@@ -27,8 +27,10 @@ pen-input path.
 3. **The CPU path is the reference; the GPU path is the destination.**
    Pixel features land with both, agreeing — tests enforce it.
 4. **Docs live with the code they describe.** Before touching an area,
-   read `docs/ARCHITECTURE.md` (especially "Traps"); if your change
-   moves knowledge, update the doc in the same commit.
+   read `docs/ARCHITECTURE.md` (especially "Traps") and the matching
+   section of `docs/CODE-MAP.md` — the cross-file invariants a locally
+   correct edit can still break silently. If your change moves
+   knowledge, update the doc in the same commit.
 5. Vendored code (`vendor/`) carries numbered patches, documented in
    `vendor/PATCHES.md` — never edit vendored files without a patch-note
    entry.
