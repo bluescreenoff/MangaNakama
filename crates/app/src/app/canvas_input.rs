@@ -1461,11 +1461,20 @@ impl App {
     /// tool-independent). Returns true when the press was consumed.
     pub(crate) fn temp_object_try(&mut self, x: f32, y: f32) -> bool {
         let (cx, cy) = self.viewport.to_canvas(x, y);
-        // Nothing stacked: do not run the hit machinery (a miss would
-        // clear the standing selection) — let the pen draw.
-        if self.object_candidates_at(cx, cy).is_empty() {
-            return false;
-        }
+        // The gate used to be object_candidates_at's zero-tolerance
+        // containment, but the hit tests below accept edges/handles
+        // within ~10 screen px — a Ctrl+drag starting on the GUTTER side
+        // of a frame border fell in the gap and drew ink over it. Run
+        // the real hit machinery instead; when nothing arms, put back
+        // every piece of selection state a miss clears (keeping the
+        // standing selection is all the gate ever existed for).
+        let snap = (
+            self.object_sel,
+            self.balloon_sel,
+            self.gen_sel,
+            self.text_sel,
+            self.object_pick,
+        );
         if !self.text_object_hit(cx, cy) {
             self.object_hit(cx, cy);
         }
@@ -1476,6 +1485,14 @@ impl App {
         if armed {
             self.temp_object = true;
             self.set_status("object grab — release to keep drawing");
+        } else {
+            (
+                self.object_sel,
+                self.balloon_sel,
+                self.gen_sel,
+                self.text_sel,
+                self.object_pick,
+            ) = snap;
         }
         armed
     }

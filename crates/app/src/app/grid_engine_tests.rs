@@ -129,6 +129,55 @@ fn size_drag_grows_brush_and_temp_grab_moves_without_tool_change() {
     assert!(!app.temp_object);
 }
 
+/// KB-022 second pass: the pre-check gate used zero-tolerance
+/// containment while the hit test it gated accepts a border within
+/// ~10 screen px — a Ctrl+drag starting on the GUTTER side of a frame
+/// border drew ink over it instead of grabbing. And with the gate
+/// gone, a true miss must still keep the standing selection (keeping
+/// it was the only thing the gate did).
+#[test]
+fn temp_grab_reaches_border_from_gutter_side_and_miss_keeps_selection() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    app.tool = crate::cmd::Tool::Pen;
+    app.doc.add_frame_folder(
+        "Frame 1",
+        mn_core::FrameSet::single_rect([300.0, 300.0, 800.0, 800.0], 4.0),
+    );
+    let li = (0..app.doc.layers.len())
+        .find(|&i| app.doc.layers[i].frames().is_some())
+        .expect("the frame folder exists");
+
+    // 30 canvas px OUTSIDE the left border, mid-height: inside the hit
+    // test's tolerance band (~10 screen px / zoom), outside the panel.
+    let (sx, sy) = app.viewport.to_screen(270.0, 550.0);
+    assert!(
+        app.temp_object_try(sx, sy),
+        "the gutter-side press grabs the border, not the pen"
+    );
+    assert!(
+        matches!(
+            app.object_drag.as_ref().map(|d| d.mode),
+            Some(crate::app::canvas_input::ObjectDragMode::Edge(_))
+        ),
+        "the grab armed an edge drag"
+    );
+    app.canvas_up(sx, sy, &[]);
+    assert!(!app.temp_object, "release clears the temp flag");
+
+    // A miss far from everything keeps the standing selection.
+    app.object_sel = Some((li, 0));
+    let (ex, ey) = app.viewport.to_screen(20.0, 20.0);
+    assert!(!app.temp_object_try(ex, ey), "empty space declines");
+    assert_eq!(
+        app.object_sel,
+        Some((li, 0)),
+        "the declined press left the selection standing"
+    );
+}
+
 /// r113: the eye solo the r102 hover promised — Alt+click hides every
 /// other layer, the second press restores the snapshot, a page switch
 /// drops it, and the manual's door resolves a real file.
