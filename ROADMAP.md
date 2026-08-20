@@ -35,12 +35,15 @@ mask), transform and flip, and undo throughout.
 
 **Manga.** Frame folders and panel division with automatic reading-order
 numbering plus an on-canvas reading-path overlay; balloons with editable
-splines and tails; screentone and live tone/gradient fill layers; a material
-bank (tones, speed lines, focus lines) with tiling; text with vertical
-Japanese, per-range styling, furigana and mixed fonts; a story editor;
-multi-page work folders with a page manager and scalable page previews; print
-preflight; and a chapter reader with right-to-left spreads, fullscreen, and an
-edit-and-return round trip.
+splines and tails that can fit themselves to their lettering; screentone and
+live tone/gradient fill layers; a material bank (tones, speed lines, focus
+lines) with tiling and taggable search; a Pattern Studio — draw on a
+wrap-around tile, watch it repeat live, save it as a material in one click;
+perspective rulers with one, two or three vanishing points, all movable after
+creation; text with vertical Japanese, per-range styling, furigana and mixed
+fonts; a story editor; multi-page work folders with a page manager and
+scalable page previews; print preflight; and a chapter reader with
+right-to-left spreads, fullscreen, and an edit-and-return round trip.
 
 **Files.** OpenRaster (`.ora`) as the native layered format, a single-file
 `.mnc` for a whole comic, full-resolution PNG export per page or for the whole
@@ -68,23 +71,16 @@ Roughly in order. None of this is promised by a date.
    best-effort Clip Studio `.sut` (your own presets), and growing the
    engine where a missing semantic is worth having natively — per-dab tip
    rotation (Photoshop's angle dynamics) is the headline gap.
-3. **Making a tiling pattern should be one gesture, not a ceremony.** The
-   engine already tiles (wrap-around drawing, tiling materials); what is
-   missing is the authoring path: draw something, see it tile live, save it
-   as a material — without a register-this, crop-that, set-nine-options
-   ritual. The benchmark is how many steps the equivalent takes in Clip
-   Studio Paint (their own tutorial for it is a long numbered list); ours
-   should be: draw, preview, name, done.
-4. **Vector inking layers.** Strokes stored as editable geometry: control-point
+3. **Vector inking layers.** Strokes stored as editable geometry: control-point
    editing, width re-editing, and an eraser that trims a stroke at the
    intersection instead of deleting it.
-5. **Layered PSD export.** Today's interchange is OpenRaster plus flat PNG,
+4. **Layered PSD export.** Today's interchange is OpenRaster plus flat PNG,
    which is fine between open tools and not enough for a studio hand-off.
-6. **Recordable actions, and a small scripting surface.** The real pain is
+5. **Recordable actions, and a small scripting surface.** The real pain is
    batch operations over layers — rename, renumber, apply tone, export — not
    macro recording for its own sake.
-7. **HDR / linear-light colour.**
-8. **The manual, kept honest.** Static HTML beside the executable exists;
+6. **HDR / linear-light colour.**
+7. **The manual, kept honest.** Static HTML beside the executable exists;
    its job is the quirks — the interlocks you would otherwise discover by
    having something silently do nothing — and it grows with every round.
 
@@ -105,15 +101,29 @@ These are settled, not open questions. Please do not open PRs for them.
 ## Good first issues
 
 Each of these is real deferred work, deferred for a written reason — ask in
-an issue before starting and the reason comes with the answer.
+an issue before starting and the reason comes with the answer. (The previous
+list of nine shipped, every one; this is the fresh crop, each noted during
+that work.)
 
-1. **Fit a balloon to its text.** The balloon and text models both exist; this
-   needs a text-field target to size against.
-2. **One-point and three-point perspective rulers.** The two-point ruler
-   exists, and the "how many vanishing points" parameter pattern already exists
-   on the symmetrical ruler — this is applying one to the other.
-3. **Tags for materials.** The material bank has search but no tags; tags need
-   a small per-folder sidecar file.
+1. **Persist per-sub-tool brush sizes.** Sizes are absolute pixels now, but
+   they reset on restart — session-only by design of the old multiplier.
+   Needs a new `ui.txt`-style key that never existed before (so no stale
+   value can be misread).
+2. **Undo for ruler creation and moves.** Rulers mutate app state directly,
+   outside the op/command recording — creation was never undoable, so the
+   new move gestures aren't either. The work is choosing where rulers'
+   undo history lives, not the bracket itself.
+3. **`Clear rulers` forgets the curve rulers.** It clears the item list but
+   not the curves list — a two-line fix plus the test that pins it.
+4. **Material tags don't ride `Import folder…`.** The importer copies image
+   files only; merging two `tags.txt` sidecars has real conflict semantics
+   that v1 deliberately skipped.
+5. **The command palette omits the perspective rulers.** `quick.rs` lists
+   some ruler kinds but none of the perspective family — a data-row
+   addition, matching how the menu names them.
+6. **The canvas drop shadow ignores view flips.** Cosmetic: the overlay
+   shadow is drawn from unflipped corner points, so it sits on the wrong
+   side under a mirrored view (both axes).
 
 ## Picking something up
 

@@ -11,3 +11,8 @@ crates/brush/tests/data/abr_v6_sample.abr
 # App-beside-exe state.
 recent.txt
 manganakama.log
+prefs.txt
+swatches.txt
+# The user's registered materials (pattern saves, registered layers) —
+# a dev-run writes them beside the repo's assets folder.
+/materials-mine/
