@@ -14,8 +14,31 @@ impl App {
     /// divide, delete, page switch) — the order is a computed property,
     /// never a name assigned once at birth.
     pub fn renumber_frames(&mut self) {
+        self.recompute_frame_order(true);
+    }
+
+    /// The cache is keyed on the document revision, so it survives exactly
+    /// as long as the geometry and the layer INDICES it holds do: adding,
+    /// duplicating, moving or merging a layer shifts those indices without
+    /// being a "frame command", and undo/redo/open move them wholesale.
+    /// Called once per frame at the head of `App::render`, before the UI
+    /// reads it — the recompute only happens when the revision moved.
+    pub(crate) fn ensure_frame_order(&mut self) {
+        if self.frame_order.is_none() || self.frame_order_rev != self.doc.revision {
+            // Silent: a plain brush stroke moves the revision too, and the
+            // ambiguity notice belongs to a frame command the user just ran.
+            self.recompute_frame_order(false);
+        }
+    }
+
+    /// The recompute itself. `announce` = say so when the layout is
+    /// ambiguous; only the explicit frame commands do.
+    fn recompute_frame_order(&mut self, announce: bool) {
         self.sync_frame_rulers();
         self.frame_order = None;
+        // Stamped up front: renumbering writes `l.name` directly and never
+        // touches the document, so the revision cannot move under us here.
+        self.frame_order_rev = self.doc.revision;
         let spread = self.pages.get(self.page_index).is_some_and(|e| e.spread);
         // Cut tolerance: the gutter the divides themselves use (the
         // larger of the two prefs, in px) — a hair of bleed or overlap
@@ -65,7 +88,7 @@ impl App {
             }
         }
         let ambiguous_n = order.ambiguous.iter().filter(|a| **a).count();
-        if ambiguous_n > 0 {
+        if announce && ambiguous_n > 0 {
             self.set_status(format!(
                 "panel order: {ambiguous_n} panel(s) in an ambiguous layout — check the badges"
             ));
@@ -234,5 +257,117 @@ mod tests {
             Some((2, false, false)),
             "back to automatic"
         );
+    }
+
+    /// Two side-by-side frame folders with hand-typed names (so renumbering
+    /// never renames them and the name stays the handle on a moving index).
+    /// Returns (app, a_draw, b_draw) — the folders' draw layers.
+    fn two_frame_folders() -> Option<(App, usize, usize)> {
+        let Ok(renderer) = mn_gpu::Renderer::new_headless(mn_gpu::GpuConfig {
+            force_fallback: std::env::var("MN_WARP").is_ok(),
+            no_vsync: false,
+        }) else {
+            println!("[test] SKIP: no usable adapter");
+            return None;
+        };
+        let mut app = App::new(renderer, (600, 400), 1.0);
+        let (dw, dh) = (app.doc.size.0 as f32, app.doc.size.1 as f32);
+        let (half, border) = (dw * 0.5, 2.0);
+        app.doc
+            .add_frame_folder("alpha", FrameSet::single_rect([0.0, 0.0, half, dh], border));
+        let a_draw = app.doc.active;
+        app.doc
+            .add_frame_folder("beta", FrameSet::single_rect([half, 0.0, dw, dh], border));
+        let b_draw = app.doc.active;
+        app.renumber_frames();
+        Some((app, a_draw, b_draw))
+    }
+
+    fn header(app: &App, name: &str) -> usize {
+        app.doc
+            .layers
+            .iter()
+            .position(|l| l.name == name)
+            .expect("folder header")
+    }
+
+    /// The cache holds RAW layer indices. `AddLayer` inside a folder inserts
+    /// at the folder's own index, so every index at or above it shifts —
+    /// and nothing about that command is a "frame command". Before the
+    /// revision stamp, the badges kept pointing at whatever slid into those
+    /// slots (a plain draw layer), which is how a reading-order number
+    /// landed on the wrong panel.
+    #[test]
+    fn adding_a_layer_does_not_leave_the_reading_order_pointing_at_strangers() {
+        let Some((mut app, a_draw, _)) = two_frame_folders() else {
+            return;
+        };
+        let before: Vec<_> = app.frame_order.as_ref().unwrap().panels.clone();
+        let (pos_a, pos_b) = (
+            app.frame_pos(header(&app, "alpha")),
+            app.frame_pos(header(&app, "beta")),
+        );
+        assert_eq!((pos_a.unwrap().0, pos_b.unwrap().0), (2, 1), "RTL");
+
+        app.doc.set_active(a_draw);
+        crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::AddLayer);
+        app.ensure_frame_order();
+
+        let after = app.frame_order.as_ref().unwrap();
+        assert_eq!(after.panels.len(), before.len(), "same panels on the page");
+        for pr in &after.panels {
+            assert!(
+                app.doc.layers[pr.layer].frames().is_some(),
+                "panel {pr:?} points at a layer that is not a frame folder"
+            );
+        }
+        assert_eq!(app.frame_pos(header(&app, "alpha")), pos_a);
+        assert_eq!(app.frame_pos(header(&app, "beta")), pos_b);
+    }
+
+    /// Reordering the stack moves the same panels to different indices.
+    /// The order is GEOMETRY's, so a folder keeps its badge — it is the
+    /// index inside the cache that has to follow it.
+    #[test]
+    fn moving_a_folder_in_the_stack_keeps_each_badge_on_its_own_panel() {
+        let Some((mut app, _, _)) = two_frame_folders() else {
+            return;
+        };
+        let (pos_a, pos_b) = (
+            app.frame_pos(header(&app, "alpha")),
+            app.frame_pos(header(&app, "beta")),
+        );
+        // alpha's whole block over the top of beta's.
+        let from = header(&app, "alpha");
+        let n = app.doc.layers.len();
+        crate::cmd::dispatch(
+            &mut app,
+            crate::cmd::AppCmd::MoveLayer {
+                from,
+                slot: n,
+                depth: 0,
+            },
+        );
+        app.ensure_frame_order();
+        assert!(
+            header(&app, "alpha") > header(&app, "beta"),
+            "the move happened"
+        );
+        assert_eq!(app.frame_pos(header(&app, "alpha")), pos_a);
+        assert_eq!(app.frame_pos(header(&app, "beta")), pos_b);
+    }
+
+    /// A freshly opened document (`forget_document_caches` drops the cache
+    /// and nothing recomputed it on demand) showed NO reading order at all
+    /// until some frame command ran. The frame-head ensure is that demand.
+    #[test]
+    fn a_dropped_cache_comes_back_without_a_frame_command() {
+        let Some((mut app, _, _)) = two_frame_folders() else {
+            return;
+        };
+        app.frame_order = None;
+        assert_eq!(app.frame_pos(header(&app, "beta")), None, "no cache, no badge");
+        app.ensure_frame_order();
+        assert_eq!(app.frame_pos(header(&app, "beta")).map(|p| p.0), Some(1));
     }
 }

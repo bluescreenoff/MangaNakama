@@ -262,6 +262,9 @@ pub struct App {
     /// Owner top item (2026-08-18): panel READING ORDER — the cached
     /// computed order (Layers badge + on-canvas path) and its toggle.
     pub frame_order: Option<mn_core::frame_order::PanelOrder>,
+    /// The document revision `frame_order` was computed at — it caches raw
+    /// layer indices, so anything that shifts the stack invalidates it.
+    pub frame_order_rev: u64,
     pub frame_order_show: bool,
     /// FB-039: the one-shot confirmation for deleting a frame
     /// folder's LAST frame (Delete arms, next Delete removes the folder
@@ -1045,6 +1048,7 @@ impl App {
             preview_order: Default::default(),
             reader: Default::default(),
             frame_order: None,
+            frame_order_rev: 0,
             frame_order_show: false,
             frame_delete_armed: None,
             story_sel: None,
@@ -1964,6 +1968,11 @@ impl App {
         if self.doc.undo_limit() != self.prefs.undo_depth {
             self.doc.set_undo_limit(self.prefs.undo_depth);
         }
+
+        // Panel reading order, same frame-head reasoning as the line above:
+        // the cache holds raw layer indices, and a dozen commands that are
+        // not "frame commands" shift them (see `ensure_frame_order`).
+        self.ensure_frame_order();
 
         // Tone layers first: their derived halftone rasters are what every
         // composite below displays (cheap — per-tile revision compare).

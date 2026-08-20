@@ -1362,22 +1362,10 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
         && let Some(order) = &app.frame_order
     {
         let amber = egui::Color32::from_rgb(196, 158, 46);
-        let mut pts: Vec<(egui::Pos2, bool)> = Vec::new(); // (centre, ambiguous)
-        for pr in &order.panels {
-            let Some(fs) = app.doc.layers.get(pr.layer).and_then(|l| l.frames()) else {
-                continue;
-            };
-            let Some(f) = fs.frames.get(pr.frame) else {
-                continue;
-            };
-            let c = f.centroid();
-            pts.push((to_pt(c[0], c[1]), false));
-        }
-        for (i, amb) in order.ambiguous.iter().enumerate() {
-            if let Some(p) = pts.get_mut(i) {
-                p.1 = *amb;
-            }
-        }
+        let pts: Vec<(egui::Pos2, bool, usize)> = reading_badges(&app.doc, order)
+            .into_iter()
+            .map(|(c, amb, n)| (to_pt(c[0], c[1]), amb, n))
+            .collect();
         // The path first (under the badges).
         for w in pts.windows(2) {
             painter.line_segment(
@@ -1385,14 +1373,14 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
                 egui::Stroke::new(2.0, amber.gamma_multiply(0.8)),
             );
         }
-        for (i, (c, amb)) in pts.iter().enumerate() {
+        for (c, amb, n) in &pts {
             let r = 9.0;
             painter.circle_filled(*c, r, if *amb { amber } else { egui::Color32::BLACK });
             painter.circle_stroke(*c, r, egui::Stroke::new(2.0, amber));
             painter.text(
                 *c,
                 egui::Align2::CENTER_CENTER,
-                i + 1,
+                n,
                 egui::FontId::proportional(10.0),
                 if *amb { egui::Color32::BLACK } else { amber },
             );
@@ -1434,6 +1422,35 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(50));
     }
+}
+
+/// The reading-order badges: (panel centroid in canvas px, ambiguous, the
+/// 1-based reading position). A panel whose folder or frame no longer
+/// resolves is DROPPED, and dropping it must not renumber or re-flag the
+/// panels after it — the position and the flag travel WITH the panel here,
+/// so a gap only breaks the path polyline.
+fn reading_badges(
+    doc: &mn_core::Document,
+    order: &mn_core::frame_order::PanelOrder,
+) -> Vec<([f32; 2], bool, usize)> {
+    order
+        .panels
+        .iter()
+        .enumerate()
+        .filter_map(|(i, pr)| {
+            let f = doc
+                .layers
+                .get(pr.layer)
+                .and_then(|l| l.frames())?
+                .frames
+                .get(pr.frame)?;
+            Some((
+                f.centroid(),
+                order.ambiguous.get(i).copied().unwrap_or(false),
+                i + 1,
+            ))
+        })
+        .collect()
 }
 
 /// Triangulate an arbitrary (convex or concave) polygon by ear clipping —
@@ -1730,5 +1747,36 @@ mod tests {
             }
         }
         assert!(polygon_triangles(&sq[..2]).is_empty());
+    }
+
+    /// A panel the cache can no longer resolve is skipped. It must not take
+    /// its successors' NUMBERS with it: the badges after a gap kept their
+    /// own reading position and their own ambiguity flag, or a stale entry
+    /// silently relabels the rest of the page (and moves the "?").
+    #[test]
+    fn a_skipped_panel_never_renumbers_the_ones_after_it() {
+        let mut doc = mn_core::Document::new(400, 200);
+        let a = doc.add_frame_folder(
+            "a",
+            mn_core::FrameSet::single_rect([0.0, 0.0, 200.0, 200.0], 2.0),
+        );
+        let b = doc.add_frame_folder(
+            "b",
+            mn_core::FrameSet::single_rect([200.0, 0.0, 400.0, 200.0], 2.0),
+        );
+        let pr = |layer| mn_core::frame_order::PanelRef { layer, frame: 0 };
+        let order = mn_core::frame_order::PanelOrder {
+            // The middle entry is the stale one (no such layer).
+            panels: vec![pr(a), pr(9999), pr(b)],
+            ambiguous: vec![false, false, true],
+        };
+        let badges = reading_badges(&doc, &order);
+        assert_eq!(badges.len(), 2);
+        assert_eq!((badges[0].2, badges[0].1), (1, false));
+        assert_eq!(
+            (badges[1].2, badges[1].1),
+            (3, true),
+            "third panel stays the third, and keeps its own flag"
+        );
     }
 }
