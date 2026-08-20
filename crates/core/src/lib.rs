@@ -44,6 +44,7 @@ pub mod stroke;
 pub mod taper;
 pub mod text;
 pub mod tile;
+pub mod psd;
 pub mod stroke_set;
 pub mod tone;
 pub mod transform;

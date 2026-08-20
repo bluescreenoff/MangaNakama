@@ -1115,6 +1115,15 @@ fn resolve_dialog(hwnd: HWND, cmd: AppCmd) -> Option<AppCmd> {
             .set_title("Export One Image Set Per Layer Comp")
             .pick_folder()
             .map(AppCmd::CompExportAllPath),
+        AppCmd::ExportPsd => {
+            let name = current()
+                .and_then(|p| {
+                    p.file_stem()
+                        .map(|s| format!("{}.psd", s.to_string_lossy()))
+                })
+                .unwrap_or_else(|| "untitled.psd".to_owned());
+            save_dialog("Export layered PSD", "psd", &name).map(AppCmd::ExportPsdPath)
+        }
         AppCmd::ExportPng => {
             let name = current()
                 .and_then(|p| {

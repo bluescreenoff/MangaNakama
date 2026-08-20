@@ -1312,6 +1312,9 @@ pub enum AppCmd {
     SaveOra,
     SaveOraAs,
     ExportPng,
+    /// Layered PSD export (the studio hand-off; core::psd).
+    ExportPsd,
+    ExportPsdPath(PathBuf),
     /// Export the whole comic as a single-file `.mnc` (the work folder is the
     /// native format; this is the portable/copy form). Never changes
     /// `doc_path`.
@@ -3074,6 +3077,24 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                         Err(e) => app.set_error(format!("export failed: {e}")),
                     }
                 }
+            }
+        }
+        AppCmd::ExportPsd => {
+            // Resolved to ExportPsdPath by `main::pump_commands`.
+        }
+        AppCmd::ExportPsdPath(p) => {
+            app.refresh_tones();
+            let file = match std::fs::File::create(&p) {
+                Ok(f) => f,
+                Err(e) => return app.set_error(format!("psd export failed: {e}")),
+            };
+            match mn_core::psd::save_psd(&app.doc, std::io::BufWriter::new(file)) {
+                Ok(()) => app.set_status(format!(
+                    "exported layered PSD ({} layers) -> {}",
+                    app.doc.layers.len(),
+                    p.display()
+                )),
+                Err(e) => app.set_error(format!("psd export failed: {e}")),
             }
         }
         AppCmd::ExportPngPath(p) => {

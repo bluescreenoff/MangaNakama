@@ -49,7 +49,8 @@ right-to-left spreads, fullscreen, and an edit-and-return round trip.
 
 **Files.** OpenRaster (`.ora`) as the native layered format, a single-file
 `.mnc` for a whole comic, full-resolution PNG export per page or for the whole
-chapter, crash recovery and autosave.
+chapter, layered PSD export for the studio hand-off (groups, all 27 blend
+modes, clipping, Japanese layer names), crash recovery and autosave.
 
 **Infrastructure.** 500+ tests. GPU tests run against the software adapter when
 no hardware one is present, and skip rather than fail when there is no adapter
@@ -65,13 +66,11 @@ Roughly in order. None of this is promised by a date.
    background benchmark decides, never a blanket default. Still CPU-only:
    smudge combined with wash (the sampler would have to read the in-flight
    wash buffer) and the spectral-paint / colorize / posterize presets.
-2. **Layered PSD export.** Today's interchange is OpenRaster plus flat PNG,
-   which is fine between open tools and not enough for a studio hand-off.
-3. **Recordable actions, and a small scripting surface.** The real pain is
+2. **Recordable actions, and a small scripting surface.** The real pain is
    batch operations over layers — rename, renumber, apply tone, export — not
    macro recording for its own sake.
-4. **HDR / linear-light colour.**
-5. **The manual, kept honest.** Static HTML beside the executable exists;
+3. **HDR / linear-light colour.**
+4. **The manual, kept honest.** Static HTML beside the executable exists;
    its job is the quirks — the interlocks you would otherwise discover by
    having something silently do nothing — and it grows with every round.
 

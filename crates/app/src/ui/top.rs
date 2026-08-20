@@ -93,6 +93,10 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 app.push_cmd(AppCmd::ExportPng);
                 ui.close();
             }
+            if item(ui, "Export layered PSD (this page)…", "") {
+                app.push_cmd(AppCmd::ExportPsd);
+                ui.close();
+            }
             if item(ui, "Export All Pages…", "") {
                 app.push_cmd(AppCmd::ExportAllPages);
                 ui.close();

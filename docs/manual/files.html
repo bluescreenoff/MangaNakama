@@ -10,6 +10,17 @@
 <nav class="top"><a href="index.html">← manual</a></nav>
 <h1>Files &amp; diagnostics</h1>
 
+<h2>Handing a page to a studio (.psd)</h2>
+<div class="quirk"><b>File ▸ Export layered PSD writes the page as
+Photoshop layers — one way.</b> Folders arrive as groups (pass-through
+folders stay pass-through), all blend modes map, clipping and Japanese
+layer names survive. QUIRKS: layer masks are baked into the pixels
+(what you saw is what they get, but the mask is no longer editable
+there); tone, fill, frame, balloon and text layers export as their
+rendered pixels; vector layers export as ink. This is an EXPORT — the
+app never reads .psd back, and your working file stays
+<code>.ora</code>/<code>.mnc</code>.</div>
+
 <h2>Where the log lives</h2>
 <div class="quirk"><b><code>manganakama.log</code>, beside the exe —
 or in <code>%LOCALAPPDATA%\MangaNakama\</code>.</b> One block is
