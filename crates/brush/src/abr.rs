@@ -49,6 +49,20 @@ pub struct AbrTip {
     pub gray: Vec<u8>,
     pub width: u32,
     pub height: u32,
+    /// v6 only: the brush key UUID heading the tip's `samp` block
+    /// (lowercased). Joins the tip to its `desc` dynamics
+    /// ([`crate::abr_desc::AbrPresetInfo::kind`]). v1/v2 have no key.
+    pub sample_id: Option<String>,
+}
+
+/// A fully parsed v6 set: the tips plus the `desc` dynamics that reference
+/// them. `presets` is empty for v1/v2 files (no `desc` section exists) and
+/// when the `desc` section fails to parse — the tips are the payload,
+/// dynamics only ever add to them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AbrSet {
+    pub tips: Vec<AbrTip>,
+    pub presets: Vec<crate::abr_desc::AbrPresetInfo>,
 }
 
 /// Parse the sampled tips out of an `.abr` file.
@@ -58,8 +72,16 @@ pub struct AbrTip {
 /// allows it (computed brushes, non-`samp` sections); only structural
 /// corruption is an `Err`.
 pub fn parse_abr(bytes: &[u8], file_stem: &str) -> Result<Vec<AbrTip>, String> {
+    parse_abr_set(bytes, file_stem).map(|s| s.tips)
+}
+
+/// Parse tips AND dynamics ([`AbrSet`]). The `desc` section degrades
+/// gracefully: unreadable dynamics leave `presets` empty, never fail the
+/// tips.
+pub fn parse_abr_set(bytes: &[u8], file_stem: &str) -> Result<AbrSet, String> {
     let mut r = Reader::new(bytes);
     let version = r.u16()?;
+    let mut presets = Vec::new();
     match version {
         1 | 2 => {
             let count = r.u32()? as usize;
@@ -74,7 +96,7 @@ pub fn parse_abr(bytes: &[u8], file_stem: &str) -> Result<Vec<AbrTip>, String> {
                     break; // truncated count field: take what we got
                 }
             }
-            Ok(tips)
+            Ok(AbrSet { tips, presets })
         }
         6 => {
             let sub = r.u16()?;
@@ -90,8 +112,17 @@ pub fn parse_abr(bytes: &[u8], file_stem: &str) -> Result<Vec<AbrTip>, String> {
                 let kind = r.tag4()?;
                 let len = r.u32()? as usize;
                 let body = r.take(len)?;
+                if kind == *b"desc" {
+                    match crate::abr_desc::parse_desc(body) {
+                        Ok(p) => presets = p,
+                        Err(e) => {
+                            eprintln!("abr: desc section unreadable ({e}); dynamics skipped");
+                        }
+                    }
+                    continue;
+                }
                 if kind != *b"samp" {
-                    continue; // desc/name/pattern sections: not our payload
+                    continue; // name/pattern sections: not our payload
                 }
                 // Inside samp: tip blocks are self-delimiting (u32 length,
                 // padded to 4). One corrupt tip is skipped, not fatal —
@@ -114,16 +145,27 @@ pub fn parse_abr(bytes: &[u8], file_stem: &str) -> Result<Vec<AbrTip>, String> {
                     // tip, not eat the next tips' bytes and hand back a
                     // plausible garbage brush after the resync.
                     let mut tb = Reader::new(&body[b.pos..end]);
-                    tb.skip(skip)?; // brush key UUID + per-subversion header
+                    // The 37-byte key field: u8 length + the brush UUID that
+                    // `desc`'s `sampledData` references (field is fixed-size,
+                    // the length byte only says how much of it is real).
+                    let key = tb.take(37)?;
+                    let sample_id = std::str::from_utf8(&key[1..=(key[0] as usize).min(36)])
+                        .ok()
+                        .map(|s| s.trim().to_ascii_lowercase())
+                        .filter(|s| !s.is_empty());
+                    tb.skip(skip - 37)?; // per-subversion header remainder
                     let id = tips.len() + 1;
                     match read_tip_tail(&mut tb, format!("{file_stem}_{id}")) {
-                        Ok(tip) => tips.push(tip),
+                        Ok(mut tip) => {
+                            tip.sample_id = sample_id;
+                            tips.push(tip);
+                        }
                         Err(e) => eprintln!("abr: skipping tip {id}: {e}"),
                     }
                     b.pos = end;
                 }
             }
-            Ok(tips)
+            Ok(AbrSet { tips, presets })
         }
         v => Err(format!("abr version {v} unsupported")),
     }
@@ -225,6 +267,7 @@ fn read_tip_tail(b: &mut Reader, name: String) -> Result<AbrTip, String> {
         gray,
         width,
         height,
+        sample_id: None,
     })
 }
 
@@ -446,8 +489,14 @@ mod tests {
             assert!(t.width > 0 && t.height > 0);
             assert_eq!(t.gray.len(), (t.width * t.height) as usize);
         }
-        // First tip's real geometry (567x701, RLE) pins the skip arithmetic.
+        // First tip's real geometry (567x701, RLE) pins the skip arithmetic,
+        // and its brush key is the UUID `desc`'s sampledData joins on.
         assert_eq!((tips[0].width, tips[0].height), (567, 701));
+        assert_eq!(
+            tips[0].sample_id.as_deref(),
+            Some("2205283b-e0f2-11df-ac64-ac9512eb12e7")
+        );
+        assert!(tips.iter().all(|t| t.sample_id.is_some()));
         assert!(tips.iter().any(|t| t.gray.iter().any(|&v| v > 200)));
         assert!(tips.iter().any(|t| t.gray.iter().any(|&v| v < 50)));
         // The blank tip comes through as all-zero coverage, not an error.

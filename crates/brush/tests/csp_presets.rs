@@ -16,8 +16,8 @@ use std::path::{Path, PathBuf};
 
 use mn_brush::settings::{input, setting};
 use mn_brush::{BrushLibrary, MyBrush};
-use mn_core::{Document, PenSample, StrokeSink, TILE_SIZE, TileIdx};
 use mn_core::stabilize::CorrectCfg;
+use mn_core::{Document, PenSample, StrokeSink, TILE_SIZE, TileIdx};
 use mn_core::{Stabilizer, Taper};
 
 const CSP_PRESETS: [&str; 9] = [
@@ -401,4 +401,3 @@ fn post_correction_narrows_a_wobbling_line() {
         "post correction should flatten the tremor: {narrow} vs {wide}"
     );
 }
-

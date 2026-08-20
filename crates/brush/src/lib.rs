@@ -16,17 +16,23 @@
 //! the app crate.
 
 mod abr;
+mod abr_desc;
 mod cpu_raster;
 mod dab;
 mod ffi;
+mod gbr;
+mod kpp;
 mod mybrush;
 mod surface;
 
 /// Brush setting/input ids, generated from `brushsettings.json` at build time.
 pub mod settings;
 
-pub use abr::{AbrTip, parse_abr, parse_abr_file};
+pub use abr::{AbrSet, AbrTip, parse_abr, parse_abr_file, parse_abr_set};
+pub use abr_desc::{AbrPresetInfo, BrushKind, Control, DynGroup, by_sample_id};
 pub use cpu_raster::rasterize_dabs;
+pub use gbr::{GbrBrush, parse_gbr, parse_gih, parse_gimp_brush_file};
+pub use kpp::{KppPreset, parse_kpp, parse_kpp_file};
 
 pub use dab::{CurveDab, DynaDab, GridDab, HairyDab, SimpleDab};
 pub use mn_core::dab::{DabParams, DabRecord};

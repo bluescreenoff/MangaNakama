@@ -72,16 +72,23 @@ Roughly in order. None of this is promised by a date.
    silently drawing differently. Includes a known wart: an imported tip's
    size is currently read from its padded bounding box, so extreme-aspect
    tips import oversized.
-4. **Vector inking layers.** Strokes stored as editable geometry: control-point
+4. **Making a tiling pattern should be one gesture, not a ceremony.** The
+   engine already tiles (wrap-around drawing, tiling materials); what is
+   missing is the authoring path: draw something, see it tile live, save it
+   as a material — without a register-this, crop-that, set-nine-options
+   ritual. The benchmark is how many steps the equivalent takes in Clip
+   Studio Paint (their own tutorial for it is a long numbered list); ours
+   should be: draw, preview, name, done.
+5. **Vector inking layers.** Strokes stored as editable geometry: control-point
    editing, width re-editing, and an eraser that trims a stroke at the
    intersection instead of deleting it.
-5. **Layered PSD export.** Today's interchange is OpenRaster plus flat PNG,
+6. **Layered PSD export.** Today's interchange is OpenRaster plus flat PNG,
    which is fine between open tools and not enough for a studio hand-off.
-6. **Recordable actions, and a small scripting surface.** The real pain is
+7. **Recordable actions, and a small scripting surface.** The real pain is
    batch operations over layers — rename, renumber, apply tone, export — not
    macro recording for its own sake.
-7. **HDR / linear-light colour.**
-8. **The manual, kept honest.** Static HTML beside the executable exists;
+8. **HDR / linear-light colour.**
+9. **The manual, kept honest.** Static HTML beside the executable exists;
    its job is the quirks — the interlocks you would otherwise discover by
    having something silently do nothing — and it grows with every round.
 
@@ -104,31 +111,23 @@ These are settled, not open questions. Please do not open PRs for them.
 Each of these is real deferred work, deferred for a written reason — ask in
 an issue before starting and the reason comes with the answer.
 
-1. **Flip the Navigator vertically.** Horizontal flip works; vertical does not,
-   because the viewport's coordinate math (`to_screen`, `to_canvas`,
-   `zoom_around`, plus the brush engine's view compensation) is
-   horizontal-only. Self-contained, a handful of call sites and a test.
-2. **The layer sub-colour.** A layer can already display its black pixels as a
-   chosen tint. The second slot — the colour that replaces *white* — is the
-   same plumbing with a second field, applied in both the CPU composite and
-   `tiles.wgsl` so the two keep agreeing.
-3. **Fit a balloon to its text.** The balloon and text models both exist; this
+1. **Fit a balloon to its text.** The balloon and text models both exist; this
    needs a text-field target to size against.
-4. **One-point and three-point perspective rulers.** The two-point ruler
+2. **One-point and three-point perspective rulers.** The two-point ruler
    exists, and the "how many vanishing points" parameter pattern already exists
    on the symmetrical ruler — this is applying one to the other.
-5. **Make rulers movable.** No ruler of any kind can be moved after you create
+3. **Make rulers movable.** No ruler of any kind can be moved after you create
    it. A recorded gap for the whole ruler family.
-6. **Absolute brush size per preset.** `[` and `]` step brush size through a
+4. **Absolute brush size per preset.** `[` and `]` step brush size through a
    ladder in real pixels, but the size slider is still a multiplier
    (0.25×–4×) on the preset's base size — so the slider's ceiling silently caps
    the ladder. Needs an absolute-pixel size field per sub-tool.
-7. **Undo for mask strokes.** Painting on a layer mask bypasses the layer's
+5. **Undo for mask strokes.** Painting on a layer mask bypasses the layer's
    operation recording, so it is not undoable. Medium: the work is the
    recording seam, not the brush.
-8. **Undo for effect-line regeneration.** Regenerating replaces the layer's
+6. **Undo for effect-line regeneration.** Regenerating replaces the layer's
    pixels wholesale, outside the undo bracket.
-9. **Tags for materials.** The material bank has search but no tags; tags need
+7. **Tags for materials.** The material bank has search but no tags; tags need
    a small per-folder sidecar file.
 
 ## Picking something up
