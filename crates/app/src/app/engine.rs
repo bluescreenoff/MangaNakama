@@ -127,14 +127,24 @@ pub(crate) fn symmetric_affines(r: &mn_core::Ruler) -> Vec<mn_core::Affine2> {
 pub struct Engine {
     main: EngineKind,
     twins: Vec<StrokeTwin>,
+    /// The kind's own dab DIAMETER in canvas px, read once at construction —
+    /// the DEFAULT a sub tool starts at, NOT a ceiling. Only the fallback
+    /// kinds need it remembered; `MyBrush` keeps its own shipped radius and
+    /// re-derives from that (see `MyBrush::base_size_px`).
+    base_px: f32,
 }
 
 impl Engine {
     pub fn new(kind: EngineKind) -> Engine {
-        Engine {
+        let mut e = Engine {
             main: kind,
             twins: Vec::new(),
-        }
+            base_px: 0.0,
+        };
+        // Every kind is fresh here (a preset load or a `new()`), so its live
+        // radius IS its base — captured before any size edit can move it.
+        e.base_px = e.radius_px() * 2.0;
+        e
     }
 
     /// The user's own engine (readbacks and preset identity come from here).
@@ -325,26 +335,45 @@ impl Engine {
         });
     }
 
-    /// Slider multiplier, 0.25x..4x of the preset's own size.
-    pub fn set_size_multiplier(&mut self, m: f32) {
+    /// The size the current kind ships with, as a dab DIAMETER in canvas px.
+    /// What a sub tool met for the first time starts at.
+    pub fn base_size_px(&self) -> f32 {
+        match &self.main {
+            EngineKind::My(b) => b.base_size_px(),
+            EngineKind::Grid(_)
+            | EngineKind::Hairy(_)
+            | EngineKind::Curve(_)
+            | EngineKind::Dyna(_)
+            | EngineKind::Dab(_) => self.base_px,
+        }
+    }
+
+    /// Set the dab DIAMETER in canvas px — absolute, not a multiplier, so the
+    /// Size control and the `[`/`]` ladder share one honest number and nothing
+    /// silently caps the ladder.
+    ///
+    /// Every kind computes its size FROM `px` rather than scaling what it
+    /// currently holds, so setting the same size twice is setting it once
+    /// (`MyBrush` re-derives from the radius the preset shipped; the fallback
+    /// kinds derive their one size scalar from `px` and keep their own
+    /// min:max ratio).
+    pub fn set_size_px(&mut self, px: f32) {
+        let r = (px * 0.5).max(1e-4);
         self.each_kind(|k| match k {
-            EngineKind::My(b) => b.set_size_multiplier(m),
-            EngineKind::Grid(g) => {
-                g.pitch = g.pitch.clamp(2.0, 128.0) * m.max(0.25);
-            }
-            EngineKind::Hairy(h) => {
-                h.spread = h.spread.clamp(1.0, 128.0) * m.max(0.25);
-            }
-            EngineKind::Curve(c) => {
-                c.w = c.w.clamp(2.0, 256.0) * m.max(0.25);
-            }
+            EngineKind::My(b) => b.set_size_px(px),
+            EngineKind::Grid(g) => g.pitch = r.clamp(2.0, 512.0),
+            EngineKind::Hairy(h) => h.spread = r.clamp(1.0, 512.0),
+            EngineKind::Curve(c) => c.w = r.clamp(2.0, 1024.0),
             EngineKind::Dyna(y) => {
-                y.base.min_radius = y.base.min_radius * m.max(0.25);
-                y.base.max_radius = y.base.max_radius * m.max(0.25);
+                // Ratio-preserving: max lands on `r` exactly and min follows
+                // it, so a second identical call is a no-op.
+                let k = r / y.base.max_radius.max(1e-4);
+                y.base.min_radius *= k;
+                y.base.max_radius = r;
             }
             EngineKind::Dab(d) => {
-                d.min_radius = BASE_MIN_RADIUS * m;
-                d.max_radius = BASE_MAX_RADIUS * m;
+                d.min_radius = r * (BASE_MIN_RADIUS / BASE_MAX_RADIUS);
+                d.max_radius = r;
             }
         });
     }
@@ -694,7 +723,7 @@ impl EngineKind {
         let EngineKind::My(b) = self else {
             return; // the fallback dab has no preset state to preserve
         };
-        b.set_size_multiplier(p.size);
+        b.set_size_px(p.size_px);
         b.set_base_opacity(if p.wash { p.flow } else { p.opacity });
         // `set_size_min_pct` REPLACES the preset's pressure→size curve with a
         // canonical one — Real G-Pen ships a 12-point measured curve, so only
@@ -719,7 +748,7 @@ impl EngineKind {
         // The three feel rows. Each carries its own "as the preset ships it"
         // state, so these are unconditional AND still byte-identical on a
         // preset nobody has touched — no read-back guard needed. Interval
-        // AFTER `set_size_multiplier` above: a Fixed-px gap is converted
+        // AFTER `set_size_px` above: a Fixed-px gap is converted
         // against the radius that call just set.
         b.set_interval(p.interval);
         if let Some(on) = p.density_by_gap {

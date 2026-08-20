@@ -66,6 +66,23 @@ pub struct GenLinesDrag {
     pub orig: mn_core::genlines::GenLinesSpec,
 }
 
+/// An in-progress ruler MOVE (Object tool). `ruler` is the combined index
+/// [`mn_core::Rulers::grab_near`] returns (items first, curves offset by
+/// `items.len()` — the [`mn_core::SnapLock`] convention), `last` the
+/// previous canvas point: every move applies the STEP, so the grab offset
+/// survives and the live ruler is already in its new place for the next
+/// snap. Rulers are app/session state with no undo entry of their own (see
+/// the creation path in `canvas_up`), so neither has the move.
+#[derive(Clone, Copy, Debug)]
+pub struct RulerMove {
+    pub ruler: usize,
+    pub grab: mn_core::RulerGrab,
+    pub last: [f32; 2],
+    /// Did the pointer actually travel? A press that only grabs is not a
+    /// move, and must not claim to be one in the status line.
+    pub moved: bool,
+}
+
 /// Where each driver handle sits, canvas px — the single source shared
 /// by the hit-test and the overlay so they can never disagree.
 pub fn gen_handle_points(
@@ -585,6 +602,13 @@ impl App {
                     self.needs_redraw = true;
                     return;
                 }
+                // Rulers are drawn OVER the art and are grabbed first —
+                // but only within the handle tolerance, so a press that is
+                // not on a ruler still reaches the panel/balloon under it.
+                if self.ruler_grab(cx, cy) {
+                    self.needs_redraw = true;
+                    return;
+                }
                 if !self.text_object_hit(cx, cy) {
                     self.object_hit(cx, cy);
                 }
@@ -1098,6 +1122,29 @@ impl App {
         false
     }
 
+    /// Object-tool press on a ruler: grab an anchor (that end moves) or the
+    /// body (the whole ruler translates). Returns true when the press was
+    /// consumed. The tolerance is the shared on-canvas-handle one — screen
+    /// px divided by zoom — and the same value gates the anchor and the
+    /// body, so there is no band where a press means something else.
+    fn ruler_grab(&mut self, cx: f32, cy: f32) -> bool {
+        let tol = (10.0 / self.viewport.zoom.max(0.01)).max(2.0);
+        let Some((ruler, grab)) = self.rulers.grab_near([cx, cy], tol) else {
+            return false;
+        };
+        self.ruler_move = Some(RulerMove {
+            ruler,
+            grab,
+            last: [cx, cy],
+            moved: false,
+        });
+        self.set_status(match grab {
+            mn_core::RulerGrab::Anchor(_) => "ruler handle — drag to move this end",
+            mn_core::RulerGrab::Body => "ruler — drag to move the whole ruler",
+        });
+        true
+    }
+
     /// Object tool press: find what the cursor grabbed, topmost vector layer
     /// first. Balloons: a control handle, then the body. Frames: a vertex
     /// handle, then an edge, then the panel body.
@@ -1448,9 +1495,9 @@ impl App {
     }
 
     /// KB-020: arm the live size drag at the press point, reading the
-    /// current multiplier the Tool Property slider shares.
+    /// current px diameter the Tool Property slider shares.
     pub(crate) fn size_drag_begin(&mut self, x: f32) {
-        self.size_drag = Some((x, self.props_current.size));
+        self.size_drag = Some((x, self.props_current.size_px));
         self.set_status(format!("brush size: {:.1} px", self.brush_radius() * 2.0));
         self.needs_redraw = true;
     }
@@ -1506,13 +1553,13 @@ impl App {
             self.update_pan(x, y);
             return;
         }
-        // KB-020: the live size drag — horizontal screen travel maps to
-        // the multiplier the Tool Property slider shares.
-        if let Some((x0, m0)) = self.size_drag {
-            let m = (m0 * (1.0 + (x - x0) / 240.0)).clamp(0.25, 4.0);
-            let base = self.brush_radius() / self.props_current.size.max(1e-3);
-            self.push_cmd(AppCmd::SetBrushSize(m));
-            self.set_status(format!("brush size: {:.1} px", base * 2.0 * m));
+        // KB-020: the live size drag — horizontal screen travel scales the
+        // px diameter the Tool Property slider shares.
+        if let Some((x0, px0)) = self.size_drag {
+            let px = (px0 * (1.0 + (x - x0) / 240.0))
+                .clamp(crate::cmd::SIZE_PX_MIN, crate::cmd::SIZE_PX_MAX);
+            self.push_cmd(AppCmd::SetBrushSizePx(px));
+            self.set_status(format!("brush size: {px:.1} px"));
             self.needs_redraw = true;
             return;
         }
@@ -1537,6 +1584,19 @@ impl App {
         }
         if let Some(d) = &mut self.text_obj_drag {
             d.cur = (cx, cy);
+            self.needs_redraw = true;
+            return;
+        }
+        // A ruler move edits the ruler LIVE: the next snap reads the new
+        // geometry with no invalidation step, because the geometry IS the
+        // ruler. (The symmetric ruler's mirror twins are a derived cache —
+        // they are rebuilt at release; no stroke can start mid-drag.)
+        if let Some(m) = self.ruler_move.as_mut() {
+            let d = [cx - m.last[0], cy - m.last[1]];
+            m.last = [cx, cy];
+            m.moved |= d[0].abs() + d[1].abs() > 0.0;
+            let (k, grab) = (m.ruler, m.grab);
+            self.rulers.move_by(k, grab, d);
             self.needs_redraw = true;
             return;
         }
@@ -1800,6 +1860,24 @@ impl App {
             self.needs_redraw = true;
             return;
         }
+        // A completed ruler move. The geometry was updated step by step, so
+        // release only ends the gesture — plus the one thing that is a
+        // CACHE of a ruler and not the ruler: the symmetric ruler's mirror
+        // twins carry its centre/axes, so a moved symmetric ruler must
+        // rebuild them or the next stroke mirrors about the old centre.
+        if let Some(m) = self.ruler_move.take() {
+            if matches!(
+                self.rulers.items.get(m.ruler),
+                Some(mn_core::Ruler::Symmetric { .. })
+            ) {
+                self.rebuild_twins();
+            }
+            if m.moved {
+                self.set_status("ruler moved");
+            }
+            self.needs_redraw = true;
+            return;
+        }
         if self.rotating() {
             self.end_rotate();
             return;
@@ -1848,13 +1926,10 @@ impl App {
                     .get(li)
                     .is_some_and(|l| l.genlines.is_some())
             {
-                // Store the new spec only if the regen SUCCEEDS (audit F,
-                // 2026-08-19): regen reads the stored spec, so it goes on
-                // first — on failure the raster is untouched and the old
-                // spec goes back, keeping spec and pixels in agreement.
-                let old = self.doc.layers[li].genlines;
-                self.doc.layers[li].genlines = Some(spec);
-                if self.doc.regen_genlines(li) {
+                // The spec is stored only if the regen SUCCEEDS (audit F,
+                // 2026-08-19): on failure neither the raster nor the
+                // parameters move, keeping the two in agreement.
+                if self.doc.regen_genlines(li, spec) {
                     self.set_status(match mode {
                         GenDragMode::Center => "run moved",
                         GenDragMode::RIn => "inner radius set",
@@ -1864,7 +1939,6 @@ impl App {
                         GenDragMode::LenMax => "maximum length set",
                     });
                 } else {
-                    self.doc.layers[li].genlines = old;
                     self.set_status("generator produced nothing — parameters widened");
                 }
             }

@@ -677,6 +677,25 @@ impl MyBrush {
         self.size_mul
     }
 
+    /// The dab DIAMETER the preset shipped with, in canvas px — `exp()` of the
+    /// radius the file carried, doubled. This is the size a sub tool DEFAULTS
+    /// to, never a ceiling: [`set_size_px`](Self::set_size_px) will happily go
+    /// far above it.
+    pub fn base_size_px(&self) -> f32 {
+        self.base_radius_log.exp() * 2.0
+    }
+
+    /// Set the dab DIAMETER in canvas px — the number artists think in, and
+    /// what the Size control and the `[`/`]` ladder both write.
+    ///
+    /// Expressed as a multiplier of the preset's own size and pushed through
+    /// [`set_size_multiplier`](Self::set_size_multiplier), so it inherits that
+    /// method's contract exactly: re-derived from `base_radius_log` every
+    /// time, hence setting the same size twice is setting it once.
+    pub fn set_size_px(&mut self, px: f32) {
+        self.set_size_multiplier(px / self.base_size_px().max(1e-4));
+    }
+
     /// Base dab radius in canvas pixels, multiplier included. Radius is stored
     /// logarithmically, so this is the `exp()` the C would take. Pressure and
     /// speed dynamics move around this value — it is what a size readout should

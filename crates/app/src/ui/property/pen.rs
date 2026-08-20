@@ -342,14 +342,18 @@ release. Fade has no such cost.",
 pub(crate) fn brush_sliders(ui: &mut egui::Ui, app: &mut App) {
     let p = app.props_current;
 
-    let mut size = p.size;
-    if ValueBar::new("Size", 0.25, 4.0)
+    // Absolute px, not a multiplier of the preset: the bar's range covers the
+    // whole `[`/`]` ladder, so the two controls can no longer disagree about
+    // how big the brush is allowed to get. The readout is the engine's own
+    // dab diameter rather than the pending slider value.
+    let mut size = p.size_px;
+    if ValueBar::new("Size", 1.0, 2000.0)
         .log()
         .display_text(format!("{:.1} px", app.brush_radius() * 2.0))
         .show(ui, &mut size)
         .changed()
     {
-        app.push_cmd(AppCmd::SetBrushSize(size));
+        app.push_cmd(AppCmd::SetBrushSizePx(size));
     }
 
     let mut min = p.min_size;

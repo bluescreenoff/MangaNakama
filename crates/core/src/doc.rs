@@ -1599,14 +1599,26 @@ impl Document {
     /// tiles (pen-down/pen-up with no movement inside the canvas) pushes
     /// nothing, so undo never eats a no-op.
     pub fn end_op(&mut self) -> bool {
-        let Some(li) = self.op_layer.take() else {
+        let Some((li, label, tiles)) = self.take_op() else {
             return false;
         };
-        let Some(rec) = self.layers.get_mut(li).and_then(Layer::take_recording) else {
-            return false;
-        };
+        self.history
+            .push_labeled(&label, UndoGroup::Tiles { layer: li, tiles });
+        self.touch();
+        true
+    }
+
+    /// Close the open op and hand back its layer, label and sorted
+    /// pre-images WITHOUT pushing a group — the shared half of `end_op`,
+    /// for the ops that wrap the same recording in a richer group (the
+    /// effect-line regen, whose spec rides the pixels). `None` when no op
+    /// was open or nothing was touched.
+    #[allow(clippy::type_complexity)]
+    fn take_op(&mut self) -> Option<(usize, String, Vec<(TileIdx, Option<Arc<Tile>>)>)> {
+        let li = self.op_layer.take()?;
+        let rec = self.layers.get_mut(li).and_then(Layer::take_recording)?;
         if rec.is_empty() {
-            return false;
+            return None;
         }
         let mut tiles: Vec<(TileIdx, Option<Arc<Tile>>)> = rec.into_iter().collect();
         // HashMap order is not deterministic; groups are compared in tests and
@@ -1616,10 +1628,7 @@ impl Document {
             .pending_op_label
             .take()
             .unwrap_or_else(|| "Edit".into());
-        self.history
-            .push_labeled(&label, UndoGroup::Tiles { layer: li, tiles });
-        self.touch();
-        true
+        Some((li, label, tiles))
     }
 
     /// Drop the open op's recording **without** restoring anything. The pixels
@@ -1692,6 +1701,31 @@ impl Document {
                 }
                 Some(UndoGroup::Tiles {
                     layer,
+                    tiles: inverse,
+                })
+            }
+            UndoGroup::GenLines {
+                layer,
+                spec,
+                tiles,
+            } => {
+                let l = self.layers.get_mut(layer)?;
+                // Parameters and pixels swap together — see the group's
+                // doc comment. Same tile door as `Tiles`, so restored tiles
+                // get fresh revisions and the compositor re-uploads them.
+                // The layer always has one here (only generated layers
+                // regenerate); the fallback keeps the group's own spec
+                // rather than inventing state if that ever changes.
+                let spec_before = l.genlines.unwrap_or(spec);
+                l.genlines = Some(spec);
+                let mut inverse = Vec::with_capacity(tiles.len());
+                for (idx, snapshot) in tiles {
+                    inverse.push((idx, l.tile_arc(idx).cloned()));
+                    l.set_tile(idx, snapshot);
+                }
+                Some(UndoGroup::GenLines {
+                    layer,
+                    spec: spec_before,
                     tiles: inverse,
                 })
             }
@@ -2554,24 +2588,62 @@ impl Document {
         Some(run.end)
     }
 
-    /// SF-004/005: re-rasterize a generated effect-line layer from its
-    /// stored spec (replace tiles wholesale). Returns false when the
-    /// layer carries no spec or the render produced nothing.
-    pub fn regen_genlines(&mut self, index: usize) -> bool {
-        let Some(spec) = self.layers.get(index).and_then(|l| l.genlines) else {
+    /// SF-004/005: re-rasterize the effect-line layer at `index` from
+    /// `spec` — ONE undo step covering both the pixels and the parameters.
+    /// Returns false, document untouched, when the layer carries no spec of
+    /// its own or the render produced nothing (the caller's status message).
+    ///
+    /// The spec is an argument rather than a field read (it used to be
+    /// stored first, then rendered) because both halves must go into the
+    /// same group: undo that restored the old pixels while leaving the new
+    /// parameters on the layer would make the Edit dialog describe art that
+    /// is no longer there. The tiles are written through `set_tile` inside
+    /// the op bracket — the old wholesale `replace_tiles` swap bypassed the
+    /// copy-on-write recording, which is why the regen was un-undoable and
+    /// had to purge the layer's history to stay consistent.
+    pub fn regen_genlines(&mut self, index: usize, spec: crate::genlines::GenLinesSpec) -> bool {
+        // Only a layer that was generated regenerates: this is the in-place
+        // door, and pointing it at an ink layer would eat the drawing.
+        let Some(before) = self.layers.get(index).and_then(|l| l.genlines) else {
             return false;
         };
         let tiles = spec.render(self.size);
         if tiles.is_empty() {
             return false;
         }
-        // replace_tiles is a wholesale swap and cannot sit inside a tile
-        // op (its debug_assert); the regen is therefore NOT undoable v1 —
-        // same class as every layer-list change. Recorded. Older
-        // pre-images for this layer would splice stale ink into the
-        // regenerated raster when undone, so they go with the swap.
-        self.history.drop_layer_history(index);
-        self.layers[index].replace_tiles(tiles);
+        // An op left open belongs to whatever gesture came before; close it
+        // rather than nest (same rule `undo` follows), or `begin_op_on`
+        // would no-op and these writes would go unrecorded.
+        if self.op_layer.is_some() {
+            self.end_op();
+        }
+        self.begin_op_on(index);
+        self.set_op_label("Regenerate lines");
+        // Wholesale replacement, tile by tile: every index the old raster
+        // covered and the new one does not has to be cleared, or the
+        // previous lines survive around the new ones.
+        let stale: Vec<TileIdx> = self.layers[index]
+            .tiles()
+            .map(|(i, _)| i)
+            .filter(|i| !tiles.contains_key(i))
+            .collect();
+        for idx in stale {
+            self.layers[index].set_tile(idx, None);
+        }
+        for (idx, tile) in tiles {
+            self.layers[index].set_tile(idx, Some(tile));
+        }
+        self.layers[index].genlines = Some(spec);
+        if let Some((li, label, tiles)) = self.take_op() {
+            self.history.push_labeled(
+                &label,
+                UndoGroup::GenLines {
+                    layer: li,
+                    spec: before,
+                    tiles,
+                },
+            );
+        }
         self.touch();
         true
     }

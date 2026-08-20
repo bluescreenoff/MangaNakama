@@ -21,8 +21,9 @@ runs on the graphics card.** That is a direction, not a finished claim — see
 wash (flow separated from opacity), texture tips, a sketch/hatching engine,
 mirror symmetry and wrap-around tiling. Pen pressure comes from raw Win32
 pointer messages — the app owns its tablet path rather than delegating it.
-Stroke stabilization, input resampling, a per-sensor curve editor, and import
-of Photoshop `.abr` brush sets.
+Stroke stabilization, input resampling, a per-sensor curve editor, and brush
+import — Photoshop `.abr` with the dynamics translated as far as they honestly
+map, and GIMP `.gbr`/`.gih`.
 
 **Canvas and layers.** A tiled canvas at print resolution with a GPU
 compositor (layer blending, group flattening, tile upload, display) and a
@@ -53,42 +54,37 @@ at all. A release workflow builds a zip that a tester can unzip and run.
 
 Roughly in order. None of this is promised by a date.
 
-1. **A Preferences dialog.** Several small settings currently have nowhere to
-   live, so they are stuck behind this one missing window.
-2. **GPU dab rasterization for the heavy brushes.** Dab cost scales with tip
+1. **GPU dab rasterization for the heavy brushes.** Dab cost scales with tip
    *area*, so big soft brushes are exactly where the graphics card should win —
    and today wash, texture and smudge brushes are excluded from the GPU path
    and fall back to the CPU. This also needs a benchmark harness: the GPU path
    should not become the default on anyone's machine without a measured number.
-3. **Faithful brush imports.** Today `.abr` import keeps the sampled tip
-   exact but deliberately resets the dynamics to a plain pressure brush.
-   The goal is to close that gap as far as each format honestly allows:
-   translate every dynamic that has an engine equivalent, grow the engine
-   where a missing semantic is worth having natively (Photoshop's spacing
-   and transfer behaviour, for instance), and extend import to more
-   formats — GIMP `.gbr`/`.gih`, best-effort Clip Studio `.sut` (your own
-   presets), and Krita `.kpp` for the engine features that exist here.
-   Where a parameter cannot map, the import must say so instead of
-   silently drawing differently. Includes a known wart: an imported tip's
-   size is currently read from its padded bounding box, so extreme-aspect
-   tips import oversized.
-4. **Making a tiling pattern should be one gesture, not a ceremony.** The
+2. **Faithful brush imports, the rest of it.** `.abr` now translates the
+   dynamics that map (spacing, pressure size and minimums, jitters,
+   scatter, transfer), bakes static tip geometry into the mask, imports
+   computed round brushes, and labels honestly what cannot map; GIMP
+   `.gbr`/`.gih` import through the same path, and Krita `.kpp` parses.
+   Still open: translating the parsed `.kpp` dynamics onto the engine,
+   best-effort Clip Studio `.sut` (your own presets), and growing the
+   engine where a missing semantic is worth having natively — per-dab tip
+   rotation (Photoshop's angle dynamics) is the headline gap.
+3. **Making a tiling pattern should be one gesture, not a ceremony.** The
    engine already tiles (wrap-around drawing, tiling materials); what is
    missing is the authoring path: draw something, see it tile live, save it
    as a material — without a register-this, crop-that, set-nine-options
    ritual. The benchmark is how many steps the equivalent takes in Clip
    Studio Paint (their own tutorial for it is a long numbered list); ours
    should be: draw, preview, name, done.
-5. **Vector inking layers.** Strokes stored as editable geometry: control-point
+4. **Vector inking layers.** Strokes stored as editable geometry: control-point
    editing, width re-editing, and an eraser that trims a stroke at the
    intersection instead of deleting it.
-6. **Layered PSD export.** Today's interchange is OpenRaster plus flat PNG,
+5. **Layered PSD export.** Today's interchange is OpenRaster plus flat PNG,
    which is fine between open tools and not enough for a studio hand-off.
-7. **Recordable actions, and a small scripting surface.** The real pain is
+6. **Recordable actions, and a small scripting surface.** The real pain is
    batch operations over layers — rename, renumber, apply tone, export — not
    macro recording for its own sake.
-8. **HDR / linear-light colour.**
-9. **The manual, kept honest.** Static HTML beside the executable exists;
+7. **HDR / linear-light colour.**
+8. **The manual, kept honest.** Static HTML beside the executable exists;
    its job is the quirks — the interlocks you would otherwise discover by
    having something silently do nothing — and it grows with every round.
 
@@ -116,18 +112,7 @@ an issue before starting and the reason comes with the answer.
 2. **One-point and three-point perspective rulers.** The two-point ruler
    exists, and the "how many vanishing points" parameter pattern already exists
    on the symmetrical ruler — this is applying one to the other.
-3. **Make rulers movable.** No ruler of any kind can be moved after you create
-   it. A recorded gap for the whole ruler family.
-4. **Absolute brush size per preset.** `[` and `]` step brush size through a
-   ladder in real pixels, but the size slider is still a multiplier
-   (0.25×–4×) on the preset's base size — so the slider's ceiling silently caps
-   the ladder. Needs an absolute-pixel size field per sub-tool.
-5. **Undo for mask strokes.** Painting on a layer mask bypasses the layer's
-   operation recording, so it is not undoable. Medium: the work is the
-   recording seam, not the brush.
-6. **Undo for effect-line regeneration.** Regenerating replaces the layer's
-   pixels wholesale, outside the undo bracket.
-7. **Tags for materials.** The material bank has search but no tags; tags need
+3. **Tags for materials.** The material bank has search but no tags; tags need
    a small per-folder sidecar file.
 
 ## Picking something up

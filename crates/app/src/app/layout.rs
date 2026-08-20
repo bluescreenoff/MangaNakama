@@ -452,6 +452,33 @@ mod tests {
         assert_eq!(WinGeom::parse(&g2.to_line()), Some(g2));
     }
 
+    /// Brush size became an ABSOLUTE px diameter (it was a 0.25..4
+    /// multiplier), and `2.0` is a plausible value under either meaning —
+    /// so a stale `2.0` must never be read as 2 px. ui.txt is the only
+    /// key=value store the app has: it carries no brush-size key, it never
+    /// did, and a hand-written or older-build line claiming one is ignored
+    /// like any other unknown key. Per-sub-tool sizes are session state.
+    #[test]
+    fn no_ui_txt_key_carries_a_brush_size() {
+        let mut me = UiLayout::default();
+        let before = me.to_body();
+        for stale in [
+            "size=2.0",
+            "brush_size=2.0",
+            "tool_size=2.0",
+            "size_multiplier=2.0",
+        ] {
+            me.apply_kv(stale);
+        }
+        assert_eq!(before, me.to_body(), "stale size keys must change nothing");
+        for k in ["size", "brush_size", "tool_size", "size_multiplier"] {
+            assert!(
+                !me.to_body().lines().any(|l| l.starts_with(&format!("{k}="))),
+                "ui.txt must not persist a brush size under `{k}`"
+            );
+        }
+    }
+
     #[test]
     fn win_geom_parse_junk() {
         assert_eq!(WinGeom::parse(""), None);

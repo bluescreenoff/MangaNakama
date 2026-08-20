@@ -891,8 +891,15 @@ pub enum Slot {
 /// `App::props`; the active copy lives in `App::props_current`.
 #[derive(Clone, Copy, Debug)]
 pub struct ToolProps {
-    /// Multiplier on the preset's own base radius, 0.25..4.
-    pub size: f32,
+    /// The dab DIAMETER in canvas px — ABSOLUTE, the number artists think in
+    /// and the one the `[`/`]` ladder steps through. Seeded from the preset's
+    /// own size on a first encounter (`App::load_props_for`), which makes that
+    /// size a DEFAULT and not a ceiling.
+    ///
+    /// Renamed from `size`, which was a 0.25..4 multiplier: a stored `2.0`
+    /// means something completely different now, and a same-named field would
+    /// have read the old meaning as 2 px without a word.
+    pub size_px: f32,
     /// Absolute brush opacity 0..1 (libmypaint `opaque`).
     pub opacity: f32,
     /// Floor of the pressure→size curve, % of base radius. The owner's CSP
@@ -970,7 +977,10 @@ pub struct ToolProps {
 impl Default for ToolProps {
     fn default() -> Self {
         Self {
-            size: 1.0,
+            // Placeholder only: every real sub tool overwrites this from the
+            // preset's own `base_size_px()` before a stroke can happen
+            // (`App::new` seeds it, `load_props_for` seeds each later one).
+            size_px: DEFAULT_SIZE_PX,
             opacity: 1.0,
             min_size: 0.0,
             stabilizer: 0.0,
@@ -1366,8 +1376,11 @@ pub enum AppCmd {
     RulerSymmetricCount,
     // --- brush + colour ----------------------------------------------------
     SelectBrush(PathBuf),
-    /// Multiplier on the base brush radius, 0.25..4.
-    SetBrushSize(f32),
+    /// The brush's dab DIAMETER in canvas px, absolute (`SIZE_PX_MIN`..
+    /// `SIZE_PX_MAX`). RENAMED from `SetBrushSize`, which carried a 0.25..4
+    /// multiplier — same shape of number, different meaning, so the old name
+    /// had to go rather than silently read 2× as 2 px.
+    SetBrushSizePx(f32),
     /// CSP Stroke ▸ Interval (S-028): the gap between dabs, either as a
     /// percent of tip diameter or as a literal pixel distance.
     SetInterval(Interval),
@@ -1776,11 +1789,23 @@ pub enum AppCmd {
     SetPaperColour([u8; 3]),
 }
 
-/// Base radii of the `SimpleDab` fallback engine, scaled by the size prop.
-/// libmypaint presets carry their own radius; the multiplier is applied
-/// logarithmically there (see `MyBrush::set_size_multiplier`).
+/// Base radii of the `SimpleDab` fallback engine — its shipped size, and the
+/// min:max ratio `Engine::set_size_px` keeps. libmypaint presets carry their
+/// own radius instead (see `MyBrush::set_size_px`).
 pub const BASE_MIN_RADIUS: f32 = 1.0;
 pub const BASE_MAX_RADIUS: f32 = 12.0;
+
+/// The absolute Size range, as a dab DIAMETER in canvas px.
+///
+/// The ceiling deliberately sits PAST the `[`/`]` ladder's top rung (2000 px):
+/// the bug this replaces was a 4× multiplier ceiling quietly capping the
+/// ladder, so the clamp must never be the thing a `]` press runs into.
+pub const SIZE_PX_MIN: f32 = 0.1;
+pub const SIZE_PX_MAX: f32 = 5000.0;
+
+/// Pre-seed placeholder for `ToolProps::default()` only — a real sub tool's
+/// size comes from its preset (`Engine::base_size_px`).
+pub const DEFAULT_SIZE_PX: f32 = 10.0;
 
 /// PM-051: the batch export's default file prefix — the work name, or
 /// `page` for an unnamed work. This is the string the pre-options export
@@ -1815,6 +1840,18 @@ fn flip_status(vp: &mn_gpu::Viewport) -> &'static str {
     }
 }
 
+/// Every layer mask's identity, for the undo/redo invalidation compare.
+/// `Document::apply_group` stamps a fresh revision on any mask it restores,
+/// so a moved coverage field always shows up here (and a mask that appeared
+/// or vanished changes the shape of the vector).
+fn mask_sig(app: &App) -> Vec<Option<(u64, bool)>> {
+    app.doc
+        .layers
+        .iter()
+        .map(|l| l.mask.as_ref().map(|m| (m.revision, m.enabled)))
+        .collect()
+}
+
 pub fn dispatch(app: &mut App, cmd: AppCmd) {
     // FB-039: the last-frame delete confirmation is one-shot — any other
     // command disarms it.
@@ -1843,11 +1880,19 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             // tile cache then holds derived rasters newer than the source
             // tiles, which the revision compare would keep. Evict on change.
             let tones_before: Vec<_> = app.doc.layers.iter().map(|l| l.tone).collect();
+            let masks_before = mask_sig(app);
             if app.doc.undo() {
                 for (li, (l, was)) in app.doc.layers.iter().zip(&tones_before).enumerate() {
                     if l.tone != *was {
                         app.renderer.evict_layer(li);
                     }
+                }
+                // LM-004: the GPU tile cache keys on the LAYER tile revision
+                // and folds the mask into the upload, so a mask that moved
+                // over unchanged pixels needs the full rebuild — the same
+                // door every other mask edit goes through.
+                if mask_sig(app) != masks_before {
+                    app.renderer.invalidate();
                 }
                 // Undo can remove the active layer's mask (e.g. undo of its
                 // creation) — audit H1: armed mask-edit must not survive it.
@@ -1858,11 +1903,15 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
         AppCmd::Redo => {
             app.commit_text_edit();
             let tones_before: Vec<_> = app.doc.layers.iter().map(|l| l.tone).collect();
+            let masks_before = mask_sig(app);
             if app.doc.redo() {
                 for (li, (l, was)) in app.doc.layers.iter().zip(&tones_before).enumerate() {
                     if l.tone != *was {
                         app.renderer.evict_layer(li);
                     }
+                }
+                if mask_sig(app) != masks_before {
+                    app.renderer.invalidate();
                 }
                 app.disarm_mask_edit_if_unmasked();
                 app.mark_dirty();
@@ -2093,17 +2142,14 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             // everything else generates a fresh layer as before.
             if app.doc.active_layer().genlines.is_some() {
                 let li = app.doc.active;
-                // Spec-on-success (audit F): regen reads the stored spec,
-                // so the new one goes on first and the OLD one is restored
-                // when the render produces nothing — the stored parameters
-                // must always describe the pixels on screen.
-                let old = app.doc.layers[li].genlines;
-                app.doc.layers[li].genlines = Some(spec);
-                if app.doc.regen_genlines(li) {
+                // Spec-on-success (audit F): the regen stores the new spec
+                // only when it rendered something, and a failed one leaves
+                // both halves alone — the stored parameters must always
+                // describe the pixels on screen.
+                if app.doc.regen_genlines(li, spec) {
                     app.set_status("effect lines regenerated");
                     app.mark_dirty();
                 } else {
-                    app.doc.layers[li].genlines = old;
                     app.set_status("generator produced nothing — widen the parameters");
                 }
                 return;
@@ -2157,6 +2203,7 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
         AppCmd::HistoryTo { keep } => {
             app.commit_text_edit();
             let tones_before: Vec<_> = app.doc.layers.iter().map(|l| l.tone).collect();
+            let masks_before = mask_sig(app);
             let mut steps = 0usize;
             while app.doc.undo_len() > keep && app.doc.undo() {
                 steps += 1;
@@ -2170,6 +2217,13 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                         app.renderer.evict_layer(li);
                     }
                 }
+                // Scrubbing the History palette crosses the same two doors a
+                // single Undo does: a restored mask needs the upload rebuild,
+                // and a mask that scrubbed away must not leave mask-edit armed.
+                if mask_sig(app) != masks_before {
+                    app.renderer.invalidate();
+                }
+                app.disarm_mask_edit_if_unmasked();
                 app.mark_dirty();
             }
         }
@@ -4539,6 +4593,8 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             // to snap_locked's else (unsnapped) — safe, but stale; drop it
             // (round-47 handoff item 1).
             app.ruler_lock = Default::default();
+            // Same for a live move (its index is into the cleared set).
+            app.ruler_move = None;
             app.rebuild_twins();
             app.set_status("rulers cleared");
             app.mark_dirty();
@@ -4639,10 +4695,11 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 Err(e) => app.set_error(format!("brush {} failed: {e}", p.display())),
             }
         }
-        AppCmd::SetBrushSize(mult) => {
-            app.props_current.size = mult.clamp(0.25, 4.0);
-            let m = app.props_current.size;
-            app.engine_mut().set_size_multiplier(m);
+        AppCmd::SetBrushSizePx(px) => {
+            let px = if px.is_finite() { px } else { DEFAULT_SIZE_PX };
+            app.props_current.size_px = px.clamp(SIZE_PX_MIN, SIZE_PX_MAX);
+            let px = app.props_current.size_px;
+            app.engine_mut().set_size_px(px);
             app.mark_dirty();
         }
         AppCmd::SetInterval(iv) => {

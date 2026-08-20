@@ -112,6 +112,117 @@ impl Ruler {
     }
 }
 
+/// What a pointer grabbed on a ruler: one of its anchor points, or the
+/// body (the whole ruler moves rigidly).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RulerGrab {
+    /// An index into [`Ruler::anchors`] / [`CurveRuler::anchors`].
+    Anchor(usize),
+    Body,
+}
+
+/// Moving a ruler after it exists (ROADMAP "make rulers movable"). The
+/// geometry IS the ruler — there is no separate transform — so a move is
+/// applied straight to the anchors and every snap after it reads the new
+/// position with no invalidation step.
+impl Ruler {
+    /// The draggable anchor points, canvas px, in creation order. A
+    /// [`Ruler::Guide`] has none: it is a bare coordinate, so the drawn
+    /// line is its own handle (body drags only).
+    pub fn anchors(&self) -> Vec<[f32; 2]> {
+        match *self {
+            Ruler::Line { a, b } | Ruler::Parallel { a, b } | Ruler::Perspective { a, b } => {
+                vec![a, b]
+            }
+            Ruler::VanishingPoint { c, .. }
+            | Ruler::Concentric { c, .. }
+            | Ruler::Symmetric { c, .. } => vec![c],
+            Ruler::Guide { .. } => Vec::new(),
+        }
+    }
+
+    /// Move anchor `i` by `d` (an out-of-range index is ignored). Only the
+    /// point moves: ray count, ring spacing and symmetry angle are the
+    /// ruler's shape, not its position — sliding a vanishing point carries
+    /// its fan along instead of re-aiming it.
+    pub fn move_anchor(&mut self, i: usize, d: [f32; 2]) {
+        fn shift(p: &mut [f32; 2], d: [f32; 2]) {
+            p[0] += d[0];
+            p[1] += d[1];
+        }
+        match self {
+            Ruler::Line { a, b } | Ruler::Parallel { a, b } | Ruler::Perspective { a, b } => {
+                match i {
+                    0 => shift(a, d),
+                    1 => shift(b, d),
+                    _ => {}
+                }
+            }
+            Ruler::VanishingPoint { c, .. }
+            | Ruler::Concentric { c, .. }
+            | Ruler::Symmetric { c, .. } => {
+                if i == 0 {
+                    shift(c, d)
+                }
+            }
+            Ruler::Guide { .. } => {}
+        }
+    }
+
+    /// Translate the whole ruler by `d` — every anchor moves EQUALLY, so
+    /// the geometry stays rigid (a moved line ruler keeps its direction, a
+    /// moved perspective set keeps its horizon length). A guide takes only
+    /// the component it lives on.
+    pub fn translate(&mut self, d: [f32; 2]) {
+        if let Ruler::Guide { horizontal, pos } = self {
+            *pos += if *horizontal { d[1] } else { d[0] };
+            return;
+        }
+        for i in 0..self.anchors().len() {
+            self.move_anchor(i, d);
+        }
+    }
+
+    /// Squared distance from `p` to the ruler's DRAWN geometry, canvas px².
+    /// For every snapping kind this is exactly the snap distance (same
+    /// math — what you grab is what you draw against). The two that never
+    /// snap define their own: a symmetric ruler is its axes, a perspective
+    /// set is its EYE LEVEL only — the faint ray fans are decoration and
+    /// would otherwise make the whole page a grab target.
+    pub fn dist2(&self, p: [f32; 2]) -> f32 {
+        match *self {
+            Ruler::Symmetric { c, lines, angle0 } => {
+                let n = lines.max(1) as usize;
+                let mut best = f32::INFINITY;
+                for k in 0..n {
+                    let ang = angle0 + k as f32 * std::f32::consts::PI / n as f32;
+                    let q = project(p, c, [ang.cos(), ang.sin()]);
+                    best = best.min(d2(q, p));
+                }
+                best
+            }
+            Ruler::Perspective { a, b } => {
+                let q = project(p, a, [b[0] - a[0], b[1] - a[1]]);
+                d2(q, p)
+            }
+            _ => self.snap_pt(p).1,
+        }
+    }
+
+    /// Hit test for a move grab: an anchor within `tol` wins, else the
+    /// body within the SAME `tol`. Canvas px — the caller divides its
+    /// screen-px tolerance by the zoom, like every other on-canvas handle.
+    pub fn grab_near(&self, p: [f32; 2], tol: f32) -> Option<RulerGrab> {
+        let t2 = tol * tol;
+        for (i, a) in self.anchors().iter().enumerate() {
+            if d2(*a, p) <= t2 {
+                return Some(RulerGrab::Anchor(i));
+            }
+        }
+        (self.dist2(p) <= t2).then_some(RulerGrab::Body)
+    }
+}
+
 /// Project `p` onto the line (point o, direction d). Degenerate lines
 /// (zero direction) snap to `o`.
 fn project(p: [f32; 2], o: [f32; 2], d: [f32; 2]) -> [f32; 2] {
@@ -186,6 +297,45 @@ impl Rulers {
             }
         }
         best
+    }
+
+    /// Hit test the whole set for a move grab, TOPMOST first (later rulers
+    /// draw over earlier ones, and curves draw over the line family). The
+    /// index is the [`SnapLock`]-style combined index: `items` first,
+    /// `curves` offset by `items.len()`.
+    ///
+    /// Snapping being off does not hide a ruler (they stay drawn), so it
+    /// does not block a grab either.
+    pub fn grab_near(&self, p: [f32; 2], tol: f32) -> Option<(usize, RulerGrab)> {
+        for (j, c) in self.curves.iter().enumerate().rev() {
+            if let Some(g) = c.grab_near(p, tol) {
+                return Some((self.items.len() + j, g));
+            }
+        }
+        for (i, r) in self.items.iter().enumerate().rev() {
+            if let Some(g) = r.grab_near(p, tol) {
+                return Some((i, g));
+            }
+        }
+        None
+    }
+
+    /// Apply one move delta to the ruler at a combined index (see
+    /// [`Rulers::grab_near`]). Deltas, not absolute points: the grab
+    /// offset is preserved and a drag is just the sum of its steps.
+    pub fn move_by(&mut self, k: usize, grab: RulerGrab, d: [f32; 2]) {
+        let n = self.items.len();
+        if let Some(r) = self.items.get_mut(k) {
+            match grab {
+                RulerGrab::Anchor(i) => r.move_anchor(i, d),
+                RulerGrab::Body => r.translate(d),
+            }
+        } else if let Some(c) = self.curves.get_mut(k - n) {
+            match grab {
+                RulerGrab::Anchor(i) => c.move_anchor(i, d),
+                RulerGrab::Body => c.translate(d),
+            }
+        }
     }
 }
 
@@ -272,6 +422,284 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod move_tests {
+    use super::*;
+
+    /// A body drag translates the ruler RIGIDLY — every anchor by the same
+    /// delta — and the snap afterwards is the moved line's, not a stale
+    /// one: the geometry is the ruler, so there is nothing to invalidate.
+    #[test]
+    fn body_move_translates_every_anchor_and_the_snap_follows() {
+        let mut rs = Rulers {
+            items: vec![Ruler::Line {
+                a: [0.0, 100.0],
+                b: [100.0, 100.0],
+            }],
+            on: true,
+            ..Default::default()
+        };
+        assert!((rs.snap([50.0, 130.0])[1] - 100.0).abs() < 1e-4);
+        rs.move_by(0, RulerGrab::Body, [10.0, 50.0]);
+        assert_eq!(
+            rs.items[0],
+            Ruler::Line {
+                a: [10.0, 150.0],
+                b: [110.0, 150.0]
+            },
+            "both anchors moved equally"
+        );
+        // Same direction (rigid), new position.
+        let p = rs.snap([50.0, 130.0]);
+        assert!(
+            (p[1] - 150.0).abs() < 1e-4,
+            "snaps to the moved line: {p:?}"
+        );
+        assert!((p[0] - 50.0).abs() < 1e-4, "still perpendicular");
+    }
+
+    /// An anchor drag moves ONLY that anchor — which re-aims the line, and
+    /// the snap direction follows the new geometry.
+    #[test]
+    fn anchor_move_re_aims_and_the_snap_direction_follows() {
+        let mut rs = Rulers {
+            items: vec![Ruler::Line {
+                a: [0.0, 0.0],
+                b: [100.0, 0.0],
+            }],
+            on: true,
+            ..Default::default()
+        };
+        // Drag b down by 100: the ruler is now the diagonal y = x.
+        rs.move_by(0, RulerGrab::Anchor(1), [0.0, 100.0]);
+        assert_eq!(
+            rs.items[0],
+            Ruler::Line {
+                a: [0.0, 0.0],
+                b: [100.0, 100.0]
+            },
+            "anchor 0 stayed put"
+        );
+        // (0,10) projects onto y = x at (5,5) — the diagonal's answer.
+        let p = rs.snap([0.0, 10.0]);
+        assert!(
+            (p[0] - 5.0).abs() < 1e-3 && (p[1] - 5.0).abs() < 1e-3,
+            "{p:?}"
+        );
+    }
+
+    /// The centre family (vanishing point, symmetric, concentric) carries
+    /// its SHAPE — ray count, angle, ring spacing — when it moves; only
+    /// the centre travels. A guide takes the component it lives on.
+    #[test]
+    fn centre_rulers_and_guides_move_without_reshaping() {
+        let mut rs = Rulers {
+            items: vec![
+                Ruler::VanishingPoint {
+                    c: [0.0, 0.0],
+                    rays: 4,
+                    angle0: 0.0,
+                },
+                Ruler::Symmetric {
+                    c: [10.0, 10.0],
+                    lines: 3,
+                    angle0: 0.5,
+                },
+                Ruler::Concentric {
+                    c: [0.0, 0.0],
+                    dr: 50.0,
+                },
+                Ruler::Guide {
+                    horizontal: true,
+                    pos: 200.0,
+                },
+                Ruler::Guide {
+                    horizontal: false,
+                    pos: 100.0,
+                },
+            ],
+            on: true,
+            ..Default::default()
+        };
+        for k in 0..rs.items.len() {
+            rs.move_by(k, RulerGrab::Body, [30.0, 20.0]);
+        }
+        assert_eq!(
+            rs.items[0],
+            Ruler::VanishingPoint {
+                c: [30.0, 20.0],
+                rays: 4,
+                angle0: 0.0
+            }
+        );
+        assert_eq!(
+            rs.items[1],
+            Ruler::Symmetric {
+                c: [40.0, 30.0],
+                lines: 3,
+                angle0: 0.5
+            }
+        );
+        assert_eq!(
+            rs.items[2],
+            Ruler::Concentric {
+                c: [30.0, 20.0],
+                dr: 50.0
+            }
+        );
+        assert_eq!(
+            rs.items[3],
+            Ruler::Guide {
+                horizontal: true,
+                pos: 220.0
+            },
+            "a horizontal guide takes dy only"
+        );
+        assert_eq!(
+            rs.items[4],
+            Ruler::Guide {
+                horizontal: false,
+                pos: 130.0
+            },
+            "a vertical guide takes dx only"
+        );
+        // The moved fan still snaps to its axes, now through (30, 20).
+        let only_vp = Rulers {
+            items: vec![rs.items[0]],
+            on: true,
+            ..Default::default()
+        };
+        let p = only_vp.snap([90.0, 25.0]);
+        assert!((p[1] - 20.0).abs() < 1e-3, "on the moved x-axis ray: {p:?}");
+    }
+
+    /// The hit test: an anchor inside the tolerance beats the body, the
+    /// body is the drawn geometry, and beyond the tolerance nothing is
+    /// grabbed. The tolerance is canvas px — the caller divides screen px
+    /// by the zoom, so a 10 px handle stays 10 SCREEN px at any zoom.
+    #[test]
+    fn grab_prefers_the_anchor_then_the_body_then_nothing() {
+        let line = Ruler::Line {
+            a: [0.0, 100.0],
+            b: [100.0, 100.0],
+        };
+        assert_eq!(
+            line.grab_near([3.0, 101.0], 10.0),
+            Some(RulerGrab::Anchor(0))
+        );
+        assert_eq!(
+            line.grab_near([98.0, 104.0], 10.0),
+            Some(RulerGrab::Anchor(1))
+        );
+        // On the line, far from both ends: the body.
+        assert_eq!(line.grab_near([400.0, 104.0], 10.0), Some(RulerGrab::Body));
+        // Off the line by more than the tolerance: nothing.
+        assert_eq!(line.grab_near([400.0, 120.0], 10.0), None);
+        // The SAME canvas point, at the tolerance a 4x zoom would produce
+        // (10 screen px / 4) and at a 0.25x zoom (10 / 0.25).
+        assert_eq!(line.grab_near([400.0, 115.0], 10.0 / 4.0), None);
+        assert_eq!(
+            line.grab_near([400.0, 115.0], 10.0 / 0.25),
+            Some(RulerGrab::Body),
+            "zoomed out, the same 10 screen px reach further in canvas px"
+        );
+    }
+
+    /// A perspective set is grabbed by its EYE LEVEL and its two VPs — not
+    /// by the ray fans, which cover the page and would make every press a
+    /// ruler grab.
+    #[test]
+    fn perspective_grabs_by_the_eye_level_and_its_vps() {
+        let p = Ruler::Perspective {
+            a: [-600.0, 100.0],
+            b: [700.0, 100.0],
+        };
+        assert_eq!(
+            p.grab_near([-598.0, 103.0], 10.0),
+            Some(RulerGrab::Anchor(0))
+        );
+        assert_eq!(p.grab_near([700.0, 95.0], 10.0), Some(RulerGrab::Anchor(1)));
+        assert_eq!(p.grab_near([0.0, 104.0], 10.0), Some(RulerGrab::Body));
+        // Squarely on a ray through VP-a, but nowhere near the horizon.
+        assert_eq!(p.grab_near([0.0, 400.0], 10.0), None);
+        // A symmetric ruler, by contrast, IS its axes.
+        let s = Ruler::Symmetric {
+            c: [0.0, 0.0],
+            lines: 2,
+            angle0: 0.0,
+        };
+        assert_eq!(s.grab_near([500.0, 3.0], 10.0), Some(RulerGrab::Body));
+        assert_eq!(s.grab_near([3.0, -500.0], 10.0), Some(RulerGrab::Body));
+        assert_eq!(s.grab_near([300.0, 300.0], 10.0), None);
+    }
+
+    /// Curve rulers move like the rest: a vertex reshapes the path, the
+    /// body carries the whole polyline, and the moved path snaps at its
+    /// new place (clamped at its ends, as ever).
+    #[test]
+    fn curve_ruler_vertex_and_body_moves() {
+        let mut rs = Rulers {
+            items: Vec::new(),
+            curves: vec![CurveRuler {
+                pts: vec![[0.0, 0.0], [100.0, 0.0]],
+            }],
+            on: true,
+            special_on: true,
+        };
+        // Combined index: curves start at items.len() == 0.
+        assert_eq!(
+            rs.grab_near([100.0, 4.0], 10.0),
+            Some((0, RulerGrab::Anchor(1)))
+        );
+        assert_eq!(rs.grab_near([50.0, 6.0], 10.0), Some((0, RulerGrab::Body)));
+        assert_eq!(rs.grab_near([50.0, 60.0], 10.0), None);
+        rs.move_by(0, RulerGrab::Anchor(1), [0.0, 100.0]);
+        assert_eq!(rs.curves[0].pts, vec![[0.0, 0.0], [100.0, 100.0]]);
+        rs.move_by(0, RulerGrab::Body, [5.0, 5.0]);
+        assert_eq!(rs.curves[0].pts, vec![[5.0, 5.0], [105.0, 105.0]]);
+        let mut lock = SnapLock::default();
+        let q = rs.snap_sticky([55.0, 55.0], &mut lock);
+        assert!(
+            (q[0] - 55.0).abs() < 1e-3 && (q[1] - 55.0).abs() < 1e-3,
+            "the moved path passes through (55,55): {q:?}"
+        );
+    }
+
+    /// Topmost wins: curves are drawn over the line family, and later
+    /// rulers over earlier ones, so the grab order matches what the eye
+    /// sees on top.
+    #[test]
+    fn grab_picks_the_topmost_ruler() {
+        let rs = Rulers {
+            items: vec![
+                Ruler::Guide {
+                    horizontal: true,
+                    pos: 50.0,
+                },
+                Ruler::Guide {
+                    horizontal: true,
+                    pos: 51.0,
+                },
+            ],
+            curves: vec![CurveRuler {
+                pts: vec![[0.0, 52.0], [100.0, 52.0]],
+            }],
+            on: true,
+            special_on: true,
+        };
+        assert_eq!(rs.grab_near([50.0, 50.0], 10.0), Some((2, RulerGrab::Body)));
+        let no_curve = Rulers {
+            curves: Vec::new(),
+            ..rs.clone()
+        };
+        assert_eq!(
+            no_curve.grab_near([50.0, 50.0], 10.0),
+            Some((1, RulerGrab::Body)),
+            "the later guide is on top"
+        );
+    }
+}
+
 /// A curve ruler (part 2): a drawn polyline; snaps onto the nearest
 /// SEGMENT (finite, unlike the line ruler — the curve is the path).
 #[derive(Clone, Debug, PartialEq)]
@@ -302,6 +730,38 @@ impl CurveRuler {
             }
         }
         (best, best_d2)
+    }
+
+    /// The vertices — every one is draggable (moving one RESHAPES the
+    /// path; the line rulers' anchors behave the same way).
+    pub fn anchors(&self) -> &[[f32; 2]] {
+        &self.pts
+    }
+
+    pub fn move_anchor(&mut self, i: usize, d: [f32; 2]) {
+        if let Some(p) = self.pts.get_mut(i) {
+            p[0] += d[0];
+            p[1] += d[1];
+        }
+    }
+
+    pub fn translate(&mut self, d: [f32; 2]) {
+        for p in &mut self.pts {
+            p[0] += d[0];
+            p[1] += d[1];
+        }
+    }
+
+    /// As [`Ruler::grab_near`]; the body is the finite path (a curve ruler
+    /// snaps clamped, so past its ends there is nothing to grab either).
+    pub fn grab_near(&self, p: [f32; 2], tol: f32) -> Option<RulerGrab> {
+        let t2 = tol * tol;
+        for (i, a) in self.pts.iter().enumerate() {
+            if d2(*a, p) <= t2 {
+                return Some(RulerGrab::Anchor(i));
+            }
+        }
+        (self.snap(p).1 <= t2).then_some(RulerGrab::Body)
     }
 }
 

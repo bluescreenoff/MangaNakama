@@ -1388,10 +1388,11 @@ pub(super) fn status_bar(ui: &mut egui::Ui, app: &mut App) {
             ui.separator();
             ui.label(
                 egui::RichText::new(format!(
-                    "{}  {:.1}px ×{:.2}{}",
+                    // The honest dab diameter, full stop — the old "×2.00"
+                    // tail was the multiplier model that capped the ladder.
+                    "{}  {:.1}px{}",
                     app.brush_name(),
                     app.brush_radius() * 2.0,
-                    app.props_current.size,
                     if app.eraser_active() { "  [erase]" } else { "" }
                 ))
                 .size(10.5)

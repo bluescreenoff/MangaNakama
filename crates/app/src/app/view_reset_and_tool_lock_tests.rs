@@ -77,15 +77,15 @@ fn a_locked_sub_tool_comes_back_to_its_snapshot() {
     let pen = app.presets[i].1.clone();
 
     // Calibrate, then lock: THIS is the state a return must restore.
-    crate::cmd::dispatch(&mut app, AppCmd::SetBrushSize(2.0));
+    crate::cmd::dispatch(&mut app, AppCmd::SetBrushSizePx(20.0));
     crate::cmd::dispatch(&mut app, AppCmd::SetOpacity(0.4));
     crate::cmd::dispatch(&mut app, AppCmd::SetToolLock(true));
     assert!(app.props_current.locked);
 
     // A locked tool is not a read-only tool — the nudge lands.
-    crate::cmd::dispatch(&mut app, AppCmd::SetBrushSize(3.5));
+    crate::cmd::dispatch(&mut app, AppCmd::SetBrushSizePx(35.0));
     assert_eq!(
-        app.props_current.size, 3.5,
+        app.props_current.size_px, 35.0,
         "a locked tool still takes the change; refusing it would make \
              the lock something you keep switching off"
     );
@@ -93,17 +93,23 @@ fn a_locked_sub_tool_comes_back_to_its_snapshot() {
     // Leave and come back: the snapshot, not the nudge.
     app.store_current_props();
     app.load_props_for(&pen);
-    assert_eq!(app.props_current.size, 2.0, "the calibrated size is back");
+    assert_eq!(
+        app.props_current.size_px, 20.0,
+        "the calibrated size is back"
+    );
     assert_eq!(app.props_current.opacity, 0.4, "and the opacity with it");
     assert!(app.props_current.locked, "still locked");
 
     // Released, the live values become the sub tool's own — the drift
     // is adopted rather than thrown away by the next switch.
-    crate::cmd::dispatch(&mut app, AppCmd::SetBrushSize(1.25));
+    crate::cmd::dispatch(&mut app, AppCmd::SetBrushSizePx(12.5));
     crate::cmd::dispatch(&mut app, AppCmd::SetToolLock(false));
     app.store_current_props();
     app.load_props_for(&pen);
-    assert_eq!(app.props_current.size, 1.25, "released, the nudge sticks");
+    assert_eq!(
+        app.props_current.size_px, 12.5,
+        "released, the nudge sticks"
+    );
     assert!(!app.props_current.locked);
 
     // "Reset to preset" drops the lock with the values it froze —

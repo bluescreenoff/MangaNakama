@@ -31,6 +31,187 @@ fn size_ladder_matches_the_owners_examples() {
     assert_eq!(size_rung(1.2, false), 1.0);
 }
 
+/// Drain the command queue (the ladder and the Size control both push).
+fn pump_cmds(app: &mut App) {
+    while let Some(c) = app.cmds.pop_front() {
+        crate::cmd::dispatch(app, c);
+    }
+}
+
+/// ROADMAP "absolute brush size per preset": `[`/`]` stepped a ladder in
+/// REAL PIXELS while the Size control was a 0.25..4 multiplier on the
+/// preset's own size — so the multiplier's ceiling silently capped the
+/// ladder, and a 10 px preset could never be walked past 40 px however
+/// many times you pressed `]`. Size is one absolute px field now.
+///
+/// This is the test that fails against the old code: on the pre-fix build
+/// the same walk stops at 4x the preset's size.
+#[test]
+fn brush_size_ladder_climbs_past_the_old_multiplier_ceiling() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (400, 300), 1.0);
+    if app.selected_preset.is_none() {
+        println!("[test] SKIP: no brush presets on disk");
+        return;
+    }
+    // The exact case from the issue: a 10 px brush. The old model could not
+    // even express this on the shipped Real G-Pen, which ships at ~100 px —
+    // 0.25x floored it at 25 px — and from a 10 px preset its 4x ceiling
+    // stopped the ladder at 40.
+    crate::cmd::dispatch(&mut app, AppCmd::SetBrushSizePx(10.0));
+    assert!(
+        (app.brush_radius() * 2.0 - 10.0).abs() < 0.05,
+        "the Size control writes absolute px straight through"
+    );
+
+    // 300 is a ladder rung, so `]` lands on it exactly.
+    for _ in 0..40 {
+        app.step_brush_size(true);
+        pump_cmds(&mut app);
+        if app.props_current.size_px >= 300.0 {
+            break;
+        }
+    }
+    assert_eq!(
+        app.props_current.size_px, 300.0,
+        "the ladder must reach 300 px from a 10 px preset — the old \
+         0.25..4 multiplier stopped it at 40"
+    );
+    assert!(
+        (app.brush_radius() * 2.0 - 300.0).abs() < 0.05,
+        "and the readout is the engine's honest dab diameter, not a \
+         number the UI made up: {} px",
+        app.brush_radius() * 2.0
+    );
+
+    // Back down the same ladder, still absolute.
+    app.step_brush_size(false);
+    pump_cmds(&mut app);
+    assert_eq!(app.props_current.size_px, 250.0);
+}
+
+/// The other half of the same bug, and the one that does not depend on the
+/// preset: whatever size a sub tool ships at, `[`/`]` must be able to walk
+/// the WHOLE ladder — 1 px to its 2000 px top rung. Under the old 0.25..4x
+/// multiplier the reachable band was four octaves wide and pinned to the
+/// preset (the Real G-Pen ships at ~100 px, so it stopped at 400).
+#[test]
+fn brush_size_ladder_walks_the_whole_ladder_from_the_presets_own_size() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (400, 300), 1.0);
+    if app.selected_preset.is_none() {
+        println!("[test] SKIP: no brush presets on disk");
+        return;
+    }
+    for _ in 0..60 {
+        app.step_brush_size(true);
+        pump_cmds(&mut app);
+        if app.props_current.size_px >= 2000.0 {
+            break;
+        }
+    }
+    assert_eq!(
+        app.props_current.size_px, 2000.0,
+        "the ladder's top rung must be reachable"
+    );
+    for _ in 0..80 {
+        app.step_brush_size(false);
+        pump_cmds(&mut app);
+        if app.props_current.size_px <= 1.0 {
+            break;
+        }
+    }
+    assert_eq!(
+        app.props_current.size_px, 1.0,
+        "and so must its 1 px floor"
+    );
+    assert!(
+        (app.brush_radius() * 2.0 - 1.0).abs() < 0.01,
+        "the engine is where the readout says: {} px",
+        app.brush_radius() * 2.0
+    );
+}
+
+/// The non-compounding contract `set_size_multiplier` established, kept by
+/// the absolute setter: the engine re-derives from the size the preset
+/// shipped, so setting 37 px twice is setting it once. (A setter that
+/// scaled what it currently held would double the brush on every slider
+/// tick.) Checked on the libmypaint path AND on the fallback dab.
+#[test]
+fn brush_size_px_set_twice_is_the_same_as_set_once() {
+    // Fallback kind first — no adapter needed.
+    let mut e = Engine::new(EngineKind::Dab(mn_brush::SimpleDab::new()));
+    e.set_size_px(48.0);
+    let once = e.radius_px();
+    e.set_size_px(48.0);
+    e.set_size_px(48.0);
+    assert_eq!(once, e.radius_px(), "SimpleDab must not compound");
+
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (400, 300), 1.0);
+    if app.selected_preset.is_none() {
+        println!("[test] SKIP: no brush presets on disk");
+        return;
+    }
+    crate::cmd::dispatch(&mut app, AppCmd::SetBrushSizePx(37.0));
+    let once = app.brush_radius();
+    crate::cmd::dispatch(&mut app, AppCmd::SetBrushSizePx(37.0));
+    assert_eq!(once, app.brush_radius(), "MyBrush must not compound");
+    // `apply_props` runs the same setter on every props push (tool switch,
+    // symmetry twin rebuild, …) — it must be just as idempotent.
+    app.apply_props();
+    app.apply_props();
+    assert_eq!(once, app.brush_radius(), "apply_props must not compound");
+}
+
+/// The preset's own size is the DEFAULT a sub tool starts at, never a
+/// ceiling: a first encounter seeds from it, and the size can then go far
+/// beyond it without the preset's shipped radius moving underneath.
+#[test]
+fn brush_size_seeds_from_the_preset_and_is_not_capped_by_it() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (400, 300), 1.0);
+    let Some(i) = app.selected_preset else {
+        println!("[test] SKIP: no brush presets on disk");
+        return;
+    };
+    let pen = app.presets[i].1.clone();
+    let base = app.engine().base_size_px();
+    assert!(base > 0.0);
+    assert!(
+        (app.props_current.size_px - base).abs() < 1e-3,
+        "a sub tool met for the first time starts at the preset's own size"
+    );
+
+    // 20x the preset — a size the old multiplier model could not express.
+    let big = (base * 20.0).min(crate::cmd::SIZE_PX_MAX);
+    crate::cmd::dispatch(&mut app, AppCmd::SetBrushSizePx(big));
+    assert!((app.props_current.size_px - big).abs() < 1e-3);
+    assert!(
+        (app.brush_radius() * 2.0 - big).abs() < big * 0.01,
+        "{} px asked, {} px on the engine",
+        big,
+        app.brush_radius() * 2.0
+    );
+    assert!(
+        (app.engine().base_size_px() - base).abs() < 1e-3,
+        "the preset's shipped size is a default, so it must not move"
+    );
+
+    // "Reset to preset" comes home to that default.
+    app.forget_current_props();
+    app.load_props_for(&pen);
+    assert!((app.props_current.size_px - base).abs() < 1e-3);
+}
+
 /// The fit margin is the `fit_margin` preference now, not a literal in
 /// two places. The shipped default must reproduce today's fit exactly —
 /// this is the test that catches "we made it configurable and moved it".
@@ -2256,6 +2437,256 @@ fn ruler_creation_and_snapping() {
     }
 }
 
+/// A ruler's anchors, within a hair of the expected canvas points — a
+/// drag's deltas come back through `to_screen`/`to_canvas`, so they carry
+/// f32 rounding and are never bit-exact.
+fn anchors_are(r: &mn_core::Ruler, want: &[[f32; 2]]) -> bool {
+    let got = r.anchors();
+    got.len() == want.len()
+        && got
+            .iter()
+            .zip(want)
+            .all(|(g, w)| (g[0] - w[0]).abs() < 0.05 && (g[1] - w[1]).abs() < 0.05)
+}
+
+/// ROADMAP good-first-issue "make rulers movable": a created ruler is
+/// no longer frozen. With the Object tool a press on the BODY carries the
+/// whole ruler (and the pen then snaps to where it went), a press on an
+/// ANCHOR moves that end alone, and the reach is screen px over zoom —
+/// the same handle tolerance every other on-canvas affordance uses.
+#[test]
+fn ruler_move_with_the_object_tool() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    let empty: [PenSample; 0] = [];
+    app.viewport.zoom = 1.0;
+
+    // The line ruler from part 1: along y = 200, x from 100 to 400.
+    crate::cmd::dispatch(
+        &mut app,
+        crate::cmd::AppCmd::RulerArm(crate::cmd::RulerKind::Line),
+    );
+    let (x0, y0) = app.viewport.to_screen(100.0, 200.0);
+    let (x1, y1) = app.viewport.to_screen(400.0, 200.0);
+    app.canvas_down(x0, y0, PointerKind::Mouse, &empty);
+    app.canvas_up(x1, y1, &empty);
+    let created = mn_core::Ruler::Line {
+        a: [100.0, 200.0],
+        b: [400.0, 200.0],
+    };
+    assert_eq!(app.rulers.items[0], created);
+    app.tool = crate::cmd::Tool::Object;
+
+    // 20 canvas px off the ruler at zoom 1 = 20 screen px: outside the
+    // 10 screen px handle, so nothing is grabbed and nothing moves.
+    let (mx, my) = app.viewport.to_screen(400.0, 220.0);
+    app.canvas_down(mx, my, PointerKind::Mouse, &empty);
+    assert!(app.ruler_move.is_none(), "a 20 px miss must not grab");
+    app.canvas_up(mx, my, &empty);
+    assert_eq!(app.rulers.items[0], created, "a miss changes nothing");
+
+    // Body drag: press ON the line, carry it 100 px down.
+    let (bx, by) = app.viewport.to_screen(250.0, 200.0);
+    app.canvas_down(bx, by, PointerKind::Mouse, &empty);
+    assert!(
+        matches!(
+            app.ruler_move,
+            Some(crate::app::canvas_input::RulerMove {
+                ruler: 0,
+                grab: mn_core::RulerGrab::Body,
+                ..
+            })
+        ),
+        "a press on the line grabs the body: {:?}",
+        app.ruler_move
+    );
+    let (bx1, by1) = app.viewport.to_screen(250.0, 300.0);
+    app.canvas_move(bx1, by1, &empty);
+    app.canvas_up(bx1, by1, &empty);
+    assert!(app.ruler_move.is_none(), "the gesture ended");
+    assert!(
+        anchors_are(&app.rulers.items[0], &[[100.0, 300.0], [400.0, 300.0]]),
+        "both anchors moved by the same delta (rigid): {:?}",
+        app.rulers.items[0]
+    );
+
+    // The pen now snaps to where the ruler WENT: a wiggle around y = 300
+    // inks flat on the moved line (it would have ironed onto y = 200
+    // before, which is 100 px away).
+    app.begin_stroke(PointerKind::Mouse);
+    app.engine_mut()
+        .set_dab_recording_all(mn_brush::RecordMode::Tap);
+    let batch: Vec<PenSample> = (0..30)
+        .map(|i| {
+            let cy = 300.0 + if i % 2 == 0 { 25.0 } else { -25.0 };
+            let (sx, sy) = app.viewport.to_screen(120.0 + i as f32 * 8.0, cy);
+            PenSample {
+                x: sx,
+                y: sy,
+                pressure: 0.8,
+                tilt_x: 0.0,
+                tilt_y: 0.0,
+                t_ms: i as f64 * 8.0,
+            }
+        })
+        .collect();
+    app.push_batch(&batch);
+    app.end_stroke();
+    let dabs = app.engine_mut().drain_dab_records();
+    assert!(!dabs.is_empty(), "the stroke painted");
+    for d in &dabs {
+        assert!(
+            (d.y - 300.0).abs() < 0.5,
+            "dab ({}, {}) must lie on the MOVED line",
+            d.x,
+            d.y
+        );
+    }
+
+    // Zoom out to 0.25: the same 20-canvas-px offset is now 5 screen px,
+    // inside the handle — the tolerance is screen px over zoom, so the
+    // press that missed at zoom 1 grabs the end here.
+    app.viewport.zoom = 0.25;
+    let (ax, ay) = app.viewport.to_screen(400.0, 320.0);
+    app.canvas_down(ax, ay, PointerKind::Mouse, &empty);
+    assert!(
+        matches!(
+            app.ruler_move,
+            Some(crate::app::canvas_input::RulerMove {
+                ruler: 0,
+                grab: mn_core::RulerGrab::Anchor(1),
+                ..
+            })
+        ),
+        "zoomed out, the same offset grabs the end: {:?}",
+        app.ruler_move
+    );
+    let (ax1, ay1) = app.viewport.to_screen(400.0, 420.0);
+    app.canvas_move(ax1, ay1, &empty);
+    app.canvas_up(ax1, ay1, &empty);
+    assert!(
+        anchors_are(&app.rulers.items[0], &[[100.0, 300.0], [400.0, 400.0]]),
+        "only the grabbed end moved — the other stayed: {:?}",
+        app.rulers.items[0]
+    );
+    // And the snap DIRECTION is the re-aimed line's: (100, 400) projects
+    // onto the a→b direction (300, 100) at (130, 310).
+    let q = app.rulers.snap([100.0, 400.0]);
+    assert!(
+        (q[0] - 130.0).abs() < 0.2 && (q[1] - 310.0).abs() < 0.2,
+        "the snap follows the new direction: {q:?}"
+    );
+}
+
+/// The symmetric ruler's mirror twins are a CACHE of its centre and axes:
+/// moving the ruler must rebuild them, or the next stroke mirrors about
+/// the place the ruler used to be.
+#[test]
+fn moving_a_symmetric_ruler_moves_its_mirror_orbit() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    let empty: [PenSample; 0] = [];
+
+    // N = 2 axes (0° and 90°) about (150, 150).
+    let c = [150.0, 150.0];
+    crate::cmd::dispatch(
+        &mut app,
+        crate::cmd::AppCmd::RulerArm(crate::cmd::RulerKind::Symmetric),
+    );
+    let (x0, y0) = app.viewport.to_screen(c[0], c[1]);
+    let (x1, y1) = app.viewport.to_screen(c[0] + 100.0, c[1]);
+    app.canvas_down(x0, y0, PointerKind::Mouse, &empty);
+    app.canvas_up(x1, y1, &empty);
+
+    // Grab the centre handle and carry it to (300, 250).
+    app.tool = crate::cmd::Tool::Object;
+    let (gx, gy) = app.viewport.to_screen(c[0], c[1]);
+    app.canvas_down(gx, gy, PointerKind::Mouse, &empty);
+    assert!(
+        matches!(
+            app.ruler_move,
+            Some(crate::app::canvas_input::RulerMove {
+                grab: mn_core::RulerGrab::Anchor(0),
+                ..
+            })
+        ),
+        "the centre is the symmetric ruler's handle"
+    );
+    let moved = [300.0, 250.0];
+    let (gx1, gy1) = app.viewport.to_screen(moved[0], moved[1]);
+    app.canvas_move(gx1, gy1, &empty);
+    app.canvas_up(gx1, gy1, &empty);
+    assert!(
+        matches!(
+            app.rulers.items[0],
+            mn_core::Ruler::Symmetric { lines: 2, .. }
+        ) && anchors_are(&app.rulers.items[0], &[moved]),
+        "the centre moved, the axis count did not: {:?}",
+        app.rulers.items[0]
+    );
+
+    // Back to the pen (the stroke path reads the tool) and dab at
+    // moved + (40, 30): the orbit is the four points around the NEW
+    // centre. Around the old one there must be nothing.
+    app.tool = crate::cmd::Tool::Pen;
+    let p = [moved[0] + 40.0, moved[1] + 30.0];
+    let (sx, sy) = app.viewport.to_screen(p[0], p[1]);
+    app.begin_stroke(PointerKind::Mouse);
+    app.push_batch(
+        &(0..6)
+            .map(|i| PenSample {
+                x: sx + if i % 2 == 0 { 0.3 } else { -0.3 },
+                y: sy + if i % 2 == 0 { -0.3 } else { 0.3 },
+                pressure: 0.8,
+                tilt_x: 0.0,
+                tilt_y: 0.0,
+                t_ms: i as f64 * 8.0,
+            })
+            .collect::<Vec<_>>(),
+    );
+    app.end_stroke();
+    let ink_near = |app: &App, x: f32, y: f32| -> bool {
+        let idx = mn_core::TileIdx::of_pixel(x as i32, y as i32);
+        let Some(t) = app.doc.active_layer().tile(idx) else {
+            return false;
+        };
+        let (ox, oy) = idx.origin();
+        let (lx, ly) = (x as i32 - ox, y as i32 - oy);
+        let mut sum = 0u64;
+        for dy in -2..=2 {
+            for dx in -2..=2 {
+                let (tx, ty) = (lx + dx, ly + dy);
+                if (0..64).contains(&tx) && (0..64).contains(&ty) {
+                    sum += t.pixel(tx as usize, ty as usize)[3] as u64;
+                }
+            }
+        }
+        sum > 0
+    };
+    assert!(ink_near(&app, p[0], p[1]), "the stroke itself inked");
+    for q in [
+        [moved[0] + 40.0, moved[1] - 30.0],
+        [moved[0] - 40.0, moved[1] + 30.0],
+        [moved[0] - 40.0, moved[1] - 30.0],
+    ] {
+        assert!(
+            ink_near(&app, q[0], q[1]),
+            "mirror image at ({}, {}) must hold ink",
+            q[0],
+            q[1]
+        );
+    }
+    // The orbit the ruler USED to have is empty.
+    assert!(
+        !ink_near(&app, c[0] - 40.0, c[1] - 30.0),
+        "nothing may mirror about the old centre"
+    );
+}
+
 /// Part 4 (P-001..010 v1): the perspective set through the REAL input
 /// path — the creation drag IS the eye level (both ends VPs), and a
 /// wobbly stroke whose early direction aims at a VP rides that VP's
@@ -3318,6 +3749,80 @@ fn gen_lines_creates_layer_and_undo_clears() {
         0,
         "undo clears the ink (the layer stays — layer adds clear history, the app-wide trade)"
     );
+}
+
+/// ROADMAP "Undo for effect-line regeneration": Apply on a generated
+/// layer regenerates IN PLACE, and that regeneration is one ordinary undo
+/// step — pixels AND parameters together. Before this it swapped the tile
+/// map wholesale outside the op bracket and purged the layer's history,
+/// so there was nothing to undo at all.
+#[test]
+fn gen_lines_regeneration_undoes_and_redoes() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    let apply = |app: &mut App, count: u32, seed: u64| {
+        crate::cmd::dispatch(
+            app,
+            crate::cmd::AppCmd::GenLinesApply {
+                focus: true,
+                a: 300.0,
+                b: 200.0,
+                c: 40.0,
+                d: 260.0,
+                count,
+                width: 4.0,
+                jitter: 0.3,
+                seed,
+            },
+        );
+    };
+    apply(&mut app, 40, 3);
+    let li = app.doc.active;
+    let snap = |app: &App| -> std::collections::BTreeMap<TileIdx, Vec<u16>> {
+        app.doc.layers[li]
+            .tiles()
+            .map(|(i, t)| (i, t.data().to_vec()))
+            .collect()
+    };
+    let generated = snap(&app);
+    let spec_before = app.doc.layers[li].genlines.expect("the layer was generated");
+    assert!(!generated.is_empty(), "ink landed");
+
+    // Apply again on the same (still active) layer: in place, one step.
+    let layers = app.doc.layers.len();
+    apply(&mut app, 96, 9);
+    assert_eq!(app.doc.layers.len(), layers, "regenerated in place");
+    let regenerated = snap(&app);
+    assert_ne!(generated, regenerated, "the raster actually changed");
+    assert_eq!(
+        app.doc.undo_labels(),
+        ["Generate lines", "Regenerate lines"],
+        "one labelled step for the regeneration"
+    );
+
+    assert!(app.doc.undo(), "the regeneration undoes");
+    assert_eq!(snap(&app), generated, "the previous lines, bit for bit");
+    assert_eq!(
+        app.doc.layers[li].genlines,
+        Some(spec_before),
+        "the parameters came back with the pixels — no half-undo"
+    );
+    assert!(app.doc.redo(), "and redoes");
+    assert_eq!(snap(&app), regenerated);
+    assert_eq!(app.doc.layers[li].genlines.map(|g| g.count), Some(96));
+
+    // Two regenerations are two steps, not one.
+    apply(&mut app, 24, 5);
+    assert_eq!(
+        app.doc.undo_labels(),
+        ["Generate lines", "Regenerate lines", "Regenerate lines"]
+    );
+    assert!(app.doc.undo());
+    assert_eq!(snap(&app), regenerated, "one press, one regeneration");
+    assert!(app.doc.undo());
+    assert_eq!(snap(&app), generated);
 }
 
 /// TRIAGE 150 / CV-003..005: the History palette's model — labelled

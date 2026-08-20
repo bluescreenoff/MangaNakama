@@ -393,6 +393,8 @@ pub struct App {
     pub symmetric_lines: u16,
     /// The drag start while a ruler creation is pending.
     pub ruler_drag: Option<[f32; 2]>,
+    /// A ruler MOVE in progress (Object tool grabbed an anchor or a body).
+    pub ruler_move: Option<canvas_input::RulerMove>,
     /// Part 2/4: the stroke-scoped sticky-snap lock (reset at
     /// begin_stroke) — the locked ruler, plus the perspective binding
     /// (anchor + the fixed family member).
@@ -1135,6 +1137,7 @@ impl App {
             ruler_pending: None,
             symmetric_lines: 2,
             ruler_drag: None,
+            ruler_move: None,
             ruler_lock: Default::default(),
             curve_pending: None,
             last_click: None,
@@ -1310,6 +1313,7 @@ impl App {
                     .position(|(n, _)| n.to_lowercase().contains("eraser"))
             });
         // Seed the Tool Property panel from the default brush's own readings.
+        app.props_current.size_px = app.engine().base_size_px();
         app.props_current.opacity = app.engine().base_opacity();
         app.props_current.min_size = app.engine().size_min_pct();
         {
@@ -1615,7 +1619,10 @@ impl App {
                 .and_then(|n| self.texture_names.iter().position(|t| t == n))
                 .map_or(0, |i| i as u16 + 1);
             ToolProps {
-                size: 1.0,
+                // The preset's own size is the DEFAULT, not a ceiling: from
+                // here the ladder and the Size control move it anywhere in
+                // SIZE_PX_MIN..SIZE_PX_MAX.
+                size_px: e.base_size_px(),
                 opacity: if wash {
                     e.wash_opacity()
                 } else {
@@ -2174,6 +2181,16 @@ impl App {
             .inner_mut()
             .inner_mut()
             .set_mask_mode_all((self.mask_edit || live) && !sel_paint);
+        // LM-004: the mask stroke's undo bracket opens HERE, next to
+        // `begin_op` and for the same reason. The engine writes the mask's
+        // coverage tiles LIVE, per dab (see `mn-brush`'s surface callback) —
+        // a snapshot taken at `end_stroke` would already contain the stroke,
+        // so undo restored the stroke it was meant to remove. `mask_op_end`
+        // pushes the group only if the coverage revision actually moved, so
+        // an aborted or empty stroke still spends no undo step.
+        if (self.mask_edit || live) && !sel_paint {
+            self.doc.mask_op_begin();
+        }
         self.input_resampler.reset();
         self.doc.begin_op();
         self.brush.begin(&mut self.doc);
@@ -2340,12 +2357,9 @@ impl App {
             return;
         }
         self.doc.set_op_label("Stroke");
+        // LM-004: the bracket opened in `begin_stroke` (the snapshot has to
+        // predate the first dab); it closes below, after the tail dabs.
         let mask_stroke = self.mask_edit || self.live_fill_active();
-        if mask_stroke {
-            // LM-004: the mask stroke's undo bracket (whole-field snapshot;
-            // pushed at end_stroke if the coverage moved).
-            self.doc.mask_op_begin();
-        }
         // The resampler's tail first: its last points must flow through the
         // stabilizer + engine before `end` drains the pull-string, landing
         // inside the still-open undo op like every other dab. Ruler snapping
@@ -3017,25 +3031,22 @@ impl App {
         self.needs_redraw = true;
     }
 
-    /// `[` / `]` step the brush's effective pixel DIAMETER through the
-    /// CSP-style ladder below (the size slider keeps its own multiplier
-    /// model). Owner ask 2026-08-17: the old ×1.15 percentage stepping
-    /// drifted sizes onto ugly values; CSP's feel is round numbers with
-    /// gradiated steps.
+    /// `[` / `]` step the brush's pixel DIAMETER through the CSP-style ladder
+    /// below. Owner ask 2026-08-17: the old ×1.15 percentage stepping drifted
+    /// sizes onto ugly values; CSP's feel is round numbers with gradiated
+    /// steps.
+    ///
+    /// The rung IS the value now — the Size control edits the same absolute
+    /// px, so nothing between here and the engine can cap it (it used to be
+    /// squeezed back through a 0.25..4 multiplier, and a 10 px preset could
+    /// therefore never reach the ladder's upper half).
     pub fn step_brush_size(&mut self, up: bool) {
-        let base_r = (self.brush_radius() / self.props_current.size).max(1e-3);
-        let d = self.brush_radius() * 2.0;
-        let target = size_rung(d, up);
-        // Back into the multiplier the engine and Tool Property share; the
-        // clamp is the slider model's existing range (its ceiling, not a
-        // new one).
-        let m = (target / 2.0 / base_r).clamp(0.25, 4.0);
-        self.push_cmd(AppCmd::SetBrushSize(m));
-        let shown = base_r * 2.0 * m;
-        let text = if shown >= 9.95 {
-            format!("brush size: {:.0} px", shown)
+        let target = size_rung(self.brush_radius() * 2.0, up);
+        self.push_cmd(AppCmd::SetBrushSizePx(target));
+        let text = if target >= 9.95 {
+            format!("brush size: {:.0} px", target)
         } else {
-            format!("brush size: {:.1} px", shown)
+            format!("brush size: {:.1} px", target)
         };
         self.set_status(text);
     }
@@ -3448,3 +3459,9 @@ mod eyedropper_tests;
 /// lettering is still lettering afterwards.
 #[cfg(test)]
 mod balloon_carries_text_tests;
+
+/// ROADMAP good-first-issue: LM-004's mask-stroke undo bracket — the
+/// snapshot has to predate the first dab, and undo/redo has to reach the
+/// compositor.
+#[cfg(test)]
+mod mask_stroke_undo_tests;

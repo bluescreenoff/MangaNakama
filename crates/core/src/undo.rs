@@ -71,6 +71,18 @@ pub enum UndoGroup {
         layer: usize,
         edge: Option<crate::edge::EdgeParams>,
     },
+    /// An effect-line regeneration: the tile pre-images (recorded through
+    /// the normal op bracket, exactly like [`UndoGroup::Tiles`]) PLUS the
+    /// generator parameters that produced them. The two ride ONE group on
+    /// purpose — the raster is rendered from the spec, so restoring the
+    /// pixels without restoring the spec leaves the dialog describing art
+    /// that is no longer on the layer. Only a layer that already carries a
+    /// spec can be regenerated, so this one is never absent.
+    GenLines {
+        layer: usize,
+        spec: crate::genlines::GenLinesSpec,
+        tiles: Vec<(TileIdx, Option<Arc<Tile>>)>,
+    },
     /// PA-001: the paper colour before the change. The only DOCUMENT-level
     /// group — it belongs to no layer, which is why [`UndoGroup::layer`]
     /// returns an `Option`. The paper's EYE is not in here on purpose: it is
@@ -81,7 +93,7 @@ pub enum UndoGroup {
 impl UndoGroup {
     pub fn tile_count(&self) -> usize {
         match self {
-            UndoGroup::Tiles { tiles, .. } => tiles.len(),
+            UndoGroup::Tiles { tiles, .. } | UndoGroup::GenLines { tiles, .. } => tiles.len(),
             UndoGroup::Frames { .. }
             | UndoGroup::Balloons { .. }
             | UndoGroup::Texts { .. }
@@ -103,7 +115,8 @@ impl UndoGroup {
             | UndoGroup::Texts { layer, .. }
             | UndoGroup::Mask { layer, .. }
             | UndoGroup::Tones { layer, .. }
-            | UndoGroup::Edges { layer, .. } => Some(*layer),
+            | UndoGroup::Edges { layer, .. }
+            | UndoGroup::GenLines { layer, .. } => Some(*layer),
             UndoGroup::Paper { .. } => None,
         }
     }
@@ -230,10 +243,13 @@ impl History {
         Some((label, self.undo.pop()?))
     }
 
-    /// Drop every group belonging to `layer`, labels in lockstep. Used by
-    /// `regen_genlines`: the raster is swapped wholesale and the regen is
-    /// not undoable, so an older pre-image would splice stale ink into
-    /// the regenerated lines when undone (audit F, 2026-08-19).
+    /// Drop every group belonging to `layer`, labels in lockstep. The tool
+    /// for an op that swaps a layer's raster WHOLESALE, past the
+    /// copy-on-write recording: older pre-images would splice stale ink
+    /// into the new raster when undone. `regen_genlines` used to be such
+    /// an op; it now writes through the tile APIs inside the op bracket
+    /// and keeps its history, so nothing in the shipped paths calls this
+    /// — a new wholesale swap must call it or become undoable instead.
     pub fn drop_layer_history(&mut self, layer: usize) {
         let rebuild = |groups: &mut Vec<UndoGroup>, labels: &mut Vec<String>| {
             let mut kg = Vec::with_capacity(groups.len());

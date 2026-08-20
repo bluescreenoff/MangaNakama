@@ -1099,10 +1099,10 @@ pub(super) fn hud(ctx: &egui::Context, app: &mut App) {
                         ui,
                         "brush",
                         &format!(
-                            "{} | {:.1} px x{:.2}{}",
+                            "{} | {:.1} px radius | {:.1} px set{}",
                             app.brush_name(),
                             app.brush_radius(),
-                            app.props_current.size,
+                            app.props_current.size_px,
                             if app.eraser_active() { " | eraser" } else { "" }
                         ),
                     );

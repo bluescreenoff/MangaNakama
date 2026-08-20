@@ -70,14 +70,14 @@ fn size_drag_grows_brush_and_temp_grab_moves_without_tool_change() {
     }
     app.tool = crate::cmd::Tool::Pen;
 
-    // KB-020: 240 px of rightward drag doubles the multiplier path.
-    let m0 = app.props_current.size;
+    // KB-020: 240 px of rightward drag doubles the px diameter.
+    let m0 = app.props_current.size_px;
     app.size_drag_begin(100.0);
     assert!(app.size_drag.is_some(), "the drag is armed");
     app.canvas_move(340.0, 200.0, &[]);
     pump(&mut app);
-    let m1 = app.props_current.size;
-    assert!(m1 > m0, "the multiplier grew ({m0} -> {m1})");
+    let m1 = app.props_current.size_px;
+    assert!(m1 > m0, "the size grew ({m0} px -> {m1} px)");
     app.canvas_up(340.0, 200.0, &[]);
     assert!(app.size_drag.is_none(), "release ends the drag");
     pump(&mut app);

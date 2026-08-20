@@ -36,6 +36,16 @@ The recurring failure shapes, in order of how often they have shipped:
   APIs so the pre-image is captured.
 - Mask edits are recorded separately: `record_mask_change(layer, before,
   label)`. A structural op that also moves a mask must record both.
+- A mask STROKE uses the bracket `mask_op_begin` / `mask_op_end`, and the
+  begin half belongs next to `begin_op` in `begin_stroke` — the engine
+  writes the mask's coverage tiles LIVE, per dab, so a snapshot taken at
+  `end_stroke` is a snapshot of the finished stroke. `mask_op_end` pushes
+  only when the coverage revision moved, so an empty gesture costs nothing.
+- Undo is a DOOR: the GPU tile cache keys on the LAYER tile revision and
+  folds the mask into the upload, so a mask restored over unchanged pixels
+  needs `renderer.invalidate()` — `AppCmd::Undo`/`Redo` compare every
+  layer's mask revision and call it. (A live-fill layer's derived raster is
+  already self-healing: `fill_stamp` carries the mask revision.)
 - One user gesture = one undo step. If your feature loops a per-item
   command, bracket it; N undo presses for one action is a bug (and a
   partial undo of a multi-part edit leaves mismatched state).
@@ -87,6 +97,15 @@ The recurring failure shapes, in order of how often they have shipped:
   reference by tests; the GPU dab path is pinned against the CPU path.
   Chain of custody: C reference → CPU → GPU. Break one link and the
   parity tests are testing nothing.
+- **Brush size is ONE absolute number in canvas px** (`ToolProps::size_px`,
+  a dab diameter): the Size control, the `[`/`]` ladder and the live drag
+  all write it, and only `Engine::set_size_px` converts. A second size
+  model — a multiplier, a per-control clamp — puts a ceiling on the others
+  without saying so, which is exactly what shipped before. The engine
+  re-derives from the radius the preset shipped (`base_radius_log`, natural
+  log), so setting the same size twice must equal setting it once; a setter
+  that scales what it currently holds compounds on every slider tick. The
+  preset's own size is the DEFAULT a sub tool seeds from, never a ceiling.
 
 ## GPU compositor (`mn-gpu` ⇄ core CPU compositing)
 
@@ -114,6 +133,13 @@ The recurring failure shapes, in order of how often they have shipped:
   test creates a band where the press does the wrong thing.
 - Ink must never land on frame layers (`guard_frame_layer`); selection
   strokes are exempt (they paint the doc's scratch).
+- Rulers are movable with the Object tool, and a ruler's geometry IS the
+  ruler — a move needs no invalidation to change what the pen snaps to.
+  The one exception is the SYMMETRIC ruler: the mirror twins are engines
+  built from its centre and axes, so a move must `rebuild_twins()` or the
+  next stroke mirrors about where the ruler used to be. Rulers park with
+  their document, so an in-flight move index is cleared on a tab switch
+  (`forget_document_caches`) like every other armed gesture.
 - Selection coverage is weighted, not boolean, and selection ops go
   through coverage-based bounds — a new op that derives its region from
   one outline loop breaks multi-island selections.

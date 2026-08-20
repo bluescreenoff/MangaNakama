@@ -195,6 +195,9 @@ impl App {
         self.object_sel = None;
         self.balloon_sel = None;
         self.gen_sel = None;
+        // Rulers are per-document too (they park with the session), so a
+        // live move's index would aim at the OTHER document's ruler set.
+        self.ruler_move = None;
         self.renaming = None;
         self.frame_delete_armed = None;
         self.last_selection = None;

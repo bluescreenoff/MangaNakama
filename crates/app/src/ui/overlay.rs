@@ -306,8 +306,11 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
         path.push(path[0]);
         ants_line(&painter, &path, col, phase);
     };
-    // TODO #3: rulers — cyan guide lines, clipped to the canvas.
-    if !app.rulers.items.is_empty() {
+    // TODO #3: rulers — cyan guide lines, clipped to the canvas. The gate
+    // asks about EVERY family: a set holding only curve rulers (or only a
+    // half-clicked one) drew nothing while this read `items` alone.
+    if !app.rulers.items.is_empty() || !app.rulers.curves.is_empty() || app.curve_pending.is_some()
+    {
         let col = egui::Color32::from_rgb(0, 200, 220);
         let far = 1.0e5;
         for r in &app.rulers.items {
@@ -446,6 +449,32 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
                     [to_pt(w[0][0], w[0][1]), to_pt(w[1][0], w[1][1])],
                     egui::Stroke::new(1.0, egui::Color32::from_rgb(120, 220, 235)),
                 );
+            }
+        }
+        // Rulers are movable with the Object tool, so under that tool they
+        // wear the same handle every other on-canvas anchor does (white
+        // square, accent outline). A guide has no anchor — its whole line
+        // is the grab — so it shows none, which is the honest affordance.
+        if app.tool == Tool::Object {
+            let handle = |p: [f32; 2]| {
+                let r = egui::Rect::from_center_size(to_pt(p[0], p[1]), egui::vec2(7.0, 7.0));
+                painter.rect_filled(r, 1.0, egui::Color32::WHITE);
+                painter.rect_stroke(
+                    r,
+                    1.0,
+                    egui::Stroke::new(1.2, theme::ACCENT),
+                    egui::StrokeKind::Inside,
+                );
+            };
+            for r in &app.rulers.items {
+                for p in r.anchors() {
+                    handle(p);
+                }
+            }
+            for c in &app.rulers.curves {
+                for p in c.anchors() {
+                    handle(*p);
+                }
             }
         }
     }

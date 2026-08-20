@@ -343,7 +343,7 @@ mod spec_tests {
         };
         let li = doc.layers.len() - 1;
         doc.layers[li].genlines = Some(spec);
-        assert!(doc.regen_genlines(li));
+        assert!(doc.regen_genlines(li, spec));
         assert!(doc.layers[li].tiles().next().is_some(), "focus lines inked");
 
         let mut buf = std::io::Cursor::new(Vec::new());
@@ -357,30 +357,34 @@ mod spec_tests {
         let g = re.layers[gl].genlines.expect("spec survived");
         assert_eq!(g, spec);
 
-        // Change a param: regen follows, same layer.
+        // Change a param: regen follows, same layer, and the new spec is
+        // stored BY the regen (it owns both halves now).
         let mut doc = re;
         let mut s2 = g;
         s2.count = 80;
-        doc.layers[gl].genlines = Some(s2);
 
-        assert!(doc.regen_genlines(gl));
+        assert!(doc.regen_genlines(gl, s2));
         assert!(doc.layers[gl].tiles().next().is_some(), "regen inked");
+        assert_eq!(doc.layers[gl].genlines, Some(s2), "the spec went on");
         assert!(
-            !doc.regen_genlines(usize::MAX),
+            !doc.regen_genlines(usize::MAX, s2),
             "out-of-bounds index, no regen"
         );
         // A real layer that carries NO spec also refuses (audit H: the
         // old test only exercised the out-of-bounds arm).
         let plain = doc.add_layer("plain");
-        assert!(!doc.regen_genlines(plain), "layer without spec, no regen");
+        assert!(
+            !doc.regen_genlines(plain, s2),
+            "layer without spec, no regen"
+        );
     }
 
     #[test]
     fn failed_regen_keeps_spec_and_tiles_agreeing() {
-        // Audit F, 2026-08-19: regen_genlines itself never touches the
-        // stored spec on failure; the app-side contract (store only on
-        // success) is what keeps spec and pixels in agreement — this pins
-        // the core half: a failed regen leaves the raster UNTOUCHED.
+        // Audit F, 2026-08-19: a regen that renders nothing must move
+        // NEITHER half — the stored spec still describes the pixels that
+        // are on screen (the store now happens inside regen_genlines, so
+        // this pins both halves rather than the app's old dance).
         let mut doc = Document::new(400, 400);
         doc.add_layer("Focus lines");
         let li = doc.layers.len() - 1;
@@ -396,7 +400,7 @@ mod spec_tests {
             seed: 7,
         };
         doc.layers[li].genlines = Some(spec);
-        assert!(doc.regen_genlines(li));
+        assert!(doc.regen_genlines(li, spec));
         let tiles_before: Vec<_> = doc.layers[li]
             .tiles()
             .map(|(i, t)| (i, t.clone()))
@@ -409,8 +413,12 @@ mod spec_tests {
         let mut dead = spec;
         dead.a = -10000.0;
         dead.b = -10000.0;
-        doc.layers[li].genlines = Some(dead);
-        assert!(!doc.regen_genlines(li), "nothing rendered, no regen");
+        assert!(!doc.regen_genlines(li, dead), "nothing rendered, no regen");
+        assert_eq!(
+            doc.layers[li].genlines,
+            Some(spec),
+            "the dead spec was not stored"
+        );
         let tiles_after: Vec<_> = doc.layers[li]
             .tiles()
             .map(|(i, t)| (i, t.clone()))
@@ -423,23 +431,15 @@ mod spec_tests {
     }
 
     #[test]
-    fn regen_drops_the_layers_stale_undo_preimages() {
-        // Audit F: replace_tiles is wholesale and not undoable — an older
-        // pre-image for the regenerated layer would splice stale ink into
-        // the new raster when undone, so regen drops the layer's history.
+    fn regen_is_one_undo_step_and_keeps_the_layers_history() {
+        // Audit F's old shape: replace_tiles swapped the raster wholesale,
+        // past the copy-on-write recording, so the regen was not undoable
+        // and had to purge the layer's pre-images to stay consistent. It
+        // now writes through set_tile inside the op bracket — ONE step, and
+        // the ink that was on the layer before the regen still undoes.
         let mut doc = Document::new(400, 400);
-        doc.add_layer("ink");
-        let li = doc.layers.len() - 1;
-        // Record one undoable tile write for the layer (Tiles group).
-        doc.begin_op();
-        doc.layers[li].set_tile(
-            crate::tile::TileIdx::new(0, 0),
-            Some(std::sync::Arc::new(crate::tile::Tile::default())),
-        );
-        doc.end_op();
-        assert_eq!(doc.undo_labels().len(), 1);
-
-        doc.layers[li].genlines = Some(GenLinesSpec {
+        let li = doc.add_layer("Focus lines");
+        let spec = GenLinesSpec {
             focus: true,
             a: 200.0,
             b: 200.0,
@@ -449,11 +449,53 @@ mod spec_tests {
             width: 2.0,
             jitter: 0.2,
             seed: 7,
-        });
-        assert!(doc.regen_genlines(li));
+        };
+        // A first generation, then an ordinary tile write on top of it:
+        // two steps for the regen under test to sit above.
+        doc.layers[li].genlines = Some(spec);
+        assert!(doc.regen_genlines(li, spec));
+        doc.begin_op_on(li);
+        doc.set_op_label("Stroke");
+        doc.layers[li].set_tile(
+            crate::tile::TileIdx::new(0, 0),
+            Some(std::sync::Arc::new(crate::tile::Tile::default())),
+        );
+        doc.end_op();
+        assert_eq!(doc.undo_labels(), ["Regenerate lines", "Stroke"]);
+        let snap = |d: &Document| -> std::collections::BTreeMap<crate::tile::TileIdx, Vec<u16>> {
+            d.layers[li]
+                .tiles()
+                .map(|(i, t)| (i, t.data().to_vec()))
+                .collect()
+        };
+        let before = snap(&doc);
+
+        let mut s2 = spec;
+        s2.count = 90;
+        s2.seed = 11;
+        assert!(doc.regen_genlines(li, s2));
+        let regenerated = snap(&doc);
+        assert_ne!(before, regenerated, "the regen changed the raster");
+        assert_eq!(
+            doc.undo_labels(),
+            ["Regenerate lines", "Stroke", "Regenerate lines"],
+            "one step for the regen, and the older steps survived it"
+        );
+
+        assert!(doc.undo(), "the regen undoes");
+        assert_eq!(snap(&doc), before, "pixels back, bit for bit");
+        assert_eq!(doc.layers[li].genlines, Some(spec), "and the parameters");
+        assert!(doc.redo(), "and redoes");
+        assert_eq!(snap(&doc), regenerated);
+        assert_eq!(doc.layers[li].genlines, Some(s2));
+
+        // The pre-regen history is still walkable: the stroke, then the
+        // first generation.
+        assert!(doc.undo() && doc.undo(), "back past the stroke");
+        assert!(doc.undo(), "back past the first generation");
         assert!(
-            doc.undo_labels().is_empty(),
-            "the layer's pre-images went with the regen"
+            doc.layers[li].tiles().next().is_none(),
+            "the layer is empty again"
         );
     }
 }
