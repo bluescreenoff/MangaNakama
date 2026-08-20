@@ -170,7 +170,7 @@ fn translating_a_stroke_moves_ink_and_geometry_as_one_step() {
     // Grab the stroke mid-body (a sample point sits at x=120,y=200) and
     // drag 40 px right through the real press/move/release path.
     app.tool = Tool::Object;
-    assert!(app.vector_hit(120.0, 200.0), "the stroke takes the press");
+    assert!(app.vector_hit(120.0, 200.0, false), "the stroke takes the press");
     assert!(app.vector_drag_move(160.0, 200.0));
     assert!(app.vector_drag_release());
 
@@ -225,7 +225,7 @@ fn a_point_drag_deforms_locally() {
     drag(&mut app, 200.0);
     app.tool = Tool::Object;
     // Grab exactly the first sample (x=60) and pull it up 30 px.
-    assert!(app.vector_hit(60.0, 200.0));
+    assert!(app.vector_hit(60.0, 200.0, false));
     assert!(app.vector_drag.as_ref().unwrap().point.is_some(), "point grab");
     assert!(app.vector_drag_move(60.0, 170.0));
     assert!(app.vector_drag_release());
@@ -347,6 +347,61 @@ fn an_eraser_miss_spends_nothing() {
     assert_eq!(app.doc.layers[li].strokes.as_ref().unwrap().strokes.len(), 1);
 }
 
+/// Phase 4: Alt-drag re-widths — dragging DOWN thins the pressure channel
+/// around the grab (raised-cosine, three brush-widths), the far end keeps
+/// its width, the re-derived ink thins where the pressure did, and one
+/// undo restores geometry and ink exactly.
+#[test]
+fn alt_drag_rewidths_locally_and_undoes_as_one() {
+    let Some(mut app) = vector_app() else { return };
+    let li = app.doc.active;
+    drag(&mut app, 200.0);
+    let tiles_before: std::collections::BTreeMap<TileIdx, Vec<u16>> = app.doc.layers[li]
+        .tiles()
+        .map(|(idx, t)| (idx, t.data().to_vec()))
+        .collect();
+    let col_alpha = |app: &App, x: i32| -> u64 {
+        let mut sum = 0;
+        for y in 180..220 {
+            let idx = TileIdx::of_pixel(x, y);
+            if let Some(t) = app.doc.layers[li].tile(idx) {
+                sum += u64::from(
+                    t.pixel((x - idx.origin().0) as usize, (y - idx.origin().1) as usize)[3],
+                );
+            }
+        }
+        sum
+    };
+    let (mid_before, end_before) = (col_alpha(&app, 150), col_alpha(&app, 62));
+    let steps_before = app.doc.undo_len();
+
+    app.tool = Tool::Object;
+    assert!(app.vector_hit(150.0, 200.0, true), "alt grab takes the stroke");
+    assert!(app.vector_drag.as_ref().unwrap().width);
+    assert!(app.vector_drag_move(150.0, 300.0)); // 100 px down = half width
+    assert!(app.vector_drag_release());
+
+    let s = &app.doc.layers[li].strokes.as_ref().unwrap().strokes[0];
+    let near = s.points.iter().min_by(|a, b| {
+        (a.0 - 150.0).abs().total_cmp(&(b.0 - 150.0).abs())
+    });
+    assert!(near.unwrap().2 < 0.55, "pressure halved at the grab");
+    assert!((s.points[0].2 - 0.9).abs() < 1e-3, "the far end kept its width");
+    assert_eq!(app.doc.undo_len(), steps_before + 1);
+    assert!(
+        col_alpha(&app, 150) < mid_before,
+        "the ink thinned where the pressure did"
+    );
+
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::Undo);
+    let tiles_after: std::collections::BTreeMap<TileIdx, Vec<u16>> = app.doc.layers[li]
+        .tiles()
+        .map(|(idx, t)| (idx, t.data().to_vec()))
+        .collect();
+    assert_eq!(tiles_after, tiles_before);
+    let _ = end_before;
+}
+
 /// Del with a selected stroke deletes it — ink and record, one step.
 #[test]
 fn deleting_a_selected_stroke_is_one_step() {
@@ -354,7 +409,7 @@ fn deleting_a_selected_stroke_is_one_step() {
     let li = app.doc.active;
     drag(&mut app, 200.0);
     app.tool = Tool::Object;
-    assert!(app.vector_hit(120.0, 200.0));
+    assert!(app.vector_hit(120.0, 200.0, false));
     app.vector_drag = None; // press selected; no drag
     let si = app.vector_sel.unwrap();
     crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::VectorDelete { stroke: si });

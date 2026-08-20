@@ -65,16 +65,13 @@ Roughly in order. None of this is promised by a date.
    background benchmark decides, never a blanket default. Still CPU-only:
    smudge combined with wash (the sampler would have to read the in-flight
    wash buffer) and the spectral-paint / colorize / posterize presets.
-2. **Vector inking layers.** Strokes stored as editable geometry: control-point
-   editing, width re-editing, and an eraser that trims a stroke at the
-   intersection instead of deleting it.
-3. **Layered PSD export.** Today's interchange is OpenRaster plus flat PNG,
+2. **Layered PSD export.** Today's interchange is OpenRaster plus flat PNG,
    which is fine between open tools and not enough for a studio hand-off.
-4. **Recordable actions, and a small scripting surface.** The real pain is
+3. **Recordable actions, and a small scripting surface.** The real pain is
    batch operations over layers — rename, renumber, apply tone, export — not
    macro recording for its own sake.
-5. **HDR / linear-light colour.**
-6. **The manual, kept honest.** Static HTML beside the executable exists;
+4. **HDR / linear-light colour.**
+5. **The manual, kept honest.** Static HTML beside the executable exists;
    its job is the quirks — the interlocks you would otherwise discover by
    having something silently do nothing — and it grows with every round.
 

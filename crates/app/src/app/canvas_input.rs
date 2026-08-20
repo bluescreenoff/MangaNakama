@@ -613,8 +613,9 @@ impl App {
                 }
                 // Vector strokes are LAYER-SCOPED: only when the active
                 // layer records do its strokes take the press (you selected
-                // the layer to edit it — the mask-editing scoping).
-                if self.doc.active_layer().strokes.is_some() && self.vector_hit(cx, cy) {
+                // the layer to edit it — the mask-editing scoping). Alt
+                // turns the drag into the WIDTH edit (phase 4).
+                if self.doc.active_layer().strokes.is_some() && self.vector_hit(cx, cy, m.alt) {
                     self.needs_redraw = true;
                     return;
                 }

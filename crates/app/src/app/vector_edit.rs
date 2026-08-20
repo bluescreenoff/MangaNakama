@@ -24,6 +24,12 @@ use super::{App, Engine, EngineKind};
 pub struct VectorDrag {
     /// The grabbed sample index (`None` = body drag: translate everything).
     pub point: Option<usize>,
+    /// Phase 4: Alt-drag re-WIDTHS instead of moving — vertical motion
+    /// scales the PRESSURE channel (per-sample width for every
+    /// pressure-driven preset) around the grabbed spot, same falloff.
+    pub width: bool,
+    /// The sample nearest the grab (the width falloff's centre).
+    pub anchor: usize,
     pub start: [f32; 2],
     /// The stroke as it was at the grab — the undo pre-image, and the base
     /// the live deformation recomputes from (no per-move accumulation
@@ -36,7 +42,7 @@ impl App {
     /// Object-tool press on the active layer's strokes. Points grab before
     /// bodies, later strokes before earlier (they draw on top); the SAME
     /// zoom-scaled tolerance gates both (the CODE-MAP hit-test rule).
-    pub fn vector_hit(&mut self, cx: f32, cy: f32) -> bool {
+    pub fn vector_hit(&mut self, cx: f32, cy: f32, width_mode: bool) -> bool {
         let li = self.doc.active;
         let Some(set) = self.doc.layers.get(li).and_then(|l| l.strokes.as_ref()) else {
             return false;
@@ -74,8 +80,21 @@ impl App {
             return false;
         };
         self.vector_sel = Some(si);
+        // The width falloff centres on the sample nearest the grab.
+        let anchor = set.strokes[si]
+            .points
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| {
+                let da = (a.0 - cx).hypot(a.1 - cy);
+                let db = (b.0 - cx).hypot(b.1 - cy);
+                da.total_cmp(&db)
+            })
+            .map_or(0, |(i, _)| i);
         self.vector_drag = Some(VectorDrag {
             point,
+            width: width_mode,
+            anchor,
             start: [cx, cy],
             before: set.strokes[si].clone(),
             moved: false,
@@ -103,6 +122,23 @@ impl App {
         else {
             return false;
         };
+        if d.width {
+            // Up = thicker, down = thinner; ±100 px of drag doubles/halves.
+            // The scale applies to the PRESSURE channel under the same
+            // falloff the move uses (three brush-widths here — width edits
+            // want a broader reach than a point nudge).
+            let factor = 2f32.powf(-dy / 100.0);
+            let radius = (d.before.size_px * 3.0).max(48.0);
+            let (gx, gy) = (d.before.points[d.anchor].0, d.before.points[d.anchor].1);
+            for (p, b) in s.points.iter_mut().zip(&d.before.points) {
+                let t = ((b.0 - gx).hypot(b.1 - gy) / radius).min(1.0);
+                let w = 0.5 + 0.5 * (t * std::f32::consts::PI).cos();
+                let f = 1.0 + (factor - 1.0) * w;
+                p.2 = (b.2 * f).clamp(0.01, 1.0);
+            }
+            self.needs_redraw = true;
+            return true;
+        }
         match d.point {
             None => {
                 for (p, b) in s.points.iter_mut().zip(&d.before.points) {
@@ -142,11 +178,16 @@ impl App {
             return true;
         }
         let li = self.doc.active;
+        let (label, status) = if d.width {
+            ("Re-width stroke", "stroke re-widthed")
+        } else {
+            ("Move stroke", "stroke moved")
+        };
         self.doc.begin_op_on(li);
         self.rederive_vector_layer(li);
-        self.doc.end_op_vector_edit(si, d.before);
+        self.doc.end_op_vector_edit(si, d.before, label);
         self.renderer.invalidate();
-        self.set_status("stroke moved");
+        self.set_status(status);
         self.needs_redraw = true;
         true
     }
@@ -183,7 +224,7 @@ impl App {
             );
             {
                 let e = fresh.inner_mut().inner_mut();
-                e.set_size_px(s.size_px);
+                e.set_size_px(s.size_px * s.width_scale.max(0.01));
                 e.set_color([
                     f32::from(s.color[0]) / 255.0,
                     f32::from(s.color[1]) / 255.0,

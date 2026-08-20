@@ -1706,12 +1706,13 @@ impl Document {
         &mut self,
         index: usize,
         before: crate::stroke_set::VectorStroke,
+        label: &str,
     ) -> bool {
         let Some((li, _label, tiles)) = self.take_op() else {
             return false;
         };
         self.history.push_labeled(
-            "Move stroke",
+            label,
             UndoGroup::VectorEdit {
                 layer: li,
                 tiles,
