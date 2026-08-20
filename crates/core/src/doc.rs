@@ -959,6 +959,20 @@ impl Layer {
         if dx == 0 && dy == 0 {
             return;
         }
+        // If an op is recording, snapshot every SOURCE tile before the
+        // mem::take below empties the map — after it, tile_mut can only see
+        // an empty map and records `None` pre-images, so undo DELETED the
+        // moved art instead of putting it back (GLM-audit survivor #1).
+        // Destinations still record through tile_mut as usual; a destination
+        // that was also a source keeps its true pre-image via or_insert.
+        if self.recording.is_some() {
+            let pre: Vec<_> = self.tiles.iter().map(|(k, v)| (*k, v.clone())).collect();
+            if let Some(rec) = &mut self.recording {
+                for (k, v) in pre {
+                    rec.entry(k).or_insert(Some(v));
+                }
+            }
+        }
         // Raster: per-source-tile blit at a pixel offset. The tile grid is
         // unbounded (content may rest off-canvas), so the destination tile
         // comes from euclidean division — negative origins included.
@@ -1255,6 +1269,14 @@ impl Document {
                 mask: before,
             },
         );
+    }
+
+    /// Push a Mask undo group for `layer` with `before` as the pre-image.
+    /// For mutations that shift a linked mask OUTSIDE the LM-004 stroke
+    /// bracket (the Object tool's folder move): snapshot the mask first,
+    /// and hand the before-state here when the revision moved.
+    pub fn record_mask_change(&mut self, layer: usize, before: Option<LayerMask>, label: &str) {
+        self.push_mask_group(layer, before, label);
     }
 
     /// LM-004 stroke bracket: snapshot at stroke start; mask_op_end pushes
@@ -1554,10 +1576,19 @@ impl Document {
     /// Note the recording is armed on the layer that is active *now*; switching
     /// layers mid-op keeps recording into the original one.
     pub fn begin_op(&mut self) {
-        if self.op_layer.is_some() {
+        let li = self.active.min(self.layers.len().saturating_sub(1));
+        self.begin_op_on(li);
+    }
+
+    /// Open an undo op on a SPECIFIC layer. The Object tool's folder move
+    /// records each child in turn — children are almost never the active
+    /// layer, and `begin_op` recording "whichever layer happened to be
+    /// active" is exactly how a folder drag became un-undoable art loss.
+    /// Same no-nesting rule as `begin_op`.
+    pub fn begin_op_on(&mut self, li: usize) {
+        if self.op_layer.is_some() || li >= self.layers.len() {
             return;
         }
-        let li = self.active.min(self.layers.len().saturating_sub(1));
         self.layers[li].arm_recording();
         self.op_layer = Some(li);
     }

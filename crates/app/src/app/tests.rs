@@ -5521,6 +5521,145 @@ fn edge_drag_carries_gutters_across_folders() {
     assert!(!fb.iter().any(|p| (p[0] - 300.0).abs() < 0.01), "{fb:?}");
 }
 
+/// GLM-audit survivor #1: a folder-header MoveWhole drag records an undo
+/// op for EVERY child and for the linked mask — not for whichever layer
+/// happened to be active. The old single begin_op() + translate_content's
+/// mem::take recorded `None` pre-images on the active child (undo DELETED
+/// its art) and nothing at all on its siblings (undo stranded them).
+#[test]
+fn frame_move_undoes_every_childs_art_and_mask() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    let a = app.doc.add_frame_folder(
+        "Frame 1",
+        mn_core::FrameSet::single_rect([16.0, 16.0, 300.0, 380.0], 4.0),
+    );
+    // add_frame_folder leaves the draw child active — the regression's
+    // exact habitat. Do not touch doc.active.
+    let draw = app.doc.active;
+    let kids: Vec<usize> = app.doc.children_range(a).collect();
+    assert!(kids.contains(&draw), "draw child inside the folder");
+    // Known ink at canvas (100, 100) on the draw child, plus a linked mask
+    // tile (mask_linked defaults true — it must ride and be undoable).
+    let px = [0u16, 0, 0, 32768];
+    app.doc.layers[draw]
+        .tile_mut(mn_core::TileIdx::new(1, 1))
+        .set_pixel(36, 36, px);
+    let mut m = mn_core::doc::LayerMask::default();
+    m.enabled = true;
+    let mut t = mn_core::Tile::new_transparent();
+    t.set_pixel(0, 0, [32768, 32768, 32768, 32768]);
+    m.tiles
+        .insert(mn_core::TileIdx::new(1, 1), std::sync::Arc::new(t));
+    app.doc.layers[draw].mask = Some(m);
+
+    let alpha_at = |app: &App, li: usize, cx: i32, cy: i32| {
+        let ts = mn_core::TILE_SIZE as i32;
+        app.doc.layers[li]
+            .tile(mn_core::TileIdx::new(cx.div_euclid(ts), cy.div_euclid(ts)))
+            .map(|t| t.pixel(cx.rem_euclid(ts) as usize, cy.rem_euclid(ts) as usize)[3])
+            .unwrap_or(0)
+    };
+    assert!(alpha_at(&app, draw, 100, 100) > 0);
+
+    // Drag the whole panel +100 px in x (sub-tile offset on purpose: the
+    // four-way blit is the recording bypass's worst case).
+    let orig = app.doc.layers[a].frames().unwrap().frames[0].clone();
+    app.object_drag = Some(crate::app::canvas_input::ObjectDrag {
+        layer: a,
+        frame: 0,
+        mode: crate::app::canvas_input::ObjectDragMode::MoveWhole,
+        start: (50.0, 50.0),
+        cur: (150.0, 50.0),
+        orig,
+    });
+    let (sx, sy) = app.viewport.to_screen(150.0, 50.0);
+    app.canvas_up(sx, sy, &[]);
+    while let Some(c) = app.cmds.pop_front() {
+        crate::cmd::dispatch(&mut app, c);
+    }
+    assert!(alpha_at(&app, draw, 200, 100) > 0, "ink moved with the panel");
+    assert_eq!(alpha_at(&app, draw, 100, 100), 0, "no ink left behind");
+    let mask_at = |app: &App, ti: (i32, i32)| {
+        app.doc.layers[draw]
+            .mask
+            .as_ref()
+            .is_some_and(|m| m.tiles.contains_key(&mn_core::TileIdx::new(ti.0, ti.1)))
+    };
+    assert!(!mask_at(&app, (1, 1)) || mask_at(&app, (2, 1)), "mask rode along");
+
+    while app.doc.undo() {}
+    assert!(
+        alpha_at(&app, draw, 100, 100) > 0,
+        "undo restores the art at its ORIGINAL place (the old bug deleted it)"
+    );
+    assert_eq!(alpha_at(&app, draw, 200, 100), 0, "moved copy undone");
+    assert!(mask_at(&app, (1, 1)), "mask back at its original tile");
+
+    while app.doc.redo() {}
+    assert!(alpha_at(&app, draw, 200, 100) > 0, "redo re-applies the move");
+    assert_eq!(alpha_at(&app, draw, 100, 100), 0);
+}
+
+/// The other half of survivor #1: with the ACTIVE layer outside the
+/// folder, the old code recorded nothing at all — undo restored the
+/// panel geometry and stranded the children's pixels where they were.
+#[test]
+fn frame_move_records_children_when_active_layer_is_elsewhere() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    let a = app.doc.add_frame_folder(
+        "Frame 1",
+        mn_core::FrameSet::single_rect([16.0, 16.0, 300.0, 380.0], 4.0),
+    );
+    let kids: Vec<usize> = app.doc.children_range(a).collect();
+    let draw = app.doc.active;
+    assert!(kids.contains(&draw));
+    let px = [0u16, 0, 0, 32768];
+    app.doc.layers[draw]
+        .tile_mut(mn_core::TileIdx::new(1, 1))
+        .set_pixel(36, 36, px);
+    // Activate a layer OUTSIDE the folder (the base "Layer 1").
+    let outside = (0..app.doc.layers.len())
+        .find(|i| !kids.contains(i) && *i != a)
+        .unwrap();
+    app.doc.set_active(outside);
+
+    let orig = app.doc.layers[a].frames().unwrap().frames[0].clone();
+    app.object_drag = Some(crate::app::canvas_input::ObjectDrag {
+        layer: a,
+        frame: 0,
+        mode: crate::app::canvas_input::ObjectDragMode::MoveWhole,
+        start: (50.0, 50.0),
+        cur: (150.0, 50.0),
+        orig,
+    });
+    let (sx, sy) = app.viewport.to_screen(150.0, 50.0);
+    app.canvas_up(sx, sy, &[]);
+    while let Some(c) = app.cmds.pop_front() {
+        crate::cmd::dispatch(&mut app, c);
+    }
+    let alpha_at = |app: &App, cx: i32, cy: i32| {
+        let ts = mn_core::TILE_SIZE as i32;
+        app.doc.layers[draw]
+            .tile(mn_core::TileIdx::new(cx.div_euclid(ts), cy.div_euclid(ts)))
+            .map(|t| t.pixel(cx.rem_euclid(ts) as usize, cy.rem_euclid(ts) as usize)[3])
+            .unwrap_or(0)
+    };
+    assert!(alpha_at(&app, 200, 100) > 0, "ink moved");
+
+    while app.doc.undo() {}
+    assert!(
+        alpha_at(&app, 100, 100) > 0,
+        "undo restores the child's art even though it was never active"
+    );
+    assert_eq!(alpha_at(&app, 200, 100), 0);
+}
+
 /// O-010: an axis-aligned edge drag SNAPS to other frames' edge lines
 /// (any same-orientation edge is an infinite extension line) within
 /// 3 canvas px.

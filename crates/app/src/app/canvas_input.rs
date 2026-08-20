@@ -1980,19 +1980,34 @@ impl App {
                             }
                         }
                         // A folder-header drag moves the folder's pixels with
-                        // the panel (CSP). One Tiles undo group for the
-                        // content + the Frames group for the geometry — two
-                        // undo steps until op-group merging lands.
+                        // the panel (CSP). One Tiles undo group PER CHILD (+
+                        // a Mask group when a linked mask rode along) + the
+                        // Frames group for the geometry — N+1 undo steps
+                        // until op-group merging lands. Per-child on purpose:
+                        // a single begin_op() armed only whichever layer was
+                        // ACTIVE, so undo deleted that child's art and
+                        // stranded every sibling (GLM-audit survivor #1).
                         if matches!(d.mode, ObjectDragMode::MoveWhole) {
                             let dx = (f.points[0][0] - d.orig.points[0][0]).round() as i32;
                             let dy = (f.points[0][1] - d.orig.points[0][1]).round() as i32;
                             if dx != 0 || dy != 0 {
-                                let kids = self.doc.children_range(d.layer);
-                                self.doc.begin_op();
-                                for k in kids {
+                                for k in self.doc.children_range(d.layer) {
+                                    let mask_before = self.doc.layers[k].mask.clone();
+                                    let rev0 = mask_before.as_ref().map(|m| m.revision);
+                                    self.doc.begin_op_on(k);
+                                    self.doc.set_op_label("Move panel");
                                     self.doc.layers[k].translate_content(dx, dy);
+                                    self.doc.end_op();
+                                    let rev1 =
+                                        self.doc.layers[k].mask.as_ref().map(|m| m.revision);
+                                    if rev1 != rev0 {
+                                        self.doc.record_mask_change(
+                                            k,
+                                            mask_before,
+                                            "Move panel",
+                                        );
+                                    }
                                 }
-                                self.doc.end_op();
                             }
                         }
                         fs.frames[d.frame] = f;
