@@ -83,6 +83,18 @@ pub enum UndoGroup {
         spec: crate::genlines::GenLinesSpec,
         tiles: Vec<(TileIdx, Option<Arc<Tile>>)>,
     },
+    /// Vector inking (docs/VECTOR-INKING.md): one drawn-and-recorded stroke
+    /// — the tile pre-images AND the recorded geometry ride one group, so
+    /// undoing the ink also takes back the record (a half-undo would leave
+    /// the set describing ink that is gone). `present` = the stroke is in
+    /// the layer's set right now: swapping pops it (inverse: absent) or
+    /// pushes it back.
+    VectorStroke {
+        layer: usize,
+        tiles: Vec<(TileIdx, Option<Arc<Tile>>)>,
+        stroke: Box<crate::stroke_set::VectorStroke>,
+        present: bool,
+    },
     /// PA-001: the paper colour before the change. The only DOCUMENT-level
     /// group — it belongs to no layer, which is why [`UndoGroup::layer`]
     /// returns an `Option`. The paper's EYE is not in here on purpose: it is
@@ -102,7 +114,9 @@ pub enum UndoGroup {
 impl UndoGroup {
     pub fn tile_count(&self) -> usize {
         match self {
-            UndoGroup::Tiles { tiles, .. } | UndoGroup::GenLines { tiles, .. } => tiles.len(),
+            UndoGroup::Tiles { tiles, .. }
+            | UndoGroup::GenLines { tiles, .. }
+            | UndoGroup::VectorStroke { tiles, .. } => tiles.len(),
             UndoGroup::Frames { .. }
             | UndoGroup::Balloons { .. }
             | UndoGroup::Texts { .. }
@@ -126,7 +140,8 @@ impl UndoGroup {
             | UndoGroup::Mask { layer, .. }
             | UndoGroup::Tones { layer, .. }
             | UndoGroup::Edges { layer, .. }
-            | UndoGroup::GenLines { layer, .. } => Some(*layer),
+            | UndoGroup::GenLines { layer, .. }
+            | UndoGroup::VectorStroke { layer, .. } => Some(*layer),
             UndoGroup::Paper { .. } | UndoGroup::Rulers { .. } => None,
         }
     }

@@ -44,6 +44,7 @@ pub mod stroke;
 pub mod taper;
 pub mod text;
 pub mod tile;
+pub mod stroke_set;
 pub mod tone;
 pub mod transform;
 pub mod undo;
@@ -75,6 +76,7 @@ pub use ruler::{CurveRuler, Ruler, RulerGrab, Rulers, SnapLock};
 pub use selection::{SEL_ON, Selection, SelectionOp, selected};
 pub use stabilize::Stabilizer;
 pub use stroke::{PenSample, StrokeSink};
+pub use stroke_set::{StrokeSet, VectorStroke};
 pub use taper::Taper;
 pub use text::{
     Align, FrameAlign, LineSpacing, RenderedText, StyleFlag, StyleRun, TextHandle, TextItem,

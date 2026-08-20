@@ -49,6 +49,15 @@ The recurring failure shapes, in order of how often they have shipped:
 - One user gesture = one undo step. If your feature loops a per-item
   command, bracket it; N undo presses for one action is a bug (and a
   partial undo of a multi-part edit leaves mismatched state).
+- Vector layers (docs/VECTOR-INKING.md): a recorded stroke's pixels and
+  its geometry ride ONE `UndoGroup::VectorStroke` — `end_op_vector_stroke`
+  closes the op, never `end_op` + a separate record. Replay has two hard
+  rules: enter at the ENGINE (`brush.begin/sample/end` — the captured
+  samples are already canvas-space and resampled; `push_batch` would
+  transform and resample them again), and on a FRESH engine from the
+  recorded preset (libmypaint brush states persist across strokes by
+  design; a same-engine replay starts mid-state and inks fatter —
+  test-proven).
 
 ## Derived rasters (tone layers, frame borders, generated lines)
 

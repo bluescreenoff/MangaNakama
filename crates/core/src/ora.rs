@@ -194,6 +194,16 @@ pub fn save_to_with<W: Write + Seek>(
         // RGB mirrors it for foreign readers' eyes). H2/M1: the image is
         // bbox-cropped, so its pixel origin and the exact tile set ride as
         // attrs next to the path.
+        // Vector inking: the stroke record rides as its own zip entry —
+        // bulk sample data has no business in a stack.xml attribute, and a
+        // foreign OpenRaster app ignores the extra file while still seeing
+        // the layer's rendered PNG (editability degrades, pixels never do).
+        let strokes_src = layer.strokes.as_ref().map(|set| {
+            let ss = format!("data/layer{i}.strokes.json");
+            zw.start_file(&ss, deflated).ok();
+            zw.write_all(set.to_json().as_bytes()).ok();
+            ss
+        });
         let mut mask_org = None;
         let mut mask_tiles = None;
         let mask_src = layer.mask.as_ref().map(|m| {
@@ -279,6 +289,7 @@ pub fn save_to_with<W: Write + Seek>(
                 _ => None,
             },
             mask_src,
+            strokes_src,
             mask_enabled: layer.mask.as_ref().map(|m| m.enabled),
             mask_unlinked: (layer.mask.is_some() && !layer.mask_linked).then_some(true),
             mask_org,
@@ -343,6 +354,9 @@ struct LayerEntry {
     through: bool,
     /// TRIAGE 138 p2: the mask PNG's zip path (+ None = unmasked).
     mask_src: Option<String>,
+    /// Vector inking: the stroke-record sidecar's zip path
+    /// (`data/layerN.strokes.json`); None = an ordinary raster layer.
+    strokes_src: Option<String>,
     mask_enabled: Option<bool>,
     mask_unlinked: Option<bool>,
     /// Audit H2/M1 (rounds 50-68): the mask PNG is cropped to its tiles'
@@ -480,6 +494,9 @@ fn stack_xml(
         }
         if e.through {
             extra.push_str(" mnc-through=\"1\"");
+        }
+        if let Some(ss) = &e.strokes_src {
+            extra.push_str(&format!(" mnc-strokes=\"{}\"", ss));
         }
         if let Some(ms) = &e.mask_src {
             extra.push_str(&format!(" mnc-mask=\"{}\"", ms));
@@ -689,6 +706,15 @@ pub fn load_from<R: Read + Seek>(source: R) -> Result<Document, OraError> {
         // over the re-rasterized tiles (found by the balloon round-trip).
         if let Some(g) = &e.genlines {
             layer.genlines = Some(*g);
+        }
+        // Vector inking: reattach the stroke record. An unreadable sidecar
+        // degrades to an EMPTY-but-present set (the raster is intact; the
+        // record is gone) — never a load failure.
+        if let Some(ss) = &e.strokes_src {
+            let set = read_entry(&mut zip, ss)
+                .map(|b| crate::stroke_set::StrokeSet::from_json(&String::from_utf8_lossy(&b)))
+                .unwrap_or_default();
+            layer.strokes = Some(set);
         }
         // TRIAGE 138 p2: restore the mask (alpha = coverage). Absent attr
         // or unreadable entry = unmasked (old files load unchanged).
@@ -921,6 +947,8 @@ struct ParsedLayer {
     genlines: Option<crate::genlines::GenLinesSpec>,
     /// TRIAGE 138 p2: `mnc-mask` zip path + the enabled flag.
     mask_src: Option<String>,
+    /// Vector inking: `mnc-strokes` sidecar zip path.
+    strokes_src: Option<String>,
     mask_enabled: bool,
     mask_unlinked: bool,
     /// Audit H2/M1: the cropped mask image's pixel origin, and the exact
@@ -1077,6 +1105,7 @@ fn parse_stack_xml(
                         fill: get("mnc-fill").and_then(|j| serde_json::from_str(j).ok()),
                         genlines: get("mnc-genlines").and_then(|j| serde_json::from_str(j).ok()),
                         mask_src: get("mnc-mask").map(str::to_string),
+                        strokes_src: get("mnc-strokes").map(str::to_string),
                         mask_enabled: get("mnc-mask-enabled") != Some("0"),
                         mask_unlinked: get("mnc-mask-unlinked").is_some(),
                         mask_org: get("mnc-mask-org").and_then(parse_i32_pair),
@@ -1126,6 +1155,7 @@ fn parse_stack_xml(
                     fill: get("mnc-fill").and_then(|j| serde_json::from_str(j).ok()),
                     genlines: get("mnc-genlines").and_then(|j| serde_json::from_str(j).ok()),
                     mask_src: get("mnc-mask").map(str::to_string),
+                    strokes_src: get("mnc-strokes").map(str::to_string),
                     mask_enabled: get("mnc-mask-enabled") != Some("0"),
                     mask_unlinked: get("mnc-mask-unlinked").is_some(),
                     mask_org: get("mnc-mask-org").and_then(parse_i32_pair),

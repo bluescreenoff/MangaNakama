@@ -353,6 +353,12 @@ pub struct Layer {
     /// built from — effect lines stay re-editable (the dialog reopens
     /// with these; re-apply rasterizes in place).
     pub genlines: Option<crate::genlines::GenLinesSpec>,
+    /// Vector inking (docs/VECTOR-INKING.md): `Some` = this raster layer
+    /// RECORDS its strokes as editable geometry beside the pixels. The
+    /// pixels stay ordinary tiles (drawing rasterizes normally); edits
+    /// re-derive by replay. Serialized as an `.ora` zip sidecar
+    /// (`data/layerN.strokes.json`).
+    pub strokes: Option<crate::stroke_set::StrokeSet>,
     /// Border effect (CSP LP-002/LP-003 境界効果 ▸ フチ). `Some` = the
     /// displayed raster is the layer's pixels sitting on a grown outline;
     /// the painted pixels are untouched and turning it off restores them.
@@ -408,6 +414,7 @@ impl Layer {
             mask_tiles: None,
             tone: None,
             genlines: None,
+            strokes: None,
             edge: None,
             tone_tiles: None,
             edge_tiles: None,
@@ -1638,6 +1645,37 @@ impl Document {
         true
     }
 
+    /// Vector inking (docs/VECTOR-INKING.md): close the open op as ONE
+    /// stroke group — the tile pre-images AND the recorded geometry, so a
+    /// single undo takes back both. An empty gesture spends nothing; a
+    /// layer that turns out not to record degrades to plain [`Self::end_op`]
+    /// semantics.
+    pub fn end_op_vector_stroke(&mut self, stroke: crate::stroke_set::VectorStroke) -> bool {
+        let Some((li, label, tiles)) = self.take_op() else {
+            return false;
+        };
+        match self.layers.get_mut(li).and_then(|l| l.strokes.as_mut()) {
+            Some(set) => set.strokes.push(stroke.clone()),
+            None => {
+                self.history
+                    .push_labeled(&label, UndoGroup::Tiles { layer: li, tiles });
+                self.touch();
+                return true;
+            }
+        }
+        self.history.push_labeled(
+            &label,
+            UndoGroup::VectorStroke {
+                layer: li,
+                tiles,
+                stroke: Box::new(stroke),
+                present: true,
+            },
+        );
+        self.touch();
+        true
+    }
+
     /// Close the open op and hand back its layer, label and sorted
     /// pre-images WITHOUT pushing a group — the shared half of `end_op`,
     /// for the ops that wrap the same recording in a richer group (the
@@ -1757,6 +1795,37 @@ impl Document {
                     layer,
                     spec: spec_before,
                     tiles: inverse,
+                })
+            }
+            UndoGroup::VectorStroke {
+                layer,
+                tiles,
+                stroke,
+                present,
+            } => {
+                let l = self.layers.get_mut(layer)?;
+                // Pixels and record swap together — the group's doc comment.
+                // Same tile door as `Tiles` (fresh revisions, compositor
+                // re-uploads).
+                let mut inverse = Vec::with_capacity(tiles.len());
+                for (idx, snapshot) in tiles {
+                    inverse.push((idx, l.tile_arc(idx).cloned()));
+                    l.set_tile(idx, snapshot);
+                }
+                if let Some(set) = &mut l.strokes {
+                    if present {
+                        // The recorded stroke is the set's newest; take it
+                        // back with the ink.
+                        set.strokes.pop();
+                    } else {
+                        set.strokes.push((*stroke).clone());
+                    }
+                }
+                Some(UndoGroup::VectorStroke {
+                    layer,
+                    tiles: inverse,
+                    stroke,
+                    present: !present,
                 })
             }
             UndoGroup::Frames { layer, frames } => {

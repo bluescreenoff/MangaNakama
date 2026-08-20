@@ -435,6 +435,10 @@ pub struct App {
     pub prefs: Prefs,
     /// Pattern Studio window state (`app/pattern.rs`). Session-only.
     pub pattern: pattern::PatternStudio,
+    /// Vector inking (docs/VECTOR-INKING.md): the in-flight stroke's
+    /// captured samples — `Some` only between begin/end of a plain ink
+    /// stroke on a recording layer.
+    pub vector_capture: Option<Vec<PenSample>>,
     /// The autosave interval changed: `main::pump_commands` re-arms the
     /// Win32 timer with this many ms (0 = kill it, autosave off). An App
     /// field rather than a direct `SetTimer` because this crate stays free
@@ -1282,6 +1286,7 @@ impl App {
             layout,
             prefs,
             pattern: pattern::PatternStudio::default(),
+            vector_capture: None,
             autosave_rearm: None,
             autosave_op_seen: 0,
             pointer_visible: false,
@@ -2275,6 +2280,13 @@ impl App {
         if (self.mask_edit || live) && !sel_paint {
             self.doc.mask_op_begin();
         }
+        // Vector inking phase 1 (docs/VECTOR-INKING.md): a plain ink stroke
+        // on a recording layer captures its post-snap samples beside the
+        // pixels — `end_stroke` closes both into ONE undo group.
+        self.vector_capture = (!(self.mask_edit || live)
+            && !sel_paint
+            && self.doc.active_layer().strokes.is_some())
+        .then(Vec::new);
         self.input_resampler.reset();
         self.doc.begin_op();
         self.brush.begin(&mut self.doc);
@@ -2405,6 +2417,9 @@ impl App {
                     y: snapped[1],
                     ..r
                 };
+                if let Some(cap) = &mut self.vector_capture {
+                    cap.push(r);
+                }
                 self.brush.sample(&mut self.doc, r);
                 // Smudge strokes dispatch per sample (NOT per frame): the
                 // C's get_color must see sample N's dabs when sample N+1
@@ -2456,6 +2471,9 @@ impl App {
                 y: snapped[1],
                 ..r
             };
+            if let Some(cap) = &mut self.vector_capture {
+                cap.push(r);
+            }
             self.brush.sample(&mut self.doc, r);
         }
         // Order matters: the stabilizer drains its remaining string inside
@@ -2473,7 +2491,32 @@ impl App {
         {
             self.doc.mask_op_to_alpha();
         }
-        self.doc.end_op();
+        // Vector inking: close the op as ONE pixels-plus-record group when
+        // this stroke captured (docs/VECTOR-INKING.md); otherwise stock.
+        match self.vector_capture.take() {
+            Some(samples) if !samples.is_empty() => {
+                let preset = self
+                    .selected_preset
+                    .map(|i| self.preset_key(&self.presets[i].1.clone()))
+                    .unwrap_or_default();
+                let c = self.active_color();
+                let stroke = mn_core::VectorStroke::from_samples(
+                    &samples,
+                    &preset,
+                    self.props_current.size_px,
+                    [
+                        (c[0] * 255.0).round() as u8,
+                        (c[1] * 255.0).round() as u8,
+                        (c[2] * 255.0).round() as u8,
+                    ],
+                    self.eraser_active(),
+                );
+                self.doc.end_op_vector_stroke(stroke);
+            }
+            _ => {
+                self.doc.end_op();
+            }
+        }
         if mask_stroke {
             self.doc.mask_op_end();
             // The mask's revision changed per tile write — the upload fold
@@ -3527,6 +3570,10 @@ mod view_reset_and_tool_lock_tests;
 /// compensation it has to reach.
 #[cfg(test)]
 mod view_flip_tests;
+
+/// Vector inking phase 1: recording, one-step undo, faithful replay.
+#[cfg(test)]
+mod vector_layer_tests;
 
 /// E-014/E-016: the eyedropper's referent and its averaging box, driven
 /// through `dispatch` the way a click drives them. `cmd.rs` has no test

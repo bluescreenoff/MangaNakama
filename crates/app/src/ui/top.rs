@@ -211,6 +211,10 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 app.push_cmd(AppCmd::AddLayer);
                 ui.close();
             }
+            if item(ui, "New vector layer", "") {
+                app.push_cmd(AppCmd::AddVectorLayer);
+                ui.close();
+            }
             if item(ui, "Generate effect lines…", "") {
                 app.push_cmd(AppCmd::GenLines);
                 ui.close();

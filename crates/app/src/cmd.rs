@@ -1326,6 +1326,9 @@ pub enum AppCmd {
     ImportImagePath(PathBuf),
     // --- layers -----------------------------------------------------------
     AddLayer,
+    /// Vector inking (docs/VECTOR-INKING.md): a raster layer that RECORDS
+    /// its strokes as editable geometry beside the pixels.
+    AddVectorLayer,
     /// New empty folder above the active layer (CSP layer-palette button).
     AddFolder,
     /// Expand/collapse a folder row in the Layers palette.
@@ -3105,6 +3108,22 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 app.doc.add_layer(name);
             }
             app.renderer.invalidate();
+            app.mark_dirty();
+        }
+        AppCmd::AddVectorLayer => {
+            app.commit_text_edit();
+            let n = app
+                .doc
+                .layers
+                .iter()
+                .filter(|l| l.strokes.is_some())
+                .count()
+                + 1;
+            let li = app.doc.add_layer(format!("Vector {n}"));
+            app.doc.layers[li].strokes = Some(mn_core::StrokeSet::default());
+            app.doc.set_active(li);
+            app.renderer.invalidate();
+            app.set_status("vector layer: strokes record as editable geometry");
             app.mark_dirty();
         }
         AppCmd::AddFolder => {

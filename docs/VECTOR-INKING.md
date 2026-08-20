@@ -14,15 +14,17 @@ scope, unchanged.
 
 ## The four decisions
 
-### 1. It is a `LayerKind`, and its raster is DERIVED
+### 1. It is a `Layer` FIELD, and the raster is the layer's own tiles
 
-`LayerKind::Vector(StrokeSet)` beside `Frame`/`Balloon`/`Text`/`Fill` —
-the parametric-layer pattern this codebase already runs on. The visible
-pixels are a derived raster, exactly like tone and frame layers: editing
-operates on the stroke set, every pixel consumer goes through
-`display_tiles()`, and `refresh_derived(dpi)` rebuilds what changed
-(CODE-MAP "Derived rasters" applies verbatim — a consumer reading
-`tiles()` directly sees stale ink).
+`Layer::strokes: Option<StrokeSet>` beside `tone`/`genlines`/`edge` —
+the non-destructive-mode pattern this codebase already runs on (a
+`LayerKind` variant was the first draft; the field is smaller and, like
+tone layers, convertible both ways by dropping the record). The visible
+pixels are the layer's ORDINARY painted tiles: drawing on a vector
+layer rasterizes through the normal stroke pipeline exactly as today,
+and the stroke is RECORDED beside the pixels. Only an EDIT (move, trim,
+re-width) re-derives — clear and replay, damage-limited later. Every
+compositor/undo/export path therefore works unchanged in phase 1.
 
 ### 2. Rendering replays the REAL brush engine
 
