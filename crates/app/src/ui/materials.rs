@@ -16,7 +16,8 @@ pub(super) fn materials_palette(ui: &mut egui::Ui, app: &mut App) {
             egui::TextEdit::singleline(&mut app.material_search)
                 .hint_text("search")
                 .desired_width(90.0),
-        );
+        )
+        .on_hover_text("matches names and tags — right-click a material to tag it");
         let sort_label = if app.material_sort_uses {
             "most used"
         } else {
@@ -146,9 +147,10 @@ pub(super) fn materials_palette(ui: &mut egui::Ui, app: &mut App) {
         return;
     }
 
+    // MT-012: the one box searches names AND tags — no second field.
     let search = app.material_search.to_lowercase();
     let mut order: Vec<usize> = (0..app.materials.len())
-        .filter(|&i| app.materials[i].name.to_lowercase().contains(&search))
+        .filter(|&i| crate::app::materials::material_matches(&app.materials[i], &search))
         .collect();
     if app.material_sort_uses {
         order.sort_by_key(|&i| {
@@ -222,17 +224,67 @@ fn material_cell(ui: &mut egui::Ui, app: &mut App, i: usize) {
         ),
         None => egui::Button::new(egui::RichText::new(label).small()),
     };
-    let resp = ui
-        .add(btn)
-        .on_hover_text(format!("{} — click to paste", item.name));
+    let hover = if item.tags.is_empty() {
+        format!("{} — click to paste, right-click to tag", item.name)
+    } else {
+        format!(
+            "{}\n{}\nclick to paste, right-click to tag",
+            item.name, item.tags
+        )
+    };
+    let resp = ui.add(btn).on_hover_text(hover);
     if thumb.is_none() && ui.is_rect_visible(resp.rect) {
         if let Some(t) = load_thumb(app, &path) {
             app.material_thumbs.insert(path.clone(), t);
         }
     }
     if resp.clicked() {
-        app.push_cmd(AppCmd::PasteMaterial { path, tile });
+        app.push_cmd(AppCmd::PasteMaterial {
+            path: path.clone(),
+            tile,
+        });
     }
+    material_tag_menu(&resp, app, &item);
+}
+
+/// MT-012's editor: the bank's per-item actions live on the cell itself
+/// (click pastes), so tags go on the same cell's right-click menu rather
+/// than a properties pane nobody would find. One comma-separated line —
+/// Enter or the button writes the folder's sidecar, Esc/click-away drops it.
+fn material_tag_menu(
+    resp: &egui::Response,
+    app: &mut App,
+    item: &crate::app::materials::MaterialItem,
+) {
+    resp.context_menu(|ui| {
+        ui.set_min_width(190.0);
+        ui.label(egui::RichText::new(&item.name).small());
+        // Seed (or re-seed) the buffer from what is on disk. Re-seeding on a
+        // different path is what stops the menu from carrying one material's
+        // half-typed tags onto the next one you right-click.
+        let buf = app
+            .material_tag_edit
+            .get_or_insert_with(|| (item.path.clone(), item.tags.clone()));
+        if buf.0 != item.path {
+            *buf = (item.path.clone(), item.tags.clone());
+        }
+        let edit = ui.add(
+            egui::TextEdit::singleline(&mut buf.1)
+                .hint_text("tags, comma separated")
+                .desired_width(180.0),
+        );
+        let entered = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        let saved = ui.button("Save tags").clicked();
+        if entered || saved {
+            let tags = std::mem::take(&mut buf.1);
+            app.material_tag_edit = None;
+            app.push_cmd(AppCmd::MaterialSetTags {
+                path: item.path.clone(),
+                tags,
+            });
+            ui.close();
+        }
+    });
 }
 
 fn load_thumb(app: &mut App, path: &std::path::Path) -> Option<egui::TextureHandle> {

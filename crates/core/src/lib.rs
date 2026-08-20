@@ -55,7 +55,9 @@ pub use balloon::{
 };
 pub use blend::{Rgba, blend_premul, expression_reduce, layer_colour_tint, scale_opacity};
 pub use curve::PressureCurve;
-pub use doc::{Blend, DEFAULT_SIZE, Document, Layer, LayerExpression, LayerKind, Paper, ResizeAnchor};
+pub use doc::{
+    Blend, DEFAULT_SIZE, Document, Layer, LayerExpression, LayerKind, Paper, ResizeAnchor,
+};
 pub use edge::EdgeParams;
 pub use export::Background;
 pub use fill::{FillOpts, FillRefer};

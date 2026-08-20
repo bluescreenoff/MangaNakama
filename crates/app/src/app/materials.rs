@@ -9,8 +9,10 @@
 //! **tiling** ask — one click covers the canvas in N×N copies as a single
 //! float, usable as a mask to draw through. Deferred to part 2 (TRIAGE
 //! row 133's named rows): Toning (image → screentone, MT-014), the five
-//! paste-size modes (MT-032), order-in-layer metadata (MT-034), tags
-//! (MT-012).
+//! paste-size modes (MT-032), order-in-layer metadata (MT-034).
+//!
+//! MT-012 (tags) lands as a per-folder `tags.txt` sidecar — see
+//! [`MaterialTags`].
 
 use std::path::{Path, PathBuf};
 
@@ -25,6 +27,10 @@ pub struct MaterialItem {
     pub path: PathBuf,
     /// Index into the folder list (grouping + display).
     pub folder: usize,
+    /// MT-012: the folder sidecar's tag line for this file, normalised
+    /// (`"screentone, dots, 10%"`). Empty = untagged, which is what every
+    /// material was before this existed.
+    pub tags: String,
 }
 
 impl App {
@@ -59,6 +65,11 @@ impl App {
             let Ok(rd) = std::fs::read_dir(folder) else {
                 continue;
             };
+            // One sidecar read per FOLDER, not per file. The sidecar is the
+            // only home of a tag, so a rescan re-reads it rather than
+            // remembering: tags on materials the owner adds by hand survive
+            // every rescan, restart and folder re-add.
+            let side = MaterialTags::load(folder);
             let mut items: Vec<MaterialItem> = rd
                 .flatten()
                 .filter_map(|e| {
@@ -72,10 +83,12 @@ impl App {
                         return None;
                     }
                     let name = p.file_stem()?.to_string_lossy().into_owned();
+                    let tags = side.get(&p.file_name()?.to_string_lossy()).to_owned();
                     Some(MaterialItem {
                         name,
                         path: p,
                         folder: fi,
+                        tags,
                     })
                 })
                 .collect();
@@ -115,6 +128,157 @@ impl App {
             .iter()
             .map(|p| p.display().to_string())
             .collect()
+    }
+}
+
+// --- MT-012: tags, as a per-folder sidecar -------------------------------
+
+/// The sidecar's file name — one per material folder, beside the images.
+pub const TAGS_FILE: &str = "tags.txt";
+
+/// A material folder's `tags.txt`: `<file name>=<comma, separated, tags>`
+/// lines, the same plain-text idiom as `prefs.txt` and `ui.txt` (no json,
+/// no yaml, no new dependency). It lives WITH the images, so copying a
+/// material folder to another machine copies its tags, and a folder the
+/// bank has never seen is already tagged the first time it is added.
+///
+/// Example:
+///
+/// ```text
+/// tone-dots-10pct.png=screentone, dots, light
+/// speed-lines.png=effect, action
+/// ```
+///
+/// **Unknown content survives a rewrite, both kinds** (the discipline
+/// `prefs.rs` documents): a line this build cannot read — a comment, a key
+/// a newer build wrote without an `=` — is kept verbatim and written back,
+/// and an entry naming a file that is not in the folder right now is kept
+/// too. That second half is what makes the file safe against a bank
+/// rescan, a temporarily-renamed image, or a drive that was not mounted.
+///
+/// The key is the file NAME with its extension (`a.png` and `a.jpg` are
+/// two different materials). A file name containing `=` is the one shape
+/// this cannot address — the first `=` splits the line, as everywhere else
+/// in the repo's `k=v` files.
+#[derive(Default, Debug, Clone)]
+pub struct MaterialTags {
+    entries: std::collections::BTreeMap<String, String>,
+    /// Lines with no usable key, kept so a rewrite does not eat them.
+    unknown: Vec<String>,
+}
+
+/// `" a , b,,c "` → `"a, b, c"`. Commas (and stray newlines from a paste)
+/// separate; empty tags vanish. A tag never contains a comma.
+fn normalize_tags(tags: &str) -> String {
+    tags.split([',', '\n', '\r'])
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+impl MaterialTags {
+    pub fn parse(text: &str) -> Self {
+        let mut me = Self::default();
+        for line in text.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            match line.split_once('=') {
+                Some((k, v)) if !k.trim().is_empty() => {
+                    me.entries.insert(k.trim().to_owned(), normalize_tags(v));
+                }
+                _ => me.unknown.push(line.to_owned()),
+            }
+        }
+        me
+    }
+
+    /// The whole file: our entries (sorted, so a rewrite is a stable diff),
+    /// then every line we did not understand, verbatim.
+    pub fn to_body(&self) -> String {
+        let mut s = String::new();
+        for (k, v) in &self.entries {
+            s.push_str(k);
+            s.push('=');
+            s.push_str(v);
+            s.push('\n');
+        }
+        for line in &self.unknown {
+            s.push_str(line);
+            s.push('\n');
+        }
+        s
+    }
+
+    /// The tag line for one file name; `""` when it has no entry.
+    pub fn get(&self, file_name: &str) -> &str {
+        self.entries
+            .get(file_name)
+            .map(String::as_str)
+            .unwrap_or("")
+    }
+
+    /// Empty tags REMOVE the entry — a material whose tags were cleared must
+    /// end up byte-identical to one that was never tagged.
+    pub fn set(&mut self, file_name: &str, tags: &str) {
+        let v = normalize_tags(tags);
+        if v.is_empty() {
+            self.entries.remove(file_name);
+        } else {
+            self.entries.insert(file_name.to_owned(), v);
+        }
+    }
+
+    /// A missing (or unreadable) sidecar is not an error — it is a folder
+    /// with no tags, which is exactly what every folder was before.
+    pub fn load(folder: &Path) -> Self {
+        std::fs::read_to_string(folder.join(TAGS_FILE))
+            .map(|t| Self::parse(&t))
+            .unwrap_or_default()
+    }
+
+    /// Write the sidecar back. Nothing left to say (last tag cleared, no
+    /// unknown lines) deletes the file instead of leaving an empty one, so
+    /// "no sidecar" stays the honest resting state. Returns false only when
+    /// the disk actually refused.
+    pub fn save(&self, folder: &Path) -> bool {
+        let p = folder.join(TAGS_FILE);
+        if self.entries.is_empty() && self.unknown.is_empty() {
+            return std::fs::remove_file(&p).is_ok() || !p.exists();
+        }
+        std::fs::write(&p, self.to_body()).is_ok()
+    }
+}
+
+/// The bank's ONE search box matches a material's name or its tags — no
+/// second box, no `tag:` prefix syntax. `needle` must already be lowercase.
+pub fn material_matches(item: &MaterialItem, needle: &str) -> bool {
+    item.name.to_lowercase().contains(needle) || item.tags.to_lowercase().contains(needle)
+}
+
+impl App {
+    /// Retag one material: rewrite its folder's sidecar and update the bank
+    /// in place. In place rather than `materials_scan()` because a rescan
+    /// throws away every decoded thumbnail — the palette must not blink
+    /// because you typed a tag. Returns false if the sidecar could not be
+    /// written (the caller says so in the status bar; the bank then still
+    /// shows what is really on disk).
+    pub fn material_set_tags(&mut self, path: &Path, tags: &str) -> bool {
+        let (Some(folder), Some(file)) = (path.parent(), path.file_name()) else {
+            return false;
+        };
+        let file = file.to_string_lossy().into_owned();
+        let mut side = MaterialTags::load(folder);
+        side.set(&file, tags);
+        if !side.save(folder) {
+            return false;
+        }
+        let now = side.get(&file).to_owned();
+        for m in self.materials.iter_mut().filter(|m| m.path == path) {
+            m.tags = now.clone();
+        }
+        true
     }
 }
 
@@ -249,5 +413,110 @@ impl App {
             self.materials_scan();
         }
         n
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(name: &str, tags: &str) -> MaterialItem {
+        MaterialItem {
+            name: name.to_owned(),
+            path: PathBuf::from(format!("C:/m/{name}.png")),
+            folder: 0,
+            tags: tags.to_owned(),
+        }
+    }
+
+    /// The sidecar's forward-compatibility contract, both halves: a line
+    /// this build cannot read is written back verbatim, and an entry for a
+    /// material that is not in the folder right now is kept — a rescan (or
+    /// an unplugged drive) must never be able to eat someone's tags.
+    #[test]
+    fn tags_sidecar_roundtrips_unknown_lines_and_absent_materials() {
+        let body = "# hand-written notes about this folder\n\
+                    tone-dots-10pct.png=screentone, dots\n\
+                    gone-for-now.png=effect, action\n\
+                    a line from a 2027 build with no equals sign\n";
+        let mut side = MaterialTags::parse(body);
+        assert_eq!(side.get("tone-dots-10pct.png"), "screentone, dots");
+
+        // This build retags one file and saves.
+        side.set("tone-dots-10pct.png", "screentone, dots, light");
+        let out = side.to_body();
+        assert!(
+            out.contains("# hand-written notes about this folder\n"),
+            "a comment must survive: {out}"
+        );
+        assert!(
+            out.contains("a line from a 2027 build with no equals sign\n"),
+            "…and every other unreadable line: {out}"
+        );
+        assert!(
+            out.contains("gone-for-now.png=effect, action\n"),
+            "an entry for a file not in the folder must survive: {out}"
+        );
+        assert!(out.contains("tone-dots-10pct.png=screentone, dots, light\n"));
+
+        // A second trip is stable — nothing doubles up, nothing is dropped.
+        assert_eq!(MaterialTags::parse(&out).to_body(), out);
+    }
+
+    /// Whitespace and empty tags are normalised on the way in, and CLEARING
+    /// a material's tags removes the entry rather than leaving `name=`, so
+    /// "cleared" and "never tagged" are the same bytes.
+    #[test]
+    fn tags_normalise_and_clearing_removes_the_entry() {
+        let mut side = MaterialTags::default();
+        side.set("a.png", "  dots ,, light,  ");
+        assert_eq!(side.get("a.png"), "dots, light");
+        assert_eq!(side.to_body(), "a.png=dots, light\n");
+
+        side.set("a.png", "   ");
+        assert_eq!(side.get("a.png"), "");
+        assert_eq!(side.to_body(), "", "cleared == never tagged");
+    }
+
+    /// The one search box matches tags as well as names, case-insensitively
+    /// — and an untagged material behaves exactly as it did before tags
+    /// existed (name match only, never a spurious hit).
+    #[test]
+    fn search_matches_tags_as_well_as_names() {
+        let dots = item("tone-dots-10pct", "Screentone, Light");
+        let plain = item("speed-lines", "");
+        assert!(material_matches(&dots, "dots"), "name still matches");
+        assert!(material_matches(&dots, "screentone"), "tag matches");
+        assert!(material_matches(&dots, "light"), "a later tag matches too");
+        assert!(!material_matches(&dots, "balloon"));
+        assert!(material_matches(&plain, "speed"));
+        assert!(
+            !material_matches(&plain, "screentone"),
+            "an untagged material must not match another material's tag"
+        );
+        assert!(
+            material_matches(&plain, ""),
+            "an empty box shows everything, as before"
+        );
+    }
+
+    /// No sidecar on disk = today's behaviour: every material scans with
+    /// empty tags, and reading the folder writes nothing.
+    #[test]
+    fn a_folder_with_no_sidecar_is_untagged_and_stays_that_way() {
+        let dir = std::env::temp_dir().join(format!("mn-tags-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let side = MaterialTags::load(&dir);
+        assert_eq!(side.get("anything.png"), "");
+        assert_eq!(side.to_body(), "");
+        assert!(
+            !dir.join(TAGS_FILE).exists(),
+            "loading must never create the file"
+        );
+        // Saving an empty sidecar likewise leaves the folder untouched.
+        assert!(side.save(&dir));
+        assert!(!dir.join(TAGS_FILE).exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

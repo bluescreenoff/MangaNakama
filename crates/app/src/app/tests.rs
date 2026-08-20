@@ -125,10 +125,7 @@ fn brush_size_ladder_walks_the_whole_ladder_from_the_presets_own_size() {
             break;
         }
     }
-    assert_eq!(
-        app.props_current.size_px, 1.0,
-        "and so must its 1 px floor"
-    );
+    assert_eq!(app.props_current.size_px, 1.0, "and so must its 1 px floor");
     assert!(
         (app.brush_radius() * 2.0 - 1.0).abs() < 0.01,
         "the engine is where the readout says: {} px",
@@ -1336,7 +1333,10 @@ fn committing_a_moved_paste_keeps_the_original() {
         drag.set_params(1.0, 1.0, 0.0, 200.0, 150.0);
     }
     crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::TransformCommit);
-    assert!(app.transform_drag.is_none(), "the commit consumed the float");
+    assert!(
+        app.transform_drag.is_none(),
+        "the commit consumed the float"
+    );
     // Original + the stamped copy: strictly MORE ink than before, and the
     // source pixels themselves are untouched.
     assert!(
@@ -2762,6 +2762,157 @@ fn perspective_ruler_creation_and_ray_binding() {
     }
 }
 
+/// A stroke through the REAL pipeline: `pts` are canvas points, the
+/// return is the recorded dab positions. The wobble the caller bakes in
+/// must ramp, as ever — a ruler stroke starts aimed.
+fn ruler_stroke_dabs(app: &mut App, pts: &[[f32; 2]]) -> Vec<(f32, f32)> {
+    app.begin_stroke(PointerKind::Mouse);
+    app.engine_mut()
+        .set_dab_recording_all(mn_brush::RecordMode::Tap);
+    let batch: Vec<PenSample> = pts
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let (sx, sy) = app.viewport.to_screen(p[0], p[1]);
+            PenSample {
+                x: sx,
+                y: sy,
+                pressure: 0.8,
+                tilt_x: 0.0,
+                tilt_y: 0.0,
+                t_ms: i as f64 * 8.0,
+            }
+        })
+        .collect();
+    app.push_batch(&batch);
+    app.end_stroke();
+    app.engine_mut()
+        .drain_dab_records()
+        .iter()
+        .map(|d| (d.x, d.y))
+        .collect()
+}
+
+/// ROADMAP good-first-issue #2 (1-point) through the real input path: the
+/// drag starts AT the vanishing point and runs along the eye level, and a
+/// stroke travelling along the horizon rides the horizontal family — the
+/// family a 2-point set does not have.
+#[test]
+fn one_point_perspective_ruler_creation_and_horizontal_family() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    let empty: [PenSample; 0] = [];
+
+    crate::cmd::dispatch(
+        &mut app,
+        crate::cmd::AppCmd::RulerArm(crate::cmd::RulerKind::Perspective1),
+    );
+    let (x0, y0) = app.viewport.to_screen(500.0, 100.0);
+    let (x1, y1) = app.viewport.to_screen(900.0, 100.0);
+    app.canvas_down(x0, y0, PointerKind::Mouse, &empty);
+    app.canvas_up(x1, y1, &empty);
+    assert_eq!(
+        app.rulers.items.as_slice(),
+        [mn_core::Ruler::Perspective1 {
+            vp: [500.0, 100.0],
+            h: [900.0, 100.0]
+        }],
+        "the press is the VP, the release the horizon handle"
+    );
+    assert!(app.rulers.on, "creation turns snapping on");
+
+    // Travel right, wobbling in y, from a point almost UNDER the VP —
+    // there the orthogonal is steep, so a level stroke is unambiguously
+    // the horizontal family and y pins to the anchor's 450.
+    let pts: Vec<[f32; 2]> = (0..30)
+        .map(|i| {
+            let wob = if i % 2 == 0 { 15.0 } else { -15.0 } * (i as f32 / 6.0).min(1.0);
+            [450.0 + i as f32 * 10.0, 450.0 + wob]
+        })
+        .collect();
+    let dabs = ruler_stroke_dabs(&mut app, &pts);
+    assert!(!dabs.is_empty(), "the stroke painted");
+    for d in &dabs {
+        assert!(
+            (d.1 - 450.0).abs() < 1.0,
+            "dab ({}, {}) left the horizontal family",
+            d.0,
+            d.1
+        );
+    }
+}
+
+/// ROADMAP good-first-issue #2 (3-point): the 2-point eye-level drag plus
+/// a third VP placed off the horizon on the side dragged toward. A
+/// downward stroke then CONVERGES on it instead of running canvas-square,
+/// and the VP is an anchor the Object tool can drag.
+#[test]
+fn three_point_perspective_ruler_creation_and_vertical_vp() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    let empty: [PenSample; 0] = [];
+
+    crate::cmd::dispatch(
+        &mut app,
+        crate::cmd::AppCmd::RulerArm(crate::cmd::RulerKind::Perspective3),
+    );
+    let (x0, y0) = app.viewport.to_screen(-400.0, 100.0);
+    let (x1, y1) = app.viewport.to_screen(900.0, 100.0);
+    app.canvas_down(x0, y0, PointerKind::Mouse, &empty);
+    app.canvas_up(x1, y1, &empty);
+    let z = match app.rulers.items.as_slice() {
+        [mn_core::Ruler::Perspective3 { a, b, z }] => {
+            assert_eq!((*a, *b), ([-400.0, 100.0], [900.0, 100.0]));
+            assert!(
+                z[1] > 100.0,
+                "dragged left→right: the third VP lands BELOW the horizon ({z:?})"
+            );
+            *z
+        }
+        other => panic!("the drag did not create a 3-point set: {other:?}"),
+    };
+    // It is a grabbable anchor (a 10 screen-px handle at zoom 1).
+    assert_eq!(
+        app.rulers
+            .grab_near([z[0] + 3.0, z[1] - 2.0], 10.0 / app.viewport.zoom),
+        Some((0, mn_core::RulerGrab::Anchor(2))),
+        "the vertical VP is draggable"
+    );
+
+    // Straight down from (100, 300), wobbling in x: the dabs ride the ray
+    // through the vertical VP, which is NOT canvas-vertical.
+    let anchor = [100.0f32, 300.0];
+    let pts: Vec<[f32; 2]> = (0..30)
+        .map(|i| {
+            let wob = if i % 2 == 0 { 15.0 } else { -15.0 } * (i as f32 / 6.0).min(1.0);
+            [anchor[0] + wob, anchor[1] + i as f32 * 8.0]
+        })
+        .collect();
+    let dabs = ruler_stroke_dabs(&mut app, &pts);
+    assert!(!dabs.is_empty(), "the stroke painted");
+    let dir = [anchor[0] - z[0], anchor[1] - z[1]];
+    let n = (dir[0] * dir[0] + dir[1] * dir[1]).sqrt();
+    for d in &dabs {
+        let cross = (d.0 - z[0]) * dir[1] - (d.1 - z[1]) * dir[0];
+        assert!(
+            cross.abs() / n < 1.0,
+            "dab ({}, {}) is off the vertical-VP ray by {:.2} px",
+            d.0,
+            d.1,
+            cross.abs() / n
+        );
+    }
+    let drift = dabs.last().unwrap().0 - dabs[0].0;
+    assert!(
+        drift.abs() > 1.0,
+        "the verticals converge on the third VP (drift {drift:.2} px)"
+    );
+}
+
 /// Auditor 0da3453's pin (round-51 handoff): snapping runs BEFORE the
 /// stabilizer, so the smoother works on already-snapped input. On a
 /// straight ruler every snapped sample sits exactly on the line and a
@@ -3787,7 +3938,9 @@ fn gen_lines_regeneration_undoes_and_redoes() {
             .collect()
     };
     let generated = snap(&app);
-    let spec_before = app.doc.layers[li].genlines.expect("the layer was generated");
+    let spec_before = app.doc.layers[li]
+        .genlines
+        .expect("the layer was generated");
     assert!(!generated.is_empty(), "ink landed");
 
     // Apply again on the same (still active) layer: in place, one step.
@@ -3965,6 +4118,142 @@ fn materials_register_layer_and_import_folder() {
 
     let _ = std::fs::remove_dir_all(&tmp);
     let _ = std::fs::remove_dir_all(&src);
+}
+
+/// ROADMAP good-first-issue #3 / MT-012: material tags live in a per-folder
+/// `tags.txt` sidecar. A folder with no sidecar behaves exactly as before;
+/// tagging writes the file and refreshes the bank without a rescan; the one
+/// search box matches tags; and a rescan re-reads the sidecar, so tags on
+/// materials the OWNER added (or hand-wrote entries for) survive it.
+#[test]
+fn material_tags_sidecar_search_and_rescan() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    let tmp = std::env::temp_dir().join(format!("mn-mat-tags-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let one = image::RgbaImage::from_pixel(1, 1, image::Rgba([0, 0, 0, 255]));
+    for f in ["tone-dots.png", "speed-lines.png"] {
+        image::save_buffer(
+            tmp.join(f),
+            one.as_raw(),
+            1,
+            1,
+            image::ExtendedColorType::Rgba8,
+        )
+        .unwrap();
+    }
+    app.material_folders.push(tmp.clone());
+    app.materials_scan();
+
+    let find = |app: &App, stem: &str| {
+        app.materials
+            .iter()
+            .find(|m| m.path.parent() == Some(tmp.as_path()) && m.name == stem)
+            .cloned()
+            .unwrap()
+    };
+    let sidecar = tmp.join(crate::app::materials::TAGS_FILE);
+
+    // No sidecar: untagged, and scanning must not create one.
+    assert_eq!(find(&app, "tone-dots").tags, "");
+    assert_eq!(find(&app, "speed-lines").tags, "");
+    assert!(!sidecar.exists(), "a scan must never write the sidecar");
+
+    // Tag one material through the command the palette pushes.
+    crate::cmd::dispatch(
+        &mut app,
+        crate::cmd::AppCmd::MaterialSetTags {
+            path: tmp.join("tone-dots.png"),
+            tags: "  Screentone , dots ,, ".into(),
+        },
+    );
+    assert_eq!(
+        find(&app, "tone-dots").tags,
+        "Screentone, dots",
+        "the bank refreshed in place — no restart, no rescan"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&sidecar).unwrap(),
+        "tone-dots.png=Screentone, dots\n"
+    );
+    assert_eq!(find(&app, "speed-lines").tags, "", "only that one changed");
+
+    // The one search box hits the tag, and misses what it should.
+    let matches = |needle: &str| {
+        app.materials
+            .iter()
+            .filter(|m| crate::app::materials::material_matches(m, needle))
+            .map(|m| m.name.clone())
+            .collect::<Vec<_>>()
+    };
+    assert!(matches("screentone").contains(&"tone-dots".to_owned()));
+    assert!(!matches("screentone").contains(&"speed-lines".to_owned()));
+    assert!(
+        matches("speed").contains(&"speed-lines".to_owned()),
+        "name search is untouched"
+    );
+
+    // The owner hand-edits the sidecar: a comment, and an entry for a
+    // material he is about to drop in. A rescan picks both up, and a later
+    // edit from the UI must not eat either.
+    std::fs::write(
+        &sidecar,
+        "# my folder\n\
+         tone-dots.png=Screentone, dots\n\
+         his-own.png=owner, keep me\n",
+    )
+    .unwrap();
+    image::save_buffer(
+        tmp.join("his-own.png"),
+        one.as_raw(),
+        1,
+        1,
+        image::ExtendedColorType::Rgba8,
+    )
+    .unwrap();
+    app.materials_scan();
+    assert_eq!(find(&app, "his-own").tags, "owner, keep me");
+    assert_eq!(find(&app, "tone-dots").tags, "Screentone, dots");
+
+    crate::cmd::dispatch(
+        &mut app,
+        crate::cmd::AppCmd::MaterialSetTags {
+            path: tmp.join("speed-lines.png"),
+            tags: "effect".into(),
+        },
+    );
+    let body = std::fs::read_to_string(&sidecar).unwrap();
+    assert!(body.contains("# my folder\n"), "comment survives: {body}");
+    assert!(
+        body.contains("his-own.png=owner, keep me\n"),
+        "the owner's own tags survive an edit elsewhere: {body}"
+    );
+    assert!(body.contains("speed-lines.png=effect\n"), "{body}");
+
+    // Clearing a material's tags removes the entry, and clearing the LAST
+    // one (with nothing else left to say) removes the file, so "cleared"
+    // and "never tagged" are the same folder on disk.
+    for f in ["tone-dots.png", "speed-lines.png", "his-own.png"] {
+        crate::cmd::dispatch(
+            &mut app,
+            crate::cmd::AppCmd::MaterialSetTags {
+                path: tmp.join(f),
+                tags: String::new(),
+            },
+        );
+    }
+    let body = std::fs::read_to_string(&sidecar).unwrap();
+    assert_eq!(body, "# my folder\n", "only the comment is left: {body}");
+    assert!(
+        app.materials
+            .iter()
+            .all(|m| m.path.parent() != Some(tmp.as_path()) || m.tags.is_empty())
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
 }
 
 /// TRIAGE 144 / PM-040/045/046/047: the Story Editor — cross-page
@@ -6389,7 +6678,10 @@ fn frame_move_undoes_every_childs_art_and_mask() {
     while let Some(c) = app.cmds.pop_front() {
         crate::cmd::dispatch(&mut app, c);
     }
-    assert!(alpha_at(&app, draw, 200, 100) > 0, "ink moved with the panel");
+    assert!(
+        alpha_at(&app, draw, 200, 100) > 0,
+        "ink moved with the panel"
+    );
     assert_eq!(alpha_at(&app, draw, 100, 100), 0, "no ink left behind");
     let mask_at = |app: &App, ti: (i32, i32)| {
         app.doc.layers[draw]
@@ -6397,7 +6689,10 @@ fn frame_move_undoes_every_childs_art_and_mask() {
             .as_ref()
             .is_some_and(|m| m.tiles.contains_key(&mn_core::TileIdx::new(ti.0, ti.1)))
     };
-    assert!(!mask_at(&app, (1, 1)) || mask_at(&app, (2, 1)), "mask rode along");
+    assert!(
+        !mask_at(&app, (1, 1)) || mask_at(&app, (2, 1)),
+        "mask rode along"
+    );
 
     while app.doc.undo() {}
     assert!(
@@ -6408,7 +6703,10 @@ fn frame_move_undoes_every_childs_art_and_mask() {
     assert!(mask_at(&app, (1, 1)), "mask back at its original tile");
 
     while app.doc.redo() {}
-    assert!(alpha_at(&app, draw, 200, 100) > 0, "redo re-applies the move");
+    assert!(
+        alpha_at(&app, draw, 200, 100) > 0,
+        "redo re-applies the move"
+    );
     assert_eq!(alpha_at(&app, draw, 100, 100), 0);
 }
 

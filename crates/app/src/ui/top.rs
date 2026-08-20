@@ -35,6 +35,10 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 app.push_cmd(AppCmd::NewDoc);
                 ui.close();
             }
+            if item(ui, "New Tiling Pattern…", "") {
+                app.push_cmd(AppCmd::NewPattern);
+                ui.close();
+            }
             if item(ui, "Open…", "Ctrl+O") {
                 app.push_cmd(AppCmd::OpenOra);
                 ui.close();
@@ -283,8 +287,16 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                     app.push_cmd(AppCmd::RulerArm(crate::cmd::RulerKind::VanishingPoint));
                     ui.close();
                 }
+                if item(ui, "Perspective (1-point)…", "") {
+                    app.push_cmd(AppCmd::RulerArm(crate::cmd::RulerKind::Perspective1));
+                    ui.close();
+                }
                 if item(ui, "Perspective (2-point)…", "") {
                     app.push_cmd(AppCmd::RulerArm(crate::cmd::RulerKind::Perspective));
+                    ui.close();
+                }
+                if item(ui, "Perspective (3-point)…", "") {
+                    app.push_cmd(AppCmd::RulerArm(crate::cmd::RulerKind::Perspective3));
                     ui.close();
                 }
                 if item(ui, "Curve…", "") {
@@ -738,11 +750,7 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                     ),
                 ] {
                     let on = app.layout.touch_gestures & bit != 0;
-                    if ui
-                        .selectable_label(on, label)
-                        .on_hover_text(tip)
-                        .clicked()
-                    {
+                    if ui.selectable_label(on, label).on_hover_text(tip).clicked() {
                         app.layout.touch_gestures ^= bit;
                         app.set_status(if app.layout.touch_gestures & bit != 0 {
                             "touch gesture on"
@@ -1066,7 +1074,8 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
         // registered after everything else so it wins both the hit test and
         // the paint order — whatever else happens to the row, the window's
         // own controls are always where Windows puts them.
-        let cap_rect = egui::Rect::from_min_max(egui::pos2(cap_left, bar.top()), bar.right_bottom());
+        let cap_rect =
+            egui::Rect::from_min_max(egui::pos2(cap_left, bar.top()), bar.right_bottom());
         let mut cap = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(cap_rect)
@@ -1222,7 +1231,11 @@ pub(super) fn doc_tab(ui: &mut egui::Ui, app: &mut App) {
             egui::vec2(14.0, 14.0),
         );
         let tresp = ui.interact(tab, ui.id().with(("mn.tab", i)), egui::Sense::click());
-        let cresp = ui.interact(close, ui.id().with(("mn.tab.close", i)), egui::Sense::click());
+        let cresp = ui.interact(
+            close,
+            ui.id().with(("mn.tab.close", i)),
+            egui::Sense::click(),
+        );
 
         let p = ui.painter();
         let radius = egui::CornerRadius {
@@ -1261,11 +1274,15 @@ pub(super) fn doc_tab(ui: &mut egui::Ui, app: &mut App) {
         .galley(
             egui::pos2(tab.left() + 8.0, ty - galley.size().y * 0.5),
             galley.clone(),
-            if is_active { theme::TEXT } else { theme::TEXT_WEAK },
+            if is_active {
+                theme::TEXT
+            } else {
+                theme::TEXT_WEAK
+            },
         );
         if *dirty {
-            let dx = (tab.left() + 8.0 + galley.size().x.min(text_room) + 6.0)
-                .min(close.left() - 5.0);
+            let dx =
+                (tab.left() + 8.0 + galley.size().x.min(text_room) + 6.0).min(close.left() - 5.0);
             p.circle_filled(egui::pos2(dx, ty), 2.5, theme::TEXT_WEAK);
         }
         if cresp.hovered() {
@@ -1366,15 +1383,13 @@ pub(super) fn status_bar(ui: &mut egui::Ui, app: &mut App) {
         );
         if !app.status.is_empty() {
             ui.separator();
-            ui.label(
-                egui::RichText::new(app.status.clone()).size(10.5).color(
-                    if app.status_warn {
-                        theme::WARN
-                    } else {
-                        theme::TEXT_WEAK
-                    },
-                ),
-            );
+            ui.label(egui::RichText::new(app.status.clone()).size(10.5).color(
+                if app.status_warn {
+                    theme::WARN
+                } else {
+                    theme::TEXT_WEAK
+                },
+            ));
         }
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

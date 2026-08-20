@@ -22,6 +22,7 @@ mod materials;
 mod navigator;
 mod overlay;
 mod pages;
+mod pattern;
 mod property;
 mod reader;
 mod subtool;
@@ -33,8 +34,7 @@ use color::picker_sync;
 use dialogs::{
     adjust_window, canvas_size_window, detail_window, export_all_window, feedback_window,
     filter_window, gen_lines_window, goto_page_window, hud, new_doc_window, prefs_window,
-    property_detail_window, spread_window, story_window, work_settings_window,
-    workspace_window,
+    property_detail_window, spread_window, story_window, work_settings_window, workspace_window,
 };
 use dock::column;
 use overlay::canvas_overlay;
@@ -120,6 +120,7 @@ pub fn build(ui: &mut egui::Ui, app: &mut App) {
     work_settings_window(ui.ctx(), app);
     canvas_size_window(ui.ctx(), app);
     prefs_window(ui.ctx(), app);
+    pattern::pattern_window(ui.ctx(), app);
     adjust_window(ui.ctx(), app);
     goto_page_window(ui.ctx(), app);
     spread_window(ui.ctx(), app);

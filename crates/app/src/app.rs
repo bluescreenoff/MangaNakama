@@ -12,26 +12,27 @@
 
 mod abr;
 mod adjust;
-mod diag;
-mod engine;
 pub(crate) mod canvas_input;
 mod comps;
+mod diag;
+mod engine;
 mod frames;
-mod layout;
-mod materials;
-mod pages;
-pub mod prefs;
-mod session;
-pub(crate) mod reader;
-mod story;
-mod transform;
-mod view;
-mod workspaces;
 /// TRIAGE 36 (`L-001`/`L-002` magnetic lasso) and 38 (`S-001` layer pick),
 /// end to end through the real pointer path. Its own file so app.rs does not
 /// grow another 200 lines of test.
 #[cfg(test)]
 mod lasso_tests;
+mod layout;
+pub mod materials;
+mod pages;
+pub mod pattern;
+pub mod prefs;
+pub(crate) mod reader;
+mod session;
+mod story;
+mod transform;
+mod view;
+mod workspaces;
 
 pub use adjust::AdjustPreview;
 pub use layout::{ScreenRect, UiLayout, WinGeom, peek_win};
@@ -49,15 +50,15 @@ use std::time::{Duration, Instant};
 
 use mn_brush::{CurveDab, DynaDab, GridDab, HairyDab, MyBrush, SimpleDab};
 use mn_core::{
-    Align, Blend, Document, FillOpts, FrameAlign, LineSpacing, PageSetup, PenSample,
-    ResizeAnchor, Selection, Stabilizer, StrokeSink, Taper,
+    Align, Blend, Document, FillOpts, FrameAlign, LineSpacing, PageSetup, PenSample, ResizeAnchor,
+    Selection, Stabilizer, StrokeSink, Taper,
 };
 use mn_gpu::{Renderer, Viewport};
 
 use crate::cmd::{
-    AppCmd, BASE_MAX_RADIUS, BASE_MIN_RADIUS, BalloonMode, DivideContents, EyedropOpts,
-    FigureMode, FillMode, FrameMode, GradMode, ObjectMode, PanMode, PickExclude, SelectMode,
-    Slot, Tool, ToolProps,
+    AppCmd, BASE_MAX_RADIUS, BASE_MIN_RADIUS, BalloonMode, DivideContents, EyedropOpts, FigureMode,
+    FillMode, FrameMode, GradMode, ObjectMode, PanMode, PickExclude, SelectMode, Slot, Tool,
+    ToolProps,
 };
 use crate::shell::Shell;
 use crate::text_edit::{TextBarDrag, TextEditState, TextGesture, TextObjDrag};
@@ -96,10 +97,10 @@ impl PointerKind {
     }
 }
 
+use diag::StrokeStats;
 /// Per-stroke console diagnostics. The owner's laptop pen stack is known-cursed; these
 /// numbers are the first thing to look at when a stroke feels wrong.
 pub use diag::{Diag, PenHealth};
-use diag::StrokeStats;
 
 /// What the message loop must do after a frame. (The cursor is not in here:
 /// Win32 wants it set from `WM_SETCURSOR`, which reads `Shell::cursor`.)
@@ -380,6 +381,12 @@ pub struct App {
     /// MT-034: where a panel-targeted material paste's layer sits in the
     /// folder (see [`MaterialLayerOrder`]).
     pub material_order: MaterialLayerOrder,
+    /// MT-012: the material whose tag editor is open in the bank's
+    /// right-click menu, and the text being typed. `None` = no editor open;
+    /// the buffer is re-seeded from the sidecar whenever the menu opens on a
+    /// different material, so it can never write one material's tags onto
+    /// another's.
+    pub material_tag_edit: Option<(std::path::PathBuf, String)>,
     /// Navigator (CV-036): sticky fit — keep re-fitting the page on every
     /// window resize until toggled off.
     pub fit_sticky: bool,
@@ -423,6 +430,8 @@ pub struct App {
     /// User preferences (`prefs.txt` beside the exe — deliberately NOT
     /// `ui.txt`, which is the file people delete to fix a wrecked dock).
     pub prefs: Prefs,
+    /// Pattern Studio window state (`app/pattern.rs`). Session-only.
+    pub pattern: pattern::PatternStudio,
     /// The autosave interval changed: `main::pump_commands` re-arms the
     /// Win32 timer with this many ms (0 = kill it, autosave off). An App
     /// field rather than a direct `SetTimer` because this crate stays free
@@ -1132,6 +1141,7 @@ impl App {
             material_tone: false,
             material_size: MaterialPasteSize::default(),
             material_order: MaterialLayerOrder::default(),
+            material_tag_edit: None,
             fit_sticky: false,
             rulers: mn_core::Rulers::default(),
             ruler_pending: None,
@@ -1269,6 +1279,7 @@ impl App {
             recent_fonts: layout.recent_fonts.clone(),
             layout,
             prefs,
+            pattern: pattern::PatternStudio::default(),
             autosave_rearm: None,
             autosave_op_seen: 0,
             pointer_visible: false,
@@ -3274,8 +3285,8 @@ fn size_rung(cur: f32, up: bool) -> f32 {
 /// client px. `fitted_viewport` is this against the whole surface. `margin`
 /// is the `fit_margin` preference (see `fitted_viewport` for its history).
 fn fitted_viewport_in(doc: &Document, origin: [f32; 2], size: (f32, f32), margin: f32) -> Viewport {
-    let zoom = ((size.0 / doc.size.0 as f32).min(size.1 / doc.size.1 as f32) * margin)
-        .clamp(0.05, 8.0);
+    let zoom =
+        ((size.0 / doc.size.0 as f32).min(size.1 / doc.size.1 as f32) * margin).clamp(0.05, 8.0);
     Viewport {
         pan: [
             origin[0] + (size.0 - doc.size.0 as f32 * zoom) * 0.5,
@@ -3459,6 +3470,11 @@ mod eyedropper_tests;
 /// lettering is still lettering afterwards.
 #[cfg(test)]
 mod balloon_carries_text_tests;
+
+/// ROADMAP good-first-issue #1 — "Fit a balloon to its text": which text it
+/// pairs with, and the single undo step the reshape costs.
+#[cfg(test)]
+mod balloon_fit_tests;
 
 /// ROADMAP good-first-issue: LM-004's mask-stroke undo bracket — the
 /// snapshot has to predate the first dab, and undo/redo has to reach the

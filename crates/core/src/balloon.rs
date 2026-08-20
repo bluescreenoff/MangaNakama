@@ -171,7 +171,10 @@ impl BalloonTone {
             (0.25, 0.25),
         ] {
             let (fx, fy) = (p[0] + dx, p[1] + dy);
-            if self.pattern.on(fx * cs - fy * sn, fx * sn + fy * cs, ink, cell) {
+            if self
+                .pattern
+                .on(fx * cs - fy * sn, fx * sn + fy * cs, ink, cell)
+            {
                 n += 1;
             }
         }
@@ -455,7 +458,10 @@ impl Tail {
         let e = 0.5 / TAIL_STEPS as f32;
         let flank = |t: f32, side: f32| -> [f32; 2] {
             let c = self.center_at(t);
-            let d = sub(self.center_at((t + e).min(1.0)), self.center_at((t - e).max(0.0)));
+            let d = sub(
+                self.center_at((t + e).min(1.0)),
+                self.center_at((t - e).max(0.0)),
+            );
             let l = len(d).max(1e-6);
             let n = [-d[1] / l, d[0] / l];
             let w = hw * (1.0 - t).powf(taper) * side;
@@ -1511,6 +1517,269 @@ pub fn rotate_texts_in(
     moved
 }
 
+// --- fit a balloon to its lettering (ROADMAP good-first-issue #1) ----------
+
+/// Breathing room left around the lettering, in **ems of the text's own type
+/// size**. Proportional on purpose: a 9 pt bubble and a 24 pt shout want the
+/// same *optical* margin, not the same pixel count, and the em is the only
+/// number that tracks the type through a dpi change.
+pub const FIT_PAD_EM: f32 = 0.75;
+
+/// Minimum ratio between the balloon's long and short axis along the text's
+/// writing direction. Tategaki (vertical) lettering gets a bubble that is at
+/// least this much taller than it is wide, yokogaki one at least this much
+/// wider than tall — the printed manga convention, which a single short
+/// column or a one-word line would otherwise round off into a circle.
+/// Deliberately mild: for ordinary multi-line lettering the measured extent
+/// already exceeds it and this clamp does nothing.
+const FIT_ASPECT: f32 = 1.05;
+
+impl BalloonShape {
+    /// The centre a fit keeps FIXED. The polygon bbox pads symmetrically, so
+    /// the padding cancels here.
+    fn center(&self) -> [f32; 2] {
+        let r = self.bbox();
+        [(r[0] + r[2]) * 0.5, (r[1] + r[3]) * 0.5]
+    }
+
+    /// Widest/tallest the body's own anchors reach (no spline padding) —
+    /// the polygon fit's "how big am I now".
+    fn raw_extent(&self) -> [f32; 2] {
+        match self {
+            BalloonShape::Ellipse { radii, .. } => [radii[0] * 2.0, radii[1] * 2.0],
+            BalloonShape::RoundRect { rect, .. } => {
+                [(rect[2] - rect[0]).abs(), (rect[3] - rect[1]).abs()]
+            }
+            BalloonShape::Polygon { points, .. } => {
+                let mut r = [
+                    f32::INFINITY,
+                    f32::INFINITY,
+                    f32::NEG_INFINITY,
+                    f32::NEG_INFINITY,
+                ];
+                for p in points {
+                    r[0] = r[0].min(p[0]);
+                    r[1] = r[1].min(p[1]);
+                    r[2] = r[2].max(p[0]);
+                    r[3] = r[3].max(p[1]);
+                }
+                [(r[2] - r[0]).max(0.0), (r[3] - r[1]).max(0.0)]
+            }
+        }
+    }
+}
+
+impl Balloon {
+    /// Scale the BODY about `c` and drag every tail's **base** along with it,
+    /// leaving the tips and the tail widths alone.
+    ///
+    /// That split is the "tail tracks its balloon" rule
+    /// [`Balloon::apply_handle`] already keeps for a resize drag, written once
+    /// more here because a fit is a resize: the base has to stay welded to the
+    /// boundary or the tail floats off the bubble, and the tip must NOT move
+    /// because the speaker did not move just because the bubble did.
+    fn scale_body_about(&mut self, c: [f32; 2], sx: f32, sy: f32) {
+        let map = |p: &mut [f32; 2]| {
+            p[0] = c[0] + (p[0] - c[0]) * sx;
+            p[1] = c[1] + (p[1] - c[1]) * sy;
+        };
+        match &mut self.shape {
+            BalloonShape::Ellipse { center, radii } => {
+                map(center);
+                radii[0] = (radii[0] * sx).abs();
+                radii[1] = (radii[1] * sy).abs();
+            }
+            BalloonShape::RoundRect { rect, .. } => {
+                let mut a = [rect[0], rect[1]];
+                let mut b = [rect[2], rect[3]];
+                map(&mut a);
+                map(&mut b);
+                *rect = [
+                    a[0].min(b[0]),
+                    a[1].min(b[1]),
+                    a[0].max(b[0]),
+                    a[1].max(b[1]),
+                ];
+            }
+            BalloonShape::Polygon { points, .. } => {
+                for p in points.iter_mut() {
+                    map(p);
+                }
+            }
+        }
+        for t in &mut self.tails {
+            map(&mut t.base);
+        }
+    }
+
+    /// **Fit this bubble around `text`** — the ROADMAP's good-first-issue #1.
+    ///
+    /// `em_px` is the text's type size in canvas px (`mn_text::font_px`); the
+    /// margin is [`FIT_PAD_EM`] of it, so the padding is proportional to the
+    /// lettering rather than a constant that is fat at 9 pt and thin at 24.
+    ///
+    /// What is preserved, and why:
+    ///
+    /// * **The centre.** The bubble is sized about where it already sits — the
+    ///   artist placed it against the art, and a fit that teleported it onto
+    ///   the text's centre would move it off the speaker. Lettering that sits
+    ///   off-centre therefore grows the bubble on that side rather than
+    ///   sliding it, which is also what keeps the tail attached: with the
+    ///   centre fixed, the tails only have to follow the scale.
+    /// * **The tails.** Bases ride the body (see [`Self::scale_body_about`]),
+    ///   tips stay put, kinds/bends/widths untouched.
+    /// * **The style.** Nothing in [`BalloonInk`], `width_scale` or
+    ///   `border_px` is read or written here.
+    /// * **A hand-drawn shape.** A [`BalloonShape::Polygon`] is scaled
+    ///   UNIFORMLY (one factor, both axes) until the lettering fits inside its
+    ///   real outline — measured through the shape's own SDF, so a concave
+    ///   drawn bubble is honoured rather than approximated by its box. Its
+    ///   proportions and every anchor's pressure survive; it is never reset to
+    ///   an ellipse, and the writing-direction clamp below is deliberately NOT
+    ///   applied to it (that would restyle the drawing).
+    ///
+    /// Returns whether anything actually moved, so a caller can skip a no-op
+    /// undo step.
+    pub fn fit_to_text(&mut self, text: &crate::text::TextItem, em_px: f32) -> bool {
+        // The lettering's axis-aligned extent — the ROTATED corners, so a
+        // tilted text box is covered by what you can see of it, grown by the
+        // margin on every side.
+        let pad = (em_px.max(1.0) * FIT_PAD_EM).max(2.0);
+        let mut want = [
+            f32::INFINITY,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NEG_INFINITY,
+        ];
+        for p in text.corners() {
+            want[0] = want[0].min(p[0]);
+            want[1] = want[1].min(p[1]);
+            want[2] = want[2].max(p[0]);
+            want[3] = want[3].max(p[1]);
+        }
+        if !want.iter().all(|v| v.is_finite()) {
+            return false;
+        }
+        want = [want[0] - pad, want[1] - pad, want[2] + pad, want[3] + pad];
+
+        let before = self.clone();
+        let c = self.shape.center();
+        // Half-extents measured FROM the fixed centre: whichever side the
+        // lettering reaches further on decides. (No `abs()` — a box entirely
+        // to one side gives one negative term, and `max` is exactly right.)
+        let min_half = MIN_BALLOON_EXTENT * 0.5;
+        let hx = (c[0] - want[0]).max(want[2] - c[0]).max(min_half);
+        let hy = (c[1] - want[1]).max(want[3] - c[1]).max(min_half);
+
+        // Whichever body it is, the answer is a pair of scale factors about
+        // the fixed centre — so the tails follow through ONE path.
+        let (sx, sy) = match &self.shape {
+            BalloonShape::Ellipse { radii, .. } => {
+                // An axis-aligned ellipse contains a rectangle of half-extents
+                // (hx, hy) exactly when its radii are √2 × them — the minimal
+                // such ellipse, so the corners of the padded box graze the
+                // curve and nothing pokes out.
+                let sqrt2 = std::f32::consts::SQRT_2;
+                let (mut rx, mut ry) = (hx * sqrt2, hy * sqrt2);
+                if text.vertical {
+                    ry = ry.max(rx * FIT_ASPECT);
+                } else {
+                    rx = rx.max(ry * FIT_ASPECT);
+                }
+                (rx / radii[0].max(1e-3), ry / radii[1].max(1e-3))
+            }
+            BalloonShape::RoundRect { rect, .. } => {
+                // A rectangle holds a rectangle: no √2 here.
+                let (mut nx, mut ny) = (hx, hy);
+                if text.vertical {
+                    ny = ny.max(nx * FIT_ASPECT);
+                } else {
+                    nx = nx.max(ny * FIT_ASPECT);
+                }
+                let (ow, oh) = ((rect[2] - rect[0]).abs(), (rect[3] - rect[1]).abs());
+                (nx * 2.0 / ow.max(1e-3), ny * 2.0 / oh.max(1e-3))
+            }
+            BalloonShape::Polygon { .. } => {
+                let s = self.polygon_fit_scale(c, want);
+                (s, s)
+            }
+        };
+        self.scale_body_about(c, sx, sy);
+        *self != before
+    }
+
+    /// The single factor a drawn body must be scaled by, about `c`, for all
+    /// four corners of `want` to land inside its outline.
+    ///
+    /// Solved against the shape's own signed distance rather than its box: a
+    /// point `p` is inside the body scaled by `s` about `c` exactly when
+    /// `c + (p - c)/s` is inside the body as drawn, so one bracket-then-bisect
+    /// over `s` answers it for a concave spline too. Monotone for any body
+    /// that is star-shaped about its own centre, which every balloon a human
+    /// draws is; a pathological shape still terminates, just on a bound rather
+    /// than the true minimum.
+    fn polygon_fit_scale(&self, c: [f32; 2], want: [f32; 4]) -> f32 {
+        let corners = [
+            [want[0], want[1]],
+            [want[2], want[1]],
+            [want[2], want[3]],
+            [want[0], want[3]],
+        ];
+        let fits = |s: f32| {
+            let inv = 1.0 / s.max(1e-3);
+            corners.iter().all(|p| {
+                self.shape
+                    .sdf([c[0] + (p[0] - c[0]) * inv, c[1] + (p[1] - c[1]) * inv])
+                    <= 0.0
+            })
+        };
+        // Bracket: grow until it fits (a shape already big enough starts at 1).
+        let mut hi = 1.0f32;
+        for _ in 0..32 {
+            if fits(hi) {
+                break;
+            }
+            hi *= 1.5;
+        }
+        // …then squeeze from below: s → 0 collapses the body to a point, so
+        // 0 never fits and the bracket is valid.
+        let mut lo = 0.0f32;
+        for _ in 0..32 {
+            let mid = (lo + hi) * 0.5;
+            if fits(mid) {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        // Never shrink a drawn bubble below the degenerate floor.
+        let e = self.shape.raw_extent();
+        let floor = MIN_BALLOON_EXTENT / e[0].min(e[1]).max(1e-3);
+        hi.max(floor)
+    }
+}
+
+/// The lettering a balloon should be fitted around: the LAST (topmost) item in
+/// `texts` that belongs to `body`.
+///
+/// Pairing is geometry, not bookkeeping — there is no stored balloon→text link
+/// in this app and this does not invent one, exactly like
+/// [`rotate_texts_in`] and the Object tool's stack cycling. An item belongs
+/// when its centre is in the bubble (the ordinary case) or when any corner is
+/// (lettering that currently overflows a too-small bubble, which is the whole
+/// reason to press Fit).
+///
+/// The test is against the BODY, not [`Balloon::contains`]: a tail is somewhere
+/// a bubble points, not somewhere lettering goes, and an SFX sitting over the
+/// tail must not capture the fit.
+pub fn text_in(body: &Balloon, texts: &crate::text::TextSet) -> Option<usize> {
+    let inside = |p: [f32; 2]| body.shape.sdf(p) <= 0.0;
+    texts
+        .texts
+        .iter()
+        .rposition(|t| inside(t.center()) || t.corners().into_iter().any(inside))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2219,7 +2488,10 @@ mod tests {
                 }
             }
         }
-        assert!(inked > 10_000, "the scene actually drew something ({inked})");
+        assert!(
+            inked > 10_000,
+            "the scene actually drew something ({inked})"
+        );
 
         // The correct-width multiplier rides the same proof.
         let mut scaled = set.clone();
@@ -2270,7 +2542,11 @@ mod tests {
         );
         // Premultiplied: rgb never exceeds alpha.
         assert!(mid[0] <= mid[3] && mid[1] <= mid[3] && mid[2] <= mid[3]);
-        assert_eq!(px_of(&tiles, 128 + 70, 128)[3], one, "the outline is intact");
+        assert_eq!(
+            px_of(&tiles, 128 + 70, 128)[3],
+            one,
+            "the outline is intact"
+        );
 
         // Half-opaque LINE: the rim pixel that was fully opaque above goes
         // translucent, because out at the boundary there is almost no fill
@@ -2437,7 +2713,10 @@ mod tests {
             if n == 0 { f32::NAN } else { sum / n as f32 }
         };
         let (cs, cb) = (centroid(&straight, 180), centroid(&bent, 180));
-        assert!((cs - 128.0).abs() < 2.0, "the straight tail is centred: {cs}");
+        assert!(
+            (cs - 128.0).abs() < 2.0,
+            "the straight tail is centred: {cs}"
+        );
         // A POSITIVE bend goes left of base→tip. This tail points down the
         // page, and on a y-down canvas "left of down" is −x — so the bent
         // centroid must land at a SMALLER x, not a larger one.
@@ -2450,7 +2729,6 @@ mod tests {
 
         // The ends are pinned: base and tip do not move with the bend.
         assert!(px_of(&bent, 128, 228)[3] > 0, "the tip stays where it was");
-
     }
 
     /// The new fields survive a save/load and old JSON still lands on the
@@ -2636,11 +2914,17 @@ mod tests {
         assert_eq!(moved, vec![0], "only the lettering in the bubble turns");
 
         let t = &ts.texts[0];
-        assert!((t.rotation - quarter).abs() < 1e-4, "the item carries the angle");
+        assert!(
+            (t.rotation - quarter).abs() < 1e-4,
+            "the item carries the angle"
+        );
         // Centre was (100,100)+(0,0) → the pivot itself; a quarter turn about
         // the pivot leaves a centred box where it was.
         let c = t.center();
-        assert!((c[0] - 100.0).abs() < 1e-3 && (c[1] - 100.0).abs() < 1e-3, "{c:?}");
+        assert!(
+            (c[0] - 100.0).abs() < 1e-3 && (c[1] - 100.0).abs() < 1e-3,
+            "{c:?}"
+        );
         // STILL EDITABLE: nothing was flattened into pixels.
         assert_eq!(t.text, "オイ");
         assert_eq!(t.runs.len(), 1);
@@ -2666,7 +2950,10 @@ mod tests {
             1
         );
         let c2 = ts2.texts[0].center();
-        assert!((c2[0] - 100.0).abs() < 1e-3, "swung onto the pivot's column: {c2:?}");
+        assert!(
+            (c2[0] - 100.0).abs() < 1e-3,
+            "swung onto the pivot's column: {c2:?}"
+        );
         assert!(c2[1] < 100.0 - 40.0, "…and up above it: {c2:?}");
     }
 
@@ -2717,5 +3004,254 @@ mod tests {
         assert!(rotate_texts_in(&body, &mut ts, [100.0, 100.0], 0.0).is_empty());
         assert_eq!(ts.texts[0].pos, before.pos);
         assert_eq!(ts.texts[0].rotation, before.rotation);
+    }
+
+    // --- fit to text (ROADMAP good-first-issue #1) -------------------------
+
+    /// Lettering with a known box: `pos`/`size` are the layout box the fit
+    /// sizes against, and `em` is passed to `fit_to_text` explicitly so these
+    /// tests never need DirectWrite.
+    fn lettering(pos: [f32; 2], size: [f32; 2], vertical: bool) -> crate::text::TextItem {
+        let mut t = crate::text::TextItem::new(pos, "Gothic".into(), 9.0, [0, 0, 0], vertical);
+        t.text = "オイ".into();
+        t.size = size;
+        t.auto_size = false;
+        t
+    }
+
+    /// Every corner of the lettering, comfortably inside the body — the one
+    /// thing "fit" has to mean.
+    fn holds(b: &Balloon, t: &crate::text::TextItem) -> bool {
+        t.corners().into_iter().all(|p| b.shape.sdf(p) < 0.0)
+    }
+
+    const EM: f32 = 12.0; // ⇒ pad = 9 px
+
+    #[test]
+    fn fitting_a_balloon_grows_and_shrinks_to_the_text_plus_padding() {
+        // Text box (80,90)…(120,110): 40 × 20 centred on (100,100).
+        let t = lettering([80.0, 90.0], [40.0, 20.0], false);
+        let pad = EM * FIT_PAD_EM;
+        // Padded half-extents from the (fixed, coincident) centre.
+        let (hx, hy) = (20.0 + pad, 10.0 + pad);
+        let want = [
+            hx * std::f32::consts::SQRT_2,
+            hy * std::f32::consts::SQRT_2,
+        ];
+
+        // GROW: a bubble far too small for the lettering.
+        let mut small = ellipse(100.0, 100.0, 12.0, 12.0);
+        assert!(!holds(&small, &t), "the premise: it did not fit before");
+        assert!(small.fit_to_text(&t, EM));
+        let BalloonShape::Ellipse { center, radii } = &small.shape else {
+            panic!("still an ellipse");
+        };
+        assert_eq!(*center, [100.0, 100.0], "the artist's placement is kept");
+        assert!(
+            (radii[0] - want[0]).abs() < 1e-3 && (radii[1] - want[1]).abs() < 1e-3,
+            "sized to the padded box: {radii:?} wanted {want:?}"
+        );
+        assert!(holds(&small, &t), "…and the lettering is inside it now");
+
+        // SHRINK: a bubble far too big lands on exactly the same answer.
+        let mut big = ellipse(100.0, 100.0, 400.0, 300.0);
+        assert!(big.fit_to_text(&t, EM));
+        let BalloonShape::Ellipse { radii: r2, .. } = &big.shape else {
+            panic!("still an ellipse");
+        };
+        assert!(
+            (r2[0] - want[0]).abs() < 1e-3 && (r2[1] - want[1]).abs() < 1e-3,
+            "fit is absolute, not a nudge: {r2:?}"
+        );
+
+        // Padding is proportional to the TYPE, not a constant: doubling the em
+        // must leave a wider margin around the same box.
+        let mut a = ellipse(100.0, 100.0, 12.0, 12.0);
+        let mut b = ellipse(100.0, 100.0, 12.0, 12.0);
+        a.fit_to_text(&t, EM);
+        b.fit_to_text(&t, EM * 2.0);
+        let (BalloonShape::Ellipse { radii: ra, .. }, BalloonShape::Ellipse { radii: rb, .. }) =
+            (&a.shape, &b.shape)
+        else {
+            panic!("ellipses");
+        };
+        assert!(rb[0] > ra[0] && rb[1] > ra[1], "{ra:?} vs {rb:?}");
+    }
+
+    /// The manga convention: a 縦書き bubble is taller than it is wide.
+    #[test]
+    fn a_tategaki_balloon_fits_taller_than_wide() {
+        // A real column of vertical lettering: narrow and tall.
+        let column = lettering([90.0, 60.0], [20.0, 80.0], true);
+        let mut b = ellipse(100.0, 100.0, 40.0, 40.0);
+        assert!(b.fit_to_text(&column, EM));
+        let BalloonShape::Ellipse { radii, .. } = &b.shape else {
+            panic!("ellipse")
+        };
+        assert!(radii[1] > radii[0], "taller than wide: {radii:?}");
+        assert!(holds(&b, &column));
+
+        // …and even one lonely square glyph does not round off into a circle,
+        // because the writing direction, not just the measured box, decides.
+        let one = lettering([85.0, 85.0], [30.0, 30.0], true);
+        let mut c = ellipse(100.0, 100.0, 40.0, 40.0);
+        assert!(c.fit_to_text(&one, EM));
+        let BalloonShape::Ellipse { radii: rv, .. } = &c.shape else {
+            panic!("ellipse")
+        };
+        assert!(rv[1] > rv[0], "vertical stays tall: {rv:?}");
+
+        // The same square box set HORIZONTALLY comes out the other way round.
+        let mut d = ellipse(100.0, 100.0, 40.0, 40.0);
+        assert!(d.fit_to_text(&lettering([85.0, 85.0], [30.0, 30.0], false), EM));
+        let BalloonShape::Ellipse { radii: rh, .. } = &d.shape else {
+            panic!("ellipse")
+        };
+        assert!(rh[0] > rh[1], "horizontal comes out wide: {rh:?}");
+    }
+
+    /// A hand-edited outline is SCALED, never replaced: the drawing's
+    /// proportions, its anchors and their pressures all survive.
+    #[test]
+    fn fitting_a_drawn_balloon_keeps_its_shape_ratio() {
+        // A 2:1 drawn blob, deliberately not a rectangle.
+        let mut b = Balloon {
+            shape: BalloonShape::Polygon {
+                points: vec![
+                    [0.0, 50.0],
+                    [40.0, 0.0],
+                    [160.0, 0.0],
+                    [200.0, 50.0],
+                    [160.0, 100.0],
+                    [40.0, 100.0],
+                ],
+                widths: vec![0.3, 0.5, 0.9, 0.5, 0.7, 0.4],
+                corners: vec![false, true, false, false, true, false],
+            },
+            ..Default::default()
+        };
+        let before = b.shape.raw_extent();
+        let ratio = before[0] / before[1];
+        let was = b.shape.clone();
+
+        // Lettering centred on the blob's centre (100, 50) but too big for it.
+        let t = lettering([10.0, 10.0], [180.0, 80.0], false);
+        assert!(!holds(&b, &t), "the premise: it did not fit before");
+        assert!(b.fit_to_text(&t, EM));
+
+        let BalloonShape::Polygon {
+            points,
+            widths,
+            corners,
+        } = &b.shape
+        else {
+            panic!("a drawn bubble is never reset to an ellipse");
+        };
+        assert_eq!(points.len(), 6, "the anchors are still the artist's");
+        assert_eq!(
+            widths.as_slice(),
+            [0.3, 0.5, 0.9, 0.5, 0.7, 0.4],
+            "pen pressures kept"
+        );
+        assert_eq!(
+            corners.as_slice(),
+            [false, true, false, false, true, false],
+            "corner flags kept"
+        );
+        let after = b.shape.raw_extent();
+        assert!(
+            (after[0] / after[1] - ratio).abs() < 1e-3,
+            "uniform scale — the hand-drawn proportions survive: {before:?} → {after:?}"
+        );
+        assert!(after[0] > before[0], "and it actually grew: {after:?}");
+        assert!(holds(&b, &t), "…around the lettering");
+        assert_ne!(&b.shape, &was);
+    }
+
+    /// A fit is a resize, so it obeys the resize rule: the tail's base rides
+    /// the body, its tip stays where the speaker is.
+    #[test]
+    fn a_fitted_balloon_keeps_its_tail_and_its_style() {
+        let mut b = ellipse(100.0, 100.0, 60.0, 40.0);
+        b.tails.push(Tail {
+            base: [160.0, 100.0], // on the right edge of the body
+            tip: [300.0, 260.0],  // out at the speaker
+            width: 20.0,
+            kind: TailKind::Thought,
+            bend: 0.25,
+        });
+        b.line_color = [10, 20, 30];
+        b.fill_opacity = 0.4;
+        b.width_scale = 2.0;
+        let style = b.ink();
+
+        let t = lettering([80.0, 90.0], [40.0, 20.0], false);
+        assert!(b.fit_to_text(&t, EM));
+
+        assert_eq!(b.tails.len(), 1, "the tail survived the fit");
+        let tail = b.tails[0];
+        assert_eq!(tail.tip, [300.0, 260.0], "the speaker did not move");
+        assert_eq!(tail.width, 20.0);
+        assert_eq!(tail.kind, TailKind::Thought);
+        assert_eq!(tail.bend, 0.25);
+        assert!(
+            b.shape.sdf(tail.base).abs() < 1.0,
+            "the base is still welded to the boundary: {:?}",
+            tail.base
+        );
+        assert_eq!(b.ink(), style, "the style is not a fit's business");
+        assert_eq!(b.width_scale, 2.0);
+    }
+
+    /// Off-centre lettering GROWS the bubble; it never slides it.
+    #[test]
+    fn fitting_never_teleports_the_balloon_off_its_art() {
+        let mut b = ellipse(100.0, 100.0, 20.0, 20.0);
+        // Text sitting well to the right of the bubble's centre.
+        let t = lettering([140.0, 90.0], [40.0, 20.0], false);
+        assert!(b.fit_to_text(&t, EM));
+        let BalloonShape::Ellipse { center, .. } = &b.shape else {
+            panic!("ellipse")
+        };
+        assert_eq!(*center, [100.0, 100.0], "the bubble stayed where it was put");
+        assert!(holds(&b, &t), "and it reached out to hold the lettering");
+    }
+
+    /// The pairing rule: geometry, topmost wins, and the tail is not a place
+    /// lettering lives.
+    #[test]
+    fn text_in_picks_the_topmost_item_inside_the_body() {
+        use crate::text::TextSet;
+        let mut b = ellipse(100.0, 100.0, 60.0, 40.0);
+        b.tails.push(Tail {
+            base: [100.0, 130.0],
+            tip: [100.0, 400.0],
+            width: 30.0,
+            ..Default::default()
+        });
+        let ts = TextSet {
+            texts: vec![
+                lettering([80.0, 90.0], [40.0, 20.0], false), // 0: inside
+                lettering([700.0, 700.0], [40.0, 20.0], false), // 1: far away
+                lettering([85.0, 95.0], [30.0, 10.0], false), // 2: inside, on top
+                lettering([85.0, 330.0], [30.0, 10.0], false), // 3: over the TAIL
+            ],
+        };
+        assert_eq!(text_in(&b, &ts), Some(2), "the topmost hit wins");
+
+        // Lettering that OVERFLOWS a too-small bubble is still its lettering —
+        // that is the whole reason to press Fit.
+        let small = ellipse(100.0, 100.0, 9.0, 9.0);
+        let over = TextSet {
+            texts: vec![lettering([20.0, 60.0], [160.0, 80.0], false)],
+        };
+        assert_eq!(text_in(&small, &over), Some(0));
+
+        // …but an empty page pairs with nothing.
+        assert_eq!(
+            text_in(&b, &TextSet { texts: Vec::new() }),
+            None,
+            "nothing to fit around"
+        );
     }
 }

@@ -230,6 +230,20 @@ pub(crate) fn sec_obj_balloon(ui: &mut egui::Ui, app: &mut App) {
         }
     }
 
+    // ROADMAP good-first-issue #1: size the bubble around the lettering that
+    // is already in it. One press, one undo step — it commits through the
+    // same `BalloonCommit` as every row above.
+    if ui
+        .button("Fit to text")
+        .on_hover_text(
+            "resize the bubble around the lettering inside it; the tail, the style and a \
+             hand-drawn outline's own shape are kept",
+        )
+        .clicked()
+    {
+        app.fit_balloon_to_text(li, bi);
+    }
+
     let anchors = bs.balloons.get(bi).map(|b| match &b.shape {
         mn_core::BalloonShape::Polygon { points, .. } => points.len(),
         _ => 0,

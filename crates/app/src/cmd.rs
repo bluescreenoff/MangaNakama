@@ -660,6 +660,15 @@ pub enum RulerKind {
     /// ends become the horizon VPs of a 2-point set; strokes bind by
     /// direction to rays through either VP or the verticals.
     Perspective,
+    /// One-point: drag FROM the vanishing point along the eye level — the
+    /// press is the VP, the release the horizon handle (which tilts the
+    /// horizontals and verticals when dragged later).
+    Perspective1,
+    /// Three-point: the same eye-level drag as the 2-point set, plus a
+    /// third (vertical) VP placed off the horizon on the side the drag
+    /// points to — left→right puts it below (high angle), right→left above
+    /// (low angle). It is anchor 2, so the Object tool drags it home.
+    Perspective3,
     /// Part 3 (RL-020): a click places a full-canvas horizontal/vertical
     /// guide at the clicked coordinate.
     GuideH,
@@ -1137,6 +1146,12 @@ pub enum AppCmd {
     Redo,
     /// Open the New Comic dialog (an egui window, not a native dialog).
     NewDoc,
+    /// One-gesture tiling-pattern authoring: a square wrap-on canvas in a
+    /// new tab + the Pattern Studio window (`app/pattern.rs`).
+    NewPattern,
+    /// Save the pattern canvas into the material bank under the studio's
+    /// name.
+    PatternSaveMaterial,
     /// Create from `App::new_doc_draft`.
     NewComicCreate,
     // --- pages --------------------------------------------------------------
@@ -1696,6 +1711,13 @@ pub enum AppCmd {
     MaterialAddFolder(std::path::PathBuf),
     /// Rescan every material folder.
     MaterialRescan,
+    /// MT-012: set one material's tags (comma separated, `""` clears them).
+    /// Writes the folder's `tags.txt` sidecar and refreshes the bank in
+    /// place — no rescan, no restart.
+    MaterialSetTags {
+        path: std::path::PathBuf,
+        tags: String,
+    },
     // --- transform (Edit ▸ Transform: scale/rotate, Enter commits) ---------
     /// Begin a transform: lift the selection (or whole layer content) into a
     /// live floating source with a bounding box overlay.
@@ -2085,7 +2107,9 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             if app.comp_save(i)
                 && let Some(n) = name
             {
-                app.set_status(format!("layer comp \"{n}\" overwritten with current visibility"));
+                app.set_status(format!(
+                    "layer comp \"{n}\" overwritten with current visibility"
+                ));
             } else {
                 app.set_status("no comp at that row to overwrite");
             }
@@ -2244,6 +2268,18 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             app.new_doc_open = true;
             app.mark_dirty();
         }
+        AppCmd::NewPattern => app.pattern_new(),
+        AppCmd::PatternSaveMaterial => match app.pattern_save_material() {
+            Some((path, stem)) => {
+                app.set_status(format!(
+                    "pattern \"{stem}\" saved to the material bank ({})",
+                    path.display()
+                ));
+            }
+            None => {
+                app.set_error("pattern save failed: the tile is empty or the folder is unwritable")
+            }
+        },
         AppCmd::NewComicCreate => {
             app.commit_text_edit();
             // A new project opens in a NEW TAB (owner, 2026-08-19: "it would
@@ -2674,8 +2710,7 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                                         half,
                                         d.paper_export_background(),
                                     );
-                                    let path =
-                                        dir.join(format!("{prefix}-p{:03}{tag}.png", i + 1));
+                                    let path = dir.join(format!("{prefix}-p{:03}{tag}.png", i + 1));
                                     if img.save(&path).is_ok() {
                                         files += 1;
                                     }
@@ -3221,7 +3256,11 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                     app.renderer.invalidate();
                     app.layer_thumbs.clear();
                     app.renumber_frames();
-                    let what = if dup { "with a copy of its art" } else { "empty" };
+                    let what = if dup {
+                        "with a copy of its art"
+                    } else {
+                        "empty"
+                    };
                     app.set_status(format!(
                         "divided into a new frame folder, {what} ({cuts} cut(s))"
                     ));
@@ -3484,9 +3523,7 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 Some((l, f)) if l == li && f < fs.frames.len() => f,
                 _ if fs.frames.len() == 1 => 0,
                 _ => {
-                    app.set_status(
-                        "pick the panel to divide with the Object tool first",
-                    );
+                    app.set_status("pick the panel to divide with the Object tool first");
                     return;
                 }
             };
@@ -3776,7 +3813,8 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                         }
                     }
                     d.refresh_derived(dpi);
-                    let img = mn_core::export::composite_for_export(&d, d.paper_export_background());
+                    let img =
+                        mn_core::export::composite_for_export(&d, d.paper_export_background());
                     if img
                         .save(sub.join(format!("{stem}-p{:03}.png", i + 1)))
                         .is_ok()
@@ -4010,6 +4048,25 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
         AppCmd::MaterialRescan => {
             app.materials_scan();
             app.set_status(format!("rescanned — {} materials", app.materials.len()));
+        }
+        AppCmd::MaterialSetTags { path, tags } => {
+            let name = path
+                .file_stem()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if !app.material_set_tags(&path, &tags) {
+                app.set_status(format!(
+                    "could not write {} beside {name} — is the folder read-only?",
+                    crate::app::materials::TAGS_FILE
+                ));
+                return;
+            }
+            let now = tags.trim();
+            app.set_status(if now.is_empty() {
+                format!("cleared \"{name}\"'s tags")
+            } else {
+                format!("tagged \"{name}\": {now}")
+            });
         }
         AppCmd::TransformStart => {
             let l = app.doc.active_layer();
@@ -4350,9 +4407,7 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                         .doc_path
                         .as_ref()
                         .map(|p| crate::recovery::sibling_autosave(p))
-                        .unwrap_or_else(|| {
-                            crate::app::unsaved_autosave_path_for(app.active_doc)
-                        });
+                        .unwrap_or_else(|| crate::app::unsaved_autosave_path_for(app.active_doc));
                     match mn_core::project::save(&proj, &path) {
                         Ok(()) => app.set_status(format!("autosaved -> {}", path.display())),
                         Err(e) => app.set_error(format!("autosave failed: {e}")),
@@ -4520,6 +4575,12 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 RulerKind::VanishingPoint => "drag from the vanishing point to set its first ray",
                 RulerKind::Perspective => {
                     "drag the eye level — both ends become vanishing points; strokes aim at either VP or run vertical"
+                }
+                RulerKind::Perspective1 => {
+                    "drag from the vanishing point along the eye level; strokes aim at it, or run along/across the horizon"
+                }
+                RulerKind::Perspective3 => {
+                    "drag the eye level — a third vanishing point lands on the side you dragged toward; drag it where you want it"
                 }
                 RulerKind::Curve => "click the curve's corners — double-click (or Enter) to finish",
                 RulerKind::Parallel => "drag the direction — every stroke comes out parallel to it",
@@ -5609,7 +5670,6 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             }
         }
 
-
         // --- paper (PA-001) -------------------------------------------------
         AppCmd::PaperToggle => {
             let on = !app.doc.paper.visible;
@@ -5625,7 +5685,9 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
         AppCmd::SetPaperColour(c) => {
             if app.doc.set_paper_colour(c) {
                 let [r, g, b] = c;
-                app.set_status(format!("paper #{r:02x}{g:02x}{b:02x} — the page exports on it"));
+                app.set_status(format!(
+                    "paper #{r:02x}{g:02x}{b:02x} — the page exports on it"
+                ));
                 app.mark_dirty();
             }
         }

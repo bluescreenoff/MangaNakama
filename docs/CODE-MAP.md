@@ -117,6 +117,13 @@ The recurring failure shapes, in order of how often they have shipped:
   rebuild frame. This is NOT a regression; agreement tests auto-verify
   on WARP, and the dab path has a canary counter + CPU-replay repair.
   Do not "fix" mysterious single-draw losses by restructuring draws.
+- Windows-10-era WARP (driver 10.0.19041.x) LOSES THE DEVICE executing
+  the blend2 shader pass — `MN_WARP=1` cannot test the shader blend
+  modes on such machines (fixed-function modes work; CI's newer WARP
+  runs everything). A lost device hands back invalid resources with no
+  error of its own: the symptom is "buffer is invalid" far downstream.
+  The device-lost callback now names it — believe that line, don't
+  chase the buffer.
 - Explicit bind-group layouts are REQUIRED for compute — auto-derived
   layouts produce silent no-op dispatches. Rust and WGSL structs must
   agree to the byte (padding included).
@@ -161,6 +168,15 @@ The recurring failure shapes, in order of how often they have shipped:
   mode-independent or persist its context with it (a bare index whose
   meaning depends on session-only state restores wrong). When a key
   changes meaning, RENAME it so stale values are ignored, not misread.
+- Material TAGS live in a per-folder `tags.txt` sidecar
+  (`app/materials.rs`, `MaterialTags`), not in `ui.txt` — the tags belong
+  to the folder, so copying a material folder copies them and a rescan
+  re-reads them. It is a shipped format: `<file name>=<comma, separated,
+  tags>`, and BOTH kinds of unknown content survive a rewrite — a line
+  this build cannot read, and an entry naming a file not in the folder
+  right now (the owner's own tags must outlive a rescan or an unmounted
+  drive). Clearing the last tag deletes the file, so "cleared" and "never
+  tagged" are the same folder on disk.
 
 ## Tests and process
 

@@ -881,6 +881,74 @@ impl App {
         }
     }
 
+    /// ROADMAP good-first-issue #1 — **fit a balloon to its text**.
+    ///
+    /// Which text? The same geometric pairing the rest of the app uses: there
+    /// is no stored balloon→text link (see `carry_texts_with_balloon` above)
+    /// and this does not invent one. Every VISIBLE text layer is walked bottom
+    /// to top and the last hit wins, so "topmost" means the same thing here as
+    /// it does to a click. A hidden layer is not a candidate — you cannot see
+    /// what it would size the bubble against.
+    ///
+    /// A LOCKED text layer still counts: the fit reads the lettering and
+    /// writes only the balloon, so nothing locked is edited.
+    ///
+    /// The reshape goes out as one `BalloonCommit`, which is the single
+    /// `set_balloons` step every other Tool Property balloon edit records —
+    /// one press, one undo.
+    pub(crate) fn fit_balloon_to_text(&mut self, layer: usize, balloon: usize) {
+        let Some(bs) = self
+            .doc
+            .layers
+            .get(layer)
+            .and_then(|l| l.balloons())
+            .cloned()
+        else {
+            return;
+        };
+        let Some(body) = bs.balloons.get(balloon) else {
+            return;
+        };
+        let mut found: Option<(usize, usize)> = None;
+        for li in 0..self.doc.layers.len() {
+            let Some(l) = self.doc.layers.get(li) else {
+                continue;
+            };
+            if !l.visible {
+                continue;
+            }
+            let Some(ts) = l.texts() else { continue };
+            if let Some(i) = mn_core::balloon::text_in(body, ts) {
+                found = Some((li, i));
+            }
+        }
+        let Some((li, ti)) = found else {
+            self.set_status("no lettering in this balloon — type the text into it first");
+            return;
+        };
+
+        let dpi = self.doc_dpi();
+        let mut bs2 = bs.clone();
+        let changed = self
+            .doc
+            .layers
+            .get(li)
+            .and_then(|l| l.texts())
+            .and_then(|ts| ts.texts.get(ti))
+            .is_some_and(|item| {
+                bs2.balloons[balloon].fit_to_text(item, mn_text::font_px(item, dpi))
+            });
+        if !changed {
+            self.set_status("the balloon already fits its lettering");
+            return;
+        }
+        self.push_cmd(AppCmd::BalloonCommit {
+            layer,
+            balloons: bs2,
+        });
+        self.set_status("balloon fitted to its lettering — the tail came with it");
+    }
+
     // --- figure + gradient (round 24) ----------------------------------------
 
     /// The closed path of the current figure shape, canvas px.
@@ -1792,14 +1860,44 @@ impl App {
                     angle0: (b[1] - a[1]).atan2(b[0] - a[0]),
                 },
                 // Part 4: the drag IS the eye level — its two ends become
-                // the horizon VPs (2-point set; 1/3-point variants are
-                // the recorded follow-up).
+                // the horizon VPs.
                 RulerKind::Perspective => {
                     if (b[0] - a[0]).abs() + (b[1] - a[1]).abs() < 32.0 {
                         self.set_status("drag the horizon — both ends become vanishing points");
                         return;
                     }
                     mn_core::Ruler::Perspective { a, b }
+                }
+                // One-point: the drag STARTS at the single vanishing point
+                // and runs along the eye level, so the same gesture places
+                // the VP and sets the horizon's tilt.
+                RulerKind::Perspective1 => {
+                    if (b[0] - a[0]).abs() + (b[1] - a[1]).abs() < 32.0 {
+                        self.set_status("drag from the vanishing point along the eye level");
+                        return;
+                    }
+                    mn_core::Ruler::Perspective1 { vp: a, h: b }
+                }
+                // Three-point: the 2-point gesture plus a third VP dropped
+                // on the perpendicular through the horizon's middle, on
+                // the side the drag pointed to (left→right = below the
+                // horizon, a high angle). It is an anchor, so the Object
+                // tool drags it to where the shot actually wants it.
+                RulerKind::Perspective3 => {
+                    let d = [b[0] - a[0], b[1] - a[1]];
+                    let n = (d[0] * d[0] + d[1] * d[1]).sqrt();
+                    if n < 32.0 {
+                        self.set_status("drag the horizon — both ends become vanishing points");
+                        return;
+                    }
+                    let perp = [-d[1] / n, d[0] / n];
+                    let mid = [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5];
+                    let reach = n * 0.75;
+                    mn_core::Ruler::Perspective3 {
+                        a,
+                        b,
+                        z: [mid[0] + perp[0] * reach, mid[1] + perp[1] * reach],
+                    }
                 }
                 // Curve creation never reaches the drag path (it collects
                 // clicks in canvas_down); reaching here means a stray
@@ -1983,11 +2081,7 @@ impl App {
                                 let abx = b[0] - a[0];
                                 let aby = b[1] - a[1];
                                 let len2 = abx * abx + aby * aby;
-                                let t_eps = if len2 > 1e-6 {
-                                    1.5 / len2.sqrt()
-                                } else {
-                                    0.0
-                                };
+                                let t_eps = if len2 > 1e-6 { 1.5 / len2.sqrt() } else { 0.0 };
                                 let on_seg_t = |p: [f32; 2]| -> Option<f32> {
                                     if len2 < 1e-6 {
                                         return None;
@@ -2089,14 +2183,9 @@ impl App {
                                     self.doc.set_op_label("Move panel");
                                     self.doc.layers[k].translate_content(dx, dy);
                                     self.doc.end_op();
-                                    let rev1 =
-                                        self.doc.layers[k].mask.as_ref().map(|m| m.revision);
+                                    let rev1 = self.doc.layers[k].mask.as_ref().map(|m| m.revision);
                                     if rev1 != rev0 {
-                                        self.doc.record_mask_change(
-                                            k,
-                                            mask_before,
-                                            "Move panel",
-                                        );
+                                        self.doc.record_mask_change(k, mask_before, "Move panel");
                                     }
                                 }
                             }

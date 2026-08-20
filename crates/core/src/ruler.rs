@@ -51,6 +51,23 @@ pub enum Ruler {
     /// cannot express this variant: `snap_pt` declines, and only the
     /// sticky pipeline (`snap_sticky` + [`SnapLock`]) serves it.
     Perspective { a: [f32; 2], b: [f32; 2] },
+    /// A ONE-POINT perspective set: `vp` is the single vanishing point and
+    /// the eye level runs through it toward `h` — a bare horizon HANDLE,
+    /// not a second VP. Three families, the trio 1-pt is drawn with:
+    /// orthogonals (rays through `vp`), horizontals (parallel to the eye
+    /// level) and verticals (perpendicular to it). A continuum like
+    /// [`Ruler::Perspective`], so again only `snap_sticky` serves it.
+    Perspective1 { vp: [f32; 2], h: [f32; 2] },
+    /// A THREE-POINT perspective set: `a`/`b` are the horizon VPs (the eye
+    /// level is the line through them) and `z` is the vertical VP above or
+    /// below it. All three families are ray fans — a 3-pt set has no
+    /// parallel family at all, which is exactly what makes its verticals
+    /// converge.
+    Perspective3 {
+        a: [f32; 2],
+        b: [f32; 2],
+        z: [f32; 2],
+    },
 }
 
 impl Ruler {
@@ -107,7 +124,9 @@ impl Ruler {
                 (q, d2(q, p))
             }
             Ruler::Symmetric { .. } => (p, f32::INFINITY),
-            Ruler::Perspective { .. } => (p, f32::INFINITY),
+            Ruler::Perspective { .. } | Ruler::Perspective1 { .. } | Ruler::Perspective3 { .. } => {
+                (p, f32::INFINITY)
+            }
         }
     }
 }
@@ -134,6 +153,11 @@ impl Ruler {
             Ruler::Line { a, b } | Ruler::Parallel { a, b } | Ruler::Perspective { a, b } => {
                 vec![a, b]
             }
+            // The 1-pt set's second anchor is the horizon handle: dragging
+            // it TILTS the eye level (and with it the horizontals and
+            // verticals) without moving the vanishing point.
+            Ruler::Perspective1 { vp, h } => vec![vp, h],
+            Ruler::Perspective3 { a, b, z } => vec![a, b, z],
             Ruler::VanishingPoint { c, .. }
             | Ruler::Concentric { c, .. }
             | Ruler::Symmetric { c, .. } => vec![c],
@@ -151,13 +175,20 @@ impl Ruler {
             p[1] += d[1];
         }
         match self {
-            Ruler::Line { a, b } | Ruler::Parallel { a, b } | Ruler::Perspective { a, b } => {
-                match i {
-                    0 => shift(a, d),
-                    1 => shift(b, d),
-                    _ => {}
-                }
-            }
+            Ruler::Line { a, b }
+            | Ruler::Parallel { a, b }
+            | Ruler::Perspective { a, b }
+            | Ruler::Perspective1 { vp: a, h: b } => match i {
+                0 => shift(a, d),
+                1 => shift(b, d),
+                _ => {}
+            },
+            Ruler::Perspective3 { a, b, z } => match i {
+                0 => shift(a, d),
+                1 => shift(b, d),
+                2 => shift(z, d),
+                _ => {}
+            },
             Ruler::VanishingPoint { c, .. }
             | Ruler::Concentric { c, .. }
             | Ruler::Symmetric { c, .. } => {
@@ -201,8 +232,15 @@ impl Ruler {
                 }
                 best
             }
-            Ruler::Perspective { a, b } => {
+            // Every perspective set is grabbed by its EYE LEVEL. The 3-pt
+            // set's vertical VP is an ANCHOR, which the hit test tries
+            // first — so it stays grabbable without widening the body.
+            Ruler::Perspective { a, b } | Ruler::Perspective3 { a, b, .. } => {
                 let q = project(p, a, [b[0] - a[0], b[1] - a[1]]);
+                d2(q, p)
+            }
+            Ruler::Perspective1 { vp, h } => {
+                let q = project(p, vp, [h[0] - vp[0], h[1] - vp[1]]);
                 d2(q, p)
             }
             _ => self.snap_pt(p).1,
@@ -220,6 +258,97 @@ impl Ruler {
             }
         }
         (self.dist2(p) <= t2).then_some(RulerGrab::Body)
+    }
+}
+
+/// The perspective family set (the continuum kinds: 1-, 2- and 3-point).
+/// They share one binding rule — the stroke's early direction picks a
+/// family, the member through the anchor is then fixed for the stroke —
+/// so the difference between them is only WHICH families exist.
+impl Ruler {
+    /// Is this one of the perspective sets? (They decline `snap_pt` and
+    /// are served by [`Rulers::snap_sticky`] alone.)
+    pub fn is_perspective(&self) -> bool {
+        matches!(
+            self,
+            Ruler::Perspective { .. } | Ruler::Perspective1 { .. } | Ruler::Perspective3 { .. }
+        )
+    }
+
+    /// The candidate families at anchor `p0`, each a member line
+    /// `(origin, unit direction)`. Order IS the tie-break order (earlier
+    /// wins ties) and the list is never empty for a perspective set: a
+    /// pen sitting exactly ON a vanishing point drops that VP's ray (every
+    /// ray passes through it, so it carries no direction) and the
+    /// remaining families arbitrate. Non-perspective kinds get nothing.
+    fn persp_families(&self, p0: [f32; 2]) -> Vec<([f32; 2], [f32; 2])> {
+        // The ray through `vp` and the anchor; None when they coincide.
+        fn ray(vp: [f32; 2], p0: [f32; 2]) -> Option<([f32; 2], [f32; 2])> {
+            let d = [p0[0] - vp[0], p0[1] - vp[1]];
+            let n = (d[0] * d[0] + d[1] * d[1]).sqrt();
+            (n >= 1e-3).then(|| (vp, [d[0] / n, d[1] / n]))
+        }
+        // Unit direction of the eye level through `a`→`b`; a degenerate
+        // eye level (a == b) falls back to canvas-horizontal, so its
+        // perpendicular is canvas-up as before.
+        fn eye(a: [f32; 2], b: [f32; 2]) -> [f32; 2] {
+            let d = [b[0] - a[0], b[1] - a[1]];
+            let n = (d[0] * d[0] + d[1] * d[1]).sqrt();
+            if n < 1e-3 {
+                [1.0, 0.0]
+            } else {
+                [d[0] / n, d[1] / n]
+            }
+        }
+        let perp = |u: [f32; 2]| [-u[1], u[0]];
+        match *self {
+            // 1-pt: orthogonals to the VP, then the eye-level parallels,
+            // then the verticals. Both non-ray families run through the
+            // anchor — they are parallel families, not fans.
+            Ruler::Perspective1 { vp, h } => {
+                let u = eye(vp, h);
+                ray(vp, p0)
+                    .into_iter()
+                    .chain([(p0, u), (p0, perp(u))])
+                    .collect()
+            }
+            // 2-pt: the two horizon fans, then the verticals — which are
+            // perpendicular TO THE EYE LEVEL, not to the canvas.
+            Ruler::Perspective { a, b } => [ray(a, p0), ray(b, p0)]
+                .into_iter()
+                .flatten()
+                .chain([(p0, perp(eye(a, b)))])
+                .collect(),
+            // 3-pt: three fans and nothing else.
+            Ruler::Perspective3 { a, b, z } => {
+                let fams: Vec<_> = [ray(a, p0), ray(b, p0), ray(z, p0)]
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                if fams.is_empty() {
+                    vec![(p0, perp(eye(a, b)))]
+                } else {
+                    fams
+                }
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Bind a stroke travelling in unit direction `nd` from anchor `p0` to
+    /// one family: the best |cos| wins (a ray and its opposite are the
+    /// same line, so the sign of the travel does not matter).
+    fn persp_bind(&self, p0: [f32; 2], nd: [f32; 2]) -> Option<([f32; 2], [f32; 2])> {
+        let mut best = -1.0;
+        let mut line = None;
+        for (o, d) in self.persp_families(p0) {
+            let dot = (nd[0] * d[0] + nd[1] * d[1]).abs();
+            if dot > best {
+                best = dot;
+                line = Some((o, d));
+            }
+        }
+        line
     }
 }
 
@@ -275,7 +404,8 @@ impl Rulers {
     /// family additionally needs `special_on`.
     fn governed(&self, r: &Ruler) -> bool {
         match r {
-            Ruler::Line { .. } | Ruler::VanishingPoint { .. } | Ruler::Perspective { .. } => true,
+            Ruler::Line { .. } | Ruler::VanishingPoint { .. } => true,
+            r if r.is_perspective() => true,
             _ => self.special_on,
         }
     }
@@ -840,7 +970,7 @@ impl Rulers {
         let persp = self
             .items
             .iter()
-            .position(|r| matches!(r, Ruler::Perspective { .. }) && self.governed(r));
+            .position(|r| r.is_perspective() && self.governed(r));
         if let Some(pi) = persp {
             if best_d2 > PERSP_CAPTURE_D2 {
                 let Some(p0) = lock.anchor else {
@@ -853,39 +983,13 @@ impl Rulers {
                     return p;
                 }
                 let nd = [dx / travel, dy / travel];
-                let Ruler::Perspective { a, b } = self.items[pi] else {
-                    unreachable!("position() found a Perspective");
-                };
-                // The third family is perpendicular TO THE EYE LEVEL, not
-                // to the canvas — a tilted horizon tilts its verticals with
-                // it. Degenerate a == b has no eye level: canvas-up.
-                let ed = [b[0] - a[0], b[1] - a[1]];
-                let en = (ed[0] * ed[0] + ed[1] * ed[1]).sqrt();
-                let vert = if en < 1e-3 {
-                    [0.0, 1.0]
-                } else {
-                    [-ed[1] / en, ed[0] / en]
-                };
                 // Best |cos| between the stroke's direction and each
-                // family's direction at the anchor; the verticals are
-                // always a candidate.
-                let mut best_dot = -1.0;
-                let mut line = (p0, vert);
-                for vp in [a, b] {
-                    let vd = [p0[0] - vp[0], p0[1] - vp[1]];
-                    let vn = (vd[0] * vd[0] + vd[1] * vd[1]).sqrt();
-                    if vn < 1e-3 {
-                        continue; // pen starts ON the VP — every ray; vertical wins by default
-                    }
-                    let dot = (nd[0] * vd[0] + nd[1] * vd[1]) / vn;
-                    if dot.abs() > best_dot {
-                        best_dot = dot.abs();
-                        line = (vp, [vd[0] / vn, vd[1] / vn]);
-                    }
-                }
-                if (nd[0] * vert[0] + nd[1] * vert[1]).abs() > best_dot {
-                    line = (p0, vert);
-                }
+                // family's direction at the anchor — which families exist
+                // is the set's own business (1-pt adds the eye-level
+                // parallels, 3-pt drops the verticals for a third fan).
+                let Some(line) = self.items[pi].persp_bind(p0, nd) else {
+                    return p; // unreachable: a perspective set always has families
+                };
                 lock.ruler = Some(pi);
                 lock.line = Some(line);
                 return project(p, line.0, line.1);
@@ -1309,5 +1413,277 @@ mod part3_tests {
         // Fresh stroke toward b now binds b's ray.
         let b = stroke(&rs, &[[100.0, 300.0], [160.0, 292.0]]);
         assert!(on_line(b[1], [700.0, 100.0], [-600.0, 200.0]));
+    }
+
+    /// ROADMAP good-first-issue #2, 1-point: ONE vanishing point plus the
+    /// two parallel families every 1-pt drawing is made of — orthogonals
+    /// converging on the VP, horizontals along the eye level, verticals
+    /// across it. The stroke's early direction picks between them.
+    #[test]
+    fn one_point_binds_orthogonals_horizontals_and_verticals() {
+        let vp = [300.0f32, 100.0];
+        let rs = Rulers {
+            items: vec![Ruler::Perspective1 {
+                vp,
+                h: [800.0, 100.0],
+            }],
+            on: true,
+            ..Default::default()
+        };
+        let anchor = [100.0f32, 300.0];
+        // Aimed at the VP, then wandering: rides the orthogonal.
+        let dir = [vp[0] - anchor[0], vp[1] - anchor[1]];
+        let out = stroke(
+            &rs,
+            &[
+                anchor,
+                [anchor[0] + dir[0] * 0.1, anchor[1] + dir[1] * 0.1],
+                [200.0, 100.0],
+                [260.0, 260.0],
+            ],
+        );
+        for q in &out[1..] {
+            assert!(on_line(*q, vp, dir), "sample {q:?} rides the orthogonal");
+        }
+        // Travelling along the eye level: the horizontal family through
+        // the anchor — y is pinned, and it does NOT converge on the VP.
+        let out = stroke(&rs, &[anchor, [160.0, 302.0], [400.0, 260.0]]);
+        for q in &out[1..] {
+            assert!((q[1] - 300.0).abs() < 1e-3, "y pinned to the anchor: {q:?}");
+        }
+        // Travelling across it: the vertical family — x pinned.
+        let out = stroke(&rs, &[anchor, [102.0, 360.0], [160.0, 600.0]]);
+        for q in &out[1..] {
+            assert!((q[0] - 100.0).abs() < 1e-3, "x pinned: {q:?}");
+        }
+    }
+
+    /// A tilted 1-pt eye level tilts BOTH parallel families with it (same
+    /// rule as the 2-pt verticals): the horizon handle is what tilts, and
+    /// dragging that anchor re-aims the families without moving the VP.
+    #[test]
+    fn one_point_families_follow_the_horizon_handle() {
+        let vp = [0.0f32, 0.0];
+        let mut rs = Rulers {
+            items: vec![Ruler::Perspective1 {
+                vp,
+                h: [100.0, 0.0],
+            }],
+            on: true,
+            ..Default::default()
+        };
+        // Tilt the eye level by dragging the HANDLE down 30 px.
+        rs.move_by(0, RulerGrab::Anchor(1), [0.0, 30.0]);
+        assert_eq!(
+            rs.items[0],
+            Ruler::Perspective1 {
+                vp: [0.0, 0.0],
+                h: [100.0, 30.0]
+            },
+            "the vanishing point stayed put"
+        );
+        let u = {
+            let d = [100.0f32, 30.0];
+            let n = (d[0] * d[0] + d[1] * d[1]).sqrt();
+            [d[0] / n, d[1] / n]
+        };
+        let anchor = [200.0f32, 400.0];
+        // Travel along the tilted eye level: the horizontal family now
+        // runs at the tilt, not canvas-level.
+        let out = stroke(
+            &rs,
+            &[
+                anchor,
+                [anchor[0] + u[0] * 40.0, anchor[1] + u[1] * 40.0],
+                [400.0, 500.0],
+            ],
+        );
+        for q in &out[1..] {
+            assert!(on_line(*q, anchor, u), "sample {q:?} rides the tilt");
+        }
+        let seg = [out[2][0] - out[1][0], out[2][1] - out[1][1]];
+        let sn = (seg[0] * seg[0] + seg[1] * seg[1]).sqrt();
+        let cos = (seg[0] * u[0] + seg[1] * u[1]) / sn;
+        assert!(cos.abs() > 1.0 - 1e-3, "parallel to the eye level: {cos}");
+    }
+
+    /// ROADMAP good-first-issue #2, 3-point: three fans and no parallel
+    /// family. The winner is chosen exactly as 2-pt chooses — best |cos|
+    /// between the early travel and each family at the anchor.
+    #[test]
+    fn three_point_binds_each_of_its_three_vps() {
+        let (a, b, z) = ([-600.0f32, 100.0], [700.0f32, 100.0], [50.0f32, 900.0]);
+        let rs = Rulers {
+            items: vec![Ruler::Perspective3 { a, b, z }],
+            on: true,
+            ..Default::default()
+        };
+        let anchor = [100.0f32, 300.0];
+        for vp in [a, b, z] {
+            let dir = [anchor[0] - vp[0], anchor[1] - vp[1]];
+            let n = (dir[0] * dir[0] + dir[1] * dir[1]).sqrt();
+            let step = [dir[0] / n * 30.0, dir[1] / n * 30.0];
+            let out = stroke(
+                &rs,
+                &[
+                    anchor,
+                    [anchor[0] + step[0], anchor[1] + step[1]],
+                    // Wander off: the bind holds for the stroke.
+                    [
+                        anchor[0] + step[0] * 6.0 + 40.0,
+                        anchor[1] + step[1] * 6.0 - 25.0,
+                    ],
+                ],
+            );
+            for q in &out[1..] {
+                assert!(on_line(*q, vp, dir), "sample {q:?} rides the {vp:?} ray");
+            }
+        }
+        // The discriminator against a 2-pt set: travelling straight DOWN
+        // converges on the vertical VP instead of pinning x.
+        let out = stroke(&rs, &[anchor, [100.0, 360.0], [100.0, 800.0]]);
+        let dir = [anchor[0] - z[0], anchor[1] - z[1]];
+        for q in &out[1..] {
+            assert!(on_line(*q, z, dir), "sample {q:?} rides the vertical VP");
+        }
+        assert!(
+            (out[2][0] - anchor[0]).abs() > 1.0,
+            "the verticals CONVERGE (a 2-pt set would pin x): {:?}",
+            out[2]
+        );
+    }
+
+    /// Movability: the new variants expose their control points, an anchor
+    /// drag re-aims (only that point moves), a body drag translates every
+    /// one rigidly, and the snap afterwards reads the moved geometry.
+    #[test]
+    fn perspective_variants_anchors_round_trip_through_moves() {
+        let mut rs = Rulers {
+            items: vec![
+                Ruler::Perspective1 {
+                    vp: [300.0, 100.0],
+                    h: [800.0, 100.0],
+                },
+                Ruler::Perspective3 {
+                    a: [-600.0, 100.0],
+                    b: [700.0, 100.0],
+                    z: [50.0, 900.0],
+                },
+            ],
+            on: true,
+            ..Default::default()
+        };
+        assert_eq!(rs.items[0].anchors(), vec![[300.0, 100.0], [800.0, 100.0]]);
+        assert_eq!(
+            rs.items[1].anchors(),
+            vec![[-600.0, 100.0], [700.0, 100.0], [50.0, 900.0]]
+        );
+        for k in 0..rs.items.len() {
+            rs.move_by(k, RulerGrab::Body, [10.0, 20.0]);
+        }
+        assert_eq!(
+            rs.items[0],
+            Ruler::Perspective1 {
+                vp: [310.0, 120.0],
+                h: [810.0, 120.0]
+            }
+        );
+        assert_eq!(
+            rs.items[1],
+            Ruler::Perspective3 {
+                a: [-590.0, 120.0],
+                b: [710.0, 120.0],
+                z: [60.0, 920.0]
+            },
+            "all three moved equally — the set stays rigid"
+        );
+        // Drag ONLY the vertical VP: the horizon is untouched.
+        rs.move_by(1, RulerGrab::Anchor(2), [200.0, -1500.0]);
+        assert_eq!(
+            rs.items[1],
+            Ruler::Perspective3 {
+                a: [-590.0, 120.0],
+                b: [710.0, 120.0],
+                z: [260.0, -580.0]
+            },
+            "a worm's-eye set: the third VP above the horizon"
+        );
+        // And the strokes follow it — no invalidation step, the geometry
+        // IS the ruler.
+        let only3 = Rulers {
+            items: vec![rs.items[1]],
+            on: true,
+            ..Default::default()
+        };
+        let anchor = [100.0f32, 400.0];
+        let z = [260.0f32, -580.0];
+        let dir = [anchor[0] - z[0], anchor[1] - z[1]];
+        let mut lock = SnapLock::default();
+        only3.snap_sticky(anchor, &mut lock);
+        let q = only3.snap_sticky([100.0, 340.0], &mut lock);
+        assert!(on_line(q, z, dir), "rides the MOVED vertical VP: {q:?}");
+    }
+
+    /// The hit test: every vanishing point is an anchor (including the
+    /// 3-pt set's vertical VP, which sits far off the horizon), the body
+    /// is the EYE LEVEL only, and the ray fans are not grab targets.
+    #[test]
+    fn perspective_variants_grab_their_vps_and_eye_levels() {
+        let p1 = Ruler::Perspective1 {
+            vp: [300.0, 100.0],
+            h: [800.0, 100.0],
+        };
+        assert_eq!(
+            p1.grab_near([302.0, 103.0], 10.0),
+            Some(RulerGrab::Anchor(0))
+        );
+        assert_eq!(
+            p1.grab_near([800.0, 95.0], 10.0),
+            Some(RulerGrab::Anchor(1)),
+            "the horizon handle is draggable too"
+        );
+        assert_eq!(p1.grab_near([-400.0, 104.0], 10.0), Some(RulerGrab::Body));
+        assert_eq!(
+            p1.grab_near([300.0, 400.0], 10.0),
+            None,
+            "on an orthogonal, far from the eye level: nothing"
+        );
+        let p3 = Ruler::Perspective3 {
+            a: [-600.0, 100.0],
+            b: [700.0, 100.0],
+            z: [50.0, 900.0],
+        };
+        assert_eq!(
+            p3.grab_near([-598.0, 103.0], 10.0),
+            Some(RulerGrab::Anchor(0))
+        );
+        assert_eq!(
+            p3.grab_near([700.0, 95.0], 10.0),
+            Some(RulerGrab::Anchor(1))
+        );
+        assert_eq!(
+            p3.grab_near([52.0, 903.0], 10.0),
+            Some(RulerGrab::Anchor(2)),
+            "the vertical VP grabs even though it is off the eye level"
+        );
+        assert_eq!(p3.grab_near([0.0, 104.0], 10.0), Some(RulerGrab::Body));
+        assert_eq!(p3.grab_near([0.0, 400.0], 10.0), None);
+        // Through the set, with the combined index: topmost (later) first,
+        // and an anchor of a lower ruler still wins when nothing above it
+        // is in reach.
+        let rs = Rulers {
+            items: vec![p3, p1],
+            on: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            rs.grab_near([302.0, 103.0], 10.0),
+            Some((1, RulerGrab::Anchor(0))),
+            "the 1-pt set is on top"
+        );
+        assert_eq!(
+            rs.grab_near([52.0, 903.0], 10.0),
+            Some((0, RulerGrab::Anchor(2)))
+        );
     }
 }

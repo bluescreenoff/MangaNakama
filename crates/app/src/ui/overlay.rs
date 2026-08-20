@@ -313,6 +313,44 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
     {
         let col = egui::Color32::from_rgb(0, 200, 220);
         let far = 1.0e5;
+        // Part 4 and the 1-/3-point variants share their furniture: the
+        // eye level drawn strong through two points, and a vanishing point
+        // marked by a faint 15° ray fan plus a cross.
+        let eye_level = |a: [f32; 2], b: [f32; 2]| {
+            let d = [b[0] - a[0], b[1] - a[1]];
+            let n = (d[0] * d[0] + d[1] * d[1]).sqrt().max(1.0);
+            let u = [d[0] / n, d[1] / n];
+            painter.line_segment(
+                [
+                    to_pt(a[0] - u[0] * far, a[1] - u[1] * far),
+                    to_pt(b[0] + u[0] * far, b[1] + u[1] * far),
+                ],
+                egui::Stroke::new(1.5, col),
+            );
+        };
+        let vp_mark = |vp: [f32; 2]| {
+            let faint = egui::Color32::from_rgba_unmultiplied(0, 200, 220, 60);
+            for k in 0..24 {
+                let ang = k as f32 * std::f32::consts::TAU / 24.0;
+                let dd = [ang.cos(), ang.sin()];
+                painter.line_segment(
+                    [
+                        to_pt(vp[0] + dd[0] * 24.0, vp[1] + dd[1] * 24.0),
+                        to_pt(vp[0] + dd[0] * 400.0, vp[1] + dd[1] * 400.0),
+                    ],
+                    egui::Stroke::new(0.5, faint),
+                );
+            }
+            let p = to_pt(vp[0], vp[1]);
+            painter.line_segment(
+                [egui::pos2(p.x - 5.0, p.y), egui::pos2(p.x + 5.0, p.y)],
+                egui::Stroke::new(1.5, col),
+            );
+            painter.line_segment(
+                [egui::pos2(p.x, p.y - 5.0), egui::pos2(p.x, p.y + 5.0)],
+                egui::Stroke::new(1.5, col),
+            );
+        };
         for r in &app.rulers.items {
             match *r {
                 mn_core::Ruler::Line { a, b } => {
@@ -343,39 +381,26 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
                 // Part 4: the eye level strong, faint 15° guide fans from
                 // each VP, and a cross on each VP.
                 mn_core::Ruler::Perspective { a, b } => {
-                    let d = [b[0] - a[0], b[1] - a[1]];
-                    let n = (d[0] * d[0] + d[1] * d[1]).sqrt().max(1.0);
-                    let u = [d[0] / n, d[1] / n];
-                    painter.line_segment(
-                        [
-                            to_pt(a[0] - u[0] * far, a[1] - u[1] * far),
-                            to_pt(b[0] + u[0] * far, b[1] + u[1] * far),
-                        ],
-                        egui::Stroke::new(1.5, col),
-                    );
-                    let faint = egui::Color32::from_rgba_unmultiplied(0, 200, 220, 60);
-                    for vp in [a, b] {
-                        for k in 0..24 {
-                            let ang = k as f32 * std::f32::consts::TAU / 24.0;
-                            let dd = [ang.cos(), ang.sin()];
-                            painter.line_segment(
-                                [
-                                    to_pt(vp[0] + dd[0] * 24.0, vp[1] + dd[1] * 24.0),
-                                    to_pt(vp[0] + dd[0] * 400.0, vp[1] + dd[1] * 400.0),
-                                ],
-                                egui::Stroke::new(0.5, faint),
-                            );
-                        }
-                        let p = to_pt(vp[0], vp[1]);
-                        painter.line_segment(
-                            [egui::pos2(p.x - 5.0, p.y), egui::pos2(p.x + 5.0, p.y)],
-                            egui::Stroke::new(1.5, col),
-                        );
-                        painter.line_segment(
-                            [egui::pos2(p.x, p.y - 5.0), egui::pos2(p.x, p.y + 5.0)],
-                            egui::Stroke::new(1.5, col),
-                        );
-                    }
+                    eye_level(a, b);
+                    vp_mark(a);
+                    vp_mark(b);
+                }
+                // One-point: the eye level runs through the single VP; the
+                // far end is a HANDLE (a ring, not a cross — it is not a
+                // vanishing point, it only tilts the horizon).
+                mn_core::Ruler::Perspective1 { vp, h } => {
+                    eye_level(vp, h);
+                    vp_mark(vp);
+                    painter.circle_stroke(to_pt(h[0], h[1]), 3.0, egui::Stroke::new(1.5, col));
+                }
+                // Three-point: the horizon pair plus the vertical VP off
+                // it — all three are real vanishing points, so all three
+                // get the fan and the cross.
+                mn_core::Ruler::Perspective3 { a, b, z } => {
+                    eye_level(a, b);
+                    vp_mark(a);
+                    vp_mark(b);
+                    vp_mark(z);
                 }
                 // Part 3 special rulers. Parallel renders its direction
                 // segment extended; concentric draws its rings (capped);
@@ -599,8 +624,7 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
                 app.gutter_folder_mm
             };
             let ang = (b.1 - a.1).atan2(b.0 - a.0);
-            let gutter =
-                app.mm_to_px(g_v) * ang.cos().abs() + app.mm_to_px(g_h) * ang.sin().abs();
+            let gutter = app.mm_to_px(g_v) * ang.cos().abs() + app.mm_to_px(g_h) * ang.sin().abs();
             let (dx, dy) = (b.0 - a.0, b.1 - a.1);
             let len = (dx * dx + dy * dy).sqrt();
             if gutter > 0.0 && len > 1.0 {
@@ -1114,12 +1138,7 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
     // which is a painter call per pixel on the UI thread.
     let quad = |x0: f32, y0: f32, x1: f32, y1: f32, col: egui::Color32| {
         egui::Shape::convex_polygon(
-            vec![
-                to_pt(x0, y0),
-                to_pt(x1, y0),
-                to_pt(x1, y1),
-                to_pt(x0, y1),
-            ],
+            vec![to_pt(x0, y0), to_pt(x1, y0), to_pt(x1, y1), to_pt(x0, y1)],
             col,
             egui::Stroke::NONE,
         )
