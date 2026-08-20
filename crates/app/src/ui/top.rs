@@ -85,7 +85,7 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 app.push_cmd(AppCmd::ImportImage);
                 ui.close();
             }
-            if item(ui, "Import Brushes (.abr, .gbr, .gih, .kpp)…", "") {
+            if item(ui, "Import Brushes (.abr, .gbr, .gih, .kpp, .sut)…", "") {
                 app.push_cmd(AppCmd::ImportAbr);
                 ui.close();
             }
@@ -317,6 +317,7 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                     ui.close();
                 }
                 let sym = app
+                    .doc
                     .rulers
                     .items
                     .iter()
@@ -339,12 +340,12 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                     ui.close();
                 }
                 ui.separator();
-                let on = app.rulers.on;
+                let on = app.doc.rulers.on;
                 if item(ui, if on { "Snap: ON" } else { "Snap: OFF" }, "") {
                     app.push_cmd(AppCmd::RulerSnapToggle);
                     ui.close();
                 }
-                let spec = app.rulers.special_on;
+                let spec = app.doc.rulers.special_on;
                 if item(
                     ui,
                     if spec {

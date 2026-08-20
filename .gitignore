@@ -2,9 +2,10 @@
 /toolchain/
 # Screenshot-harness state the app writes beside the exe.
 ui.txt
-# Local-only test fixture (third-party brush data, not redistributed —
-# the test skips when it is absent).
+# Local-only test fixtures (third-party brush data, not redistributed —
+# the tests skip when they are absent).
 crates/brush/tests/data/abr_v6_sample.abr
+crates/brush/tests/data/*.sut
 # The owner's standalone drawing install (exe + assets copied from release
 # builds) — never tracked; running the exe from target/ locks builds.
 /play/

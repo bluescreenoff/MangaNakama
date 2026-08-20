@@ -665,7 +665,7 @@ pub(super) fn free_slug(root: &Path, set: &str) -> String {
 }
 
 /// `set` name for files: lowercase ascii, filesystem- and picker-safe.
-fn set_slug(stem: &str) -> String {
+pub(super) fn set_slug(stem: &str) -> String {
     let s: String = stem
         .chars()
         .map(|c| {
@@ -702,6 +702,10 @@ impl App {
         };
         let sum = match ext.as_str() {
             // Krita: dynamics only — the tip is a separate resource file.
+            "sut" => match mn_brush::sut::parse_sut_file(path) {
+                Ok(b) => super::sut_import::write_sut_import(&root, &b, &set_slug(&stem)),
+                Err(e) => return self.set_error(format!("brush import failed: {e}")),
+            },
             "kpp" => match mn_brush::parse_kpp_file(path) {
                 Ok(preset) => {
                     super::kpp_import::write_kpp_import(&root, &preset, &set_slug(&stem))

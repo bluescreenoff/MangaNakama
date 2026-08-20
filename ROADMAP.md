@@ -22,8 +22,10 @@ wash (flow separated from opacity), texture tips, a sketch/hatching engine,
 mirror symmetry and wrap-around tiling. Pen pressure comes from raw Win32
 pointer messages — the app owns its tablet path rather than delegating it.
 Stroke stabilization, input resampling, a per-sensor curve editor, and brush
-import — Photoshop `.abr` with the dynamics translated as far as they honestly
-map, and GIMP `.gbr`/`.gih`.
+import from four ecosystems — Photoshop `.abr` (dynamics translated as far as
+they honestly map, tips stamped and rotating per dab), GIMP `.gbr`/`.gih`,
+Krita `.kpp` (dynamics), and Clip Studio `.sut` (your own sub tools — read
+directly, no export ceremony beyond CSP's own).
 
 **Canvas and layers.** A tiled canvas at print resolution with a GPU
 compositor (layer blending, group flattening, tile upload, display) and a
@@ -63,27 +65,16 @@ Roughly in order. None of this is promised by a date.
    background benchmark decides, never a blanket default. Still CPU-only:
    smudge combined with wash (the sampler would have to read the in-flight
    wash buffer) and the spectral-paint / colorize / posterize presets.
-2. **Faithful brush imports, the rest of it.** `.abr` now translates the
-   dynamics that map (spacing, pressure size and minimums, jitters,
-   scatter, transfer), bakes static tip geometry into the mask, imports
-   computed round brushes, and labels honestly what cannot map; GIMP
-   `.gbr`/`.gih` import through the same path, and Krita `.kpp` presets
-   bring their dynamics across (spacing, size, size-by-pressure, opacity and
-   flow) onto our own round tip — Krita stores brush tips as separate
-   resource files, so the import labels that limitation rather than faking a
-   tip. Still open: best-effort Clip Studio `.sut` (your own presets), and
-   growing the engine where a missing semantic is worth having natively — per-dab tip
-   rotation (Photoshop's angle dynamics) is the headline gap.
-3. **Vector inking layers.** Strokes stored as editable geometry: control-point
+2. **Vector inking layers.** Strokes stored as editable geometry: control-point
    editing, width re-editing, and an eraser that trims a stroke at the
    intersection instead of deleting it.
-4. **Layered PSD export.** Today's interchange is OpenRaster plus flat PNG,
+3. **Layered PSD export.** Today's interchange is OpenRaster plus flat PNG,
    which is fine between open tools and not enough for a studio hand-off.
-5. **Recordable actions, and a small scripting surface.** The real pain is
+4. **Recordable actions, and a small scripting surface.** The real pain is
    batch operations over layers — rename, renumber, apply tone, export — not
    macro recording for its own sake.
-6. **HDR / linear-light colour.**
-7. **The manual, kept honest.** Static HTML beside the executable exists;
+5. **HDR / linear-light colour.**
+6. **The manual, kept honest.** Static HTML beside the executable exists;
    its job is the quirks — the interlocks you would otherwise discover by
    having something silently do nothing — and it grows with every round.
 
@@ -103,15 +94,11 @@ These are settled, not open questions. Please do not open PRs for them.
 
 ## Good first issues
 
-Each of these is real deferred work, deferred for a written reason — ask in
-an issue before starting and the reason comes with the answer. (The previous
-list of nine shipped, every one; this is the fresh crop, each noted during
-that work.)
-
-1. **Undo for ruler creation and moves.** Rulers mutate app state directly,
-   outside the op/command recording — creation was never undoable, so the
-   new move gestures aren't either. The work is choosing where rulers'
-   undo history lives, not the bracket itself.
+None open right now: the list of nine shipped, every one, and so did the
+tenth (undo for ruler creation and moves — rulers moved onto the `Document`
+so the one undo history owns them). New ones are noted here as the work
+that finds them lands; each comes with the written reason it was deferred,
+and asking in an issue gets you that reason with the answer.
 
 ## Picking something up
 

@@ -23,6 +23,8 @@ mod ffi;
 mod gbr;
 mod kpp;
 mod mybrush;
+pub mod sqlite_ro;
+pub mod sut;
 mod surface;
 
 /// Brush setting/input ids, generated from `brushsettings.json` at build time.
