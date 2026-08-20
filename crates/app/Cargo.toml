@@ -1,0 +1,55 @@
+[package]
+name = "mn-app"
+version.workspace = true
+edition.workspace = true
+# egui 0.36 requires 1.95; the rest of the workspace still builds on 1.85.
+rust-version = "1.95"
+publish.workspace = true
+
+[[bin]]
+name = "manganakama"
+path = "src/main.rs"
+
+[dependencies]
+mn-core = { workspace = true }
+mn-brush = { workspace = true }
+mn-gpu = { workspace = true }
+mn-text = { workspace = true }
+# Same wgpu the compositor uses (workspace pin = 30); egui-wgpu 0.36.1 depends
+# on wgpu ^30, so the tree stays unified — see docs/ARCHITECTURE.md.
+wgpu = { workspace = true }
+image = { workspace = true }
+egui = "0.36"
+# `default-features = false`: the defaults drag in wgpu/webgl + a macOS window
+# fix we cannot use. Windows/DX12 only here.
+egui-wgpu = { version = "0.36.1", default-features = false }
+# Native file dialogs. Defaults are the Linux xdg-portal/wayland backends; on
+# Windows rfd uses the COM item dialog and needs no features.
+#
+# Do NOT enable `common-controls-v6`: it imports comctl32 v6, which needs a
+# side-by-side assembly manifest we do not ship, and the exe then fails to
+# start at all (loader error, no message — cost an hour on 2026-08-13).
+rfd = { version = "0.17", default-features = false }
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Dwm",
+  "Win32_Graphics_Gdi",
+  "Win32_System_LibraryLoader",
+  "Win32_System_DataExchange",
+  "Win32_System_Memory",
+  # GetTickCount — the clock POINTER_INFO::dwTime uses, so the HUD's input
+  # latency row can subtract the two without a second time base.
+  "Win32_System_SystemInformation",
+  "Win32_UI_Controls",
+  "Win32_UI_HiDpi",
+  "Win32_UI_Input_Ime",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_Input_Pointer",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+] }
+# The palette docking system (drag/tab/split/float). `serde` persists the
+# two dock columns into ui.txt.
+egui_dock = { version = "0.21.1", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

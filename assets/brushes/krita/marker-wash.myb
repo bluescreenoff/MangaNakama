@@ -1,0 +1,51 @@
+{
+  "comment": "MyPaint brush file",
+  "name": "Krita Marker Wash",
+  "group": "krita",
+  "description": "Krita WASH semantics: the whole stroke composites once at stroke opacity, Flow is the per-dab alpha - a wet marker that cannot exceed its opacity no matter how slowly you go over a spot. Hard dabs for the marker's crisp edge.",
+  "mn-hard-dab": true,
+  "mn-wash": true,
+  "mn-wash-opacity": 1.0,
+  "mn-brush-blend": "normal",
+  "settings": {
+    "radius_logarithmic": {
+      "base_value": 2.0,
+      "inputs": {
+        "pressure": [
+          [0.0, -1.2],
+          [0.6, 0.0],
+          [1.0, 0.0]
+        ]
+      }
+    },
+    "opaque": {
+      "base_value": 0.35
+    },
+    "opaque_multiply": {
+      "base_value": 0.1,
+      "inputs": {
+        "pressure": [
+          [0.0, 0.0],
+          [0.5, 0.6],
+          [1.0, 0.9]
+        ]
+      }
+    },
+    "opaque_linearize": {
+      "base_value": 0.0
+    },
+    "hardness": {
+      "base_value": 0.95
+    },
+    "dabs_per_basic_radius": {
+      "base_value": 2.0
+    },
+    "dabs_per_actual_radius": {
+      "base_value": 2.0
+    },
+    "slow_tracking": {
+      "base_value": 0.1
+    }
+  },
+  "version": 3
+}

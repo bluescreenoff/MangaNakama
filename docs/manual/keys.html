@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Keys — MangaNakama manual</title>
+<link rel="stylesheet" href="manual.css">
+</head>
+<body>
+<main>
+<nav class="top"><a href="index.html">← manual</a></nav>
+<h1>Keys</h1>
+
+<h2>Tools</h2>
+<table>
+<tr><th>Key</th><th>Tool</th></tr>
+<tr><td><kbd>P</kbd> / <kbd>B</kbd></td><td>Pen</td></tr>
+<tr><td><kbd>E</kbd></td><td>Eraser (press again to flip back to the Pen)</td></tr>
+<tr><td><kbd>G</kbd></td><td>Fill</td></tr>
+<tr><td><kbd>W</kbd></td><td>Wand (auto select)</td></tr>
+<tr><td><kbd>M</kbd></td><td>Select</td></tr>
+<tr><td><kbd>O</kbd></td><td>Object — press again to cycle the stack under the pick</td></tr>
+<tr><td><kbd>U</kbd></td><td>Frame</td></tr>
+<tr><td><kbd>T</kbd></td><td>Text (press again to flip to Balloon)</td></tr>
+<tr><td><kbd>F</kbd> / <kbd>V</kbd></td><td>Figure / Gradient</td></tr>
+</table>
+
+<h2>Every day</h2>
+<table>
+<tr><th>Key</th><th>Does</th></tr>
+<tr><td><kbd>[</kbd> / <kbd>]</kbd></td><td>Brush size ladder (CSP steps)</td></tr>
+<tr><td><kbd>Ctrl+Alt+drag</kbd></td><td>Brush size, live — drag left/right while held</td></tr>
+<tr><td><kbd>Ctrl+drag</kbd></td><td>Temporary Object grab — move what is under the pen, release to keep drawing (the tool never changes)</td></tr>
+<tr><td><kbd>,</kbd> / <kbd>.</kbd></td><td>Step the current tool's sub-tool</td></tr>
+<tr><td><kbd>Ctrl+Z</kbd> / <kbd>Ctrl+Y</kbd></td><td>Undo / Redo</td></tr>
+<tr><td><kbd>Ctrl+T</kbd></td><td>Transform</td></tr>
+<tr><td><kbd>Ctrl+D</kbd></td><td>Deselect (see below)</td></tr>
+<tr><td><kbd>Ctrl+Shift+D</kbd></td><td>Reselect (restore the last deselected selection)</td></tr>
+<tr><td><kbd>Ctrl+0</kbd> / <kbd>Ctrl+1</kbd></td><td>Fit / 100 %</td></tr>
+<tr><td><kbd>Ctrl+9</kbd></td><td>Flip view (mirror, not the layer)</td></tr>
+<tr><td><kbd>Tab</kbd></td><td>Hide every palette — canvas and chrome only</td></tr>
+<tr><td><kbd>Shift+Tab</kbd></td><td>Hide the menu bar and the status bar too</td></tr>
+<tr><td><kbd>Esc</kbd></td><td>Bring both back (when it has nothing else to cancel)</td></tr>
+<tr><td><kbd>Alt+[</kbd> / <kbd>Alt+]</kbd></td><td>Walk the active layer down / up the stack</td></tr>
+<tr><td><kbd>Ctrl+PageUp/Down</kbd>, <kbd>Ctrl+Home/End</kbd></td><td>Previous / next page, first / last</td></tr>
+<tr><td><kbd>Enter</kbd> / <kbd>Esc</kbd> / <kbd>Backspace</kbd></td><td>During a magnetic-lasso trace: close the outline / throw it away / take the last anchor back (at the first anchor, cancel)</td></tr>
+</table>
+
+<h2>Putting the view back</h2>
+<p>Three separate resets sit in the <b>View</b> menu, because “put the
+page back” means different things depending on what you touched:</p>
+<table>
+<tr><th>Item</th><th>Resets</th><th>Leaves alone</th></tr>
+<tr><td>Reset rotation</td><td>the angle</td><td>mirror, zoom, pan</td></tr>
+<tr><td>Reset rotation and flip</td><td>angle and mirror</td><td>zoom, pan</td></tr>
+<tr><td>Reset view</td><td>angle, mirror, and refits the page</td><td>—</td></tr>
+</table>
+<div class="quirk"><b>Reset rotation does not unmirror.</b> The mirror
+is the drawing-error check, and you want it to survive straightening a
+page you had twisted to ink a curve. If the page looks wrong-handed
+after a reset, you wanted the second item.</div>
+<div class="quirk"><b>The middle one keeps your zoom.</b> That is what
+makes it usable mid-drawing — it will not throw you back out to a whole
+page when you are working into a face.</div>
+
+<h2>Getting the interface out of the way</h2>
+<p><kbd>Tab</kbd> hides every palette. <kbd>Shift+Tab</kbd> also hides
+the menu bar at the top and the status bar at the bottom — canvas and
+nothing else. The same keys bring each back, and so do
+<b>View ▸ Show palettes</b> and <b>View ▸ Show menu and status
+bars</b>.</p>
+<div class="quirk"><b>“Tab hid my palettes and I don't know why.”</b>
+That is this feature, and it is a single keypress away from the
+<kbd>T</kbd> and the <kbd>W</kbd> you were reaching for. Press
+<kbd>Tab</kbd> again, or <kbd>Esc</kbd>, or reopen them from the View
+menu. Nothing was closed and no layout was lost — the palettes are
+exactly where you left them.</div>
+<div class="quirk warn"><b>The menu bar is also the window's title
+bar.</b> The – □ × buttons and the strip you drag the window by live in
+it, so while <kbd>Shift+Tab</kbd> has it hidden there is nothing to
+click to close or move the window. Four ways back:
+<kbd>Shift+Tab</kbd>, <kbd>Esc</kbd>, <kbd>Alt+Space</kbd> (Windows' own
+Move/Close menu), and <kbd>Alt+F4</kbd>.</div>
+<div class="quirk"><b>Neither hide survives a restart — on purpose.</b>
+The app always starts with its palettes and chrome, whatever state you
+left it in. Nothing you can press can leave the next launch stranded.
+The View menu's crop-mark switch is the opposite case and <em>is</em>
+remembered, because that one is a preference rather than a
+get-out-of-my-way key.</div>
+<div class="quirk"><b>Neither key fires while you are typing.</b> With a
+text field focused — a layer name, the Quick Access search, the text
+tool on canvas — <kbd>Tab</kbd> and <kbd>Esc</kbd> belong to the text,
+not to the palettes.</div>
+
+<h2>The reader</h2>
+<table>
+<tr><th>Key</th><th>Does</th></tr>
+<tr><td><kbd>←</kbd>/<kbd>→</kbd>, <kbd>PgUp/PgDn</kbd></td><td>Turn (direction-aware)</td></tr>
+<tr><td><kbd>1</kbd></td><td>1:1 zoom — the tone-moiré check</td></tr>
+<tr><td><kbd>F</kbd></td><td>Flag the spread you are reading</td></tr>
+<tr><td><kbd>F11</kbd> / <kbd>Esc</kbd></td><td>Fullscreen / leave</td></tr>
+</table>
+
+<h2>Touch gestures</h2>
+<p>On a touchscreen, one finger pans and two fingers pinch, twist and
+drag the canvas. Three <em>tap</em> gestures sit on top of that — and
+they are <b>all off until you turn them on</b>:</p>
+<table>
+<tr><th>Gesture</th><th>Does</th><th>Switch</th></tr>
+<tr><td>Two-finger tap</td><td>Undo</td><td><code>1</code></td></tr>
+<tr><td>Three-finger tap</td><td>Redo</td><td><code>2</code></td></tr>
+<tr><td>Three-finger tap <b>on the Navigator</b></td><td>Put the view
+back upright and unmirrored (rotation to 0°, flip off) in one
+gesture</td><td><code>4</code></td></tr>
+</table>
+<p>Switch them on in <b>View ▸ Touch gestures</b> — one entry per
+gesture, ticked when it is on, and the change takes effect immediately.
+They are remembered between sessions.</p>
+<p>They are also stored as a single number in <code>ui.txt</code> beside
+the exe (<code>touch_gestures=</code>, the sum of the switches above:
+<code>1</code> for undo only, <code>3</code> for both taps,
+<code>7</code> for all three), which is worth knowing only if you are
+editing that file for some other reason. Editing it while the app is
+running does nothing — it rewrites the file on exit from what it read at
+startup.</p>
+<div class="quirk"><b>They are off by default because a resting palm is
+also “two fingers”.</b> No amount of filtering makes that judgement
+perfect, so each gesture has its own switch and you decide which ones
+your hand can be trusted with. A tap only counts if the fingers land
+together (within 100 ms), stay put (under ~12 px), are fingertip-sized,
+and are gone again within 300 ms — anything slower or larger is read as
+a pan, a pinch or a hand.</div>
+<div class="quirk"><b>Rest your palm and the taps stop working until
+you lift it.</b> That is deliberate: while an extra contact is on the
+glass the finger count is a lie, so nothing fires. Lift the hand and the
+next tap works normally.</div>
+<div class="quirk"><b>The Navigator tap needs the Navigator
+visible.</b> If that palette is closed, or is tabbed behind another one,
+a three-finger tap there is an ordinary Redo.</div>
+
+<h2>Recorded deviations</h2>
+<div class="quirk"><b><kbd>Ctrl+D</kbd> is Deselect.</b> CSP uses it for
+Reselect; we kept Deselect on the plain chord deliberately, and
+Reselect lives on <kbd>Ctrl+Shift+D</kbd>.</div>
+<div class="quirk"><b>Page flipping is <kbd>Ctrl+PageUp/PageDown</kbd>
+and <kbd>Ctrl+Home/End</kbd>.</b> CSP's bare comma/period are our
+sub-tool stepping keys, and bare PageUp/PageDown are zoom bindings —
+so page navigation took the Ctrl chords.</div>
+
+<footer><a href="index.html">← manual</a> · the complete table lives in
+the source (<code>crates/app/src/main.rs</code>, the
+<code>shortcut</code> function) and is the authority if this page ever
+disagrees.</footer>
+</main>
+</body>
+</html>

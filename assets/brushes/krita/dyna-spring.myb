@@ -1,0 +1,6 @@
+{
+    "version": 3,
+    "name": "Dyna Spring",
+    "mn-engine": "dyna",
+    "comment": "Krita DYNA engine: a mass-spring pen tip trailing the pen (k=90, drag=14) — wobbly, physical lines with overshoot at turns."
+}

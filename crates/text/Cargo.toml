@@ -1,0 +1,27 @@
+[package]
+name = "mn-text"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "mn_text"
+path = "src/lib.rs"
+
+# DirectWrite/Direct2D are COM; `windows-sys` deliberately ships no COM
+# interfaces, so this crate (alone in the workspace) uses the full `windows`
+# crate. Features are the narrow set the engine touches.
+[dependencies]
+mn-core = { workspace = true }
+# D2D APIs in `windows` 0.62 take their matrix/point types from here.
+windows-numerics = "0.3"
+windows = { version = "0.62", features = [
+    "Win32_Graphics_DirectWrite",
+    "Win32_Graphics_Direct2D",
+    "Win32_Graphics_Direct2D_Common",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Imaging",
+    "Win32_System_Com",
+    "Foundation_Numerics",
+] }

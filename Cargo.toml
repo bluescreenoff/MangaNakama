@@ -1,0 +1,57 @@
+[workspace]
+resolver = "3"
+members = ["crates/core", "crates/brush", "crates/gpu", "crates/text", "crates/app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+license = "MIT OR Apache-2.0"
+
+# Version policy (docs/ARCHITECTURE.md): wgpu major == whatever the latest
+# released egui-wgpu pins, so the egui shell (added by a later agent) never
+# forks the dependency tree. Checked 2026-08-13: egui-wgpu 0.36.1 depends on
+# `wgpu ^30.0` -> wgpu = "30".
+[workspace.dependencies]
+mn-core = { path = "crates/core" }
+mn-brush = { path = "crates/brush" }
+mn-gpu = { path = "crates/gpu" }
+mn-text = { path = "crates/text" }
+
+wgpu = "30"
+raw-window-handle = "0.6"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+# PNG is the format we WRITE (ORA layers, exports). The rest are decode-only
+# and exist because of what people drop on a manga app: reference photos are
+# JPEGs, phone screenshots are WEBP, scanned line art is TIFF. The Import
+# dialog had been offering jpg/bmp/tif since it was written while the crate
+# could only decode PNG — every one of those picks failed with "the image
+# format could not be determined" (found 2026-08-19 wiring up drag-and-drop).
+# Adding a decoder here is additive; nothing that already worked changes.
+image = { version = "0.25", default-features = false, features = [
+  "png",
+  "jpeg",
+  "bmp",
+  "tiff",
+  "webp",
+  "gif",
+] }
+windows-sys = "0.61"
+
+[profile.dev]
+# Debug builds are used for iteration, but dab compositing is hot enough that
+# fully-unoptimised deps make the pen feel wrong. Optimise deps only.
+opt-level = 0
+
+[profile.dev.package."*"]
+opt-level = 2
+
+# Vendored with MangaNakama-specific patches (see vendor/PATCHES.md): global
+# drag-and-drop keys so two sibling DockAreas (left/right palette columns)
+# share one drag, a cross-state guard so the non-owning column never indexes
+# foreign surfaces, release-over-no-leaf = tear-off into a floating window,
+# and a saner tab-drag threshold.
+[patch.crates-io]
+egui_dock = { path = "vendor/egui_dock" }

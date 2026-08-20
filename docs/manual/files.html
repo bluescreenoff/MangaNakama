@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Files &amp; diagnostics — MangaNakama manual</title>
+<link rel="stylesheet" href="manual.css">
+</head>
+<body>
+<main>
+<nav class="top"><a href="index.html">← manual</a></nav>
+<h1>Files &amp; diagnostics</h1>
+
+<h2>Where the log lives</h2>
+<div class="quirk"><b><code>manganakama.log</code>, beside the exe —
+or in <code>%LOCALAPPDATA%\MangaNakama\</code>.</b> One block is
+appended per session. If the install folder is read-only the log
+silently moves to the local-app-data fallback; <kbd>F1</kbd> shows the
+resolved path (with a copy button) so you never have to guess which
+one is live.</div>
+
+<h2>Where your settings live</h2>
+<div class="quirk"><b><code>prefs.txt</code>, beside the exe — and
+deleting it is a supported way to undo a setting you cannot find.</b>
+Everything in <code>Edit ▸ Preferences…</code> is stored there as
+plain <code>name=value</code> lines you can read and edit in Notepad.
+A missing file is not an error: the app starts on the shipped defaults
+and says nothing. Neither is a damaged one — a line that makes no
+sense costs you <em>that one setting</em>, not the file, so the other
+nine still load. <b>It is deliberately not <code>ui.txt</code></b>,
+which holds the palette layout and is the file to delete when a
+palette has ended up somewhere unusable; wiping your window layout was
+never meant to also wipe your settings, so the two are apart.</div>
+
+<h2>Reading a crash</h2>
+<div class="quirk warn"><b>A clean session ends with
+<code>=== exited cleanly ===</code>.</b> A block that ends any other
+way — mid-line, or at a <code>!!! PANIC at file:line</code> entry — is
+the crash record. The panic hook chains into the log with the exact
+file and line; the missing tail matters as much as the line, because a
+stack-overflow class kill leaves no Rust hook output at all. The
+banner and the F1 page both carry the build's version and short SHA —
+say them with the report.</div>
+
+<h2>After a crash: the recovery offer</h2>
+<div class="quirk"><b>If the last session did not exit cleanly, the
+next start asks whether to open the autosave.</b> The question is
+answered from the log, not from a marker file — the same missing
+<code>exited cleanly</code> line described above is what triggers it.
+You are only ever offered an autosave that is <em>newer</em> than the
+file it belongs to, so a saved document is never shadowed by older
+work; saying <b>No</b> changes nothing on disk and the autosave stays
+where it is. Autosaves land beside the document as
+<code>&lt;name&gt;.autosave.mnc</code>, or in <code>%TEMP%</code> as
+<code>MangaNakama-autosave.mnc</code> for a document you have never
+saved. Saving normally deletes the matching autosave, because the
+saved file is the better copy by then. <b>Work folders never appear in
+this prompt</b> — they autosave in place, page by page, so after a
+crash the folder is already current.</div>
+
+<h2>Turning the autosave down — or off</h2>
+<div class="quirk warn"><b><code>Edit ▸ Preferences ▸ Autosave</code>
+sets the interval, and <code>Off</code> means <em>nothing is written
+at all</em>.</b> Not "written rarely" — the timer is never started, so
+there is no recovery copy to offer after a crash and a work folder
+stops saving itself in place. That is a real choice on a slow drive
+with a huge page, but it is the one setting here that can cost you an
+afternoon, so it is worth knowing what it turns off. The interval
+takes effect immediately; you do not have to restart.</div>
+<h2>Is my pressure real?</h2>
+<div class="quirk warn"><b>If the tablet stops reporting pressure,
+MangaNakama keeps drawing at a constant half-pressure — and tells
+you.</b> A pen that reports no pressure must still be able to draw, so
+the value is substituted rather than refused; what would be unfair is
+substituting it in silence, because then "my pressure stopped working"
+is impossible to confirm from inside the app. So: the first pen touch
+of a session writes one line to the status bar and the log
+(<code>pen · pressure: reported …</code>, or
+<code>NOT REPORTED — 0.5 substituted</code> in the warning colour), a
+loss <em>part-way</em> through a session announces itself the same way,
+and <kbd>F1</kbd> marks the value permanently —
+<code>pressure 0.500 (SUBSTITUTED — device reports no pressure)</code>.
+<span class="why">If your tablet driver's own test page shows pressure
+and this says NOT REPORTED, the loss is between the driver and Windows
+Ink, not inside the drawing app — which is the one thing this
+distinction is for.</span></div>
+
+<h2>The pen moves and nothing is drawn</h2>
+<div class="quirk warn"><b>A stroke that received no usable input says
+<code>stroke drew nothing</code> in the status bar instead of just
+producing no ink.</b> MangaNakama only paints from pen reports that
+Windows marks as actually touching the tablet — that filter is what
+keeps a blob from appearing at the start of every stroke — but a few
+drivers signal contact by pressure alone and never set the flag. The
+message names where the pen went down and whether reports arrived and
+were filtered out (<code>… 7 pen report(s) dropped as
+not-in-contact</code>) or never arrived at all, which is the difference
+between a driver problem and a tablet that is not talking to Windows.
+The <kbd>F1</kbd> page carries the running totals on its
+<code>pen device</code> row.</div>
+
+<h2>How far behind the pen is</h2>
+<div class="quirk"><b><kbd>F1</kbd> shows end-to-end input latency —
+from the moment the tablet stamped a sample to the frame that showed
+it — with a session maximum beside it.</b> It reads
+<code>— (pen only)</code> for mouse drawing, because the mouse fallback
+has no device clock to compare against and a made-up number would be
+worse than a blank.</div>
+
+<div class="quirk"><b><code>Also after every operation</code> writes the
+recovery copy the moment an operation finishes, instead of waiting for
+the timer.</b> It does not replace the interval — with both on you get
+whichever comes first — and it is the same write to the same file, only
+on a different trigger. Undo counts as an operation; a stroke does not
+count until you lift the pen, and adding or deleting a layer counts too.
+It is <b>off</b> by default, because on a print-resolution page that
+write is not free: turn it on for the session you cannot afford to
+repeat, not as a permanent setting. The checkbox greys out when
+<code>Autosave</code> is <code>Off</code>, because Off means off.</div>
+
+<h2>Reporting a problem</h2>
+<div class="quirk"><b>Attach <code>manganakama.log</code> — one file,
+safe to post.</b> The log is written to contain nothing personal: no
+file paths, no user names (a test fails the day any line leaks one).
+Its neighbour <code>recent.txt</code> is different — that one stores
+full opened-file paths including your Windows user name, so it stays
+private; the log is the file strangers can read.</div>
+
+<h2>Several documents at once</h2>
+<div class="quirk"><b>Every open document is a tab above the canvas, and
+<code>File ▸ New</code> opens a NEW one instead of replacing what you
+have.</b> Click a tab to switch; the dot on a tab means unsaved changes.
+Each tab keeps its own pages, its own file, its own undo history — and
+its own view position, so switching back finds the canvas exactly where
+you left it. <b>The × on a tab closes that document, not the
+application</b> — except on the last one, where it closes MangaNakama
+(and still asks about unsaved work first), because there is nothing to
+show with no document open.</div>
+
+<h2>Dropping files on the window</h2>
+<div class="quirk"><b>An image dropped anywhere on the window becomes
+a layer in the document you already have open — the drop point does
+not change what happens.</b> This is deliberately not what Clip Studio
+does: there, dropping on the canvas builds a <em>new document</em> and
+only the Layer palette imports. Here the common drop is a reference
+photo onto the page in progress, so that is what a drop means
+everywhere, and "open it as its own document" has its own gesture:
+drop a <code>.mnc</code> or <code>.ora</code> — or the work
+<em>folder</em> itself — and it opens. Drop several images and they
+all come in, in the order the shell hands them over. If a drop
+contains a project and images together, the project wins and opens.
+Readable formats are png, jpg, bmp, tif, webp and gif; anything else
+is refused <em>in the status bar with its name</em> rather than
+silently doing nothing.</div>
+
+<div class="quirk"><b>Import an image while a selection is active and it
+arrives already masked to that selection.</b> Select the panel, drop the
+photo, and everything outside the panel is hidden — no cropping, no
+erasing. It is a <em>layer mask</em>, so nothing was thrown away:
+<code>Layer ▸ Layer Mask ▸ Delete mask</code> and the whole photo is
+back, at full size, exactly where it landed. This holds for both routes
+in — the drop and <code>File ▸ Import Image as Layer…</code> — and the
+status bar says which of the two imports you got. With no selection there is no
+mask (an all-hidden layer would just look like a failed import).</div>
+
+<h2>Saving</h2>
+<div class="quirk"><b>Single images save as .ora; comics are work
+folders</b> (a <code>work.mnc</code> index plus one file per page).
+Work folders autosave in place, page by page — only pages that changed
+are rewritten. Layered PSD is the hand-off format for other apps; CSP
+cannot open .ora.</div>
+
+<h2>Exporting every page</h2>
+<div class="quirk"><b>File ▸ Export All Pages… asks for its options
+first, then for a folder.</b> Leave the options alone and you get what
+you always got: <code>&lt;work name&gt;-p001.png</code>,
+<code>-p002.png</code> and so on, full resolution, PNG only. An unnamed
+work exports as <code>page-p001.png</code>. Clearing the file prefix
+does not produce files called <code>-p001.png</code> — an empty prefix
+falls back to the work name.</div>
+
+<div class="quirk"><b>A page range does not renumber.</b> Exporting
+pages 5 to 8 writes <code>p005</code> to <code>p008</code>. The number
+in the filename is always the page's own number, so a partial re-export
+overwrites exactly the files it should.</div>
+
+<div class="quirk"><b>Split spreads writes a spread as two files,
+<code>…p003a.png</code> and <code>…p003b.png</code> — and
+<code>a</code> is the half a reader meets FIRST.</b> On a right-bound
+(Japanese) work that is the RIGHT half. The seam is cut with no gutter,
+so nothing is thrown away; the gutter swallow only happens when you
+split a spread while editing. A page counts as a spread if you combined
+it this session, or if its canvas is half again as wide as a normal page
+in the work — the second test is what still works after the work has
+been closed and reopened, because the first is only remembered until
+you quit. In a work where every page is the same width nothing is
+treated as a spread.</div>
+
+<h2>Sending the text to a translator</h2>
+<div class="quirk"><b>File ▸ Export Text (script)… writes every balloon
+in the whole chapter to a .txt, in reading order.</b> The same toggle
+lives in the Export All Pages options, where it drops
+<code>&lt;prefix&gt;-text.txt</code> into the image folder. Layout: a
+<code>== Page N ==</code> line for every page (even an empty one, so the
+numbers stay countable), then <code>-- Panel N --</code> using the same
+panel numbering the Layers palette badges show. Text that sits in no
+panel comes last under <code>-- Outside panels --</code>; on a page with
+no panels at all it simply follows the page line.</div>
+
+<div class="quirk"><b>One balloon is one line, and hidden text is not
+exported.</b> Line breaks inside a balloon are typesetting, not content,
+so they collapse to a single space — expect a space where a Japanese
+balloon wrapped. A balloon that straddles two panels is filed by its
+centre point. A text layer with its eye off, or inside a folder with its
+eye off, is left out entirely: the dump is what would print.</div>
+
+<div class="quirk"><b>The .txt is UTF-8 with a byte-order mark and
+Windows line ends.</b> That is deliberate — the file leaves the app for
+Notepad, Word and Excel, and without those two details Japanese arrives
+as garbled characters or as one endless line. MangaNakama's own settings
+files are not written this way.</div>
+
+<footer><a href="index.html">← manual</a></footer>
+</main>
+</body>
+</html>

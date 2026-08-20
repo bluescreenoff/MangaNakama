@@ -1,0 +1,99 @@
+# CI: the full suite on windows-latest, GPU tests on WARP (the software
+# adapter — MN_WARP forces the fallback path the suite was designed for;
+# hardware adapters are not available on runners). The build needs the
+# GNU target + w64devkit's gcc/ar/dlltool exactly as SETUP.md describes
+# for a fresh machine — CI IS that fresh machine, re-proven every push.
+
+name: ci
+
+# Push triggers re-armed 2026-08-20: the workflow went green on its first
+# watched run (dispatch 32363905768) after the fresh-clone header fix, so
+# the "not until it has passed once" guard below has served its purpose.
+# (The guard's reasons, kept for the record: a Windows runner minute bills
+# DOUBLE against a private repo's free allowance, and a red-on-every-push
+# workflow mails the owner each time.)
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      MN_WARP: "1"
+      # The app suite builds a headless GPU renderer per test. Under the
+      # SOFTWARE adapter (which is what MN_WARP forces, and all a runner
+      # has) several of those alive at once exhaust memory: reproduced
+      # locally on 2026-08-19 as `Out of Memory` from wgpu, and as an
+      # outright STATUS_ACCESS_VIOLATION when the default thread count was
+      # used. Two at a time is the compromise; 1 costs about six minutes.
+      RUST_TEST_THREADS: "2"
+    steps:
+      - uses: actions/checkout@v4
+
+      # A failing CI run you cannot read is worth nothing. This prints the
+      # environment the build actually got — toolchain, C compiler, and
+      # whether the runner has the Japanese fonts several text tests name.
+      - name: Environment
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          rustc -vV
+          Write-Host "--- fonts the text suite asks for ---"
+          foreach ($f in "Meiryo","Yu Gothic","MS Gothic","Arial","Impact") {
+            $found = Get-ChildItem C:\Windows\Fonts -ErrorAction SilentlyContinue |
+                     Where-Object { $_.Name -match ($f -replace ' ','') }
+            Write-Host ("{0,-12} {1}" -f $f, $(if ($found) { "present" } else { "MISSING" }))
+          }
+
+      # The project builds with the GNU toolchain (no Visual Studio
+      # anywhere — see .cargo/config.toml's link-self-contained note).
+      - name: Rust (stable, x86_64-pc-windows-gnu)
+        run: |
+          rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
+          rustup default stable-x86_64-pc-windows-gnu
+
+      # w64devkit: the portable C toolchain the vendored libmypaint
+      # builds with (gcc/ar/dlltool on PATH via ./build.sh). Released as
+      # a self-extracting w64devkit-x64-*.exe; unpacked into
+      # toolchain/w64devkit where build.sh expects it (SETUP.md step 2).
+      - name: w64devkit
+        shell: pwsh
+        run: |
+          $rel = Invoke-RestMethod https://api.github.com/repos/skeeto/w64devkit/releases/latest
+          $asset = $rel.assets | Where-Object { $_.name -match '^w64devkit-x64-.*\.(exe|7z)$' } | Select-Object -First 1
+          curl.exe -L -o w64devkit.exe $asset.browser_download_url
+          if ($asset.name -match '\.7z$') {
+            7z x w64devkit.exe -otoolchain | Out-Null
+          } else {
+            ./w64devkit.exe -o"toolchain" -y | Out-Null
+          }
+          if (-not (Test-Path toolchain/w64devkit/bin/gcc.exe)) {
+            Get-ChildItem toolchain | ForEach-Object {
+              if (Test-Path "$($_.FullName)/bin/gcc.exe") { Move-Item $_.FullName toolchain/w64devkit }
+            }
+          }
+          if (-not (Test-Path toolchain/w64devkit/bin/gcc.exe)) { throw "w64devkit unpack failed" }
+
+      - name: cargo cache
+        uses: Swatinem/rust-cache@v2
+
+      # `--no-fail-fast` so one broken suite does not hide the state of the
+      # other six, and the whole transcript is kept as an artifact: the run
+      # page truncates, and reading the actual failure beats guessing at it.
+      - name: Test (WARP)
+        shell: bash
+        run: |
+          set -o pipefail
+          ./build.sh --test --no-fail-fast 2>&1 | tee ci-test.log
+
+      - name: Keep the transcript
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-test-log
+          path: ci-test.log
+          if-no-files-found: warn

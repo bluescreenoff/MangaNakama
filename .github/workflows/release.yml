@@ -1,0 +1,113 @@
+# RELEASE: tag a commit `vX.Y.Z`, push the tag, and this builds the real
+# release binary on a clean machine and publishes a downloadable zip on
+# the GitHub Releases page. That zip IS the tester's install: unzip,
+# double-click. Nothing else is required of them — no toolchain, no Rust.
+#
+# The layout inside the zip mirrors play/ because the exe resolves its
+# assets BESIDE ITSELF first (the round-28 stale-assets bug): the exe,
+# `assets/` and `manual/` travel together or the app comes up without
+# brushes and Help ▸ Manual opens nothing.
+#
+# Publishing uses the runner's preinstalled `gh` with the automatic
+# GITHUB_TOKEN — deliberately no third-party publish action, so a release
+# never depends on someone else's marketplace repo.
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  # Hand-runnable from the Actions tab for a dry run: builds and uploads
+  # the zip as a workflow artifact without creating a public release.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust (stable, x86_64-pc-windows-gnu)
+        run: |
+          rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
+          rustup default stable-x86_64-pc-windows-gnu
+
+      - name: w64devkit
+        shell: pwsh
+        run: |
+          $rel = Invoke-RestMethod https://api.github.com/repos/skeeto/w64devkit/releases/latest
+          $asset = $rel.assets | Where-Object { $_.name -match '^w64devkit-x64-.*\.(exe|7z)$' } | Select-Object -First 1
+          curl.exe -L -o w64devkit.exe $asset.browser_download_url
+          if ($asset.name -match '\.7z$') {
+            7z x w64devkit.exe -otoolchain | Out-Null
+          } else {
+            ./w64devkit.exe -o"toolchain" -y | Out-Null
+          }
+          if (-not (Test-Path toolchain/w64devkit/bin/gcc.exe)) {
+            Get-ChildItem toolchain | ForEach-Object {
+              if (Test-Path "$($_.FullName)/bin/gcc.exe") { Move-Item $_.FullName toolchain/w64devkit }
+            }
+          }
+          if (-not (Test-Path toolchain/w64devkit/bin/gcc.exe)) { throw "w64devkit unpack failed" }
+
+      - name: cargo cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build (release)
+        shell: bash
+        run: ./build.sh --release -p mn-app
+
+      # The zip is named for the tag, or for the short SHA on a hand-run —
+      # a tester's bug report has to be able to name the build it came from,
+      # and the file name is the first place they will look.
+      - name: Assemble the zip
+        id: pack
+        shell: pwsh
+        run: |
+          $tag = if ($env:GITHUB_REF -like 'refs/tags/*') { $env:GITHUB_REF -replace '^refs/tags/','' }
+                 else { "dev-" + $env:GITHUB_SHA.Substring(0,7) }
+          $dir = "MangaNakama-$tag-win64"
+          New-Item -ItemType Directory -Path $dir | Out-Null
+          Copy-Item target/release/manganakama.exe $dir/
+          Copy-Item -Recurse assets $dir/assets
+          Copy-Item -Recurse docs/manual $dir/manual
+          Copy-Item README.md, LICENSE-APACHE, LICENSE-MIT $dir/
+          Compress-Archive -Path $dir -DestinationPath "$dir.zip"
+          "tag=$tag"       | Out-File -Append $env:GITHUB_OUTPUT
+          "zip=$dir.zip"   | Out-File -Append $env:GITHUB_OUTPUT
+
+      # workflow_dispatch runs stop here: the zip is downloadable from the
+      # run's own page, nothing is published.
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pack.outputs.tag }}
+          path: ${{ steps.pack.outputs.zip }}
+
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # The notes are ASSEMBLED IN THE SCRIPT, never inlined in the YAML:
+        # the previous multi-line --notes string had continuation lines at
+        # column 0, which TERMINATED the `run: |` block scalar — "Bug
+        # reports:" became a top-level workflow key, GitHub could not parse
+        # the file at all, and every branch push produced a zero-job
+        # "failure" run (the owner's mystery emails). A workflow whose name
+        # shows as its file PATH in the Actions tab is one GitHub failed to
+        # parse.
+        run: |
+          {
+            printf '%s\n' 'Early build for testers. Windows 10/11, 64-bit. Unzip anywhere and run manganakama.exe — keep `assets/` and `manual/` beside it.'
+            printf '\n'
+            printf '%s\n' 'Bug reports: attach `manganakama.log` from beside the exe (it names the build and records the last crash) and say what you were drawing. Feature requests are welcome as issues.'
+          } > release-notes.md
+          gh release create "${{ steps.pack.outputs.tag }}" "${{ steps.pack.outputs.zip }}" \
+            --title "MangaNakama ${{ steps.pack.outputs.tag }}" \
+            --notes-file release-notes.md \
+            --prerelease

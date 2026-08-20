@@ -1,0 +1,22 @@
+[package]
+name = "mn-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "mn_core"
+path = "src/lib.rs"
+
+# core has no OS deps by contract (docs/ARCHITECTURE.md) — image/zip/xml are
+# explicitly fine, they are pure data.
+[dependencies]
+image = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# ORA is a zip. `deflate-flate2` pulls the pure-Rust miniz_oxide backend that
+# `image`'s PNG codec already brings in; everything else (aes, bzip2, lzma,
+# zstd, time) is off.
+zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
+quick-xml = "0.41"

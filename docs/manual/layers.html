@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Layers &amp; masks — MangaNakama manual</title>
+<link rel="stylesheet" href="manual.css">
+</head>
+<body>
+<main>
+<nav class="top"><a href="index.html">← manual</a></nav>
+<h1>Layers &amp; masks</h1>
+
+<h2>Blending modes</h2>
+<div class="quirk"><b>The list is not in Clip Studio's order.</b> Modes sit
+in the order they were built — Normal, Multiply, Screen, Add, Subtract
+first, then Overlay through Color, then the burn/dodge/light family last.
+So <b>Color burn</b> is at the bottom of the list, nowhere near
+<b>Color dodge</b>. The list keeps its order because saved files and your
+own muscle memory both count positions in it.</div>
+<div class="quirk"><b>"Brightness" is what other apps call
+"Luminosity".</b> It takes the upper layer's brightness and the lower
+layer's colour — the exact opposite of the <b>Color</b> mode two rows
+above it. It is not a tonal correction and it has no slider.</div>
+<div class="quirk warn"><b>Glow dodge is our own shape, not a copy of
+Clip Studio's.</b> Clip Studio has never published what its glow modes
+compute. Ours does the thing the mode is for: unlike <b>Color dodge</b>,
+which cannot lighten a pure black pixel at all, <b>Glow dodge</b> lifts
+black. If you are matching a file made in Clip Studio, expect this one
+mode to differ; the other twenty-six are the standard formulas.</div>
+<div class="quirk"><b>There is no "Add (Glow)" because <b>Add</b> already
+is it.</b> Clip Studio splits Add into two, differing only on
+part-transparent pixels. Ours is the stronger of the two, so a Clip
+Studio file using Add (Glow) lands on the right mode; a file using the
+plainer Add will read slightly brighter here where the layer is
+semi-transparent.</div>
+<div class="quirk"><b>Hard mix, Darker color and Lighter color have hard
+edges by design.</b> Hard mix snaps every channel to 0 or full, and the
+two colour compares switch the whole colour at once. Gradients under
+them band instead of blending — that is the mode working, not a
+rendering fault.</div>
+<div class="quirk"><b>Another app opening your .ora may not see these
+modes.</b> Fifteen of the twenty-seven use standard names other editors
+know. The rest (Linear burn, Glow dodge, Vivid light, Linear light, Pin
+light, Hard mix, Divide, Darker color, Lighter color, Add, Subtract)
+are ours; a foreign editor falls back to Normal for those layers. Your
+own files reload correctly — this only affects handing a .ora to
+someone else.</div>
+
+<h2>Mask editing is a mode that arms</h2>
+<div class="quirk warn"><b>Clicking a layer's mask square routes your
+brush to the mask.</b> While mask edit is armed, every stroke paints the
+mask's coverage instead of the layer's pixels. The mode disarms safely
+at the start of a stroke when it is no longer valid (the mask was
+deleted or baked) — those strokes drop instead of painting the layer by
+accident. Click the square again to leave the mode.</div>
+
+<h2>What undo does not cover</h2>
+<div class="quirk warn"><b>Mask strokes are not undoable.</b> Painting
+on a mask writes the mask field directly; there is no undo group for
+it. If a mask stroke went wrong, re-paint it — or clear the mask
+(Layer ▸ Layer Mask ▸ Clear) and redo it.</div>
+<div class="quirk warn"><b>Baking a mask leaves the mask outside the
+undo bracket.</b> Layer ▸ Layer Mask ▸ Apply commits the mask into the
+pixels as one undo step — but undoing that step restores the pixels and
+<b>not</b> the mask you spent time painting. Keep the layer's .ora saved
+if the mask matters.</div>
+
+<h2>Screentone</h2>
+<div class="quirk"><b>Dot position moves the DOTS, not the drawing.</b>
+The two "Dot position" bars slide the halftone lattice underneath art
+that stays exactly where it is — that is what they are for. Two tone
+layers at the same frequency and angle interfere and print as ugly
+bands; nudging one of them a few pixels breaks it. The lattice repeats,
+so a large offset eventually lands back on the same dots and appears to
+do nothing — a nudge of a few pixels is the whole intent.</div>
+<div class="quirk warn"><b>"Specified density" ignores what you
+painted.</b> With it on, every dot is the same size no matter how dark
+the ink underneath is — the flat "40&nbsp;% tone" fill. Alpha still
+decides <i>where</i>: transparent areas stay empty. "Brightness of
+image" is identical to "Colour of image" on grey and black art and only
+differs on <b>coloured</b> art, where it weighs blue as darker than
+green.</div>
+<div class="quirk"><b>Past 50&nbsp;% density every shape turns
+inside out.</b> Below half, the shape grows from the middle of each
+cell; above half, you are looking at shrinking holes of paper at the
+cell corners — which is how real screentone behaves. Star and Asterisk
+turn into <i>round</i> holes up there, so a very dark "star tone" stops
+looking like stars.</div>
+<div class="quirk"><b>Noise has no lattice, and Asterisk is
+approximate.</b> Noise is a random dither, so it cannot moiré against
+anything and its grain follows the Frequency bar rather than a Size
+control. Every shape solves its own size from the density you asked
+for, but Asterisk's size law is fitted rather than solved, so its
+density is close rather than exact. If a printed density has to be
+exact, use Dots, Square, Ellipse, Lozenge, Cross or Lines.</div>
+<div class="quirk"><b>Posterize is not on live tone Fill layers.</b>
+The steps control appears on the layer <i>effect</i> panel only. A live
+Fill layer already draws one flat density, so there is no ramp for it
+to flatten.</div>
+<div class="quirk"><b>View ▸ Show tone area tints whole 64&nbsp;px
+blocks.</b> It marks every toned region of every <i>visible</i> layer
+green so a forgotten scrap of tone shows up before the page prints. The
+tint is deliberately coarse — a three-pixel scrap lights up its whole
+block, because a scrap you can see is the point. It is a view only:
+nothing is saved, exported or undoable.</div>
+<h2>Filters</h2>
+<div class="quirk warn"><b>Filters have no preview — they apply when you
+press Apply.</b> Filter ▸ Blur ▸ Gaussian blur, Motion blur and Filter ▸
+Effect ▸ Mosaic all commit straight to the layer. There is nothing on
+canvas showing what the numbers will do beforehand, so the way to judge
+a setting is to apply it, look, and <kbd>Ctrl+Z</kbd> if it is wrong.
+Each filter is exactly one undo step no matter how much of the page it
+touched.</div>
+<div class="quirk"><b>A filter runs on the active layer only, and stops
+at the selection.</b> Not on the merged image, not on a folder — one
+raster layer, the one highlighted in the Layer palette. With a selection
+active the change is confined to it, but the blur still <i>reads</i>
+pixels from outside the marquee, so the edge of the selection does not
+darken. A folder, a text/balloon/frame layer or a locked layer refuses
+the filter and the status bar says so.</div>
+<div class="quirk"><b>Blur spreads ink past where the drawing was.</b> A
+stroke near the edge of its layer blurs outwards into empty space, so
+the layer covers a little more than it did — up to the blur's own radius.
+It stops at the paper edge: a filter will not push content out beyond
+the canvas.</div>
+<div class="quirk"><b>"Lock transparent pixels" turns a blur into a
+colour-only blur.</b> With the lock on, the alpha of every pixel is put
+back exactly as it was after the filter runs, so the silhouette does not
+move and only the colours inside it soften. That is the trick for
+softening flats without fattening the line they sit under.</div>
+<div class="quirk"><b>Gaussian strength is approximate at the bottom of
+the slider.</b> The blur is built from three box passes (which is why it
+is fast at large radii), and those passes come in whole pixels — so
+strengths between about 1 and 2 px round to the same few results instead
+of increasing smoothly. Above ~3 px it tracks the number. Mosaic cells
+are anchored to the paper's top-left corner, not to your selection, so
+mosaicking two areas separately keeps one continuous grid.</div>
+
+<h2>Solos</h2>
+<div class="quirk"><b>Alt+click an EYE solos the layer.</b> Every other
+layer's eye goes off; Alt+click the same eye again and the exact
+previous visibility comes back. The snapshot lives per page — switching
+pages forgets it (the second press then starts a fresh solo).</div>
+<div class="quirk"><b>The Reference checkbox has its own solo.</b>
+Alt+click the "Reference layer" checkbox solos the REFERENCE set (every
+other layer's reference flag clears) — a different solo from the eye's,
+and the two do not interact.</div>
+
+<h2>The Correction menu</h2>
+<div class="quirk warn"><b>A correction is baked into the pixels.</b>
+Brightness/Contrast, Hue/Saturation/Luminosity, Posterization, Reverse
+gradient and Binarization rewrite the layer's pixels. It is one undo
+step while the file is open — but once you save and close, the original
+tones are gone. Duplicate the layer first if you might want them back.
+There is no correction layer you can re-open and re-edit.</div>
+<div class="quirk warn"><b>It corrects the ACTIVE layer, not what you
+see.</b> The canvas shows every layer composited; a correction touches
+exactly one. Binarizing a page whose lineart sits above a white base
+changes the lineart layer only — the white stays white because it is a
+different layer.</div>
+<div class="quirk"><b>A selection bounds it.</b> With a selection
+active, pixels outside it are left byte-for-byte alone and a partly
+selected pixel gets a proportional amount of the correction — a feathered
+selection fades the correction out along its edge. Deselect first if you
+meant the whole layer.</div>
+<div class="quirk"><b>Transparent pixels stay transparent, always.</b>
+No correction here changes alpha, Binarization included: it drives
+colour to pure black or pure white and leaves opacity untouched, so
+binarizing scanned lineart does not flood the page with white. CSP's
+"Leave transparency" switch has no off position here.</div>
+<div class="quirk warn"><b>The preview is the real canvas, and anything
+else abandons it.</b> While the dialog is open the correction is painted
+into the actual pixels so you judge it at full size. That means nothing
+else may touch the document: any other command — a menu item, a
+shortcut, switching layers or tabs — puts the pixels back and closes the
+dialog, and a pen stroke is refused with a note in the status bar. Press
+Apply before you go anywhere. Untick <i>Preview</i> to see the
+untouched layer without closing the dialog.</div>
+<div class="quirk"><b>Reverse gradient applies immediately.</b> It has
+no settings, so there is no dialog and no preview — the menu item is the
+whole operation. Undo is the way back.</div>
+<h2>Filtering the stack</h2>
+<div class="quirk warn"><b>You cannot drag rows to reorder while a
+filter is on.</b> With rows missing, a drop line drawn between two
+visible rows would land the layer somewhere you cannot see, so the
+palette turns reordering off and says "reorder off" beside the count.
+Clear the filter to reorder. Everything else — the eye, rename, select,
+delete, the folder triangle — keeps working on exactly the layer named
+in the row.</div>
+<div class="quirk"><b>A filtered stack is FLAT.</b> Collapsed folders
+stop hiding their children while a filter is on, otherwise a match
+inside a shut folder would look like a filter that found nothing. The
+folder triangles go back to doing their job the moment the filter is
+cleared.</div>
+<div class="quirk"><b>The active layer always shows, match or not.</b>
+It is the layer your pen is on; a stack that hides it is worse than one
+extra row. It is included in the "n of m" count.</div>
+<div class="quirk"><b>"This frame folder" means the koma holding the
+ACTIVE layer</b> — the whole block, header and children, found by
+walking up from wherever the active layer sits. With the active layer in
+no frame folder at all the filter matches nothing, and the count row
+says so rather than leaving you with a blank palette.</div>
+<h2>Palette colours</h2>
+<div class="quirk"><b>A folder wears the topmost palette colour from
+inside it.</b> A folder with no colour of its own shows the colour of
+the highest layer within it that has one, so a collapsed folder still
+tells you what it holds. Give the folder a colour of its own and that
+one wins — which is also how you stop a child's colour showing on the
+folder. Nesting is followed all the way down; a folder with nothing
+coloured inside it keeps a bare strip.</div>
+<div class="quirk"><b>Select layer is a sub tool of Operation, and it
+finds layers by pointing at the page.</b> Pick Operation ▸ Select layer
+and click a pixel: the Layer palette jumps to whichever layer drew it.
+It answers with the TOPMOST layer that has ink there, so on a finished
+page the answer is usually a tone or the text — which is what the
+Exclude switches in Tool Property are for. Draft, text and locked layers
+are skipped by default; fill/tone layers are not, because sometimes the
+tone IS what you were pointing at.</div>
+<div class="quirk"><b>Select layer ignores hidden layers whatever the
+Exclude switches say, and needs real ink, not a fringe.</b> A layer you
+cannot see is never the answer. Neither is a pixel less than about 10%
+opaque — the soft edge of an antialiased line one layer up would
+otherwise win every click against the solid line underneath it. If the
+click reports nothing found, either the excludes ate every candidate or
+you clicked the paper.</div>
+<h2>Border effect</h2>
+<div class="quirk"><b>The outline grows OUTSIDE the drawing, into space the
+layer never painted.</b> Layer Property ▸ Border effect wraps a keyline
+round the layer's own alpha — the white line that lets a character read
+against a tone — so the layer now covers more of the page than its pixels
+do, by up to the thickness you set. It stops at the paper edge: outline
+that would fall off the page is never drawn and never exported.</div>
+<div class="quirk"><b>Nothing is painted, and it follows the drawing.</b>
+The pixels underneath are untouched — turn the effect off and the layer is
+byte-for-byte what it was. Keep drawing with it on and the outline is
+round the new ink on the next frame; erase and it retreats. Thickness is
+in <b>canvas pixels</b> (not mm) and caps at 32.</div>
+<div class="quirk warn"><b>Half-transparent ink does not get an
+outline.</b> A pixel seeds the keyline only at 50&nbsp;% alpha or more, the
+same rule the text engine's フチ uses. So the soft tail of an airbrushed
+stroke is simply not there as far as the outline is concerned, and a layer
+drawn entirely at low opacity gets no keyline at all — raise the ink, not
+the thickness.</div>
+<div class="quirk"><b>On a tone layer the keyline wraps the DOTS.</b> The
+effect is derived after the screentone, so it outlines what the layer
+shows rather than the grey you painted — each dot gets its own rim. The
+same is true of a live Fill layer. Folders refuse the effect outright:
+a folder has no alpha of its own to grow from, and the status bar says so.</div>
+
+<h2>Layer colour, sub colour and the mono preview</h2>
+<div class="quirk"><b>Layer colour and sub colour are the two ends of one
+ramp.</b> The main colour replaces the layer's <i>black</i>, the sub colour
+replaces its <i>white</i>, and everything between is mixed by brightness —
+the two-tone rough-draft look. Sub colour only appears once a layer colour
+is set, because on its own it means nothing. Leaving it off is exactly the
+same picture as setting it to white.</div>
+<div class="quirk warn"><b>"Preview as" is the screen only — it never
+reaches the exported page.</b> Grey and Mono&nbsp;(1-bit) answer "would
+this hold up in print?" without converting a pixel. The export, and the
+colour the fill and wand tools sample, both ignore it. Layer colour and
+sub colour are the opposite: those are real rendering and they <i>do</i>
+print.</div>
+<div class="quirk warn"><b>Mono preview thresholds coverage as well as
+value, and that is the point.</b> At 1-bit there are no half-covered
+pixels, so anything under 50&nbsp;% alpha vanishes and everything above it
+goes fully solid — the antialiased edge you have been drawing against
+disappears and you see the hard, aliased edge a 1-bit page really prints.
+A preview that kept the soft edge would hide the exact problem it exists
+to show. The threshold is fixed at 50&nbsp;%.</div>
+<div class="quirk"><b>Only the border effect is undoable.</b>
+<kbd>Ctrl+Z</kbd> steps through border-effect changes; layer colour, sub
+colour and the preview mode are presentation switches with no undo step,
+like the eye — click them back. All four are saved with the file.</div>
+<h2>Paper</h2>
+<div class="quirk"><b>The paper is not a layer, and it is under all of
+them.</b> View ▸ Paper. There is exactly one per page, you cannot draw
+on it, move it, delete it or reorder it — so it is a property of the
+document rather than a row in the stack. It has two knobs and they
+behave differently on purpose: the <b>colour</b> is part of the drawing
+(a cream page exports cream, and changing it is undoable), and
+<b>Show paper</b> is a view switch like a layer's eye (not undoable).</div>
+<div class="quirk warn"><b>Turning the paper off does NOT export a
+transparent PNG.</b> With the paper hidden the canvas shows the
+transparency checker wherever the page is transparent — that is what it
+is for: a missed spot inside a flat fill is invisible against white and
+obvious against a checker. It is a check you switch on, not an export
+mode, so every export still writes the paper colour underneath. If you
+want a transparent PNG, that is a separate export option, not this
+switch.</div>
+<div class="quirk"><b>The checker does not zoom.</b> Its squares stay
+the same size on screen at 12 % and at 800 %, because it belongs to the
+window and not to the drawing. If it scaled with the page it would read
+as a big grey pattern you had painted.</div>
+<div class="quirk"><b>Paper colours are a short preset list plus your
+current colour.</b> View ▸ Paper offers white, cream, newsprint, two
+greys and black; for anything else, pick the colour in the Color
+palette and choose "Use the current drawing colour". Black lineart on a
+mid grey paper is the quick way to check whether your darks are
+carrying.</div>
+
+<footer><a href="index.html">← manual</a></footer>
+</main>
+</body>
+</html>

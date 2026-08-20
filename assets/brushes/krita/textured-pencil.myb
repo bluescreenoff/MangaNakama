@@ -1,0 +1,62 @@
+{
+  "comment": "MyPaint brush file",
+  "name": "Krita Textured Pencil",
+  "group": "krita",
+  "description": "Krita TEXTURE tip: the grain mask multiplies every dab, anchored to the canvas - paper tooth that stays put as the pencil moves. Light scatter for the dry drag of a real pencil.",
+  "mn-texture": "grain",
+  "mn-texture-scroll": 0.0,
+  "mn-scatter": 0.12,
+  "settings": {
+    "radius_logarithmic": {
+      "base_value": 1.1,
+      "inputs": {
+        "pressure": [
+          [0.0, -0.7],
+          [0.7, 0.0],
+          [1.0, 0.0]
+        ]
+      }
+    },
+    "opaque": {
+      "base_value": 0.5
+    },
+    "opaque_multiply": {
+      "base_value": 0.0,
+      "inputs": {
+        "pressure": [
+          [0.0, 0.0],
+          [0.4, 0.4],
+          [1.0, 0.5]
+        ]
+      }
+    },
+    "hardness": {
+      "base_value": 0.8,
+      "inputs": {
+        "pressure": [
+          [0.0, -0.1],
+          [1.0, 0.05]
+        ]
+      }
+    },
+    "dabs_per_basic_radius": {
+      "base_value": 6.0
+    },
+    "dabs_per_actual_radius": {
+      "base_value": 6.0
+    },
+    "radius_by_random": {
+      "base_value": 0.0,
+      "inputs": {
+        "pressure": [
+          [0.0, 0.0],
+          [1.0, 0.03]
+        ]
+      }
+    },
+    "slow_tracking": {
+      "base_value": 0.3
+    }
+  },
+  "version": 3
+}

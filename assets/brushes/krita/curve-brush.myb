@@ -1,0 +1,6 @@
+{
+    "version": 3,
+    "name": "Curve Brush",
+    "mn-engine": "curve",
+    "comment": "Krita CURVE engine: a 7-dab parabola arch tiled along the path, chord perpendicular to travel — the scallop/stitch texture."
+}

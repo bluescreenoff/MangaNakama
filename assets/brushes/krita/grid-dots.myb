@@ -1,0 +1,6 @@
+{
+    "version": 3,
+    "name": "Grid Dots",
+    "mn-engine": "grid",
+    "comment": "Krita GRID engine: hard dots snapped to a square lattice. pitch/dot tuned at 12px / 0.35."
+}

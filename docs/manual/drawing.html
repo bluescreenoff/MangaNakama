@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawing &amp; selections — MangaNakama manual</title>
+<link rel="stylesheet" href="manual.css">
+</head>
+<body>
+<main>
+<nav class="top"><a href="index.html">← manual</a></nav>
+<h1>Drawing &amp; selections</h1>
+
+<h2>Stroke correction</h2>
+<div class="quirk warn"><b>Post correction makes the ink trail the
+pen.</b> It smooths each point against the points on BOTH sides of it,
+so a point cannot be drawn until the pen is far enough past it — about
+32 canvas pixels of stroke at 100%, less at lower settings. The line
+catches up the moment you lift. Stabilize is the alternative that has
+no look-ahead; it lags too, and it also swallows slow movement
+entirely. <span class="why">Neither is free: one costs look-ahead, the
+other costs a dead zone.</span></div>
+<div class="quirk warn"><b>An Out taper holds back the end of the
+stroke until you lift the pen.</b> The last <i>Out</i> pixels cannot be
+thinned before the program knows where the stroke ends, so that much
+ink appears on release. Set <i>Start/end</i> to <b>Fade</b> instead if
+that bothers you — Fade runs from the start of the stroke and holds
+nothing back.</div>
+<div class="quirk"><b>By scale reads the zoom once, when the stroke
+starts.</b> Zooming or rotating mid-stroke does not resize the
+correction under a line that is already being drawn. Same rule as the
+mouse smoothing floor.</div>
+<div class="quirk"><b>Fade ignores the In length.</b> In Fade mode the
+whole stroke ramps from full down to the minimum over the Out length
+and then holds there, so an entry taper would have nothing to do; the
+In slider is hidden rather than silently ignored.</div>
+<div class="quirk"><b>Sharp angles does nothing on its own.</b> It is an
+exception to post correction, so it only has an effect while <i>Post
+correct</i> is above zero. A corner sharper than about 60° is emitted
+exactly as drawn and the smoothing stops on either side of it.</div>
+<div class="quirk"><b>Correction ▸ In and Sub Tool Detail ▸ In taper
+stack.</b> They are two separate entry tapers — the sub tool's own
+(seeded from the brush the preset was converted from) and yours — and
+both multiply the pressure. A preset that already tapers in, like Real
+G-Pen, is already ramping before you add anything here.</div>
+<h2>The eraser end of the pen</h2>
+<div class="quirk"><b>Flipping the stylus over selects the Eraser tool,
+and flipping back restores the tool you were using.</b> Because it is a
+real tool switch rather than a temporary mode, the eraser end keeps its
+own brush and its own size — flip back and forth and each end stays as
+you left it. Three deliberate limits: a flip is <em>ignored while a
+line is being drawn</em>, so a mis-reported flag can never change the
+tool under your hand; if you pick a different tool by hand while the
+pen is inverted, flipping back leaves your choice alone; and moving a
+real mouse cancels it. <span class="why">Some tablets only report the
+tail while it is touching, not while it hovers — if yours does, the
+toolbar changes as you make contact rather than as you flip.</span></div>
+
+<h2>Leaving the window mid-stroke</h2>
+<div class="quirk"><b>Alt-Tabbing away, or another program stealing the
+window, ends the stroke in progress — the ink you had already laid down
+stays and is one undo step.</b> The keyboard and pen events that would
+normally finish the gesture go to the other window, so holding them
+open would be worse: a held <kbd>Space</kbd> released in the other
+program used to leave the canvas stuck in pan mode, where every pen
+press dragged the page instead of drawing. Coming back, everything is
+released: no held space, no half-finished stroke, no live brush-size
+drag. The status bar says <code>input released</code> when there was
+something to release.</div>
+
+<h2>Wash mode</h2>
+<div class="quirk"><b>One wash stroke can never exceed its opacity,
+however much it overlaps itself.</b> In wash mode the dabs accumulate
+inside a stroke buffer and the whole stroke commits once at the
+Opacity you set — going over the same line twice inside ONE stroke
+does not darken it. Build-up mode (wash off) is the stock behaviour:
+every dab paints, and overlaps add up. <span class="why">Flow is the
+per-dab alpha inside the stroke; Opacity is the stroke.</span></div>
+<div class="quirk"><b>The Ink blend box only appears in wash mode, and
+it is not saved with the brush.</b> It offers the same twenty-seven
+modes the Layers palette does, and it decides how the finished stroke
+combines with what is already on that layer. Build-up strokes have no
+such control. The choice lives with the tool for the session — brush
+preset files on disk can only carry Normal, Multiply and Screen, so a
+stroke blend you set here is gone next launch.</div>
+
+<h2>Locking a sub tool</h2>
+<p>The padlock beside the wrench in <b>Tool Property</b> pins the sub
+tool you are on — for the pen you spent an afternoon calibrating and
+would rather not have to calibrate again at three in the morning.</p>
+<div class="quirk"><b>A locked tool still takes every change.</b> Drop
+the size for one panel, pull the opacity down for one bit of shading —
+it all works normally. What the lock stops is the <em>remembering</em>:
+the next time you select that sub tool, the values the padlock froze
+come back and the status bar says <i>settings restored</i>. A lock that
+refused the change outright would be a lock you spent the day switching
+off.</div>
+<div class="quirk"><b>The lock follows the sub tool, not the app.</b>
+Locking your inking pen leaves the eraser, and every other brush, free.
+Each sub tool has its own padlock.</div>
+<div class="quirk"><b>Unlocking keeps the values you are looking
+at.</b> Whatever you drifted to becomes that sub tool's own settings on
+the way out — releasing the padlock does not throw the afternoon
+away.</div>
+<div class="quirk"><b>Sub Tool Detail is the same tool by another
+door.</b> Everything in that window edits normally while the lock is on,
+and comes back with everything else; the window says so at the top so
+the snap-back does not arrive unannounced.</div>
+<div class="quirk"><b>“Reset to preset” releases the lock.</b> It throws
+away the stored settings, and a padlock over values that no longer
+exist would be a lie.</div>
+<div class="quirk"><b>Locks are forgotten on exit.</b> Tool Property
+values are session memory, and so is the padlock.</div>
+
+<h2>Texture</h2>
+<div class="quirk"><b>Texture grain is anchored to the canvas, not the
+pen.</b> A textured brush multiplies the same grain values at the same
+canvas positions, so overlapping strokes reinforce the same pattern
+instead of laying down fresh grain each pass. A deliberate deviation
+from Krita.</div>
+
+<h2>Brush feel — Interval, density, anti-alias</h2>
+<div class="quirk"><b>Interval and Anti-alias start on "As preset", which is
+not one of CSP's settings.</b> Until you pick a rung, the brush draws with
+exactly the spacing and edge the preset file shipped — so nothing you have
+been using changes the day these rows appear. Picking "As preset" again puts
+that exact value back, not a house default.</div>
+<div class="quirk"><b>Narrow / Normal / Wide follow the Size slider; Fixed
+does not.</b> The three named intervals are fractions of the tip (5 %, 10 %,
+20 % of its width), so a brush at four times the size gets four times the gap
+and keeps the same look. Fixed is a literal pixel distance and holds still
+while the brush grows — which is what you want for a dotted or beaded line
+and wrong for everything else. The number beside the dropdown is the real
+gap at the current size.</div>
+<div class="quirk"><b>Adjust density by gap can only make a stroke lighter,
+never darker.</b> It divides one stroke's opacity across however many dabs
+land on a pixel, so tightening the interval stops making the line blacker —
+that is the cure for the faint periodic banding a sketchy brush shows. It
+does not work the other way: widening the gap will not be compensated back
+up, so a too-pale wide-gap brush needs Opacity, not this. <span
+class="why">Off is raw build-up: every dab paints at full strength and
+overlaps add up.</span></div>
+<div class="quirk"><b>Anti-alias is a minimum, so raising it does nothing to
+an already-soft brush.</b> The four levels set the narrowest edge fade the
+dab is allowed — a tip softer than that keeps its own edge untouched, and
+only a harder one is softened up to it. When it does soften, the dab is
+grown to match, so the line does not get thinner. <span class="why">"None"
+means genuinely aliased: a hard tip stays hard-edged, which is a deliberate
+choice for manga lineart, not a missing feature.</span></div>
+<div class="quirk warn"><b>Hard dab overrides Anti-alias completely.</b> Hard
+dab draws its own exact disc with a one-pixel edge and never reads hardness,
+so the four levels change nothing you can see while it is on — the row says
+so instead of showing a pixel figure that is not being used.</div>
+
+<h2>Fill</h2>
+<div class="quirk"><b>Area scaling is signed, and negative never pulls
+back from the page edge.</b> Positive grows the fill under the lineart
+(overfill); negative erodes it so the fill stops short of the line
+(underfill). The erosion measures distance to a real boundary, and the
+canvas border is not one — an area that runs off the page keeps its
+pixels right up to the page edge however far you pull the slider
+negative. <span class="why">Same rule the selection's Shrink follows,
+so the two agree.</span></div>
+<div class="quirk"><b>Refer to image border leaves the outermost pixel
+row unpainted.</b> The switch makes the page's perimeter count as a
+drawn line — and you do not paint over a line, so at Area scaling 0 a
+one-pixel ring stays empty. The default +1 covers it again. <span
+class="why">What the switch is for is lineart that stops a few pixels
+shy of the page edge: on its own that slot lets a fill out over the
+top, and with the perimeter drawn in, Close gap seals it.</span></div>
+<div class="quirk warn"><b>Enclose and fill needs open space at the page
+edge to know what "inside" means.</b> It fills every closed area your
+loop encloses by flooding from the four page corners first and throwing
+that away — so on a page whose lineart runs right to the edge on all
+sides there is nothing to throw away, and the drag fills the background
+too. Leave a margin, or reach for the plain bucket. <span class="why">The
+selection tool's Shrink (flats) mode is the same geometry and has the
+same edge case.</span></div>
+<div class="quirk"><b>Lasso fill ignores every fill setting.</b> Pick
+that sub tool and Tolerance, Close gap, Area scaling and the Refer rows
+disappear from Tool Property: it paints the shape you drew, straight
+over any lineart inside it, so none of them have anything to describe.
+An active selection still clips it, like every fill.</div>
+<h2>Colour</h2>
+<div class="quirk"><b>The HEX field reverts anything it cannot read
+exactly.</b> It takes <code>#rrggbb</code>, <code>rrggbb</code> and the
+3-digit short form (<code>#f80</code> is <code>#ff8800</code>). Type
+something that is not one of those — a half-typed value, a
+<code>#rrggbbaa</code> with an alpha on the end — and pressing Enter
+puts the current colour back rather than jumping to a nearby one.
+<span class="why">A guess in a colour field is worse than doing
+nothing: you would not notice it was a guess.</span></div>
+<div class="quirk"><b>The <b>Recent</b> strip fills when you
+<em>settle</em> on a colour, not while you drag.</b> Sweeping the hue
+ring feeds the canvas live but leaves nothing behind; the value you
+release on is the one that lands in the strip. It keeps the last ten,
+newest first, drops repeats, and survives a restart. Right-click any
+of them for <b>Add all to Color Set</b> (a copy — the strip is left
+alone) or <b>Clear recent colours</b>. <span class="why">Otherwise one
+two-second drag would fill all ten slots with the same hue.</span></div>
+<div class="quirk"><b>The Color Set never grows on its own unless you
+tick <b>Add picked colours</b>.</b> The switch is at the bottom of the
+Color Set palette and is off to begin with: with it on, every colour
+you take with the eyedropper is added (repeats ignored, and it stops
+at 256). <span class="why">The Recent strip already remembers your
+picks and forgets them again, which is what you want for most of them
+— the Color Set is the half you curate.</span></div>
+<div class="quirk"><b>An imported <code>.gpl</code> keeps its colour
+names — hover a swatch to read one.</b> Palettes downloaded for GIMP
+or Krita usually name their swatches ("skin — shadow"), and those
+names are now stored with the colour in <code>swatches.txt</code>,
+after the hex on the same line. An unnamed swatch shows its hex
+instead. <span class="why">A build older than this one reads that file
+too, but drops the names; it will not choke on them.</span></div>
+<h2>Eyedropper</h2>
+<div class="quirk"><b>The average is an average of light, not of
+numbers.</b> Set Average color to 2 × 2 over a spot that is half ink and
+half paper and the pick comes back <code>#BCBCBC</code>, not the
+mid grey <code>#808080</code> you would get by averaging the bytes.
+That is the honest answer: half the light really does look like that,
+and it is the same rule the canvas uses when you zoom out — so an
+averaged pick agrees with the zoomed-out page instead of contradicting
+it. <span class="why">1 × 1 is the default and takes the pixel verbatim,
+exactly as it always did.</span></div>
+<div class="quirk"><b>Reference layers are picked even when their eye is
+off.</b> With the sub tool on <i>Pick from reference layers</i> the
+sample comes from the reference set alone, hidden or not — the same rule
+the fill tool follows, so you can keep roughs invisible and still pick
+off them. If no layer is marked as reference the pick falls back to what
+you see and the status line says so.</div>
+<div class="quirk"><b>The picker ring only appears for the Eyedropper
+tool.</b> <kbd>Alt</kbd>+click from a brush picks with the same
+Reference and Average settings, but draws no ring — the brush ring is
+already there and two rings fight. Turn the ring off in Tool Property ▸
+Show color picker circle.</div>
+<h2>Gradients</h2>
+<div class="quirk"><b>The colour bar only authors what is BETWEEN the two
+ends.</b> The ramp's start and end colours come from the sub tool you
+picked (Main&nbsp;→&nbsp;Sub, Main&nbsp;→&nbsp;Transparent,
+Transparent&nbsp;→&nbsp;Main), so they are not draggable and cannot be
+moved inwards. Click the bar to add an interior stop, drag a stop down
+out of the bar to delete it. Six interior stops is the maximum.
+<span class="why">On a gradient LAYER the two ends are editable too —
+they are that layer's own parameters, not the tool's.</span></div>
+<div class="quirk warn"><b>Edge process &ldquo;Do not draw&rdquo; leaves
+the outside alone — it does not erase it.</b> Everything past the length
+you dragged keeps whatever was already on the layer. The default,
+&ldquo;Do not repeat&rdquo;, holds the end colour out to the canvas edge
+instead; Repeat tiles the ramp and Reverse ping-pongs it.</div>
+<div class="quirk"><b>Flip and Start from centre change the DRAG, not the
+bar.</b> The colour bar always shows the ramp as authored, left to right.
+Flip paints it end-first and Start from centre makes the point you press
+the middle of the ramp rather than one end — neither redraws the bar, so
+the canvas is where you see them.</div>
+<div class="quirk"><b>Dithering only touches the inside of the ramp.</b>
+It is an ordered pattern worth about one 8-bit level, there to stop a
+long smooth ramp printing as visible bands. Where the ramp has run out
+and the end colour is being held flat, no noise is added — a fade to
+transparent leaves genuinely clean paper.</div>
+<div class="quirk"><b>&ldquo;Create live layer&rdquo; retargets the
+gradient layer you are standing on.</b> With the switch on, dragging the
+Gradient tool while a live fill/gradient/tone layer is active REPLACES
+that layer's parameters instead of stacking a new layer. Stand on a
+raster layer to get a new gradient layer.</div>
+<div class="quirk"><b>Brightness only exists in Perceptual mixing.</b> The
+slider disappears in the other modes rather than sitting there dead. It
+lifts the middle of a ramp between two saturated colours back toward the
+brighter end&rsquo;s lightness; it can never move either end, whatever
+the level. <span class="why">Standard mixes the sRGB numbers (what every
+paint program calls normal), Linear mixes the light itself, so a
+black&nbsp;&rarr;&nbsp;white ramp reads much brighter halfway across in
+Linear than in Standard.</span></div>
+<div class="quirk warn"><b>Applying a saved gradient REWRITES your main
+and sub colours.</b> A saved gradient owns its two end colours, but the
+tool takes its ends from the palette — so Apply sets main (and sub, and
+the sub tool mode) to whatever reproduces the saved ramp. Apply it while
+standing on a gradient LAYER instead and nothing in the palette moves:
+the layer holds its own ends.</div>
+<div class="quirk"><b>Import reads GIMP <code>.ggr</code>, not CSP
+<code>.cgs</code> or Photoshop <code>.grd</code>.</b> Those two are
+undocumented binary formats; <code>.ggr</code> is plain text and most
+gradient packs are published in it as well. A <code>.ggr</code> with more
+than six interior boundaries keeps the first six and still lands both
+ends, rather than refusing to load.</div>
+<div class="quirk"><b>The gradient set lives beside the exe, not in the
+document.</b> It is one line in <code>ui.txt</code>, so it follows the
+install and not the file you are drawing. Every list button saves it
+immediately &mdash; there is no separate Save.</div>
+
+<h2>Selections</h2>
+<div class="quirk warn"><b>Selections are not in the undo history.</b>
+Deselecting, growing, inverting — none of it has an undo step. CSP
+parity, deliberate. <span class="why">What you DO inside a selection
+(paint, fill, transform) is undoable normally; the selection itself is
+session state.</span></div>
+<div class="quirk"><b>Flip is bounded by the selection.</b> Every pixel
+outside the selection is byte-untouched by a flip or transform commit —
+deliberately unlike CSP's never-fixed 2016 transform bug that destroyed
+neighbouring content.</div>
+<div class="quirk"><b>Reset is not the same as Esc.</b> The Reset button
+in Tool Property puts the float back to the size, angle and position it
+was lifted at and <em>stays in the transform</em>; <kbd>Esc</kbd> leaves
+the transform altogether and takes the lifted selection with it. Reset
+leaves the reference point where you put it — it is a setting, not part
+of the transformation.</div>
+<div class="quirk"><b>Moving the transform reference point shifts the
+content.</b> The pivot is not cosmetic: moving it re-derives the
+transform from the same scale/rotation values around the new pivot, so
+the preview moves. The honest recomputation, not a pinned preview.</div>
+<div class="quirk"><b>The magnetic lasso only re-aims while the pen is
+down.</b> Press and drag and the outline snaps to the lineart as you
+go. Lift the pen and the line to the cursor goes straight and stays
+straight — that is not the path the next drag will take, it is just
+telling you where the trace left off. Press again and it snaps from
+there. <span class="why">The snapped wire is a shortest-path search, and
+running one per mouse-move with the pen up would cost you a search per
+frame for a preview you did not ask for.</span></div>
+<div class="quirk"><b>Lifting the pen plants an anchor, and only Enter,
+Esc or a click on the ringed first point ends the trace.</b> The lift is
+not the end of the gesture — the outline stays open so you can trace a
+long edge in several comfortable strokes. Backspace takes anchors back
+one at a time and cancels the whole trace at the first one.</div>
+<div class="quirk warn"><b>Drag too far without an anchor and the
+magnetic lasso stops snapping.</b> Past roughly 500 px between anchors
+the search window would be big enough to stall the page, so the wire
+gives up and runs dead straight. It plants anchors itself every ~48 px
+while you drag, so you only see this by dragging with the pen up. A
+straight segment where you expected a snap means "drop an anchor".</div>
+<div class="quirk"><b>Snap range is the whole of the magnetic lasso's
+tuning, and it cuts both ways.</b> Tool Property ▸ Snap range (default
+40 px) is how far off your cursor the wire may wander to find an edge.
+Too small and it ignores the line you are tracing; too large and it can
+prefer a stronger edge you did not mean — the next panel border rather
+than the chin. <span class="why">It also bounds the search, so a large
+range is slower.</span></div>
+<div class="quirk"><b>The magnetic lasso snaps to the page as you see
+it, not to the layer you are on.</b> Every visible layer feeds the edge
+detector, so it will happily follow a line drawn on a layer you are not
+editing. Draft layers and hidden layers are the two exceptions — it
+ignores both, the same rule fill and the magic wand follow. <span
+class="why">Snapping to the rough underdrawing instead of the finished
+line is the one wrong answer that would be worth reporting as a
+bug.</span></div>
+<div class="quirk"><b>A blurred (feathered) selection moves softly.</b>
+Blur a selection in the selection launcher, then transform: each pixel
+travels by its coverage fraction, so the edge fades instead of cutting
+at a hard line. Paint and fill read the same feather — the edge is a
+gradient, not a step.</div>
+
+<footer><a href="index.html">← manual</a> · the deep records live in
+the repository's <code>docs/DECISIONS.md</code>.</footer>
+</main>
+</body>
+</html>

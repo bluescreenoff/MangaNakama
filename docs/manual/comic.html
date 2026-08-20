@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Comic — MangaNakama manual</title>
+<link rel="stylesheet" href="manual.css">
+</head>
+<body>
+<main>
+<nav class="top"><a href="index.html">← manual</a></nav>
+<h1>Comic: frames, gutters, effect lines</h1>
+
+<h2>Frame folders</h2>
+<div class="quirk warn"><b>The last frame takes a one-shot
+confirm.</b> Pressing Delete on a frame folder's LAST panel arms (the
+status line tells you the next press removes the folder); any other
+command disarms it; the second press deletes the folder together with
+its layers. Every other frame deletes on the first press — the guard
+exists only where Delete would take the art with it.</div>
+<div class="quirk"><b>Dragging a shared gutter moves both panels.</b>
+Borders created by dividing a page stay linked: drag one and the
+neighbour's edge follows as one gesture — and if the drag would squash
+a neighbour into a broken shape, the whole edit reverts (the status
+line says so). Release near a neighbour's edge to snap.</div>
+<div class="quirk"><b>Panel numbers are reading order, not names.</b>
+The badge on each frame folder recomputes from the page's geometry
+(top-right first in right-to-left), so moving a panel renumbers the
+page. Rename a folder and the name is yours — the badge keeps carrying
+the number.</div>
+
+<h2>Crop marks and margins</h2>
+<p>The bleed, trim, inner border and publisher safety margins come from
+the page's comic settings and are drawn over the canvas. <b>View ▸ Crop
+marks and margins</b> unticks them.</p>
+<div class="quirk"><b>Hiding them changes nothing about the page.</b>
+The sizes stay in the work settings, panel edges still snap to the same
+lines, and export never drew them in the first place — the switch is
+about what you can see while you draw, not about what the page is.</div>
+<div class="quirk"><b>This one <em>is</em> remembered between
+sessions</b> (<code>guides_hidden=</code> in <code>ui.txt</code>),
+unlike <kbd>Tab</kbd> and <kbd>Shift+Tab</kbd>, which always come back
+on the next launch. Hiding the guides is a way of working; hiding the
+palettes is a key you pressed.</div>
+<div class="quirk"><b>A canvas made from a pixel preset has no
+guides.</b> They are millimetre geometry at a dpi, so a canvas created
+in pixels has nothing to draw and the switch has nothing to do.</div>
+<h2>Cutting panels</h2>
+<div class="quirk warn"><b>What a cut does to the art is a setting, not
+a rule.</b> With the <i>Divide frame folder</i> sub tool, Tool Property
+▸ <i>Contents of the new folder</i> picks between <i>Create empty
+folder</i> (the default — the new half starts blank), <i>Duplicate
+layer</i> (the new half gets a copy of the folder's contents, so a
+panel you have already drawn keeps its drawing in both halves) and
+<i>Do not change</i> (draw the border only; no new folder, nothing
+moves). Cutting a drawn panel on the default setting leaves the art in
+the ORIGINAL half only — that is the setting talking, not a bug.</div>
+<div class="quirk"><b>Tap a panel edge, and it runs off the page.</b>
+With either divide sub tool, a click that does not turn into a drag
+extends the panel edge nearest the tap out past the paper — the bleed
+panel in one tap. If another panel of the same folder faces that edge,
+the edge stops flush against it instead and the gutter between the two
+closes. A drag still divides; only a tap extends.</div>
+<div class="quirk"><b>Divide equally uses the gutter values above it,
+and needs to know which panel.</b> Tool Property ▸ Columns/Rows ▸
+<i>Divide equally</i> cuts the panel into the whole grid in one
+command, spacing it with the divide sub tool's own Gutter L/R and
+T/B. When the folder holds more than one panel it will not guess:
+select the panel with the Object tool first. <i>Fit to side
+direction</i> divides a tilted panel along its own slant rather than
+true vertical and horizontal.</div>
+<div class="quirk"><b>A bent cut makes panels that cannot be cut
+again.</b> Cutting along a bent or curved path leaves concave panels,
+and the divide tool only cuts convex ones — so plan the straight cuts
+first and the shaped ones last.</div>
+
+<h2>Borders you ink yourself</h2>
+<div class="quirk"><b>Turning a border off turns it into a ruler.</b>
+Right-click a frame folder's reading-order badge ▸ <i>Border off —
+outline becomes a ruler</i>. The folder keeps its shape and still masks
+its contents, but lays down no ink: instead the outline joins the curve
+rulers, so a pen snaps to it and you ink the panel edge yourself with
+real pressure and brush character. Two consequences worth knowing:
+<b>it switches ruler snapping ON</b> for the whole document (a ruler
+you cannot snap to is not a ruler), and the border width you had is
+remembered, not thrown away — the same menu item inks it back at the
+same weight.</div>
+<h2>Balloons</h2>
+<div class="quirk"><b>There is no &ldquo;fill inside frame&rdquo; switch &mdash;
+set Fill opacity to 0.</b> A bubble with no fill is a bubble whose fill you
+cannot see, so Tool Property gives you one control instead of two: drop Fill
+opacity to zero and the outline inks while the art behind shows straight
+through. The panel says so under the bar when you get there.</div>
+<div class="quirk"><b>A screened balloon&rsquo;s cell is measured in canvas
+pixels, not lines per inch.</b> Tick <i>Screened fill</i> and the Cell bar is
+px. Changing the document&rsquo;s resolution afterwards does <em>not</em>
+re-flow that screen &mdash; it stays the size you gave it, and you re-set it by
+hand. A tone <em>layer</em> is specified in lpi and does follow the dpi; the
+two are deliberately different and this is the one place it shows.</div>
+<div class="quirk"><b>Tail type and bend apply to the whole balloon, not to
+one tail.</b> There is no way to select a single tail, so setting Thought or
+Shout on a bubble sets every tail it has. If you have somehow given one
+balloon two differently-shaped tails, the panel shows the tool&rsquo;s own
+setting rather than picking one of them to call the truth &mdash; and the next
+change makes them match.</div>
+<div class="quirk warn"><b>Only a <em>drawn</em> bubble can be rotated.</b>
+The rotation knob is offered on every balloon, but an ellipse and a rounded
+rectangle are stored axis-aligned: turning one moves nothing (an ellipse with
+no tail comes out of the drag identical). Draw the bubble with the Balloon
+tool&rsquo;s pen mode if you need it tilted. This is also why turning an
+ellipse does not take its lettering with it &mdash; see
+<a href="text.html">Text &amp; objects</a>.</div>
+<div class="quirk"><b>Two balloons that overlap on one layer become one
+balloon &mdash; including their colour.</b> The shared edge is erased, which is
+what makes a tail merge into its bubble. Where two <em>differently</em>
+coloured balloons overlap, each pixel takes the ink of whichever body or tail
+is nearest to it, so the two colours meet along the ridge between them. Put
+them on separate balloon layers if you want a hard edge instead.</div>
+
+<h2>Effect lines</h2>
+<div class="quirk warn"><b>Regenerating effect lines replaces the
+layer's pixels wholesale — and is not undoable.</b> Layer ▸ Edit effect
+lines ▸ Apply re-runs the generator with the dialog's values; the old
+raster is gone (including anything painted on top of it), and there is
+no undo step. The generator parameters themselves are remembered per
+layer and only update when a regeneration succeeds.</div>
+
+<footer><a href="index.html">← manual</a></footer>
+</main>
+</body>
+</html>

@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>MangaNakama — manual</title>
+<link rel="stylesheet" href="manual.css">
+</head>
+<body>
+<main>
+<h1>MangaNakama manual</h1>
+<p>This manual documents <b>the things you would never guess</b> —
+behaviour that differs from CSP, one-shot confirmations, modes that arm
+and disarm, actions that are not undoable. It is not a feature tour: a
+feature tour is what every abandoned help file is. If something surprised
+you, it should be on one of these eight pages.</p>
+
+<h2>The five that bite in the first hour</h2>
+<div class="quirk warn"><b>Clicking a layer's mask square arms mask
+editing.</b> Your brush now writes to the mask, not the layer — the
+square you clicked is the mode. Click it again (or a layer's thumbnail)
+to go back. <a href="layers.html">Layers &amp; masks</a></div>
+<div class="quirk warn"><b>Mask strokes are not undoable.</b> There is
+no undo step that restores a mask stroke; re-paint the change instead.
+<a href="layers.html">Layers &amp; masks</a></div>
+<div class="quirk warn"><b>Deleting a frame folder's last frame takes a
+second press.</b> The first Delete arms (the status line says so); any
+other command disarms; the second removes the folder with its layers.
+This is the only thing standing between Delete and a vanished panel.
+<a href="comic.html">Comic</a></div>
+<div class="quirk"><b>Press the Object tool's key again to move through
+the stack.</b> With something selected in the Object tool, <kbd>O</kbd>
+cycles everything under your click — text, then the balloon, then the
+frame — and <kbd>Shift+O</kbd> goes back. The status bar names each
+hop. <a href="text.html">Text &amp; objects</a></div>
+<div class="quirk"><b><kbd>Ctrl+D</kbd> is Deselect.</b> CSP uses it for
+Reselect; we kept Deselect deliberately. Reselect lives on
+<kbd>Ctrl+Shift+D</kbd>. <a href="keys.html">Keys</a></div>
+
+<h2>Contents</h2>
+<table>
+<tr><td><a href="drawing.html">Drawing &amp; selections</a></td><td>wash mode, texture grain, the HEX field, recent colours, selection undo, flip bounds</td></tr>
+<tr><td><a href="layers.html">Layers &amp; masks</a></td><td>mask arming, mask undo, screentone shapes and density, what bake leaves outside undo, filters and corrections, the border effect, layer/sub colour and the mono preview</td></tr>
+<tr><td><a href="comic.html">Comic</a></td><td>frames, gutters, effect lines, the last-frame confirm</td></tr>
+<tr><td><a href="text.html">Text &amp; objects</a></td><td>the Object key, the Text→Object handover, style runs</td></tr>
+<tr><td><a href="pages.html">Pages &amp; reading</a></td><td>multi-page, the story editor, the reader</td></tr>
+<tr><td><a href="keys.html">Keys</a></td><td>the key map and every recorded shortcut deviation</td></tr>
+<tr><td><a href="files.html">Files &amp; diagnostics</a></td><td>where the log lives, what to attach to a bug report</td></tr>
+</table>
+
+<footer>This manual ships with the app and documents the build it came
+with. A behaviour change that affects a page here is a bug in that
+change — the manual and the code move in the same commit.</footer>
+</main>
+</body>
+</html>

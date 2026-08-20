@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Text &amp; objects — MangaNakama manual</title>
+<link rel="stylesheet" href="manual.css">
+</head>
+<body>
+<main>
+<nav class="top"><a href="index.html">← manual</a></nav>
+<h1>Text &amp; objects</h1>
+
+<h2>The Object key cycles the stack</h2>
+<div class="quirk"><b>Press <kbd>O</kbd> again to move onward.</b> With
+something selected in the Object tool, pressing the Object key again
+moves the selection through everything stacked under your click — in
+the same order clicking would find them: text first, then effect-line
+runs, then balloons, then frames. <kbd>Shift+O</kbd> steps back; both
+wrap around. The status bar names each hop
+(<code>text → balloon (2 of 3 here)</code>). Cycling only moves the
+selection — nothing is edited, nothing is undoable.</div>
+<div class="quirk"><b>Switching from the Text tool to Object selects
+the balloon.</b> With a text selected, pressing <kbd>O</kbd> from the
+Text tool hands the selection to the balloon containing that text —
+the bubble's vertices and handles, ready to drag. If no balloon
+contains it, the text stays selected.</div>
+
+<h2>Turning a balloon turns its lettering</h2>
+<div class="quirk"><b>Rotate a drawn bubble and the text inside it comes
+with it &mdash; still text.</b> Every text box whose centre sat inside the
+balloon swings around with it and is re-set at the new angle by the font
+engine. Nothing is flattened into pixels: click it afterwards and keep typing,
+restyle it, change its furigana. (This is the thing you cannot do in Clip
+Studio, where a text layer has to be rasterised before it can be turned and
+the lettering then can never be edited again.)</div>
+<div class="quirk warn"><b>Undoing that takes two steps, and only a
+<em>drawn</em> bubble does it at all.</b> The bubble and the lettering live on
+different layers and history is kept per layer, so <kbd>Ctrl</kbd>+<kbd>Z</kbd>
+takes back the text first and the balloon second &mdash; the status line says
+how many texts came along. An ellipse or rounded-rectangle balloon cannot be
+tilted at all (see <a href="comic.html">Comic</a>), so turning one moves no
+lettering either. Text on a hidden or locked layer is left where it is.</div>
+
+<h2>Undo while you are typing</h2>
+<div class="quirk"><b><kbd>Ctrl</kbd>+<kbd>Z</kbd> inside a text box
+steps back through your edits, not out of the box.</b> Typing collapses
+into word-sized steps — a run of characters undoes together, while a
+space, a newline, a deletion, a style change or a reading each get
+their own step. So does anything you change in Tool Property while the
+caret is in the box: a font, an alignment, a furigana setting — and a
+whole slider drag counts once, not once per frame.</div>
+<div class="quirk"><b>The press that runs out of edits closes the box
+and stops there.</b> When there is nothing left to undo <em>inside</em>
+the box, <kbd>Ctrl</kbd>+<kbd>Z</kbd> ends the session; if the session
+changed anything, that same press also takes the box back, which is the
+single step the document's own history keeps for it. A session that
+ends where it started has nothing in that history, so the press only
+puts the caret away and the drawing behind it is left alone — press
+again to undo what you did before you opened the box.</div>
+
+<h2>Furigana (ふりがな)</h2>
+<div class="quirk"><b>Select the kanji inside the text, type the reading
+into Tool Property ▸ Furigana, press ルビ.</b> An empty field clears the
+reading; the field's grey hint shows whatever reading the caret is
+already sitting inside, so you can see one without hunting for it on
+the canvas. Readings are set at <b>half the base size</b> — that is
+what JIS specifies, so it is fixed and not a slider. In vertical text
+the reading goes to the <b>right of the column</b>, in horizontal above
+the word.</div>
+<div class="quirk"><b>An annotated text box spaces its lines further
+apart than an unannotated one</b>, because the readings need somewhere
+to sit — a text set to a specific Line spacing keeps exactly the
+spacing you asked for, and only <em>Auto</em> makes room automatically.
+Text with no readings is laid out exactly as before, to the pixel.</div>
+<div class="quirk"><b>Tool Property ▸ Furigana carries the reading
+settings: Size, Gap, Adjust and Along.</b> They apply to the whole text
+item, not to one reading — as in Clip Studio, and because a balloon
+whose two readings are set differently is a balloon with a mistake in
+it. <b>Size defaults to 50 %</b> of the base text, which is what JIS
+specifies; <b>Clip Studio ships 67 %</b>, so a page set there needs this
+turned up to match. Gap is the distance from the base text, Adjust
+slides the reading along the word, and Along decides whether a short
+reading sits centred on its word (the usual) or against one end.</div>
+<div class="quirk warn"><b>Readings follow the characters they belong
+to as you edit</b>: typing in front of an annotated word carries the
+reading along, typing inside it extends the reading's range, deleting
+part of the word shrinks it, and deleting the whole word removes the
+reading with it. <b>Known limit:</b> if an annotated word wraps across
+two lines, the reading is drawn against the first line only.</div>
+
+<h2>Numbers in vertical text (縦中横)</h2>
+<div class="quirk"><b>Select the number while editing, then press
+<kbd>縦中横</kbd> in Tool Property ▸ Style.</b> It sits with B/I/U
+because it behaves like them: a toggle over the selected characters,
+shown pressed when they are already upright, and pressing it again lays
+them back down. A selection that is only <em>partly</em> upright counts
+as off, so the press finishes the job rather than undoing the half that
+was done. The button is greyed in horizontal text, where the setting
+would mean nothing.</div>
+<div class="quirk"><b>Characters marked as 縦中横 are set upright and side
+by side, inside one character cell of the column.</b> That is how a number
+reads on a printed Japanese page — 22時, 3人, 第1話 — and it is exactly
+what a vertical line does <em>not</em> do by itself: left alone the text
+engine lays Latin characters on their side and stacks them down the
+column, so 22 arrives as two fallen digits. A marked run takes exactly
+one cell however many characters are in it, and its characters are
+centred in that cell.</div>
+<div class="quirk"><b>Two digits are set at full size; three or four are
+shrunk to fit the column.</b> A digit is around six tenths of a character
+wide and a column is about one and a half, so a pair fits with room to
+spare and nothing is scaled — and a pair is what 縦中横 is conventionally
+used for. A longer run is scaled down as a group, where a Japanese
+typesetter would instead narrow the glyphs without making them shorter;
+the text engine cannot do that to part of a line, so the group simply
+gets smaller. <b>A text box holding nothing but the number</b> shrinks it
+too, for a duller reason: with no other character on the line there is
+nothing to set the column's width by, so the pair is squeezed into a
+single cell.</div>
+<div class="quirk warn"><b>It does nothing in horizontal text.</b> 縦中横
+means "horizontal inside vertical", so a run left on a box you later turn
+horizontal is ignored rather than made to mean something else. Marked
+runs follow their characters as you edit, exactly as readings and font
+overrides do, and two runs that end up touching become one cell — 2 and 2
+marked separately are still 22 in one square.</div>
+
+<h2>Auto 縦中横</h2>
+<div class="quirk"><b>Tool Property ▸ Text direction ▸ 自動縦中横 stands
+short numbers upright without you selecting anything.</b> Pick how long a
+run may be — <kbd>off</kbd>, <kbd>1</kbd>, <kbd>2</kbd>, <kbd>3</kbd>,
+<kbd>4</kbd> — and every run of half-width letters or digits up to that
+length is set upright on its own: 第1話, 22時, 3年. New text boxes start
+at <kbd>2</kbd>. The row is greyed in horizontal text for the same reason
+the 縦中横 button is.</div>
+<div class="quirk"><b>A run is taken whole or not at all.</b> With the
+limit at 2, "223" is left lying down rather than set as an upright 22 with
+a stray 3 after it — half a number standing up is worse than none. Runs
+are measured between non-alphanumeric characters, so a line break, a kana
+or a space ends one; full-width ２２ is already upright in a column and is
+never touched.</div>
+<div class="quirk"><b>Nothing is written into the box — the runs are
+worked out afresh every time it is drawn.</b> Turning the setting back to
+<kbd>off</kbd> therefore restores the page exactly, and typing a third
+digit into a pair takes the cell apart again instead of leaving a
+two-character cell with a digit hanging off it.</div>
+<div class="quirk warn"><b>Auto cannot be cancelled for one span; the
+<kbd>縦中横</kbd> button only clears runs you marked by hand.</b> A run you
+marked yourself wins over anything Auto found in the same characters, but
+there is no way to tell Auto to skip a particular number. To lay one back
+down, set 自動縦中横 to <kbd>off</kbd> for that box and mark the runs you
+do want. Clip Studio has the same hole and gives the same answer.</div>
+
+<h2>Two fonts in one balloon</h2>
+<div class="quirk"><b>Select characters while editing, then pick a font
+— it applies to the selection, not the whole box.</b> With nothing
+selected the picker sets the item's font as it always did (and the
+default for new text). This is the same rule the B/I/U buttons follow.
+It exists because a Japanese balloon font rarely has Latin worth
+reading, so the English shout, the SFX or the name on a sign wants its
+own face inside otherwise Japanese text. <b>A font set over part of an
+existing override splits it</b> instead of replacing it: set a line in
+one face, then three characters of it in another, and the first face
+still holds either side. <b>Picking the item's own font for a selection
+clears the override</b> rather than storing a duplicate one — otherwise
+changing the box's font later would leave islands of the old face
+behind with nothing on screen to explain them; that too takes back only
+the selection, not the run around it. A furigana reading is set in
+whatever font its base characters use.</div>
+
+<h2>Style runs and the story editor</h2>
+<div class="quirk warn"><b>Script edits reset character styling when
+the length changes.</b> Editing a field's text through the Story
+Editor keeps per-character styling (bold, colour, size) only while the
+text length stays the same; any length-changing edit resets the
+style runs to the field's defaults. Same-length edits (retyping a
+character) keep them.</div>
+<div class="quirk"><b>Alignment and spacing are item-level.</b> Row
+alignment and line spacing apply to the whole text item, not to a
+selected range — DirectWrite has no per-range paragraph alignment.
+Strikethrough and underline work in vertical text, where CSP hides
+them.</div>
+
+<footer><a href="index.html">← manual</a></footer>
+</main>
+</body>
+</html>

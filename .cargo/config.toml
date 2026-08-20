@@ -1,0 +1,16 @@
+# Why this file exists
+#
+# `build.sh` puts `toolchain/w64devkit/bin` on PATH (we need its gcc/ar/dlltool
+# for the vendored libmypaint C). rustc's windows-gnu target infers
+# `link-self-contained` from whether it can see an external mingw gcc: once
+# w64devkit's gcc is on PATH it assumes a complete system mingw and stops
+# passing its own runtime directory. w64devkit ships a unified `libgcc.a` with
+# no separate `libgcc_eh.a`, so every link then dies with
+# `cannot find -lgcc_eh`.
+#
+# Forcing self-contained linking makes rustc supply the mingw runtime it ships
+# with (rustup's `rust-mingw` component), while w64devkit still provides the
+# gcc/binutils drivers. Do not remove this without re-testing a clean build.
+
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-C", "link-self-contained=yes"]

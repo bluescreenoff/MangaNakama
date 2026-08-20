@@ -1,0 +1,47 @@
+{
+  "comment": "MyPaint brush file",
+  "name": "Krita Sketch Pen",
+  "group": "krita",
+  "description": "Krita's SKETCH engine: the stroke links back to its own recent history, so scribbles knot into hatching webs - the roughing tool. Distance = how far back it connects; density = how often.",
+  "mn-sketch": true,
+  "mn-sketch-distance": 40,
+  "mn-sketch-density": 0.6,
+  "settings": {
+    "radius_logarithmic": {
+      "base_value": 1.3,
+      "inputs": {
+        "pressure": [
+          [0.0, -0.5],
+          [0.7, 0.0],
+          [1.0, 0.0]
+        ]
+      }
+    },
+    "opaque": {
+      "base_value": 0.6
+    },
+    "opaque_multiply": {
+      "base_value": 0.0,
+      "inputs": {
+        "pressure": [
+          [0.0, 0.0],
+          [0.4, 0.3],
+          [1.0, 0.4]
+        ]
+      }
+    },
+    "hardness": {
+      "base_value": 0.85
+    },
+    "dabs_per_basic_radius": {
+      "base_value": 2.5
+    },
+    "dabs_per_actual_radius": {
+      "base_value": 2.5
+    },
+    "slow_tracking": {
+      "base_value": 0.15
+    }
+  },
+  "version": 3
+}

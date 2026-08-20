@@ -1,0 +1,7 @@
+/target/
+/toolchain/
+# Screenshot-harness state the app writes beside the exe.
+ui.txt
+# Local-only test fixture (third-party brush data, not redistributed —
+# the test skips when it is absent).
+crates/brush/tests/data/abr_v6_sample.abr

@@ -1,0 +1,514 @@
+//! Sub Tool list: every tool's own sub-tool palette — brush presets with
+//! live stroke previews for Pen/Eraser, mode rows for everything else.
+//! `ensure_preview` honours the 1-per-frame budget set at the top of
+//! `build` (startup trickles, never hitches).
+
+use std::path::PathBuf;
+
+use super::icons::{self, Icon};
+use super::preview;
+use super::theme;
+use super::widgets::group_caption;
+use crate::app::App;
+use crate::cmd::{AppCmd, BalloonMode, FillMode, SelectMode, Tool};
+
+// --- sub tool list ------------------------------------------------------
+
+/// Fetch (or lazily build) the stroke preview for one preset.
+fn ensure_preview(
+    app: &mut App,
+    ctx: &egui::Context,
+    path: &PathBuf,
+) -> Option<egui::TextureHandle> {
+    if let Some(entry) = app.brush_previews.get(path) {
+        return entry.clone();
+    }
+    if app.preview_budget == 0 {
+        // Not generated yet; keep the UI responsive and repaint soon.
+        ctx.request_repaint_after(std::time::Duration::from_millis(30));
+        return None;
+    }
+    app.preview_budget -= 1;
+    let tex = preview::generate(ctx, path);
+    app.brush_previews.insert(path.clone(), tex.clone());
+    tex
+}
+
+/// CSP's strict chain: every tool has its own Sub Tool list. Stroke tools
+/// list the brush presets; the rest list their modes (fill referents, select
+/// shapes, balloon shapes, frame cuts...), each remembering its own Tool
+/// Property values.
+pub(super) fn sub_tool_list(ui: &mut egui::Ui, app: &mut App) {
+    match app.tool {
+        // The selection pen/eraser ride the BRUSH preset list — the stroke
+        // is the active brush; only the target differs (selection coverage).
+        Tool::Pen | Tool::Eraser | Tool::SelPen | Tool::SelEraser => brush_sub_tools(ui, app),
+        _ => mode_sub_tools(ui, app),
+    }
+}
+
+/// One selectable mode row: tool icon + name, same shape as the brush rows so
+/// the palette reads uniformly.
+fn mode_row(ui: &mut egui::Ui, selected: bool, icon: Icon, name: &str) -> egui::Response {
+    let w = ui.available_width();
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 22.0), egui::Sense::click());
+    let p = ui.painter();
+    if selected {
+        p.rect_filled(rect, 2.0, theme::SEL_ROW);
+        p.rect_filled(
+            egui::Rect::from_min_size(rect.min, egui::vec2(2.0, rect.height())),
+            0.0,
+            theme::ACCENT,
+        );
+    } else if resp.hovered() {
+        p.rect_filled(rect, 2.0, theme::HOVER);
+    }
+    let ir = egui::Rect::from_center_size(
+        egui::pos2(rect.left() + 15.0, rect.center().y),
+        egui::vec2(15.0, 15.0),
+    );
+    icons::paint(
+        p,
+        ir,
+        icon,
+        if selected {
+            theme::TEXT_STRONG
+        } else {
+            theme::TEXT
+        },
+    );
+    let color = if selected {
+        theme::TEXT_STRONG
+    } else {
+        theme::TEXT
+    };
+    let galley = super::widgets::ellipsis(
+        ui,
+        name,
+        egui::FontId::proportional(11.5),
+        color,
+        (rect.right() - 4.0 - (rect.left() + 28.0)).max(10.0),
+    );
+    p.galley(
+        egui::pos2(rect.left() + 28.0, rect.center().y - galley.size().y * 0.5),
+        galley,
+        color,
+    );
+    resp
+}
+
+fn mode_sub_tools(ui: &mut egui::Ui, app: &mut App) {
+    use crate::cmd::{FrameMode, PanMode};
+    match app.tool {
+        Tool::Fill => {
+            // CSP's Fill sub-tool list, in its order: three click-aimed
+            // 参照 rows, then the two path-aimed ones. Picking a 参照 row
+            // also returns to the click sub tool — that is what those rows
+            // ARE in CSP.
+            group_caption(ui, "Fill");
+            let click = app.fill_mode == FillMode::Click;
+            let refer = app.fill_opts.refer;
+            let mut pick_refer: Option<mn_core::FillRefer> = None;
+            if mode_row(
+                ui,
+                click && refer == mn_core::FillRefer::All,
+                Icon::Fill,
+                "Refer other layers",
+            )
+            .clicked()
+            {
+                pick_refer = Some(mn_core::FillRefer::All);
+            }
+            if mode_row(
+                ui,
+                click && refer == mn_core::FillRefer::Active,
+                Icon::Fill,
+                "Refer editing layer only",
+            )
+            .clicked()
+            {
+                pick_refer = Some(mn_core::FillRefer::Active);
+            }
+            if mode_row(
+                ui,
+                click && refer == mn_core::FillRefer::Reference,
+                Icon::Fill,
+                "Refer reference layer",
+            )
+            .clicked()
+            {
+                pick_refer = Some(mn_core::FillRefer::Reference);
+            }
+            if let Some(r) = pick_refer {
+                app.fill_opts.refer = r;
+                app.push_cmd(AppCmd::SetFillMode(FillMode::Click));
+            }
+            if mode_row(
+                ui,
+                app.fill_mode == FillMode::Enclose,
+                Icon::Wand,
+                "Enclose and fill",
+            )
+            .on_hover_text("drag right around a messy region — every closed area inside it fills")
+            .clicked()
+            {
+                app.push_cmd(AppCmd::SetFillMode(FillMode::Enclose));
+            }
+            if mode_row(ui, app.fill_mode == FillMode::Lasso, Icon::Select, "Lasso fill")
+                .on_hover_text("drag a shape and it is painted as drawn — lines are ignored")
+                .clicked()
+            {
+                app.push_cmd(AppCmd::SetFillMode(FillMode::Lasso));
+            }
+        }
+        Tool::Wand => {
+            group_caption(ui, "Auto select");
+            let refer = app.wand_opts.refer;
+            if mode_row(
+                ui,
+                refer == mn_core::FillRefer::All,
+                Icon::Wand,
+                "Refer all layers",
+            )
+            .clicked()
+            {
+                app.wand_opts.refer = mn_core::FillRefer::All;
+            }
+            if mode_row(
+                ui,
+                refer == mn_core::FillRefer::Active,
+                Icon::Wand,
+                "Refer editing layer only",
+            )
+            .clicked()
+            {
+                app.wand_opts.refer = mn_core::FillRefer::Active;
+            }
+            if mode_row(
+                ui,
+                refer == mn_core::FillRefer::Reference,
+                Icon::Wand,
+                "Refer reference layer",
+            )
+            .clicked()
+            {
+                app.wand_opts.refer = mn_core::FillRefer::Reference;
+            }
+        }
+        Tool::Select => {
+            group_caption(ui, "Selection");
+            let m = app.select_mode;
+            if mode_row(ui, m == SelectMode::Rect, Icon::Select, "Rectangle").clicked() {
+                app.push_cmd(AppCmd::SetSelectMode(SelectMode::Rect));
+            }
+            if mode_row(ui, m == SelectMode::Lasso, Icon::Select, "Lasso").clicked() {
+                app.push_cmd(AppCmd::SetSelectMode(SelectMode::Lasso));
+            }
+            if mode_row(ui, m == SelectMode::Magnetic, Icon::Select, "Magnetic lasso")
+                .on_hover_text(
+                    "trace roughly along the lineart and the outline snaps to it — Backspace undoes an anchor, Enter closes",
+                )
+                .clicked()
+            {
+                app.push_cmd(AppCmd::SetSelectMode(SelectMode::Magnetic));
+            }
+            if mode_row(ui, m == SelectMode::Shrink, Icon::Wand, "Shrink (flats)")
+                .on_hover_text(
+                    "drag across the empty space — every closed area the path crosses is selected",
+                )
+                .clicked()
+            {
+                app.push_cmd(AppCmd::SetSelectMode(SelectMode::Shrink));
+            }
+        }
+        Tool::Frame => {
+            let m = app.frame_mode;
+            let mut pick: Option<FrameMode> = None;
+            group_caption(ui, "Create frame");
+            if mode_row(ui, m == FrameMode::Rect, Icon::Object, "Rectangle frame").clicked() {
+                pick = Some(FrameMode::Rect);
+            }
+            if mode_row(ui, m == FrameMode::Polyline, Icon::Frame, "Polyline frame")
+                .on_hover_text("click corners, close on the first one (Enter closes, Esc cancels)")
+                .clicked()
+            {
+                pick = Some(FrameMode::Polyline);
+            }
+            if mode_row(ui, m == FrameMode::Pen, Icon::Pen, "Frame border pen")
+                .on_hover_text("draw the panel outline freehand")
+                .clicked()
+            {
+                pick = Some(FrameMode::Pen);
+            }
+            group_caption(ui, "Cut frame border");
+            if mode_row(
+                ui,
+                m == FrameMode::DivideFolder,
+                Icon::Frame,
+                "Divide frame folder",
+            )
+            .on_hover_text("each cut panel becomes its own frame folder (CSP)")
+            .clicked()
+            {
+                pick = Some(FrameMode::DivideFolder);
+            }
+            if mode_row(
+                ui,
+                m == FrameMode::DivideBorder,
+                Icon::Frame,
+                "Divide frame border",
+            )
+            .on_hover_text("the cut stays inside the same folder")
+            .clicked()
+            {
+                pick = Some(FrameMode::DivideBorder);
+            }
+            if let Some(p) = pick {
+                app.frame_mode = p;
+                app.frame_poly = None;
+                app.frame_pen = None;
+            }
+        }
+        Tool::Balloon => {
+            group_caption(ui, "Balloon");
+            for m in [
+                BalloonMode::Ellipse,
+                BalloonMode::Round,
+                BalloonMode::Draw,
+                BalloonMode::Tail,
+            ] {
+                if mode_row(ui, app.balloon_mode == m, Icon::Balloon, m.label()).clicked() {
+                    app.balloon_mode = m;
+                }
+            }
+        }
+        Tool::Text => {
+            group_caption(ui, "Text");
+            mode_row(ui, true, Icon::Text, "Text");
+        }
+        Tool::Object => {
+            group_caption(ui, "Operation");
+            use crate::cmd::ObjectMode;
+            let om = app.object_mode;
+            if mode_row(ui, om == ObjectMode::Object, Icon::Object, "Object").clicked() {
+                app.object_mode = ObjectMode::Object;
+            }
+            // S-001: the pick is an OPERATION sub tool in CSP, not a layer
+            // palette button — you are pointing at the page, not at a list.
+            if mode_row(ui, om == ObjectMode::PickLayer, Icon::Eyedrop, "Select layer")
+                .on_hover_text("click a pixel and the Layer palette jumps to whichever layer drew it")
+                .clicked()
+            {
+                app.object_mode = ObjectMode::PickLayer;
+            }
+        }
+        Tool::Figure => {
+            group_caption(ui, "Figure");
+            use crate::cmd::FigureMode;
+            for (m, icon) in [
+                (FigureMode::Line, Icon::Figure),
+                (FigureMode::Rect, Icon::Rect),
+                (FigureMode::Ellipse, Icon::Ellipse),
+                (FigureMode::Polygon, Icon::Poly),
+            ] {
+                if mode_row(ui, app.figure_mode == m, icon, m.label()).clicked() {
+                    app.figure_mode = m;
+                    app.figure_poly = None;
+                }
+            }
+        }
+        Tool::Gradient => {
+            group_caption(ui, "Gradient");
+            use crate::cmd::GradMode;
+            for m in [
+                GradMode::FgToBg,
+                GradMode::FgToTransparent,
+                GradMode::TransparentToFg,
+            ] {
+                if mode_row(ui, app.grad_mode == m, Icon::Gradient, m.label()).clicked() {
+                    app.grad_mode = m;
+                }
+            }
+        }
+        Tool::Eyedrop => {
+            // E-014 参照: the same three referents the fill tool offers, in
+            // the same order, so the two palettes read as one idea.
+            group_caption(ui, "Eyedropper");
+            let refer = app.eyedrop_opts.refer;
+            for (v, label, hint) in [
+                (
+                    mn_core::FillRefer::All,
+                    "Pick displayed color",
+                    "the colour you see, every visible layer flattened",
+                ),
+                (
+                    mn_core::FillRefer::Active,
+                    "Pick color from layer",
+                    "the editing layer's own ink, over paper white",
+                ),
+                (
+                    mn_core::FillRefer::Reference,
+                    "Pick from reference layers",
+                    "the reference set only, even where its eyes are off",
+                ),
+            ] {
+                if mode_row(ui, refer == v, Icon::Eyedrop, label)
+                    .on_hover_text(hint)
+                    .clicked()
+                {
+                    app.eyedrop_opts.refer = v;
+                }
+            }
+            // E-016 average colour: a single pixel of anti-aliased ink is a
+            // colour nobody can see on the page.
+            group_caption(ui, "Average color");
+            for n in [1u32, 2, 3, 5] {
+                let label = if n == 1 {
+                    "1 × 1 (one pixel)".to_owned()
+                } else {
+                    format!("{n} × {n}")
+                };
+                if mode_row(ui, app.eyedrop_opts.size == n, Icon::Eyedrop, &label).clicked() {
+                    app.eyedrop_opts.size = n;
+                }
+            }
+        }
+        Tool::Pan => {
+            group_caption(ui, "Move");
+            if mode_row(ui, app.pan_mode == PanMode::Hand, Icon::Pan, "Hand").clicked() {
+                app.pan_mode = PanMode::Hand;
+            }
+            if mode_row(
+                ui,
+                app.pan_mode == PanMode::Rotate,
+                Icon::RotateRight,
+                "Rotate",
+            )
+            .on_hover_text("drag spins the view around the canvas centre")
+            .clicked()
+            {
+                app.pan_mode = PanMode::Rotate;
+            }
+        }
+        Tool::Pen | Tool::Eraser | Tool::SelPen | Tool::SelEraser => {
+            unreachable!("brush list handles these")
+        }
+    }
+}
+
+/// The preset list, grouped CSP-style with a real stroke preview per row:
+/// the owner's imported CSP brushes first, then the MyPaint classics.
+fn brush_sub_tools(ui: &mut egui::Ui, app: &mut App) {
+    let mut clicked = None;
+    egui::ScrollArea::vertical()
+        .id_salt("mn.presets")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            if app.presets.is_empty() {
+                ui.weak("no assets/brushes/**/*.myb found");
+                return;
+            }
+            let group_of = |p: &std::path::Path| -> &'static str {
+                match p
+                    .parent()
+                    .and_then(|d| d.file_name())
+                    .and_then(|n| n.to_str())
+                {
+                    Some("csp") => "CSP",
+                    Some("krita") => "Krita",
+                    Some("classic") => "Classic",
+                    _ => "Other",
+                }
+            };
+            for group in ["CSP", "Krita", "Classic", "Other"] {
+                let rows: Vec<(usize, String, PathBuf)> = app
+                    .presets
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (_, p))| group_of(p) == group)
+                    .map(|(i, (name, p))| (i, name.clone(), p.clone()))
+                    .collect();
+                if rows.is_empty() {
+                    continue;
+                }
+                group_caption(ui, group);
+                for (i, name, path) in rows {
+                    let tex = ensure_preview(app, ui.ctx(), &path);
+                    let selected = app.selected_preset == Some(i);
+                    if subtool_row(ui, selected, tex.as_ref(), &name).clicked() {
+                        clicked = Some(i);
+                    }
+                }
+                ui.add_space(4.0);
+            }
+        });
+    if let Some(i) = clicked {
+        let p = app.presets[i].1.clone();
+        app.push_cmd(AppCmd::SelectBrush(p));
+    }
+}
+fn subtool_row(
+    ui: &mut egui::Ui,
+    selected: bool,
+    tex: Option<&egui::TextureHandle>,
+    name: &str,
+) -> egui::Response {
+    let w = ui.available_width();
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 22.0), egui::Sense::click());
+    let p = ui.painter();
+    if selected {
+        p.rect_filled(rect, 2.0, theme::SEL_ROW);
+        p.rect_filled(
+            egui::Rect::from_min_size(rect.min, egui::vec2(2.0, rect.height())),
+            0.0,
+            theme::ACCENT,
+        );
+    } else if resp.hovered() {
+        p.rect_filled(rect, 2.0, theme::HOVER);
+    }
+    let ir = egui::Rect::from_min_size(
+        egui::pos2(
+            rect.left() + 6.0,
+            rect.center().y - preview::PREVIEW_H as f32 * 0.5,
+        ),
+        egui::vec2(preview::PREVIEW_W as f32, preview::PREVIEW_H as f32),
+    );
+    match tex {
+        Some(t) => {
+            p.image(
+                t.id(),
+                ir,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+        }
+        None => {
+            p.rect_filled(ir, 2.0, theme::FIELD);
+        }
+    }
+    p.rect_stroke(
+        ir,
+        2.0,
+        egui::Stroke::new(1.0, theme::BORDER),
+        egui::StrokeKind::Inside,
+    );
+    let tx = ir.right() + 7.0;
+    let color = if selected {
+        theme::TEXT_STRONG
+    } else {
+        theme::TEXT
+    };
+    let galley = super::widgets::ellipsis(
+        ui,
+        name,
+        egui::FontId::proportional(11.5),
+        color,
+        (rect.right() - 4.0 - tx).max(10.0),
+    );
+    p.galley(
+        egui::pos2(tx, rect.center().y - galley.size().y * 0.5),
+        galley,
+        color,
+    );
+    resp
+}

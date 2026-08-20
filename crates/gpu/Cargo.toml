@@ -1,0 +1,21 @@
+[package]
+name = "mn-gpu"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "mn_gpu"
+path = "src/lib.rs"
+
+[dependencies]
+mn-core = { workspace = true }
+wgpu = { workspace = true }
+raw-window-handle = { workspace = true }
+pollster = { workspace = true }
+bytemuck = { workspace = true }
+image = { workspace = true }
+
+[dev-dependencies]
+mn-brush = { workspace = true }
