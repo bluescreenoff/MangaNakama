@@ -726,3 +726,67 @@ fn cpu_matches_gpu_with_layer_colour_tint() {
     let w = tinted.get_pixel(15, 15);
     assert_eq!(w.0[0], 255, "white stays white");
 }
+
+/// LP-017: the two-tone pair (main colour on the black end, sub colour on
+/// the WHITE end) is a per-layer display maths that lives twice — once in
+/// `mn_core::blend::layer_colour_tint`, once in `tiles.wgsl`/`blend2.wgsl`.
+/// The lerp has to land on the same value at every alpha, so the ramp tile
+/// (alpha across x, value across y) is the real subject here; the flat
+/// pixels are only there to prove the two ends did not swap.
+///
+/// The second half runs the same layer through a blend2 SHADER mode: the
+/// packed `fx` word rides a different pipeline's instance buffer there, and
+/// a layout that agreed only in the fixed-function path would pass the test
+/// above and still paint the wrong colour on an Overlay layer.
+#[test]
+fn cpu_matches_gpu_with_a_two_tone_layer() {
+    let _serial = gpu_guard();
+    let Some(mut r) = renderer() else { return };
+
+    let mut doc = Document::new(128, 128);
+    fill(&mut doc, 0, TileIdx::new(0, 0), [0.9, 0.2, 0.2, 1.0]);
+    fill(&mut doc, 0, TileIdx::new(1, 0), [1.0, 1.0, 1.0, 1.0]);
+    fill(&mut doc, 0, TileIdx::new(0, 1), [0.1, 0.1, 0.1, 1.0]);
+
+    let li = doc.add_layer("two-tone");
+    for ty in 0..2 {
+        for tx in 0..2 {
+            fill_ramp(&mut doc, li, TileIdx::new(tx, ty), [1.0, 1.0, 1.0]);
+        }
+    }
+    {
+        let t = doc.layers[li].tile_mut(TileIdx::new(0, 0));
+        t.set_pixel(5, 5, [0, 0, 0, 32768]); // black end
+        t.set_pixel(15, 15, [32768; 4]); // white end
+    }
+    doc.set_layer_colour(li, Some([0, 0, 255]));
+    doc.set_layer_sub_colour(li, Some([255, 192, 0]));
+    assert_agrees(&mut r, &doc, "two-tone layer");
+
+    // The ends must be the two chips, not one chip and paper white.
+    let cpu = export::composite(&doc, Background::White);
+    let k = cpu.get_pixel(5, 5).0;
+    assert!(k[2] > 200 && k[0] < 60, "black end → main colour, got {k:?}");
+    let w = cpu.get_pixel(15, 15).0;
+    assert!(
+        w[0] > 200 && w[1] > 140 && w[2] < 60,
+        "white end → sub colour, got {w:?}"
+    );
+
+    // Same document through the shader-composite pass. Tolerance 4 for the
+    // same reason the blend-mode sweep uses it: blend2 blends against an
+    // 8-bit snapshot of the canvas, the CPU reference against f32.
+    doc.set_layer_blend(li, Blend::Overlay);
+    assert_agrees_tol(&mut r, &doc, "two-tone through blend2", 4);
+
+    // The compatibility promise on the GPU side: an explicit white sub and
+    // no sub at all are the same render. Checked against the CPU reference
+    // rather than GPU-against-GPU, so the laptop's dropped-draw flake still
+    // has its WARP re-check (see `assert_agrees`); the byte-for-byte half of
+    // this promise is pinned on the CPU in `core::export`.
+    doc.set_layer_blend(li, Blend::Normal);
+    doc.set_layer_sub_colour(li, None);
+    assert_agrees(&mut r, &doc, "layer colour, no sub");
+    doc.set_layer_sub_colour(li, Some([255, 255, 255]));
+    assert_agrees(&mut r, &doc, "layer colour, white sub");
+}

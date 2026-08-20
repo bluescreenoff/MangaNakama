@@ -702,6 +702,71 @@ mod tests {
         assert_eq!(img.get_pixel(0, 0).0, [255, 255, 255, 255]);
     }
 
+    /// LP-016/LP-017 through the EXPORT path: the two-tone pair is display
+    /// maths the exported PNG must carry too (it is what the page looks
+    /// like), and the sub colour has to be inert in every shape that means
+    /// "not set" — otherwise a file drawn before the second slot existed
+    /// exports different pixels than it used to.
+    #[test]
+    fn the_sub_colour_reaches_the_export_and_off_is_the_old_output() {
+        let mut doc = Document::new(128, 128);
+        // Black, mid grey and white ink, plus a translucent tile: the tint
+        // maths run per-pixel on unpremultiplied value, so partial coverage
+        // is where a wrong divide would show.
+        fill_tile(&mut doc, 0, TileIdx::new(0, 0), [0.0, 0.0, 0.0, 1.0]);
+        fill_tile(&mut doc, 0, TileIdx::new(1, 0), [0.5, 0.5, 0.5, 1.0]);
+        fill_tile(&mut doc, 0, TileIdx::new(0, 1), [1.0, 1.0, 1.0, 1.0]);
+        fill_tile(&mut doc, 0, TileIdx::new(1, 1), [0.25, 0.25, 0.25, 0.5]);
+
+        // A sub colour ALONE is nothing: the white end only moves once the
+        // layer has a colour at all. The GPU agrees by construction — the
+        // no-tint sentinel returns before it unpacks the sub word.
+        let plain = composite_for_export(&doc, Background::White);
+        assert!(doc.set_layer_sub_colour(0, Some([255, 192, 0])));
+        assert_eq!(
+            composite_for_export(&doc, Background::White).into_raw(),
+            plain.clone().into_raw(),
+            "a sub colour without a layer colour must change nothing"
+        );
+
+        assert!(doc.set_layer_sub_colour(0, None));
+        assert!(doc.set_layer_colour(0, Some([0, 0, 255])));
+        let main_only = composite_for_export(&doc, Background::White);
+        assert_eq!(main_only.get_pixel(10, 10).0, [0, 0, 255, 255], "ink→blue");
+        assert_eq!(main_only.get_pixel(10, 74).0, [255, 255, 255, 255], "white");
+
+        // Both slots set: black takes the main colour, white takes the sub.
+        assert!(doc.set_layer_sub_colour(0, Some([255, 192, 0])));
+        let two_tone = composite_for_export(&doc, Background::White);
+        assert_eq!(
+            two_tone.get_pixel(10, 10).0,
+            [0, 0, 255, 255],
+            "the black end is still the main colour"
+        );
+        for (c, want) in two_tone.get_pixel(10, 74).0[..3].iter().zip([255, 192, 0]) {
+            assert!(
+                (*c as i32 - want).abs() <= 1,
+                "the white end takes the sub colour, got {:?}",
+                two_tone.get_pixel(10, 74).0
+            );
+        }
+
+        // The compatibility promise, byte for byte: white sub == no sub ==
+        // what this document exported before the second slot existed.
+        assert!(doc.set_layer_sub_colour(0, Some([255, 255, 255])));
+        assert_eq!(
+            composite_for_export(&doc, Background::White).into_raw(),
+            main_only.clone().into_raw(),
+            "an explicit white sub is the LP-016 output"
+        );
+        assert!(doc.set_layer_sub_colour(0, None));
+        assert_eq!(
+            composite_for_export(&doc, Background::White).into_raw(),
+            main_only.into_raw(),
+            "clearing the sub restores the LP-016 output"
+        );
+    }
+
     #[test]
     fn layers_stack_bottom_first() {
         let mut doc = Document::new(64, 64);
