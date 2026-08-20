@@ -101,30 +101,35 @@ pub fn reading_order(
         .collect();
 
     let mut ordered: Vec<(PanelItem, bool)> = Vec::new();
+    // A spread's page order is ABSOLUTE: bands never cross the seam, or
+    // the tiebreak sort could drag second-page panels across it.
+    let mut seam = 0usize;
     if spread && page_w > 0.0 {
         let mid = page_w * 0.5;
         let (right, left): (Vec<PanelItem>, Vec<PanelItem>) =
             items.into_iter().partition(|it| cx(&it.rect) >= mid);
         let (first, second) = if rtl { (right, left) } else { (left, right) };
         xy_cut(first, tol, rtl, &mut ordered);
+        seam = ordered.len();
         xy_cut(second, tol, rtl, &mut ordered);
     } else {
         xy_cut(items, tol, rtl, &mut ordered);
     }
 
     // --- slot tiebreak inside ambiguous bands ---------------------------
-    // Consecutive ambiguous members are one band: members sharing a slot
-    // cluster (by the slot's reading position), and a band whose sort is
-    // fully determined clears its badge. Slots never reorder a band the
-    // geometry already resolved.
+    // Consecutive ambiguous members ON ONE PAGE are one band: members
+    // sharing a slot cluster (by the slot's reading position), and a band
+    // whose sort is fully determined clears its badge. Slots never
+    // reorder a band the geometry already resolved.
     let mut i = 0;
     while i < ordered.len() {
         if !ordered[i].1 {
             i += 1;
             continue;
         }
+        let stop = if i < seam { seam } else { ordered.len() };
         let mut j = i;
-        while j < ordered.len() && ordered[j].1 {
+        while j < stop && ordered[j].1 {
             j += 1;
         }
         slot_tiebreak(&mut ordered[i..j], rtl, tol);
@@ -221,12 +226,16 @@ fn slot_tiebreak(band: &mut [(PanelItem, bool)], rtl: bool, tol: f32) {
     if band.len() < 2 || !band.iter().any(|(it, _)| it.slot.is_some()) {
         return; // nothing to tiebreak with — keep the band sort
     }
-    let key = |it: &PanelItem| -> (f32, f32) {
+    // Reading position of the slot (or the panel itself when slotless) —
+    // tier first, then right-first for RTL — then the PANEL's own
+    // position as the within-cluster order. The slot alone excused every
+    // tie inside a same-slot cluster (a Divide-equally grid shares ONE
+    // slot), which cleared the badge on exactly the guesses it flags.
+    let key = |it: &PanelItem| -> (f32, f32, f32, f32) {
         let r = it.slot.unwrap_or(it.rect);
-        // Reading position of the slot (or the panel itself when slotless):
-        // tier first, then right-first for RTL.
-        let x = if rtl { -r[2] } else { r[0] };
-        (r[1], x)
+        let sx = if rtl { -r[2] } else { r[0] };
+        let px = if rtl { -it.rect[2] } else { it.rect[0] };
+        (r[1], sx, it.rect[1], px)
     };
     let mut idx: Vec<usize> = (0..band.len()).collect();
     idx.sort_by(|&a, &b| {
@@ -234,20 +243,24 @@ fn slot_tiebreak(band: &mut [(PanelItem, bool)], rtl: bool, tol: f32) {
         ka.partial_cmp(&kb).unwrap_or(std::cmp::Ordering::Equal)
     });
     let rearranged: Vec<(PanelItem, bool)> = idx.into_iter().map(|i| band[i].clone()).collect();
-    // Total iff no two members share a key band (slot equal counts as a
-    // deliberate cluster — order within it by panel position).
+    // Total iff no two members genuinely tie: a shared slot is a
+    // deliberate cluster, fine — but only while the panels' OWN
+    // positions break the tie inside it.
     let mut total = true;
     for w in rearranged.windows(2) {
         let (ka, kb) = (key(&w[0].0), key(&w[1].0));
-        let close = (ka.0 - kb.0).abs() <= tol.max(2.0) && (ka.1 - kb.1).abs() <= tol.max(2.0);
+        let t = tol.max(2.0);
+        let close = (ka.0 - kb.0).abs() <= t && (ka.1 - kb.1).abs() <= t;
         if close {
-            // same key: fine only when they share a slot (a cluster) or
-            // are the same folder; two slotless panels tieing = ambiguous.
             let same_slot = match (w[0].0.slot, w[1].0.slot) {
                 (Some(a), Some(b)) => rect_close(a, b, tol),
                 _ => false,
             };
             if !same_slot {
+                // Distinct slots (or slotless) at one key: ambiguous.
+                total = false;
+            } else if (ka.2 - kb.2).abs() <= t && (ka.3 - kb.3).abs() <= t {
+                // Same slot AND same panel position: a genuine guess.
                 total = false;
             }
         }
@@ -691,6 +704,61 @@ mod owner_correction_tests {
             o.ambiguous.iter().all(|a| !a),
             "the slot resolved the band: {:?}",
             o.ambiguous
+        );
+    }
+
+    /// A shared slot excuses a tie only when the panels' OWN positions
+    /// break it: two same-slot cells stacked at the same spot (a
+    /// Divide-equally grid after a drag mishap) are a genuine guess and
+    /// keep the badge. The old key was the slot alone, so a same-slot
+    /// cluster excused every tie — "never silently guessed" broken on
+    /// exactly the layouts the badge exists for.
+    #[test]
+    fn stacked_same_slot_cells_stay_badged() {
+        let s: Rect4 = [0.0, 0.0, 300.0, 160.0];
+        let f = [
+            // Two cells of one division sitting on the SAME rect.
+            folder(0, None, Some(s), &[[150.0, 60.0, 300.0, 160.0]]),
+            folder(1, None, Some(s), &[[150.0, 60.0, 300.0, 160.0]]),
+            // The spanner that defeats every cut line.
+            folder(2, None, None, &[[0.0, 0.0, 200.0, 200.0]]),
+        ];
+        let o = reading_order(&f, true, false, 400.0, 2.0);
+        assert_eq!(o.panels.len(), 3);
+        let badged = o
+            .panels
+            .iter()
+            .zip(&o.ambiguous)
+            .filter(|(p, _)| p.layer < 2)
+            .all(|(_, a)| *a);
+        assert!(
+            badged,
+            "identical same-slot cells are a guess — badge kept: {:?}",
+            o.ambiguous
+        );
+    }
+
+    /// Spread pages are ordered ABSOLUTELY (right page entirely first
+    /// for RTL): an ambiguous band ending the first page and one opening
+    /// the second must never merge into a single band, or the tiebreak
+    /// sort drags second-page panels across the seam.
+    #[test]
+    fn ambiguous_bands_never_merge_across_the_spread_seam() {
+        let s: Rect4 = [100.0, 0.0, 300.0, 80.0];
+        let f = [
+            // RIGHT page (x >= 400): an unresolvable pair, low on the page.
+            folder(0, None, None, &[[500.0, 300.0, 700.0, 380.0]]),
+            folder(1, None, None, &[[500.0, 300.0, 700.0, 380.0]]),
+            // LEFT page: a slotted pair at the top — its key reads
+            // "above" the right pair's, which is exactly the bait.
+            folder(2, None, Some(s), &[[100.0, 0.0, 300.0, 80.0]]),
+            folder(3, None, Some(s), &[[100.0, 0.0, 300.0, 80.0]]),
+        ];
+        let o = reading_order(&f, true, true, 800.0, 2.0);
+        let layers: Vec<usize> = o.panels.iter().map(|p| p.layer).collect();
+        assert!(
+            layers[0..2].contains(&0) && layers[0..2].contains(&1),
+            "the right page reads entirely first: {layers:?}"
         );
     }
 }
