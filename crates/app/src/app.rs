@@ -1323,8 +1323,17 @@ impl App {
                     .iter()
                     .position(|(n, _)| n.to_lowercase().contains("eraser"))
             });
-        // Seed the Tool Property panel from the default brush's own readings.
-        app.props_current.size_px = app.engine().base_size_px();
+        // Seed the Tool Property panel from the default brush's own readings —
+        // except the SIZE, which the startup sub tool takes from ui.txt when
+        // the user set one last session (`seed_size_px`), so the first stroke
+        // after a relaunch is the size he left the brush at.
+        app.props_current.size_px = match app.selected_preset {
+            Some(i) => {
+                let p = app.presets[i].1.clone();
+                app.seed_size_px(&p)
+            }
+            None => app.engine().base_size_px(),
+        };
         app.props_current.opacity = app.engine().base_opacity();
         app.props_current.min_size = app.engine().size_min_pct();
         {
@@ -1598,9 +1607,61 @@ impl App {
     /// values a locked tool returns to.
     pub fn snapshot_current_props(&mut self) {
         if let Some(i) = self.selected_preset {
-            self.props
-                .insert(self.presets[i].1.clone(), self.props_current);
+            let path = self.presets[i].1.clone();
+            self.props.insert(path.clone(), self.props_current);
+            self.note_sub_tool_size(&path);
         }
+    }
+
+    /// Write this sub tool's SIZE into `ui.txt` (`sub_tool_size_px=`), or drop
+    /// the entry when it is back at the preset's own size. Called from the
+    /// same place the session memory is written, so the persisted size obeys
+    /// TL-013 for free: a LOCKED tool never reaches `snapshot_current_props`
+    /// on a switch, so the nudge you took for one panel is not what the next
+    /// launch restores — the snapshot is.
+    ///
+    /// The size only, not the whole `ToolProps`. Everything else there is
+    /// either a reading of the preset (which must follow a preset update) or
+    /// session state by design (`locked`); the size is the one value the
+    /// owner re-dials every launch, which is why it is the one persisted.
+    fn note_sub_tool_size(&mut self, path: &Path) {
+        // The current engine IS this preset's, so its shipped size is the
+        // default to compare against. Callers run before the engine swap.
+        let base = self.engine().base_size_px();
+        let px = self.props_current.size_px;
+        let key = self.preset_key(path);
+        let moved = (px - base).abs() > 1e-3;
+        self.layout.note_sub_tool_size(&key, moved.then_some(px));
+    }
+
+    /// A sub tool's stable identity for `ui.txt`: its preset path RELATIVE to
+    /// the brushes root, `/`-separated — so moving the install, or running the
+    /// same assets from `cargo run` instead of the shipped exe, keeps the
+    /// sizes. A preset from outside the root (none ship that way) falls back
+    /// to its file name.
+    pub fn preset_key(&self, path: &Path) -> String {
+        let rel = self
+            .brushes_root
+            .as_deref()
+            .and_then(|root| path.strip_prefix(root).ok())
+            .or_else(|| path.file_name().map(Path::new))
+            .unwrap_or(path);
+        rel.components()
+            .map(|c| c.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+
+    /// The size a sub tool STARTS at: the one the user last set for it
+    /// (persisted in `ui.txt`), else the preset's own shipped size. An
+    /// untouched sub tool has no stored entry, so a preset whose size changes
+    /// moves it — the CODE-MAP rule that the preset size is a DEFAULT.
+    fn seed_size_px(&self, path: &Path) -> f32 {
+        self.layout
+            .sub_tool_size_px
+            .get(&self.preset_key(path))
+            .copied()
+            .unwrap_or_else(|| self.engine().base_size_px())
     }
 
     /// Drop the stored Tool Property values for the current preset, so the
@@ -1609,7 +1670,13 @@ impl App {
     /// padlock hanging over values that are no longer the ones it froze.
     pub fn forget_current_props(&mut self) {
         if let Some(i) = self.selected_preset {
-            self.props.remove(&self.presets[i].1);
+            let path = self.presets[i].1.clone();
+            self.props.remove(&path);
+            // ...including the persisted size: "back to the preset" that only
+            // lasted until the next launch would be the same bug in slow
+            // motion.
+            let key = self.preset_key(&path);
+            self.layout.note_sub_tool_size(&key, None);
         }
         self.props_current.locked = false;
     }
@@ -1618,6 +1685,7 @@ impl App {
     /// the preset's own honest readings, so the panel shows what the brush
     /// actually does instead of imaginary defaults.
     pub fn load_props_for(&mut self, path: &Path) {
+        let seed_size = self.seed_size_px(path);
         self.props_current = self.props.get(path).copied().unwrap_or_else(|| {
             let e = self.engine();
             let (taper_px, taper_min) = e.taper_hint().unwrap_or((0.0, 0.18));
@@ -1632,8 +1700,10 @@ impl App {
             ToolProps {
                 // The preset's own size is the DEFAULT, not a ceiling: from
                 // here the ladder and the Size control move it anywhere in
-                // SIZE_PX_MIN..SIZE_PX_MAX.
-                size_px: e.base_size_px(),
+                // SIZE_PX_MIN..SIZE_PX_MAX. A size the user set in an earlier
+                // SESSION overrides that default (ui.txt `sub_tool_size_px=`);
+                // one he never touched still comes from the preset.
+                size_px: seed_size,
                 opacity: if wash {
                     e.wash_opacity()
                 } else {

@@ -9,6 +9,21 @@ use crate::cmd::{BalloonMode, SelectMode, Tool};
 
 // --- canvas overlay: page shadow + manuscript guides --------------------
 
+/// The page drop shadow's two strips (right edge, bottom edge), `d` px deep,
+/// from the page's two TRANSFORMED corners. Issue #6: taking them as
+/// top-left/bottom-right verbatim degenerates the moment the view is
+/// mirrored — the corners swap and the rects come out inverted (empty).
+/// Min/max instead: the light keeps falling to the screen's bottom-right,
+/// whichever page corner has landed there under H, V or H+V.
+fn shadow_rects(a: egui::Pos2, b: egui::Pos2, d: f32) -> [egui::Rect; 2] {
+    let (x0, x1) = (a.x.min(b.x), a.x.max(b.x));
+    let (y0, y1) = (a.y.min(b.y), a.y.max(b.y));
+    [
+        egui::Rect::from_min_max(egui::pos2(x1, y0 + d), egui::pos2(x1 + d, y1 + d)),
+        egui::Rect::from_min_max(egui::pos2(x0 + d, y1), egui::pos2(x1, y1 + d)),
+    ]
+}
+
 /// Painted in egui, over the GPU canvas, clipped to the canvas area. Guides
 /// go through `Viewport::to_screen`, so they survive pan/zoom/rotation.
 pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
@@ -133,20 +148,10 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
     // Drop shadow: only when the view is unrotated (axis-aligned strips are
     // cheap and correct; a rotated shadow would overdraw the page).
     if app.viewport.rotate_rad == 0.0 {
-        let tl = to_pt(0.0, 0.0);
-        let br = to_pt(w as f32, h as f32);
-        let d = 6.0;
         let shadow = egui::Color32::from_black_alpha(90);
-        painter.rect_filled(
-            egui::Rect::from_min_max(egui::pos2(br.x, tl.y + d), egui::pos2(br.x + d, br.y + d)),
-            0.0,
-            shadow,
-        );
-        painter.rect_filled(
-            egui::Rect::from_min_max(egui::pos2(tl.x + d, br.y), egui::pos2(br.x, br.y + d)),
-            0.0,
-            shadow,
-        );
+        for r in shadow_rects(to_pt(0.0, 0.0), to_pt(w as f32, h as f32), 6.0) {
+            painter.rect_filled(r, 0.0, shadow);
+        }
     }
     painter.add(egui::Shape::line(
         quad(page),
@@ -1795,6 +1800,54 @@ mod tests {
             }
         }
         assert!(polygon_triangles(&sq[..2]).is_empty());
+    }
+
+    /// Issue #6: the shadow strips came straight off `to_pt(0,0)` and
+    /// `to_pt(w,h)`, which are only top-left/bottom-right in an unmirrored
+    /// view — under the H mirror (pre-existing) or the V flip the rects
+    /// inverted and the shadow vanished. Driven through the real
+    /// `Viewport`, all four flip states must produce the same two strips
+    /// hugging the page box's right and bottom edges.
+    #[test]
+    fn the_drop_shadow_hugs_the_page_under_every_flip() {
+        let (w, h, d) = (400.0_f32, 300.0_f32, 6.0_f32);
+        for (fh, fv) in [(false, false), (true, false), (false, true), (true, true)] {
+            let vp = mn_gpu::Viewport {
+                pan: [500.0, 400.0],
+                zoom: 1.0,
+                rotate_rad: 0.0,
+                flip_h: fh,
+                flip_v: fv,
+            };
+            let pt = |x: f32, y: f32| {
+                let (sx, sy) = vp.to_screen(x, y);
+                p(sx, sy)
+            };
+            let [right, bottom] = shadow_rects(pt(0.0, 0.0), pt(w, h), d);
+            let page = egui::Rect::from_two_pos(pt(0.0, 0.0), pt(w, h));
+            let case = format!("flip_h={fh} flip_v={fv}");
+            assert_eq!(right.size(), egui::vec2(d, h), "right strip ({case})");
+            assert_eq!(bottom.size(), egui::vec2(w - d, d), "bottom strip ({case})");
+            assert_eq!(right.min, p(page.max.x, page.min.y + d), "{case}");
+            assert_eq!(bottom.min, p(page.min.x + d, page.max.y), "{case}");
+        }
+    }
+
+    /// The unflipped rendering is the reference and must not have moved:
+    /// the exact rects the old inline code painted.
+    #[test]
+    fn the_unflipped_shadow_is_byte_identical() {
+        let (tl, br, d) = (p(10.0, 20.0), p(410.0, 320.0), 6.0);
+        assert_eq!(
+            shadow_rects(tl, br, d),
+            [
+                egui::Rect::from_min_max(
+                    egui::pos2(br.x, tl.y + d),
+                    egui::pos2(br.x + d, br.y + d)
+                ),
+                egui::Rect::from_min_max(egui::pos2(tl.x + d, br.y), egui::pos2(br.x, br.y + d)),
+            ]
+        );
     }
 
     /// A panel the cache can no longer resolve is skipped. It must not take

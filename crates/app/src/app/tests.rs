@@ -209,6 +209,88 @@ fn brush_size_seeds_from_the_preset_and_is_not_capped_by_it() {
     assert!((app.props_current.size_px - base).abs() < 1e-3);
 }
 
+/// Good-first-issue #1: the size a sub tool was left at is the size it
+/// draws at after a RELAUNCH — and only for the sub tools the user
+/// actually re-dialled. Sizes used to be session-only (the old
+/// multiplier's design), so the relaunch half of this fails against the
+/// pre-persistence code: the seed came straight from `base_size_px()`.
+///
+/// The save/load path is the real one minus the file: `to_body` is what
+/// `save_if_dirty` writes and `from_body` is what `load` parses. Tests
+/// must not write the ui.txt beside the test exe — the parallel runner
+/// shares it, and so does the owner's build.
+#[test]
+fn brush_size_survives_a_relaunch_for_the_sub_tools_that_moved() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (400, 300), 1.0);
+    let Some(i) = app.selected_preset else {
+        println!("[test] SKIP: no brush presets on disk");
+        return;
+    };
+    let pen = app.presets[i].1.clone();
+    let base = app.engine().base_size_px();
+    let want = (base * 3.0).min(crate::cmd::SIZE_PX_MAX);
+    crate::cmd::dispatch(&mut app, AppCmd::SetBrushSizePx(want));
+
+    // Quitting is the sub tool's switch (main.rs `WM_DESTROY`).
+    app.store_current_props();
+    let body = app.layout.to_body();
+    let key = app.preset_key(&pen);
+    assert!(
+        body.lines()
+            .any(|l| l.starts_with("sub_tool_size_px={") && l.contains(&key)),
+        "the size must reach ui.txt under the new key, keyed `{key}`: {body}"
+    );
+    assert!(
+        !key.contains('\\') && !key.contains(':'),
+        "the key must be relative and `/`-separated so a moved install \
+         keeps its sizes, got `{key}`"
+    );
+
+    // Relaunch: ui.txt re-read from that body, and the per-sub-tool memory
+    // (`props`) starts empty again because it is not persisted.
+    app.layout = UiLayout::from_body(&body);
+    app.props.clear();
+    app.load_props_for(&pen);
+    assert!(
+        (app.props_current.size_px - want).abs() < 1e-3,
+        "a relaunched sub tool must seed from the size the user left it at: \
+         wanted {want}, got {}",
+        app.props_current.size_px
+    );
+    // The startup sub tool goes through the same helper (`App::new`).
+    assert!((app.seed_size_px(&pen) - want).abs() < 1e-3);
+
+    // "Back to the preset" drops the persisted override too, so the next
+    // launch does not resurrect it.
+    app.forget_current_props();
+    assert!(!app.layout.sub_tool_size_px.contains_key(&key));
+    assert!((app.seed_size_px(&pen) - base).abs() < 1e-3);
+
+    // A sub tool the user never touched keeps seeding from ITS preset —
+    // the CODE-MAP rule that a preset's size is the default, so a preset
+    // update is free to move it.
+    let Some(other) = app.presets.iter().map(|(_, p)| p).find(|p| **p != pen) else {
+        return;
+    };
+    let other = other.clone();
+    crate::cmd::dispatch(&mut app, AppCmd::SelectBrush(other.clone()));
+    if app.selected_preset.is_some_and(|j| app.presets[j].1 == other) {
+        assert!(
+            !app.layout
+                .sub_tool_size_px
+                .contains_key(&app.preset_key(&other)),
+            "an untouched sub tool writes no override"
+        );
+        assert!(
+            (app.props_current.size_px - app.engine().base_size_px()).abs() < 1e-3,
+            "and starts at its own preset's size"
+        );
+    }
+}
+
 /// The fit margin is the `fit_margin` preference now, not a literal in
 /// two places. The shipped default must reproduce today's fit exactly —
 /// this is the test that catches "we made it configurable and moved it".

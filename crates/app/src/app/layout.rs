@@ -5,6 +5,7 @@
 //! egui_dock); the old order/collapsed/floating keys from the pre-docking
 //! columns are ignored when found (and migrated away on the next save).
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// Persisted palette layout: column widths + the two dock columns (as JSON,
@@ -32,6 +33,12 @@ pub struct UiLayout {
     /// AND a benchmark number exists on the owner's hardware. The View-menu
     /// toggle remains the manual path meanwhile.
     pub gpu_dabs: bool,
+    /// Whether ui.txt actually CARRIED a `gpu_dabs=` line (session-only,
+    /// never written): the DECISIONS 8.9 re-flip runs as a per-adapter
+    /// measured auto-default (`bench::resolve_auto`), and an auto verdict
+    /// must never override a choice the user made — absent key = the user
+    /// never chose, and only then may the measurement decide.
+    pub gpu_dabs_explicit: bool,
     /// Recently used font families, newest first, max 10 (round 34, CSP
     /// Font-list parity) — a JSON string array on one line.
     pub recent_fonts: Vec<String>,
@@ -90,6 +97,23 @@ pub struct UiLayout {
     /// the starter set; `[]` is a user who deleted every gradient and is
     /// entitled to keep it empty.
     pub gradients: String,
+    /// Per-sub-tool brush SIZES: preset key → dab diameter in canvas px, one
+    /// JSON object on one line (`App::preset_key` makes the key — the preset's
+    /// path relative to the brushes root, so a moved or re-installed copy
+    /// keeps its sizes).
+    ///
+    /// ONLY sub tools whose size the user actually MOVED off the preset's own
+    /// size are in here. An untouched sub tool has no entry and keeps seeding
+    /// from its preset, which is what lets a preset update change its default
+    /// size (docs/CODE-MAP.md: the preset's size is the DEFAULT, never a
+    /// ceiling). "Reset to preset" deletes the entry rather than writing the
+    /// default down, so the two states stay distinguishable.
+    ///
+    /// The key is `sub_tool_size_px=` — NEW, never written by any build. The
+    /// old model was a 0.25..4 multiplier where `2.0` was an ordinary value,
+    /// so no pre-existing key could be reinterpreted as pixels; naming the
+    /// unit in the key is the guarantee (the ui.txt rename rule).
+    pub sub_tool_size_px: BTreeMap<String, f32>,
     dirty: bool,
 }
 
@@ -103,6 +127,7 @@ impl Default for UiLayout {
             prop_hidden: String::new(),
             win: String::new(),
             gpu_dabs: false,
+            gpu_dabs_explicit: false,
             recent_fonts: Vec::new(),
             material_folders: Vec::new(),
             material_uses: String::new(),
@@ -115,6 +140,7 @@ impl Default for UiLayout {
             reader_page: 0,
             guides_hidden: false,
             gradients: String::new(),
+            sub_tool_size_px: BTreeMap::new(),
             dirty: false,
         }
     }
@@ -297,6 +323,19 @@ impl UiLayout {
         }
     }
 
+    /// Remember one sub tool's brush size, or forget it. `Some(px)` is a size
+    /// the user moved off the preset's own; `None` means "back to the preset"
+    /// and DELETES the entry — writing the default down would freeze it, and
+    /// a preset whose shipped size changes has to be able to move an
+    /// untouched sub tool with it.
+    pub fn note_sub_tool_size(&mut self, key: &str, px: Option<f32>) {
+        let changed = match px {
+            Some(px) => self.sub_tool_size_px.insert(key.to_owned(), px) != Some(px),
+            None => self.sub_tool_size_px.remove(key).is_some(),
+        };
+        self.dirty |= changed;
+    }
+
     pub fn save_if_dirty(&mut self) {
         if !std::mem::take(&mut self.dirty) {
             return;
@@ -306,9 +345,11 @@ impl UiLayout {
     }
 
     /// The full ui.txt content (one k=v per line — keys are shipped API).
-    fn to_body(&self) -> String {
+    /// Exactly what `save_if_dirty` writes: the save half of the seam
+    /// `from_body` completes.
+    pub(super) fn to_body(&self) -> String {
         format!(
-            "left_w={:.0}\nright_w={:.0}\ndock_left={}\ndock_right={}\nprop_hidden={}\nwin={}\ngpu_dabs={}\nrecent_fonts={}\nmaterial_folders={}\nmaterial_uses={}\nquick_pins={}\nworkspaces={}\nworkspace_current={}\ntouch_gestures={}\ncolor_history={}\nauto_swatch={}\nreader_page={}\nguides_hidden={}\ngradients={}\n",
+            "left_w={:.0}\nright_w={:.0}\ndock_left={}\ndock_right={}\nprop_hidden={}\nwin={}\ngpu_dabs={}\nrecent_fonts={}\nmaterial_folders={}\nmaterial_uses={}\nquick_pins={}\nworkspaces={}\nworkspace_current={}\ntouch_gestures={}\ncolor_history={}\nauto_swatch={}\nreader_page={}\nguides_hidden={}\ngradients={}\nsub_tool_size_px={}\n",
             self.left_w,
             self.right_w,
             self.dock_left,
@@ -328,6 +369,7 @@ impl UiLayout {
             self.reader_page,
             self.guides_hidden as u8,
             self.gradients.replace('\n', ""),
+            serde_json::to_string(&self.sub_tool_size_px).unwrap_or_default(),
         )
     }
 
@@ -374,7 +416,10 @@ impl UiLayout {
             // `1` requests on, anything else off — the round-32 rule,
             // restored by the round-34 revert (default-off until TODO #0.1
             // + an on-hardware benchmark number justify the flip).
-            "gpu_dabs" => self.gpu_dabs = v.trim() == "1",
+            "gpu_dabs" => {
+                self.gpu_dabs = v.trim() == "1";
+                self.gpu_dabs_explicit = true;
+            }
             // JSON string array, one line (like the dock columns).
             "recent_fonts" if !line.contains('\n') => {
                 if let Ok(f) = serde_json::from_str::<Vec<String>>(v) {
@@ -393,15 +438,39 @@ impl UiLayout {
             }
             // `G-011`: the gradient set, one JSON line.
             "gradients" if !line.contains('\n') => self.gradients = v.to_owned(),
+            // Per-sub-tool sizes, JSON map preset key → canvas px. Entries
+            // outside the Size control's own range (and NaN) are dropped
+            // here rather than clamped: a number this build cannot mean is a
+            // hand-edit or a newer build's, and seeding from the preset is
+            // the honest answer to both. A malformed line costs the map and
+            // nothing else — every sub tool then starts at its preset size.
+            "sub_tool_size_px" if !line.contains('\n') => {
+                if let Ok(m) = serde_json::from_str::<BTreeMap<String, f32>>(v) {
+                    self.sub_tool_size_px = m
+                        .into_iter()
+                        .filter(|(_, px)| {
+                            px.is_finite()
+                                && (crate::cmd::SIZE_PX_MIN..=crate::cmd::SIZE_PX_MAX).contains(px)
+                        })
+                        .collect();
+                }
+            }
             _ => {}
         }
     }
 
     pub(super) fn load() -> Self {
+        match layout_path().and_then(|p| std::fs::read_to_string(p).ok()) {
+            Some(text) => Self::from_body(&text),
+            None => Self::default(),
+        }
+    }
+
+    /// Everything `load` does except reading the file — so a test can drive
+    /// the real save→load path (`to_body` → this) without touching the ui.txt
+    /// beside the test exe, which the parallel runner shares.
+    pub(super) fn from_body(text: &str) -> Self {
         let mut me = Self::default();
-        let Some(text) = layout_path().and_then(|p| std::fs::read_to_string(p).ok()) else {
-            return me;
-        };
         for line in text.lines() {
             me.apply_kv(line);
         }
@@ -452,31 +521,78 @@ mod tests {
         assert_eq!(WinGeom::parse(&g2.to_line()), Some(g2));
     }
 
-    /// Brush size became an ABSOLUTE px diameter (it was a 0.25..4
-    /// multiplier), and `2.0` is a plausible value under either meaning —
-    /// so a stale `2.0` must never be read as 2 px. ui.txt is the only
-    /// key=value store the app has: it carries no brush-size key, it never
-    /// did, and a hand-written or older-build line claiming one is ignored
-    /// like any other unknown key. Per-sub-tool sizes are session state.
+    /// No MULTIPLIER-era key is ever read. Brush size became an ABSOLUTE px
+    /// diameter (it was a 0.25..4 multiplier), and `2.0` is a plausible value
+    /// under either meaning — so a stale `2.0` must never be read as 2 px.
+    /// Sizes DO persist now, but only under the new `sub_tool_size_px=` key,
+    /// which names its unit and which no older build ever wrote: these four
+    /// hand-written or older-build spellings stay unknown keys forever.
     #[test]
-    fn no_ui_txt_key_carries_a_brush_size() {
+    fn no_multiplier_era_key_is_ever_read() {
+        const OLD: [&str; 4] = ["size", "brush_size", "tool_size", "size_multiplier"];
         let mut me = UiLayout::default();
         let before = me.to_body();
-        for stale in [
-            "size=2.0",
-            "brush_size=2.0",
-            "tool_size=2.0",
-            "size_multiplier=2.0",
-        ] {
-            me.apply_kv(stale);
+        for k in OLD {
+            me.apply_kv(&format!("{k}=2.0"));
         }
         assert_eq!(before, me.to_body(), "stale size keys must change nothing");
-        for k in ["size", "brush_size", "tool_size", "size_multiplier"] {
+        assert!(
+            me.sub_tool_size_px.is_empty(),
+            "and none of them may seed a sub tool's size"
+        );
+        for k in OLD {
             assert!(
                 !me.to_body().lines().any(|l| l.starts_with(&format!("{k}="))),
                 "ui.txt must not persist a brush size under `{k}`"
             );
         }
+    }
+
+    /// Good-first-issue #1: per-sub-tool sizes survive save→load through the
+    /// real body, only entries the user MOVED are written, "back to the
+    /// preset" deletes rather than freezes, and junk degrades to "no
+    /// override" (= seed from the preset), never to a bogus pixel size.
+    #[test]
+    fn sub_tool_sizes_roundtrip_through_the_body() {
+        let mut me = UiLayout::default();
+        assert!(me.sub_tool_size_px.is_empty(), "nothing until the user acts");
+        me.note_sub_tool_size("csp/g-pen.myb", Some(37.5));
+        assert!(me.dirty);
+        // An untouched sub tool is an ABSENT entry, not a written default.
+        me.note_sub_tool_size("mypaint/pen.myb", None);
+        assert_eq!(me.sub_tool_size_px.len(), 1);
+
+        let body = me.to_body();
+        assert!(
+            body.contains("\nsub_tool_size_px={\"csp/g-pen.myb\":37.5}\n"),
+            "one JSON line, `/`-separated relative keys: {body}"
+        );
+
+        // The real load path (file read aside).
+        let back = UiLayout::from_body(&body);
+        assert_eq!(back.sub_tool_size_px.get("csp/g-pen.myb"), Some(&37.5));
+        assert_eq!(back.sub_tool_size_px.get("mypaint/pen.myb"), None);
+        assert!(!back.dirty, "a fresh load is not a pending save");
+
+        // Re-noting the same size must not re-dirty a clean layout...
+        let mut back = back;
+        back.note_sub_tool_size("csp/g-pen.myb", Some(37.5));
+        assert!(!back.dirty);
+        // ...and "back to the preset" removes the entry (it does not write
+        // the preset's size down, which would freeze a preset update out).
+        back.note_sub_tool_size("csp/g-pen.myb", None);
+        assert!(back.dirty && back.sub_tool_size_px.is_empty());
+        let cleared = UiLayout::from_body(&back.to_body());
+        assert!(cleared.sub_tool_size_px.is_empty());
+
+        // Junk: a mangled line costs the map, and out-of-range or non-finite
+        // entries are dropped so no brush is ever seeded a nonsense size.
+        let mut junk = UiLayout::default();
+        junk.apply_kv("sub_tool_size_px=not json");
+        assert!(junk.sub_tool_size_px.is_empty());
+        junk.apply_kv(r#"sub_tool_size_px={"a.myb":0,"b.myb":999999,"d.myb":24}"#);
+        assert_eq!(junk.sub_tool_size_px.len(), 1, "only the sane entry lands");
+        assert_eq!(junk.sub_tool_size_px.get("d.myb"), Some(&24.0));
     }
 
     #[test]

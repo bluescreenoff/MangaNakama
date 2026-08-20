@@ -97,6 +97,13 @@ The recurring failure shapes, in order of how often they have shipped:
   reference by tests; the GPU dab path is pinned against the CPU path.
   Chain of custody: C reference → CPU → GPU. Break one link and the
   parity tests are testing nothing.
+- GPU dabs default by MEASUREMENT (`bench::resolve_auto`): an explicit
+  choice (the `--gpu-dabs` flag or a `gpu_dabs=` line ui.txt actually
+  carries — `gpu_dabs_explicit` is the tri-state) always wins; else a
+  `gpu-verdict.txt` matching THIS adapter's fingerprint; else off + a
+  one-shot `--bench-verdict` child measures for the next launch. An auto
+  path must never overwrite the user's key — the verdict file and ui.txt
+  are separate authorities on purpose.
 - **Brush size is ONE absolute number in canvas px** (`ToolProps::size_px`,
   a dab diameter): the Size control, the `[`/`]` ladder and the live drag
   all write it, and only `Engine::set_size_px` converts. A second size
@@ -105,7 +112,13 @@ The recurring failure shapes, in order of how often they have shipped:
   re-derives from the radius the preset shipped (`base_radius_log`, natural
   log), so setting the same size twice must equal setting it once; a setter
   that scales what it currently holds compounds on every slider tick. The
-  preset's own size is the DEFAULT a sub tool seeds from, never a ceiling.
+  preset's own size is the DEFAULT a sub tool seeds from, never a ceiling —
+  which is exactly what the persistence rule leans on: ui.txt's
+  `sub_tool_size_px=` stores ONLY the sub tools whose size the user moved off
+  that default (keyed by the preset's path relative to the brushes root, so a
+  moved install keeps them). An untouched sub tool has no entry and still
+  seeds from its preset, so updating a preset moves its size; "back to the
+  preset" DELETES the entry instead of writing today's default down.
 
 ## GPU compositor (`mn-gpu` ⇄ core CPU compositing)
 

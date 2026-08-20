@@ -57,11 +57,12 @@ at all. A release workflow builds a zip that a tester can unzip and run.
 
 Roughly in order. None of this is promised by a date.
 
-1. **GPU dab rasterization for the heavy brushes.** Dab cost scales with tip
-   *area*, so big soft brushes are exactly where the graphics card should win —
-   and today wash, texture and smudge brushes are excluded from the GPU path
-   and fall back to the CPU. This also needs a benchmark harness: the GPU path
-   should not become the default on anyone's machine without a measured number.
+1. **GPU dabs, the last exclusions.** Wash, texture and smudge brushes ride
+   the GPU path now, a benchmark harness exists (`--bench-dabs`), and the
+   path turns itself on per machine from a measured verdict — a one-shot
+   background benchmark decides, never a blanket default. Still CPU-only:
+   smudge combined with wash (the sampler would have to read the in-flight
+   wash buffer) and the spectral-paint / colorize / posterize presets.
 2. **Faithful brush imports, the rest of it.** `.abr` now translates the
    dynamics that map (spacing, pressure size and minimums, jitters,
    scatter, transfer), bakes static tip geometry into the mask, imports
@@ -105,25 +106,10 @@ an issue before starting and the reason comes with the answer. (The previous
 list of nine shipped, every one; this is the fresh crop, each noted during
 that work.)
 
-1. **Persist per-sub-tool brush sizes.** Sizes are absolute pixels now, but
-   they reset on restart — session-only by design of the old multiplier.
-   Needs a new `ui.txt`-style key that never existed before (so no stale
-   value can be misread).
-2. **Undo for ruler creation and moves.** Rulers mutate app state directly,
+1. **Undo for ruler creation and moves.** Rulers mutate app state directly,
    outside the op/command recording — creation was never undoable, so the
    new move gestures aren't either. The work is choosing where rulers'
    undo history lives, not the bracket itself.
-3. **`Clear rulers` forgets the curve rulers.** It clears the item list but
-   not the curves list — a two-line fix plus the test that pins it.
-4. **Material tags don't ride `Import folder…`.** The importer copies image
-   files only; merging two `tags.txt` sidecars has real conflict semantics
-   that v1 deliberately skipped.
-5. **The command palette omits the perspective rulers.** `quick.rs` lists
-   some ruler kinds but none of the perspective family — a data-row
-   addition, matching how the menu names them.
-6. **The canvas drop shadow ignores view flips.** Cosmetic: the overlay
-   shadow is drawn from unflipped corner points, so it sits on the wrong
-   side under a mirrored view (both axes).
 
 ## Picking something up
 

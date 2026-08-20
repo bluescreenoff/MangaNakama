@@ -131,6 +131,9 @@ struct Cli {
     /// --bench-dabs: run the dab-path benchmark (P3 re-flip criterion)
     /// and exit, writing manganakama-bench.txt beside the exe.
     bench_dabs: bool,
+    /// --bench-verdict: the one-shot measurement child the auto-default
+    /// spawns — run the short bench, write `gpu-verdict.txt`, exit.
+    bench_verdict: bool,
     /// --e2e-dockdrag: drive the docking system's drag interactions through
     /// the real pointer path and print verdicts.
     e2e_dockdrag: bool,
@@ -153,6 +156,7 @@ fn parse_cli() -> Cli {
         shot_dock: false,
         e2e_workfolder: false,
         bench_dabs: false,
+        bench_verdict: false,
         e2e_dockdrag: false,
         e2e_paneresize: false,
     };
@@ -169,6 +173,7 @@ fn parse_cli() -> Cli {
             "--shot-dock" => cli.shot_dock = true,
             "--e2e-workfolder" => cli.e2e_workfolder = true,
             "--bench-dabs" => cli.bench_dabs = true,
+            "--bench-verdict" => cli.bench_verdict = true,
             "--e2e-dockdrag" => cli.e2e_dockdrag = true,
             "--e2e-paneresize" => cli.e2e_paneresize = true,
             "--screenshot" => match args.next() {
@@ -250,6 +255,26 @@ fn main() {
             }
             Err(e) => {
                 eprintln!("[bench] failed: {e}");
+                std::process::exit(3);
+            }
+        }
+    }
+    if cli.bench_verdict {
+        // The auto-default's measurement child: short bench, verdict file,
+        // exit. A failure writes nothing — the next launch retries.
+        match bench::quick_verdict(cfg, 3) {
+            Ok(v) => {
+                bench::store_verdict(&v);
+                println!(
+                    "[bench] verdict {} for {} ({})",
+                    if v.on { "ON" } else { "off" },
+                    v.fingerprint,
+                    v.summary
+                );
+                std::process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("[bench] verdict failed: {e}");
                 std::process::exit(3);
             }
         }
@@ -448,17 +473,38 @@ fn main() {
     // The reader's F11 fullscreen needs the window handle (tests run
     // headless with hwnd == 0 — state-only).
     app.hwnd = hwnd as isize;
-    // GPU dabs on at startup: the ui.txt preference (View-menu toggle,
-    // TODO #0.1 — default OFF; the round-34 default-on flip was reverted
-    // same-day per the auditor's criteria: re-flip when #0.1 wash/texture/
-    // smudge lands AND a benchmark number exists on the owner's hardware)
-    // OR the `--gpu-dabs` override — both ANDed with adapter support, so a
-    // storage-less adapter (or a ui.txt carried to a weaker machine) just
-    // stays on cpu.
-    let want_gpu_dabs = cli.gpu_dabs || app.layout.gpu_dabs;
+    // GPU dabs on at startup — DECISIONS 8.9's re-flip, implemented as a
+    // MEASURED per-adapter auto-default: an explicit choice (the --gpu-dabs
+    // flag or a gpu_dabs= line the user's ui.txt actually carries) always
+    // wins; otherwise a stored `gpu-verdict.txt` for THIS adapter decides;
+    // otherwise the app stays on cpu and spawns a one-shot measurement
+    // child (`--bench-verdict`, the real bench, no window) whose number
+    // takes effect from the NEXT launch. Everything is ANDed with adapter
+    // support, so a ui.txt carried to a weaker machine just stays on cpu.
+    let explicit = if cli.gpu_dabs {
+        Some(true)
+    } else if app.layout.gpu_dabs_explicit {
+        Some(app.layout.gpu_dabs)
+    } else {
+        None
+    };
+    let (want_gpu_dabs, spawn_measurement) =
+        bench::resolve_auto(explicit, bench::load_verdict(), &app.renderer.adapter_line());
     app.gpu_dabs = want_gpu_dabs && app.renderer.gpu_dabs_supported();
     if want_gpu_dabs && !app.gpu_dabs {
         println!("[app] gpu dabs requested (flag/ui.txt) but unsupported here — CPU dab path");
+    }
+    if explicit.is_none() && app.gpu_dabs {
+        app.set_status(
+            "inking runs on the GPU: measured faster on this machine (View menu to change)",
+        );
+    }
+    if spawn_measurement && app.renderer.gpu_dabs_supported() {
+        // Detached, windowless (GUI-subsystem exe), exits on its own. If it
+        // dies the verdict file stays absent and the next launch retries.
+        if let Ok(exe) = std::env::current_exe() {
+            let _ = std::process::Command::new(exe).arg("--bench-verdict").spawn();
+        }
     }
     // PR-040: ask the PREVIOUS session's verdict before this session appends
     // its own banner to the same file — one line later and the question
@@ -2083,6 +2129,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) };
             note_geom_now(hwnd);
             persist_geom(app);
+            // The sub tool in hand never had a switch to write it down, so
+            // exiting IS its switch: this is what carries a size the user
+            // dialled and then quit on into `ui.txt`. Lock-aware, like every
+            // other switch (`store_current_props`).
+            app.store_current_props();
             app.layout.save_if_dirty();
             app.prefs.save_if_dirty();
             // The telemetry exit summary, while the App still exists —

@@ -60,6 +60,21 @@ pub fn command_index() -> Vec<(&'static str, &'static str, AppCmd)> {
             RulerArm(crate::cmd::RulerKind::VanishingPoint),
         ),
         (
+            "Perspective ruler (1-point)",
+            "Layer ▸ Ruler",
+            RulerArm(crate::cmd::RulerKind::Perspective1),
+        ),
+        (
+            "Perspective ruler (2-point)",
+            "Layer ▸ Ruler",
+            RulerArm(crate::cmd::RulerKind::Perspective),
+        ),
+        (
+            "Perspective ruler (3-point)",
+            "Layer ▸ Ruler",
+            RulerArm(crate::cmd::RulerKind::Perspective3),
+        ),
+        (
             "Curve ruler",
             "Layer ▸ Ruler",
             RulerArm(crate::cmd::RulerKind::Curve),
@@ -251,5 +266,30 @@ mod tests {
                 .any(|(l, w, _)| *l == "Undo" && w.contains("Edit")),
             "menu paths ride along (UI-052's parenthetical)"
         );
+    }
+
+    /// Issue #5: the palette listed line/vanishing-point/curve/parallel/
+    /// concentric/symmetric but no perspective ruler at all — the three
+    /// kinds the Ruler menu offers were unreachable by search.
+    #[test]
+    fn the_perspective_family_is_in_the_palette() {
+        let idx = command_index();
+        for kind in [
+            crate::cmd::RulerKind::Perspective1,
+            crate::cmd::RulerKind::Perspective,
+            crate::cmd::RulerKind::Perspective3,
+        ] {
+            let hit = idx
+                .iter()
+                .find(|(_, _, c)| matches!(c, AppCmd::RulerArm(k) if *k == kind));
+            let Some((label, wher, _)) = hit else {
+                panic!("{kind:?} has no palette row");
+            };
+            assert!(
+                label.to_lowercase().contains("perspective"),
+                "typing 'perspective' must find it ({label})"
+            );
+            assert_eq!(*wher, "Layer ▸ Ruler", "same menu path as its siblings");
+        }
     }
 }

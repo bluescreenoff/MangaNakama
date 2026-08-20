@@ -270,3 +270,54 @@ fn border_as_ruler_publishes_the_outline_and_retracts_only_its_own() {
         "only the frame's own curve was retracted"
     );
 }
+
+/// Issue #3: `Clear rulers` emptied `items` and left `curves` untouched, so
+/// every curve ruler survived a clear. It clears the hand-made ones now —
+/// and leaves the frame-published ones alone, because those belong to the
+/// panel and `sync_frame_rulers` retracts them by value (clearing them here
+/// would strand that bookkeeping until the next frame edit).
+#[test]
+fn clearing_rulers_takes_the_hand_made_curves_but_not_the_frames() {
+    let Some(mut app) = super::new_document_tests::headless() else {
+        return;
+    };
+    let mine = mn_core::CurveRuler {
+        pts: vec![[0.0, 0.0], [10.0, 10.0]],
+    };
+    app.rulers.curves.push(mine.clone());
+    app.rulers.items.push(mn_core::Ruler::Line {
+        a: [0.0, 0.0],
+        b: [50.0, 50.0],
+    });
+    let h = app.doc.add_frame_folder(
+        "Frame 1",
+        mn_core::FrameSet::single_rect([20.0, 20.0, 380.0, 280.0], 4.0),
+    );
+    dispatch(&mut app, AppCmd::FrameBorderRuler { layer: h });
+    assert_eq!(app.rulers.curves.len(), 2, "hand-made + the panel outline");
+
+    dispatch(&mut app, AppCmd::RulerClear);
+    assert!(app.rulers.items.is_empty(), "the line family went");
+    assert_eq!(
+        app.rulers.curves, app.frame_rulers,
+        "the hand-made curve went; the panel's own stayed"
+    );
+    assert_eq!(app.rulers.curves.len(), 1, "and it is the frame's one");
+    assert!(
+        !app.rulers.curves.contains(&mine),
+        "the hand-made one is gone"
+    );
+
+    // The frame's ruler is still the frame's: switching the border back on
+    // retracts exactly it, leaving nothing behind.
+    dispatch(&mut app, AppCmd::FrameBorderRuler { layer: h });
+    assert!(
+        app.rulers.curves.is_empty(),
+        "retraction still finds its own curve after a clear"
+    );
+
+    // With no frame rulers at all, a clear empties the list outright.
+    app.rulers.curves.push(mine.clone());
+    dispatch(&mut app, AppCmd::RulerClear);
+    assert!(app.rulers.curves.is_empty(), "{:?}", app.rulers.curves);
+}

@@ -4649,6 +4649,12 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
         }
         AppCmd::RulerClear => {
             app.rulers.items.clear();
+            // The curve rulers go too (issue #3) — but only the hand-made
+            // ones. A panel border published as a ruler is the FRAME's
+            // property, and `sync_frame_rulers` retracts by value against
+            // `frame_rulers`; dropping those here would desync that
+            // bookkeeping (they would vanish now and never be retracted).
+            app.rulers.curves = app.frame_rulers.clone();
             app.ruler_pending = None;
             // A live sticky lock indexing into the cleared set would fall
             // to snap_locked's else (unsnapped) — safe, but stale; drop it
@@ -4657,7 +4663,11 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             // Same for a live move (its index is into the cleared set).
             app.ruler_move = None;
             app.rebuild_twins();
-            app.set_status("rulers cleared");
+            app.set_status(if app.frame_rulers.is_empty() {
+                "rulers cleared"
+            } else {
+                "rulers cleared — panel-border rulers stay with their frames"
+            });
             app.mark_dirty();
         }
         AppCmd::SetLayerDraft(i, v) => {

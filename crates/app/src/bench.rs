@@ -116,9 +116,191 @@ pub fn bench_write(table: &str) -> Option<std::path::PathBuf> {
     Some(p)
 }
 
+// ---------------------------------------------------------------------------
+// The measured auto-default (ROADMAP: "the GPU path should not become the
+// default on anyone's machine without a measured number").
+// ---------------------------------------------------------------------------
+
+/// One measured decision for one adapter.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DabVerdict {
+    /// `Renderer::adapter_line()` — name, backend, type, driver. A driver
+    /// update or a GPU swap changes it, which is exactly when the number
+    /// must be re-measured.
+    pub fingerprint: String,
+    pub on: bool,
+    /// The ratios, one line, for the log and the verdict file's own record.
+    pub summary: String,
+}
+
+/// The criterion: GPU becomes the default only when the strategic class —
+/// the soft airbrush, where dab cost scales with tip AREA — is clearly
+/// faster (< 0.9×), and NO class regresses badly (all < 1.3×). Ratios are
+/// gpu/cpu, aligned with [`CLASSES`]. Deliberately conservative: a wash
+/// that ties and an airbrush that wins flips ON; a knife that pays 1.5×
+/// vetoes even a 2× airbrush win.
+pub fn decide(ratios: &[f64]) -> bool {
+    ratios.len() == CLASSES.len()
+        && ratios.iter().all(|r| r.is_finite() && *r < 1.3)
+        && ratios[1] < 0.9
+}
+
+/// Measure and decide, on the adapter `cfg` selects. `reps` low (3) — this
+/// runs once per adapter, in a child process, not in anyone's way.
+pub fn quick_verdict(cfg: GpuConfig, reps: usize) -> Result<DabVerdict, String> {
+    let renderer = Renderer::new_headless(cfg).map_err(|e| e.to_string())?;
+    let fingerprint = renderer.adapter_line();
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    let cpu = timed_pass(&mut app, reps, false)?;
+    let gpu = timed_pass(&mut app, reps, true)?;
+    let ratios: Vec<f64> = cpu
+        .iter()
+        .zip(&gpu)
+        .map(|(c, g)| if *c > 0.0 { g / c } else { f64::INFINITY })
+        .collect();
+    let on = decide(&ratios);
+    let summary = CLASSES
+        .iter()
+        .zip(&ratios)
+        .map(|((name, _), r)| format!("{name} {r:.2}x"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Ok(DabVerdict {
+        fingerprint,
+        on,
+        summary,
+    })
+}
+
+/// `gpu-verdict.txt` beside the exe: line 1 `fingerprint`, line 2 `on`/`off`,
+/// line 3 the summary (a record for humans; never parsed).
+pub fn verdict_path() -> Option<std::path::PathBuf> {
+    Some(std::env::current_exe().ok()?.parent()?.join("gpu-verdict.txt"))
+}
+
+pub fn store_verdict(v: &DabVerdict) {
+    if let Some(p) = verdict_path() {
+        store_verdict_at(&p, v);
+    }
+}
+
+fn store_verdict_at(p: &std::path::Path, v: &DabVerdict) {
+    let _ = std::fs::write(
+        p,
+        format!(
+            "{}\n{}\n{}\n",
+            v.fingerprint,
+            if v.on { "on" } else { "off" },
+            v.summary
+        ),
+    );
+}
+
+/// The stored `(fingerprint, on)`, if any. A malformed file reads as absent
+/// (the next launch re-measures — a corrupt verdict must never decide).
+pub fn load_verdict() -> Option<(String, bool)> {
+    load_verdict_at(&verdict_path()?)
+}
+
+fn load_verdict_at(p: &std::path::Path) -> Option<(String, bool)> {
+    let text = std::fs::read_to_string(p).ok()?;
+    let mut lines = text.lines();
+    let fp = lines.next()?.trim().to_string();
+    let on = match lines.next()?.trim() {
+        "on" => true,
+        "off" => false,
+        _ => return None,
+    };
+    if fp.is_empty() { None } else { Some((fp, on)) }
+}
+
+/// The startup resolution, pure so it is testable. Returns
+/// `(gpu_dabs_on, spawn_measurement)`.
+///
+/// - An EXPLICIT choice (the `--gpu-dabs` flag, or a `gpu_dabs=` key the
+///   user's ui.txt actually carries) always wins and never re-measures.
+/// - Otherwise a stored verdict for THIS adapter applies.
+/// - Otherwise: off for now, and the measurement child should run so the
+///   NEXT launch has its number.
+pub fn resolve_auto(
+    explicit: Option<bool>,
+    verdict: Option<(String, bool)>,
+    fingerprint: &str,
+) -> (bool, bool) {
+    if let Some(on) = explicit {
+        return (on, false);
+    }
+    match verdict {
+        Some((fp, on)) if fp == fingerprint => (on, false),
+        _ => (false, true),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The criterion, pinned: the airbrush must clearly win, nothing may
+    /// badly lose, and malformed input never flips ON.
+    #[test]
+    fn the_flip_criterion_is_conservative()
+    {
+        let n = CLASSES.len();
+        let mut wins = vec![0.8; n];
+        assert!(decide(&wins), "a clean sweep flips on");
+        wins[1] = 0.95; // the strategic class merely ties
+        assert!(!decide(&wins), "an airbrush that only ties does not flip");
+        wins[1] = 0.5;
+        wins[4] = 1.5; // one class regresses badly
+        assert!(!decide(&wins), "a bad regression vetoes a big win");
+        assert!(!decide(&vec![0.5; n - 1]), "wrong arity never flips");
+        let mut nan = vec![0.5; n];
+        nan[0] = f64::NAN;
+        assert!(!decide(&nan), "a NaN ratio never flips");
+    }
+
+    /// The startup resolution: explicit beats verdict beats measurement.
+    #[test]
+    fn resolution_order_explicit_verdict_measure() {
+        let fp = "Some GPU | Vulkan | driver 1.2";
+        let stored = Some((fp.to_string(), true));
+        // Explicit user choice wins, never re-measures.
+        assert_eq!(resolve_auto(Some(false), stored.clone(), fp), (false, false));
+        assert_eq!(resolve_auto(Some(true), None, fp), (true, false));
+        // No explicit choice: this adapter's verdict applies.
+        assert_eq!(resolve_auto(None, stored, fp), (true, false));
+        assert_eq!(
+            resolve_auto(None, Some((fp.into(), false)), fp),
+            (false, false)
+        );
+        // A verdict for ANOTHER adapter (driver update, new GPU) re-measures.
+        assert_eq!(
+            resolve_auto(None, Some(("old driver".into(), true)), fp),
+            (false, true)
+        );
+        // Nothing stored: stay off, measure.
+        assert_eq!(resolve_auto(None, None, fp), (false, true));
+    }
+
+    /// The verdict file: round trips, and a corrupt file reads as absent.
+    #[test]
+    fn verdict_file_round_trips_and_rejects_garbage() {
+        let dir = std::env::temp_dir().join(format!("mn-verdict-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("gpu-verdict.txt");
+        let v = DabVerdict {
+            fingerprint: "Adapter X | Dx12 | driver 31.0".into(),
+            on: true,
+            summary: "plain g-pen 1.01x, soft airbrush 0.42x".into(),
+        };
+        store_verdict_at(&p, &v);
+        assert_eq!(load_verdict_at(&p), Some((v.fingerprint.clone(), true)));
+        std::fs::write(&p, "Adapter X | Dx12 | driver 31.0\nmaybe\n").unwrap();
+        assert_eq!(load_verdict_at(&p), None, "a corrupt flag never decides");
+        std::fs::write(&p, "\non\n").unwrap();
+        assert_eq!(load_verdict_at(&p), None, "an empty fingerprint never decides");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     /// Structure smoke: every class produces a row, the GPU path really
     /// routed GPU for every class, both columns parse positive. Timings

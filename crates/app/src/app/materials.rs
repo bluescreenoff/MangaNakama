@@ -382,38 +382,72 @@ impl App {
     }
 
     /// Row 151's bulk half: copy every image file from `src` into the
-    /// registered folder (existing names kept — no clobbering). Returns
-    /// the number imported.
+    /// registered folder (existing names kept — no clobbering), carrying
+    /// the copied files' tags with them. Returns the number imported.
     pub fn material_import_folder(&mut self, src: &Path) -> usize {
         let dst = self.registered_material_folder();
-        let Ok(rd) = std::fs::read_dir(src) else {
-            return 0;
-        };
-        let mut n = 0;
-        for e in rd.flatten() {
-            let p = e.path();
-            let ext = p
-                .extension()
-                .and_then(|x| x.to_str())
-                .map(|x| x.to_ascii_lowercase())
-                .unwrap_or_default();
-            if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp") {
-                continue;
-            }
-            let Some(name) = p.file_name() else { continue };
-            let target = dst.join(name);
-            if target.exists() {
-                continue;
-            }
-            if std::fs::copy(&p, &target).is_ok() {
-                n += 1;
-            }
-        }
-        if n > 0 {
+        let copied = material_import_files(src, &dst);
+        material_import_tags(src, &dst, &copied);
+        if !copied.is_empty() {
             self.materials_scan();
         }
-        n
+        copied.len()
     }
+}
+
+/// The file half of the import: copy every image file from `src` into
+/// `dst`, keeping existing names. Returns the names actually copied —
+/// which, by that no-clobber rule, are exactly the ones that are NEW in
+/// `dst`.
+fn material_import_files(src: &Path, dst: &Path) -> Vec<String> {
+    let Ok(rd) = std::fs::read_dir(src) else {
+        return Vec::new();
+    };
+    let mut copied = Vec::new();
+    for e in rd.flatten() {
+        let p = e.path();
+        let ext = p
+            .extension()
+            .and_then(|x| x.to_str())
+            .map(|x| x.to_ascii_lowercase())
+            .unwrap_or_default();
+        if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp") {
+            continue;
+        }
+        let Some(name) = p.file_name() else { continue };
+        let target = dst.join(name);
+        if target.exists() {
+            continue;
+        }
+        if std::fs::copy(&p, &target).is_ok() {
+            copied.push(name.to_string_lossy().into_owned());
+        }
+    }
+    copied
+}
+
+/// The tag half (good-first-issue #4): the two sidecars merge without any
+/// conflict semantics, because a file that was actually copied is new in
+/// `dst` — so it cannot already have a destination entry to disagree with.
+/// The merge is therefore a plain add of the copied files' source entries;
+/// a file the copy SKIPPED (its name was taken) contributes nothing, and
+/// whatever the destination says about that name stands.
+///
+/// The source's unknown lines (comments, future keys) are deliberately not
+/// carried: they describe the source folder, not this one. And when
+/// nothing gets tagged we do not touch — or create — the destination
+/// sidecar at all, keeping "no sidecar" the honest resting state.
+fn material_import_tags(src: &Path, dst: &Path, copied: &[String]) {
+    let from = MaterialTags::load(src);
+    let tagged: Vec<&String> = copied.iter().filter(|n| !from.get(n).is_empty()).collect();
+    if tagged.is_empty() {
+        return;
+    }
+    let mut into = MaterialTags::load(dst);
+    for name in tagged {
+        into.set(name, from.get(name));
+    }
+    let _ = into.save(dst);
 }
 
 #[cfg(test)]
@@ -518,5 +552,115 @@ mod tests {
         assert!(side.save(&dir));
         assert!(!dir.join(TAGS_FILE).exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- good-first-issue #4: tags ride `Import folder…` ------------------
+
+    /// A fresh `src`/`dst` pair under one temp folder. The image files are
+    /// never decoded on this path (the import is a byte copy), so their
+    /// contents are only there to prove which bytes survived.
+    fn import_dirs(tag: &str) -> (PathBuf, PathBuf) {
+        let base = std::env::temp_dir().join(format!("mn-import-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (src, dst) = (base.join("src"), base.join("dst"));
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        (src, dst)
+    }
+
+    /// The happy path: a tagged material arrives tagged, and the bank's one
+    /// search box finds it by that tag in its new home.
+    #[test]
+    fn import_carries_the_tags_of_the_files_it_copied() {
+        let (src, dst) = import_dirs("carries");
+        std::fs::write(src.join("tone.png"), "tone-bytes").unwrap();
+        std::fs::write(src.join("notes.txt"), "not an image").unwrap();
+        std::fs::write(src.join(TAGS_FILE), "tone.png=screentone, dots\n").unwrap();
+
+        let copied = material_import_files(&src, &dst);
+        material_import_tags(&src, &dst, &copied);
+
+        assert_eq!(copied, vec!["tone.png".to_owned()], "images only");
+        assert!(dst.join("tone.png").exists());
+        let side = MaterialTags::load(&dst);
+        assert_eq!(side.get("tone.png"), "screentone, dots");
+        // …which is what the bank would scan, so the search box matches it.
+        let scanned = item("tone", side.get("tone.png"));
+        assert!(material_matches(&scanned, "screentone"));
+        let _ = std::fs::remove_dir_all(src.parent().unwrap());
+    }
+
+    /// Source with no sidecar = today's behaviour byte-for-byte: the files
+    /// land untagged and no sidecar is invented in the destination.
+    #[test]
+    fn import_from_an_untagged_folder_creates_no_sidecar() {
+        let (src, dst) = import_dirs("nosidecar");
+        std::fs::write(src.join("a.png"), "a").unwrap();
+
+        let copied = material_import_files(&src, &dst);
+        material_import_tags(&src, &dst, &copied);
+
+        assert_eq!(copied, vec!["a.png".to_owned()]);
+        assert!(dst.join("a.png").exists());
+        assert!(
+            !dst.join(TAGS_FILE).exists(),
+            "nothing to tag must not create a sidecar"
+        );
+        let _ = std::fs::remove_dir_all(src.parent().unwrap());
+    }
+
+    /// A file whose name was already taken is NOT copied, so its source tag
+    /// must not land either — the destination's own tag (and its bytes) win.
+    #[test]
+    fn import_does_not_tag_a_file_it_skipped() {
+        let (src, dst) = import_dirs("skipped");
+        std::fs::write(src.join("a.png"), "source-bytes").unwrap();
+        std::fs::write(src.join(TAGS_FILE), "a.png=from-the-source\n").unwrap();
+        std::fs::write(dst.join("a.png"), "destination-bytes").unwrap();
+        std::fs::write(dst.join(TAGS_FILE), "a.png=mine\n").unwrap();
+
+        let copied = material_import_files(&src, &dst);
+        material_import_tags(&src, &dst, &copied);
+
+        assert!(copied.is_empty(), "the name was taken");
+        assert_eq!(
+            std::fs::read_to_string(dst.join("a.png")).unwrap(),
+            "destination-bytes"
+        );
+        assert_eq!(MaterialTags::load(&dst).get("a.png"), "mine");
+        let _ = std::fs::remove_dir_all(src.parent().unwrap());
+    }
+
+    /// The destination sidecar's own content survives the merge — including
+    /// its comments and its entries for files that are not there right now
+    /// — while the SOURCE's comments stay behind: they described the source
+    /// folder, not this one.
+    #[test]
+    fn import_keeps_the_destination_sidecar_and_leaves_source_comments_behind() {
+        let (src, dst) = import_dirs("merge");
+        std::fs::write(src.join("b.png"), "b").unwrap();
+        std::fs::write(
+            src.join(TAGS_FILE),
+            "# notes about the SOURCE folder\nb.png=effect, action\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dst.join(TAGS_FILE),
+            "# my own notes\ngone-for-now.png=kept\n",
+        )
+        .unwrap();
+
+        let copied = material_import_files(&src, &dst);
+        material_import_tags(&src, &dst, &copied);
+
+        let out = std::fs::read_to_string(dst.join(TAGS_FILE)).unwrap();
+        assert!(out.contains("# my own notes\n"), "{out}");
+        assert!(out.contains("gone-for-now.png=kept\n"), "{out}");
+        assert!(out.contains("b.png=effect, action\n"), "{out}");
+        assert!(
+            !out.contains("SOURCE folder"),
+            "the source's comments describe the source: {out}"
+        );
+        let _ = std::fs::remove_dir_all(src.parent().unwrap());
     }
 }
