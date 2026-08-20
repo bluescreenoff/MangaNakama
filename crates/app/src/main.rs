@@ -483,6 +483,11 @@ fn main() {
         ),
         format!("[app] dpi scale: {ppp:.2}"),
         format!("[app] flags: warp={} gpu_dabs={}", cli.warp, app.gpu_dabs),
+        // How to get this file to the dev — the log is its own instruction
+        // sheet, because nobody rereads a README when something breaks.
+        "[log] safe to share as-is (no names, no paths). Send it to \
+         github.com/bluescreenoff/MangaNakama/issues or bluescreen.off@gmail.com"
+            .to_owned(),
     ]);
     // Read the two preferences this function needs BEFORE the App moves into
     // the window's user data and stops being reachable by name.
@@ -2083,6 +2088,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             persist_geom(app);
             app.layout.save_if_dirty();
             app.prefs.save_if_dirty();
+            // The telemetry exit summary, while the App still exists —
+            // `end_session` after the message loop only stamps the marker.
+            app.diag.flush_composite_summary();
             // Drop the App (and the Renderer's surface) while the HWND is valid.
             drop(unsafe { Box::from_raw(p) });
             unsafe { PostQuitMessage(0) };

@@ -112,7 +112,36 @@ pub struct Diag {
     pub latency_max_ms: f32,
     /// `dwTime` of the newest sample pushed since the last frame.
     last_sample_t_ms: f64,
+
+    // --- passive GPU telemetry (owner ask 2026-08-20) -----------------------
+    // Session aggregates of the compositor's CPU-side cost, written to
+    // `manganakama.log` so any tester's GPU story is in the file they
+    // already share — without being asked to run anything. Per-frame lines
+    // would drown the log; this is one line per 5 minutes of activity,
+    // one at exit, and an immediate (rate-limited) line for a slow frame.
+    comp_frames: u64,
+    comp_full: u64,
+    comp_tiles: u64,
+    comp_uploads: u64,
+    comp_sum_ms: f64,
+    comp_max_ms: f32,
+    comp_slow: u32,
+    comp_slow_logged: Option<Instant>,
+    comp_flushed: Instant,
+    comp_since_flush: u64,
+    /// Dab-path session counts (the per-event lines already exist; these
+    /// are the exit summary's totals).
+    pub dab_gpu_strokes: u32,
+    pub dab_cpu_routed: u32,
+    pub dab_canary_repairs: u32,
 }
+
+/// A composite frame slower than this (CPU-side ms) gets its own log line.
+const COMP_SLOW_MS: f32 = 50.0;
+/// At most one slow-frame line per this many seconds.
+const COMP_SLOW_EVERY: Duration = Duration::from_secs(10);
+/// Aggregate line cadence while compositing is happening.
+const COMP_FLUSH_EVERY: Duration = Duration::from_secs(300);
 
 impl Default for Diag {
     fn default() -> Self {
@@ -132,6 +161,19 @@ impl Default for Diag {
             latency_ms: None,
             latency_max_ms: 0.0,
             last_sample_t_ms: 0.0,
+            comp_frames: 0,
+            comp_full: 0,
+            comp_tiles: 0,
+            comp_uploads: 0,
+            comp_sum_ms: 0.0,
+            comp_max_ms: 0.0,
+            comp_slow: 0,
+            comp_slow_logged: None,
+            comp_flushed: Instant::now(),
+            comp_since_flush: 0,
+            dab_gpu_strokes: 0,
+            dab_cpu_routed: 0,
+            dab_canary_repairs: 0,
         }
     }
 }
@@ -154,6 +196,68 @@ impl Diag {
             self.events_per_sec = self.events as f32 / secs;
             self.events = 0;
             self.window = Instant::now();
+        }
+    }
+
+    /// Fold one frame's compositor cost in and write the log lines that are
+    /// due (slow frame now; the periodic aggregate). Called once per
+    /// rendered frame; frames that did no compositor work only advance the
+    /// flush clock.
+    pub(crate) fn note_composite(&mut self, fs: &mn_gpu::FrameStats) {
+        if fs.worked() {
+            self.comp_frames += 1;
+            self.comp_since_flush += 1;
+            self.comp_full += u64::from(fs.full);
+            self.comp_tiles += fs.composite_tiles as u64;
+            self.comp_uploads += fs.uploads as u64;
+            self.comp_sum_ms += fs.ms as f64;
+            self.comp_max_ms = self.comp_max_ms.max(fs.ms);
+            if fs.ms > COMP_SLOW_MS {
+                self.comp_slow += 1;
+                let due = self
+                    .comp_slow_logged
+                    .is_none_or(|t| t.elapsed() >= COMP_SLOW_EVERY);
+                if due {
+                    self.comp_slow_logged = Some(Instant::now());
+                    crate::testlog::line(&format!(
+                        "[gpu] slow composite: {:.1} ms cpu-side ({} tiles, {} uploads{})",
+                        fs.ms,
+                        fs.composite_tiles,
+                        fs.uploads,
+                        if fs.full { ", full rebuild" } else { "" },
+                    ));
+                }
+            }
+        }
+        if self.comp_since_flush > 0 && self.comp_flushed.elapsed() >= COMP_FLUSH_EVERY {
+            self.flush_composite_summary();
+        }
+    }
+
+    /// The aggregate telemetry line (cumulative for the session). Also the
+    /// exit summary — `main` calls this before `end_session`.
+    pub(crate) fn flush_composite_summary(&mut self) {
+        self.comp_flushed = Instant::now();
+        self.comp_since_flush = 0;
+        if self.comp_frames == 0 {
+            return;
+        }
+        crate::testlog::line(&format!(
+            "[gpu] composite session: {} frames ({} full), avg {:.1} ms, max {:.1} ms, \
+             {} slow >{}ms, {} tile uploads",
+            self.comp_frames,
+            self.comp_full,
+            self.comp_sum_ms / self.comp_frames as f64,
+            self.comp_max_ms,
+            self.comp_slow,
+            COMP_SLOW_MS as u32,
+            self.comp_uploads,
+        ));
+        if self.dab_gpu_strokes + self.dab_cpu_routed + self.dab_canary_repairs > 0 {
+            crate::testlog::line(&format!(
+                "[dab] session: {} gpu strokes, {} cpu-routed, {} canary repairs",
+                self.dab_gpu_strokes, self.dab_cpu_routed, self.dab_canary_repairs,
+            ));
         }
     }
 

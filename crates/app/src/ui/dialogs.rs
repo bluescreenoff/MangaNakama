@@ -1189,6 +1189,84 @@ fn row(ui: &mut egui::Ui, k: &str, v: &str) {
     ui.end_row();
 }
 
+/// Help ▸ Report Bug / Feature Request / Feedback — the two doors to the
+/// dev (GitHub issues, email), plus where the log lives, because a bug
+/// report without `manganakama.log` usually needs a second round trip.
+pub(super) fn feedback_window(ctx: &egui::Context, app: &mut App) {
+    if !app.feedback_open {
+        return;
+    }
+    const ISSUES: &str = "https://github.com/bluescreenoff/MangaNakama/issues";
+    const MAIL: &str = "bluescreen.off@gmail.com";
+    let mut open = app.feedback_open;
+    egui::Window::new("Report Bug / Feature Request / Feedback")
+        .open(&mut open)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, -40.0))
+        .show(ctx, |ui| {
+            ui.set_max_width(340.0);
+            ui.label("Bugs, feature requests, or just impressions — both doors reach the dev:");
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui.button("Open GitHub Issues").clicked() {
+                    unsafe { crate::win32::shell_open(std::path::Path::new(ISSUES)) };
+                }
+                if ui.small_button("copy link").clicked() {
+                    ui.ctx().copy_text(ISSUES.to_owned());
+                    app.set_status("issues link copied");
+                }
+            });
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                if ui.button("Email the dev").clicked() {
+                    unsafe {
+                        crate::win32::shell_open(std::path::Path::new(&format!(
+                            "mailto:{MAIL}?subject=MangaNakama feedback"
+                        )))
+                    };
+                }
+                if ui.small_button("copy address").clicked() {
+                    ui.ctx().copy_text(MAIL.to_owned());
+                    app.set_status("email address copied");
+                }
+                ui.weak(MAIL);
+            });
+            ui.add_space(6.0);
+            ui.separator();
+            // The log is the half of a bug report people forget. It is safe
+            // to attach by design: no file paths, no names (testlog.rs).
+            ui.weak(
+                "For bugs, please attach manganakama.log — it names the build, \
+                 your GPU and any crash, and carries nothing personal, so it is \
+                 safe to post publicly.",
+            );
+            match crate::testlog::path() {
+                Some(p) => {
+                    ui.horizontal(|ui| {
+                        ui.weak("log");
+                        if ui.small_button("copy path").clicked() {
+                            ui.ctx().copy_text(p.display().to_string());
+                            app.set_status("log path copied");
+                        }
+                    });
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(p.display().to_string())
+                                .size(10.0)
+                                .weak(),
+                        )
+                        .selectable(true)
+                        .wrap(),
+                    );
+                }
+                None => {
+                    ui.weak("log: nothing written yet this session — it appears beside the exe");
+                }
+            }
+        });
+    app.feedback_open = open;
+}
+
 /// PM-022: the Go to Page dialog — a number field (1-based), Go on Enter,
 /// clamped on apply. CSP's "Specific Page".
 pub(super) fn goto_page_window(ctx: &egui::Context, app: &mut App) {

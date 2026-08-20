@@ -583,23 +583,6 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 }
             });
         });
-        // Help — the manual's door (MANUAL-PLAN's mechanical consequence:
-        // it ships offline beside the exe and opens from here; F1 stays
-        // the diagnostics HUD).
-        ui.menu_button("Help", |ui| {
-            if item(
-                ui,
-                "Manual — the quirks, not a feature tour",
-                "opens in your browser",
-            ) {
-                app.push_cmd(AppCmd::OpenManual);
-                ui.close();
-            }
-            if item(ui, "Diagnostics (F1)", "log path, version, counters") {
-                app.push_cmd(AppCmd::ToggleHud);
-                ui.close();
-            }
-        });
         // "Manga" — the owner's rename (his screenshot's CSP menu is
         // Story; Manga reads better here and holds the reader).
         ui.menu_button("Manga", |ui| {
@@ -928,6 +911,32 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
             });
             ui.separator();
             paper_menu(ui, app);
+        });
+        // Help — LAST, where every app puts it (the owner missed it mid-bar).
+        // The manual's door (MANUAL-PLAN: ships offline beside the exe and
+        // opens from here; F1 stays the diagnostics HUD), and the feedback
+        // window (GitHub issues + the dev's email).
+        ui.menu_button("Help", |ui| {
+            if item(
+                ui,
+                "Manual — the quirks, not a feature tour",
+                "opens in your browser",
+            ) {
+                app.push_cmd(AppCmd::OpenManual);
+                ui.close();
+            }
+            if item(
+                ui,
+                "Report Bug / Feature Request / Feedback…",
+                "GitHub or email",
+            ) {
+                app.feedback_open = true;
+                ui.close();
+            }
+            if item(ui, "Diagnostics (F1)", "log path, version, counters") {
+                app.push_cmd(AppCmd::ToggleHud);
+                ui.close();
+            }
         });
 
         // --- command row, same strip (CSP keeps it one bar) ----------------

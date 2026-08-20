@@ -725,6 +725,8 @@ pub struct App {
     pub pen_preset: Option<usize>,
     pub eraser_preset: Option<usize>,
     pub hud_open: bool,
+    /// Help ▸ Report Bug / Feature Request — the feedback window.
+    pub feedback_open: bool,
     pub doc_path: Option<PathBuf>,
     /// One line of feedback for the top bar (last save/open/brush switch, or the
     /// error that stopped one).
@@ -1268,6 +1270,7 @@ impl App {
             presets,
             selected_preset,
             hud_open: false,
+            feedback_open: false,
             doc_path: None,
             status: String::new(),
             status_warn: false,
@@ -2020,6 +2023,8 @@ impl App {
         // Only legal after the frame has been submitted.
         self.shell.free(&mut out.textures_delta);
 
+        let fs = self.renderer.frame_stats();
+        self.diag.note_composite(&fs);
         self.diag.note_frame(t0.elapsed());
         FrameOutput { repaint_after }
     }
@@ -2216,9 +2221,11 @@ impl App {
                 smudge: smudge && !wash,
             });
             self.dab_path_last = "gpu".into();
+            self.diag.dab_gpu_strokes += 1;
         } else {
             self.dab_path_last = if self.gpu_dabs { "cpu (routed)" } else { "cpu" }.into();
             if self.gpu_dabs {
+                self.diag.dab_cpu_routed += 1;
                 // Why the CPU path took over (wash/texture/exotic brush) —
                 // the tester log's routing line.
                 crate::testlog::line(&format!(
@@ -2602,6 +2609,7 @@ impl App {
                 st.flushes,
                 st.all_dabs.len()
             ));
+            self.diag.dab_canary_repairs += 1;
             let tex = self
                 .brush
                 .inner()

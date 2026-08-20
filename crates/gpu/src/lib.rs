@@ -536,6 +536,31 @@ struct SurfaceState {
     config: wgpu::SurfaceConfiguration,
 }
 
+/// CPU-side cost of one `update_canvas` (tile uploads + composite encode +
+/// submit). GPU execution time is not in here — measuring it would need
+/// timestamp queries — but the CPU side is where a struggling
+/// driver/adapter stalls first, and it needs no extra GPU work to observe.
+/// The app aggregates these into the tester log ("passive GPU telemetry":
+/// any user's log shows how their GPU fares without being asked anything).
+#[derive(Clone, Copy, Default)]
+pub struct FrameStats {
+    /// Tiles whose pixels were written to GPU textures this frame.
+    pub uploads: u32,
+    /// Tile regions the composite redrew (0 = frame did no composite).
+    pub composite_tiles: u32,
+    /// The whole canvas was rebuilt (layer/paper/layout change, not damage).
+    pub full: bool,
+    /// Milliseconds spent CPU-side in upload + composite encode/submit.
+    pub ms: f32,
+}
+
+impl FrameStats {
+    /// Did this frame actually upload or composite anything?
+    pub fn worked(&self) -> bool {
+        self.uploads > 0 || self.composite_tiles > 0
+    }
+}
+
 pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -612,6 +637,9 @@ pub struct Renderer {
     /// composite of the same canvas (Pages thumbnail then main view) cannot
     /// eat the first one's redraw.
     canvas_shown: HashMap<TileKey, u64>,
+    /// What the last `update_canvas` cost (CPU-side), for the tester log's
+    /// passive GPU telemetry. Zeroed when a frame had nothing to do.
+    frame_stats: FrameStats,
     /// Blend part 2: the shader compositor pass for the modes fixed-function
     /// blending cannot express. Pipelines + bind group layouts; the SNAPSHOT
     /// texture (canvas-sized copy of the destination, taken between passes)
@@ -1430,6 +1458,7 @@ impl Renderer {
             tiles: HashMap::new(),
             dabs,
             canvas_shown: HashMap::new(),
+            frame_stats: FrameStats::default(),
             blend2_tile_pipe,
             blend2_blit_pipe,
             blend2_tile_bgl,
@@ -1671,6 +1700,11 @@ impl Renderer {
         &self.queue
     }
 
+    /// What the last frame's `update_canvas` cost (see [`FrameStats`]).
+    pub fn frame_stats(&self) -> FrameStats {
+        self.frame_stats
+    }
+
     /// Format of the swapchain (or the canvas format when headless) — an
     /// overlay pipeline must be created for this target format.
     pub fn output_format(&self) -> wgpu::TextureFormat {
@@ -1879,6 +1913,10 @@ impl Renderer {
     /// canvas is resized, a tile disappears, layer presentation state changes,
     /// or `invalidate()` was called.
     fn update_canvas(&mut self, doc: &Document) {
+        // Telemetry: zeroed now, filled at the end when work happened, so a
+        // frame that early-returns honestly reports "did nothing".
+        self.frame_stats = FrameStats::default();
+        let t0 = std::time::Instant::now();
         self.ensure_canvas(doc);
         let Some(canvas) = &self.canvas else { return };
         let canvas_view = canvas.view.clone();
@@ -1926,6 +1964,7 @@ impl Renderer {
         let mut damaged: std::collections::BTreeSet<TileIdx> = Default::default();
         let mut present: std::collections::HashSet<TileKey> = Default::default();
         let mut regions_all: std::collections::BTreeSet<TileIdx> = Default::default();
+        let mut uploads: u32 = 0;
 
         for (li, layer) in doc.layers.iter().enumerate() {
             let pixel_tiles = layer
@@ -2026,6 +2065,7 @@ impl Renderer {
                     },
                 );
                 entry.revision = tile.revision();
+                uploads += 1;
             }
         }
 
@@ -2085,6 +2125,8 @@ impl Renderer {
             damaged.into_iter().collect()
         };
         if regions.is_empty() && !full {
+            // An upload implies damage implies a region, so uploads == 0 here
+            // and the zeroed stats above are already the truth.
             return;
         }
         // Content is about to change: the mip chain regenerates at present.
@@ -2750,6 +2792,12 @@ impl Renderer {
             }
         }
         self.canvas_dirty_all = false;
+        self.frame_stats = FrameStats {
+            uploads,
+            composite_tiles: regions.len() as u32,
+            full,
+            ms: t0.elapsed().as_secs_f32() * 1000.0,
+        };
     }
 
     /// Make sure isolation buffers exist for levels `1..=max_level` at the
