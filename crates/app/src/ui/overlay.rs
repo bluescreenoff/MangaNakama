@@ -559,10 +559,39 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
                 egui::Stroke::new(2.0, theme::ACCENT),
             ));
         } else {
-            painter.line_segment(
-                [to_pt(a.0, a.1), to_pt(b.0, b.1)],
-                egui::Stroke::new(2.0, theme::ACCENT),
-            );
+            // The divide preview shows the GUTTER, not just the cut (owner,
+            // 2026-08-20, CSP behaviour): two parallel lines at the exact
+            // width the release will carve — the same angle-blended formula
+            // as AppCmd::FrameDivide, so a drag that tilts from horizontal
+            // to vertical watches its gutter change width live.
+            let (g_h, g_v) = if app.frame_mode == crate::cmd::FrameMode::DivideBorder {
+                app.gutter_border_mm
+            } else {
+                app.gutter_folder_mm
+            };
+            let ang = (b.1 - a.1).atan2(b.0 - a.0);
+            let gutter =
+                app.mm_to_px(g_v) * ang.cos().abs() + app.mm_to_px(g_h) * ang.sin().abs();
+            let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+            let len = (dx * dx + dy * dy).sqrt();
+            if gutter > 0.0 && len > 1.0 {
+                let (nx, ny) = (-dy / len, dx / len);
+                let (hx, hy) = (nx * gutter * 0.5, ny * gutter * 0.5);
+                for s in [-1.0f32, 1.0] {
+                    painter.line_segment(
+                        [
+                            to_pt(a.0 + hx * s, a.1 + hy * s),
+                            to_pt(b.0 + hx * s, b.1 + hy * s),
+                        ],
+                        egui::Stroke::new(1.5, theme::ACCENT),
+                    );
+                }
+            } else {
+                painter.line_segment(
+                    [to_pt(a.0, a.1), to_pt(b.0, b.1)],
+                    egui::Stroke::new(2.0, theme::ACCENT),
+                );
+            }
         }
     }
 
