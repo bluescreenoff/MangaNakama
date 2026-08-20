@@ -1,6 +1,11 @@
 # Contributing to MangaNakama
 
-Short version: build with `./build.sh`, run `./build.sh --test` before
+> **TL;DR: hand this file to your AI vibeslop coder of choice and make it
+> read the whole thing before it touches anything.** Every rule below exists
+> because skipping it breaks the app *silently* — the agent that ignores
+> them ships a green build that draws wrong.
+
+Human short version: build with `./build.sh`, run `./build.sh --test` before
 opening a PR, and read the docs the repo keeps before changing code —
 they record *why* everything is shaped the way it is.
 
