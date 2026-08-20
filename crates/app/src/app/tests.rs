@@ -977,6 +977,110 @@ fn cut_feathered_splits_by_weight() {
     assert_eq!(app.doc.undo_len(), 1, "Cut is one undo step");
 }
 
+/// The clipboard's operand rect comes off the selection's COVERAGE, not
+/// its display outline. A wand + Shift-add selection has islands and
+/// `outline` keeps exactly ONE of them (the vertex-count sort in
+/// `set_outlines`), so an outline-aimed Cut cleared one island and left
+/// the other sitting on the layer.
+#[test]
+fn cut_clears_every_island_of_a_multi_island_selection() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    let ink = |app: &mut App, x: i32, y: i32| {
+        let ti = TileIdx::of_pixel(x, y);
+        let (ox, oy) = ti.origin();
+        app.doc.active_layer_mut().tile_mut(ti).set_pixel(
+            (x - ox) as usize,
+            (y - oy) as usize,
+            [1000, 2000, 3000, 32767],
+        );
+    };
+    ink(&mut app, 132, 195); // island A
+    ink(&mut app, 310, 110); // island B
+    let px = |app: &App, x: i32, y: i32| -> [u16; 4] {
+        let ti = TileIdx::of_pixel(x, y);
+        app.doc
+            .active_layer()
+            .tile(ti)
+            .unwrap()
+            .pixel((x - ti.origin().0) as usize, (y - ti.origin().1) as usize)
+    };
+
+    let a = mn_core::Selection::from_rect(&app.doc, 120.0, 190.0, 140.0, 200.0);
+    // An L (6 corners against the rect's 4) so the loops sort unequally
+    // and `outline` deterministically keeps island B.
+    let b = mn_core::Selection::from_polygon(
+        &app.doc,
+        &[
+            (300.0, 100.0),
+            (360.0, 100.0),
+            (360.0, 120.0),
+            (330.0, 120.0),
+            (330.0, 160.0),
+            (300.0, 160.0),
+        ],
+    );
+    let sel = a.combine(&b, &app.doc, mn_core::SelectionOp::Add);
+    assert!(!sel.extra_outlines.is_empty(), "two islands, two loops");
+    app.doc.selection = Some(sel);
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::Cut);
+    assert_eq!(px(&app, 132, 195)[3], 0, "island A cleared");
+    assert_eq!(px(&app, 310, 110)[3], 0, "island B cleared");
+    assert_eq!(app.doc.undo_len(), 1, "still one undo step");
+}
+
+/// SE-007's silent trap: a blur wide enough to push every pixel under
+/// half leaves a live selection with NO ants and no launcher, while the
+/// brush stays masked at partial strength. The status must warn, and the
+/// weight consumers must still reach the feather — Cut lifts the graded
+/// pixels instead of reporting nothing to cut.
+#[test]
+fn blur_below_half_warns_but_still_cuts() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    let ti = TileIdx::of_pixel(150, 150);
+    let (ox, oy) = ti.origin();
+    app.doc.active_layer_mut().tile_mut(ti).set_pixel(
+        (150 - ox) as usize,
+        (150 - oy) as usize,
+        [1000, 2000, 3000, 32767],
+    );
+    app.doc.selection = Some(mn_core::Selection::from_rect(
+        &app.doc, 130.0, 130.0, 170.0, 170.0,
+    ));
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::SelectBlur(32));
+
+    let sel = app
+        .doc
+        .selection
+        .as_ref()
+        .expect("the selection is still live");
+    assert!(
+        sel.outline.is_empty() && sel.extra_outlines.is_empty(),
+        "a 40 px rect blurred by 32 px has no ≥-half pixel left"
+    );
+    let cov = sel.coverage(150, 150);
+    assert!(cov > 0 && cov < 128, "a feather under half: {cov}");
+    assert!(app.status_warn, "the status warns: {}", app.status);
+
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::Cut);
+    assert!(app.clipboard.is_some(), "Cut still finds the feather");
+    let left = app
+        .doc
+        .active_layer()
+        .tile(ti)
+        .unwrap()
+        .pixel((150 - ox) as usize, (150 - oy) as usize)[3];
+    assert!(
+        left > 0 && left < 32767,
+        "the feather cut by weight, not wholesale: {left}"
+    );
+}
+
 /// TRIAGE 131: with NO selection the operand is the whole layer —
 /// Copy's rect is the layer's populated bounds, Cut empties it, and the
 /// round trip restores everything.

@@ -212,6 +212,44 @@ impl Selection {
         self.tiles.is_empty()
     }
 
+    /// The operand rect for Cut/Copy/Transform/Crop, `[x0, y0, x1, y1]`
+    /// with an EXCLUSIVE max — read off the COVERAGE, never `outline`.
+    /// The display loops keep one arbitrary island in `outline` and the
+    /// rest in `extra_outlines`, and a feathered selection can have no
+    /// loop at all, so an outline bbox silently operates on part of the
+    /// mask (or none of it). Sub-`SEL_ON` coverage still has bounds — a
+    /// blur that lands entirely under half is invisible but active, and
+    /// the weight consumers must still be able to reach its pixels.
+    pub fn bounds(&self) -> Option<[i32; 4]> {
+        self.bounds_where(selected)
+            .or_else(|| self.bounds_where(|v| v > 0))
+    }
+
+    /// Whether anything reaches [`SEL_ON`], i.e. whether `retrace` can
+    /// draw ants at all.
+    pub fn has_visible_outline(&self) -> bool {
+        self.bounds_where(selected).is_some()
+    }
+
+    fn bounds_where(&self, on: impl Fn(u8) -> bool) -> Option<[i32; 4]> {
+        let (mut x0, mut y0, mut x1, mut y1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+        for (idx, m) in &self.tiles {
+            let (ox, oy) = idx.origin();
+            for y in 0..TILE_SIZE {
+                for x in 0..TILE_SIZE {
+                    if on(m[y * TILE_SIZE + x]) {
+                        let (px, py) = (ox + x as i32, oy + y as i32);
+                        x0 = x0.min(px);
+                        y0 = y0.min(py);
+                        x1 = x1.max(px + 1);
+                        y1 = y1.max(py + 1);
+                    }
+                }
+            }
+        }
+        (x0 < x1).then_some([x0, y0, x1, y1])
+    }
+
     /// The selection-paint stroke's landing: coverage from a MASK FIELD
     /// the brush engine painted (selection pen / eraser / Quick Mask —
     /// alpha is the payload, KEPT as graduated u8 so a soft brush makes
@@ -376,9 +414,8 @@ impl Selection {
     /// feathered selection (soft brush ⇒ soft selection already could,
     /// r97; this softens any selection's edge). The paint/fill paths read
     /// raw coverage as weight, so a blurred edge feathers everything
-    /// downstream; the transform lift/clear pair stays BOOLEAN by the
-    /// recorded round-50 decision (feathering must convert them to
-    /// weights — still future work, now it can actually matter).
+    /// downstream; the transform lift/clear pair reads the same weights
+    /// since r107 (DECISIONS 8.73 — it was boolean before that).
     /// Separable (horizontal then vertical window means) so the cost is
     /// linear in pixels regardless of `px`; outlines re-trace on the
     /// ≥-half view.
@@ -938,6 +975,65 @@ mod tests {
         assert_eq!(z.coverage(75, 75), 255);
         assert_eq!(z.coverage(101, 75), 0);
     }
+    /// The operand rect for Cut/Copy/Transform/Crop must see EVERY
+    /// island. `outline` holds one loop and `extra_outlines` the rest
+    /// (the vertex-count sort in `set_outlines` picks which), so an
+    /// outline bbox operates on one arbitrary island of a Shift-added
+    /// selection.
+    #[test]
+    fn bounds_covers_every_island() {
+        let doc = Document::new(256, 256);
+        let a = Selection::from_rect(&doc, 10.0, 10.0, 30.0, 30.0);
+        // An L: 6 corners against the rect's 4, so the loops sort
+        // unequally and `outline` deterministically keeps the L.
+        let b = Selection::from_polygon(
+            &doc,
+            &[
+                (100.0, 100.0),
+                (160.0, 100.0),
+                (160.0, 120.0),
+                (120.0, 120.0),
+                (120.0, 160.0),
+                (100.0, 160.0),
+            ],
+        );
+        let both = a.combine(&b, &doc, SelectionOp::Add);
+        assert!(!both.extra_outlines.is_empty(), "two islands, two loops");
+        let bb = both.bounds().expect("a covered selection has bounds");
+        assert!(bb[0] <= 10 && bb[1] <= 10, "island A is inside {bb:?}");
+        assert!(bb[2] >= 160 && bb[3] >= 160, "island B is inside {bb:?}");
+        // The one loop `outline` kept spans far less than the mask does.
+        let (mut x0, mut x1) = (f32::INFINITY, f32::NEG_INFINITY);
+        for &(x, _) in &both.outline {
+            x0 = x0.min(x);
+            x1 = x1.max(x);
+        }
+        assert!(
+            x1 - x0 < (bb[2] - bb[0]) as f32,
+            "one loop is not the selection's bbox"
+        );
+        assert!(Selection::default().bounds().is_none());
+    }
+
+    /// A wide blur can put every pixel under [`SEL_ON`]: no loops, no
+    /// ants, no launcher — but the mask is live and still weights the
+    /// brush, so `bounds` falls back to any coverage and the weight
+    /// consumers can still reach it.
+    #[test]
+    fn bounds_survives_an_invisible_feather() {
+        let doc = Document::new(256, 256);
+        let s = Selection::from_rect(&doc, 100.0, 100.0, 140.0, 140.0);
+        let b = s.blur(&doc, 32);
+        assert!(
+            b.outline.is_empty() && b.extra_outlines.is_empty(),
+            "the ≥-half view is empty, so retrace found no loop"
+        );
+        assert!(!b.has_visible_outline());
+        assert!(!b.is_empty(), "the coverage is still there");
+        let bb = b.bounds().expect("the feather still has bounds");
+        assert!(bb[0] < 100 && bb[2] > 140, "the feather's spread: {bb:?}");
+    }
+
     #[test]
     fn lasso_triangle_covers_centroid_only() {
         let doc = Document::new(256, 256);

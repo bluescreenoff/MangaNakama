@@ -246,7 +246,8 @@ pub fn magic_select(
 /// space is subtracted, so what comes back is every CLOSED pocket the path
 /// crossed. Seeds landing inside an already-covered pocket are SKIPPED, so the
 /// cost is one flood per distinct pocket, not per seed point. Returns the
-/// canvas-sized mask and the number of floods it took (for the status line);
+/// canvas-sized mask and how many CLOSED areas it holds (for the status
+/// line — floods wholly inside the subtracted outer space do not count);
 /// `None` when nothing enclosed was found.
 fn enclosed_pockets(doc: &Document, seeds: &[(i32, i32)], opts: &FillOpts) -> Option<(Vec<bool>, u32)> {
     let (w, h) = (doc.size.0 as usize, doc.size.1 as usize);
@@ -260,8 +261,14 @@ fn enclosed_pockets(doc: &Document, seeds: &[(i32, i32)], opts: &FillOpts) -> Op
     // space; then nothing is excluded — recorded as the v1 edge case.)
     // FI-022 is forced OFF here: "the page rim is a line" would wall the
     // corner seeds in and there would BE no outer space to subtract.
+    // FI-016's area scaling is forced off too: the outer set only says
+    // which space is edge-reachable, and a dilated outer eats exactly the
+    // margin the pockets' own expansion tucks under the lineart — the two
+    // cancel at every shared boundary. `gap_close_px` stays symmetric (both
+    // sides must agree on which gaps are sealed).
     let outer_opts = FillOpts {
         refer_border: false,
+        expand_px: 0,
         ..*opts
     };
     let mut outer: Vec<bool> = vec![false; w * h];
@@ -281,7 +288,7 @@ fn enclosed_pockets(doc: &Document, seeds: &[(i32, i32)], opts: &FillOpts) -> Op
         }
     }
     let mut acc: Vec<bool> = vec![false; w * h];
-    let mut floods = 0u32;
+    let mut pockets = 0u32;
     for &(x, y) in seeds {
         if x < 0 || y < 0 || x >= w as i32 || y >= h as i32 {
             continue;
@@ -290,20 +297,26 @@ fn enclosed_pockets(doc: &Document, seeds: &[(i32, i32)], opts: &FillOpts) -> Op
             continue; // this pocket is already covered
         }
         if let Some(region) = flood_region(doc, (x, y), opts) {
-            floods += 1;
+            // The count is what the status line calls "closed areas": a
+            // flood the subtraction below erases wholesale does not count.
+            // That is every seed the path drops in the OPEN space — it
+            // floods the outer set itself, so N pockets reported N+1.
+            if region.iter().zip(&outer).any(|(r, o)| *r && !*o) {
+                pockets += 1;
+            }
             for (a, r) in acc.iter_mut().zip(region) {
                 *a |= r;
             }
         }
     }
-    if floods == 0 {
+    if pockets == 0 {
         return None;
     }
     // Subtract the outer space: what remains is the closed pockets.
     for (a, o) in acc.iter_mut().zip(outer) {
         *a &= !o;
     }
-    acc.iter().any(|&a| a).then_some((acc, floods))
+    acc.iter().any(|&a| a).then_some((acc, pockets))
 }
 
 /// SE-020 shrink-select (CSP 選択範囲シュリンク): a freehand path through
@@ -311,7 +324,7 @@ fn enclosed_pockets(doc: &Document, seeds: &[(i32, i32)], opts: &FillOpts) -> Op
 /// crosses becomes selected, in one action. The fast way to grab a page of
 /// flats: drag loosely across the drawing and every pocket between the
 /// lineart floods to its own barriers. Returns the selection and the
-/// number of floods it took (for the status line).
+/// number of closed areas it holds (for the status line).
 pub fn magic_select_path(
     doc: &Document,
     seeds: &[(i32, i32)],
@@ -721,6 +734,54 @@ mod tests {
         // same as clicking the wand on ink.)
         let oob: Vec<(i32, i32)> = vec![(-5, -5), (-20, -20)];
         assert!(magic_select_path(&doc, &oob, &opts).is_none());
+    }
+
+    /// FI-016 must not cancel itself inside the pocket finder: the outer
+    /// set only says which space is edge-reachable, so it floods with the
+    /// area scaling OFF. With it inherited, the outer flood's own
+    /// dilation ate exactly the pixel the pocket tucks under the lineart,
+    /// and the path wand disagreed with the click wand on the same
+    /// pocket (shrink-select stopping 1 px short of the line).
+    #[test]
+    fn path_wand_matches_the_click_wand_under_the_lineart() {
+        let mut doc = Document::new(128, 128);
+        draw_box_with_gap(&mut doc, 40, 40, 100, 100, 0);
+        let opts = FillOpts::default(); // expand_px 1 = the tuck-under
+        let click = magic_select(&doc, (70, 70), &opts).unwrap();
+        let (path, pockets) = magic_select_path(&doc, &[(70, 70)], &opts).unwrap();
+        assert_eq!(pockets, 1);
+        assert_eq!(click.coverage(40, 70), 255, "the click wand tucks under");
+        assert_eq!(path.coverage(40, 70), 255, "and so must the path wand");
+        for y in 0..128 {
+            for x in 0..128 {
+                assert_eq!(
+                    click.coverage(x, y),
+                    path.coverage(x, y),
+                    "the two wands disagree at ({x},{y})"
+                );
+            }
+        }
+    }
+
+    /// The status line counts CLOSED areas, not floods: a gesture starts
+    /// in the open space, and that seed floods the outer set which is
+    /// subtracted whole — one pocket must report one.
+    #[test]
+    fn enclosed_pockets_counts_pockets_not_floods() {
+        let mut doc = Document::new(128, 128);
+        draw_box_with_gap(&mut doc, 40, 40, 100, 100, 0);
+        let opts = FillOpts {
+            gap_close_px: 0,
+            expand_px: 0,
+            ..Default::default()
+        };
+        // Two seeds outside the box, two inside it (the second of each
+        // pair is skipped as already covered).
+        let seeds = [(10, 70), (25, 70), (70, 70), (85, 70)];
+        let (sel, pockets) = magic_select_path(&doc, &seeds, &opts).unwrap();
+        assert_eq!(pockets, 1, "one closed area, however far the drag ran");
+        assert_eq!(sel.coverage(70, 70), 255, "the pocket is selected");
+        assert_eq!(sel.coverage(10, 70), 0, "the outer space is subtracted");
     }
 
     /// The defaults are the contract every earlier build shipped: FI-016's

@@ -479,27 +479,11 @@ fn slot_for(frames: &[mn_core::Frame], cut: Option<[f32; 4]>) -> Option<[f32; 4]
     if all_inside { Some(c) } else { None }
 }
 
-/// Axis-aligned bounding box of a selection's outline, [x0, y0, x1, y1].
+/// Axis-aligned bounding box of a selection, [x0, y0, x1, y1]. The
+/// COVERAGE decides: `outline` is one island of a multi-island mask and
+/// is empty for a sub-half feather, so it cannot aim an operand rect.
 fn selection_bbox(sel: &mn_core::Selection) -> Option<[i32; 4]> {
-    if sel.outline.is_empty() {
-        return None;
-    }
-    let mut x0 = f32::INFINITY;
-    let mut y0 = f32::INFINITY;
-    let mut x1 = f32::NEG_INFINITY;
-    let mut y1 = f32::NEG_INFINITY;
-    for &(x, y) in &sel.outline {
-        x0 = x0.min(x);
-        y0 = y0.min(y);
-        x1 = x1.max(x);
-        y1 = y1.max(y);
-    }
-    Some([
-        x0.floor() as i32,
-        y0.floor() as i32,
-        x1.ceil() as i32,
-        y1.ceil() as i32,
-    ])
+    sel.bounds()
 }
 
 /// One canvas resize through the whole app: end any stroke/edit, drop stale
@@ -5155,9 +5139,21 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
         },
         AppCmd::SelectBlur(px) => match app.doc.selection.take() {
             Some(s) => {
-                app.doc.selection = Some(s.blur(&app.doc, px));
+                let b = s.blur(&app.doc, px);
+                // A blur wide enough to push EVERY pixel under half leaves
+                // a live selection with no ants and no launcher — it still
+                // masks the brush at partial strength, so say so rather
+                // than let the canvas go quietly unpaintable.
+                let hidden = !b.is_empty() && !b.has_visible_outline();
+                app.doc.selection = Some(b);
                 app.doc.touch();
-                app.set_status(format!("selection border blurred by {px} px"));
+                if hidden {
+                    app.set_error(format!(
+                        "blurred by {px} px: coverage is under 50% everywhere, so the marching ants are hidden — the selection still masks painting at partial strength (Ctrl+D clears it)"
+                    ));
+                } else {
+                    app.set_status(format!("selection border blurred by {px} px"));
+                }
                 app.mark_dirty();
             }
             None => app.set_status("nothing selected to blur"),
