@@ -18,6 +18,7 @@ mod diag;
 mod engine;
 mod frames;
 mod kpp_import;
+mod sut_import;
 /// TRIAGE 36 (`L-001`/`L-002` magnetic lasso) and 38 (`S-001` layer pick),
 /// end to end through the real pointer path. Its own file so app.rs does not
 /// grow another 200 lines of test.
@@ -391,9 +392,10 @@ pub struct App {
     /// Navigator (CV-036): sticky fit — keep re-fitting the page on every
     /// window resize until toggled off.
     pub fit_sticky: bool,
-    /// Rulers (TODO #3): the active set + the pending creation (a Layer ▸
-    /// Ruler menu choice arms the NEXT canvas drag).
-    pub rulers: mn_core::Rulers,
+    /// Rulers (TODO #3): the pending CREATION (a Layer ▸ Ruler menu choice
+    /// arms the next canvas drag). The set itself lives on the document
+    /// (`app.doc.rulers`) so ruler edits ride the document's one undo
+    /// history; this is the arming state of a menu, which does not.
     pub ruler_pending: Option<RulerKind>,
 
     /// Default line count for the next symmetric ruler (RL-021); existing
@@ -1144,7 +1146,6 @@ impl App {
             material_order: MaterialLayerOrder::default(),
             material_tag_edit: None,
             fit_sticky: false,
-            rulers: mn_core::Rulers::default(),
             ruler_pending: None,
             symmetric_lines: 2,
             ruler_drag: None,
@@ -1498,11 +1499,12 @@ impl App {
     /// toggled off).
     pub fn rebuild_twins(&mut self) {
         let sym = self
+            .doc
             .rulers
             .items
             .iter()
             .find(|r| matches!(r, mn_core::Ruler::Symmetric { .. }));
-        let twins = if let (Some(r), true) = (sym, self.rulers.special_active()) {
+        let twins = if let (Some(r), true) = (sym, self.doc.rulers.special_active()) {
             let affines = symmetric_affines(r);
             let mut kinds: Vec<EngineKind> = Vec::with_capacity(affines.len());
             for _ in 0..affines.len() {
@@ -2397,7 +2399,7 @@ impl App {
                 // so the pen slides along the ruler like Krita/CSP. Sticky
                 // (part 2): the first snapped sample locks the ruler for the
                 // whole stroke; crossing rulers cannot flicker mid-stroke.
-                let snapped = self.rulers.snap_sticky([r.x, r.y], &mut self.ruler_lock);
+                let snapped = self.doc.rulers.snap_sticky([r.x, r.y], &mut self.ruler_lock);
                 let r = PenSample {
                     x: snapped[0],
                     y: snapped[1],
@@ -2448,7 +2450,7 @@ impl App {
         // the dab record AFTER stroke end instead of working around the old
         // finish-order bug: the tail dabs were visibly off the ruler).
         for r in self.input_resampler.flush() {
-            let snapped = self.rulers.snap_sticky([r.x, r.y], &mut self.ruler_lock);
+            let snapped = self.doc.rulers.snap_sticky([r.x, r.y], &mut self.ruler_lock);
             let r = PenSample {
                 x: snapped[0],
                 y: snapped[1],
@@ -3547,3 +3549,9 @@ mod balloon_fit_tests;
 /// compositor.
 #[cfg(test)]
 mod mask_stroke_undo_tests;
+
+/// ROADMAP good-first-issue: ruler creation/move/clear on the document's
+/// one undo history — and the two things that must NOT be steps (the
+/// frame-published sync) or lost (a page switch).
+#[cfg(test)]
+mod ruler_undo_tests;

@@ -369,7 +369,7 @@ fn d2(a: [f32; 2], b: [f32; 2]) -> f32 {
 
 /// The active ruler set: `snap` returns the nearest-geometry projection of
 /// a canvas point. Empty set (or snap off) = the point unchanged.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Rulers {
     pub items: Vec<Ruler>,
     /// Part 2: curve rulers live separately (their snap is segment-wise).

@@ -71,9 +71,9 @@ pub struct GenLinesDrag {
 /// `items.len()` — the [`mn_core::SnapLock`] convention), `last` the
 /// previous canvas point: every move applies the STEP, so the grab offset
 /// survives and the live ruler is already in its new place for the next
-/// snap. Rulers are app/session state with no undo entry of their own (see
-/// the creation path in `canvas_up`), so neither has the move.
-#[derive(Clone, Copy, Debug)]
+/// snap. The whole drag is ONE undo step: `before` is the set as it was at
+/// the grab, and `canvas_up` records it once at release.
+#[derive(Clone, Debug)]
 pub struct RulerMove {
     pub ruler: usize,
     pub grab: mn_core::RulerGrab,
@@ -81,6 +81,8 @@ pub struct RulerMove {
     /// Did the pointer actually travel? A press that only grabs is not a
     /// move, and must not claim to be one in the status line.
     pub moved: bool,
+    /// The ruler set at the moment of the grab — the undo step's pre-image.
+    pub before: mn_core::Rulers,
 }
 
 /// Where each driver handle sits, canvas px — the single source shared
@@ -1197,7 +1199,7 @@ impl App {
     /// body, so there is no band where a press means something else.
     fn ruler_grab(&mut self, cx: f32, cy: f32) -> bool {
         let tol = (10.0 / self.viewport.zoom.max(0.01)).max(2.0);
-        let Some((ruler, grab)) = self.rulers.grab_near([cx, cy], tol) else {
+        let Some((ruler, grab)) = self.doc.rulers.grab_near([cx, cy], tol) else {
             return false;
         };
         self.ruler_move = Some(RulerMove {
@@ -1205,6 +1207,7 @@ impl App {
             grab,
             last: [cx, cy],
             moved: false,
+            before: self.doc.rulers.clone(),
         });
         self.set_status(match grab {
             mn_core::RulerGrab::Anchor(_) => "ruler handle — drag to move this end",
@@ -1664,7 +1667,7 @@ impl App {
             m.last = [cx, cy];
             m.moved |= d[0].abs() + d[1].abs() > 0.0;
             let (k, grab) = (m.ruler, m.grab);
-            self.rulers.move_by(k, grab, d);
+            self.doc.rulers.move_by(k, grab, d);
             self.needs_redraw = true;
             return;
         }
@@ -1941,8 +1944,13 @@ impl App {
                 },
             };
             let symmetric = matches!(ruler, mn_core::Ruler::Symmetric { .. });
-            self.rulers.items.push(ruler);
-            self.rulers.on = true;
+            // One creation drag = one undo step. The snapshot is taken HERE
+            // and not at the press because every arm above can bail out
+            // (too short a drag, wrong kind) without creating anything.
+            let before = self.doc.rulers.clone();
+            self.doc.rulers.items.push(ruler);
+            self.doc.rulers.on = true;
+            self.doc.record_rulers(before, "Add ruler");
             if symmetric {
                 // The mirror twins exist only while a symmetric ruler is
                 // live — rebuild replaces the checkbox twins with the
@@ -1965,11 +1973,16 @@ impl App {
         // rebuild them or the next stroke mirrors about the old centre.
         if let Some(m) = self.ruler_move.take() {
             if matches!(
-                self.rulers.items.get(m.ruler),
+                self.doc.rulers.items.get(m.ruler),
                 Some(mn_core::Ruler::Symmetric { .. })
             ) {
                 self.rebuild_twins();
             }
+            // The drag applied its deltas live; the UNDO step is the whole
+            // gesture, pushed once here against the snapshot taken at the
+            // grab. A press that only grabbed changes nothing and records
+            // nothing (`record_rulers` compares).
+            self.doc.record_rulers(m.before, "Move ruler");
             if m.moved {
                 self.set_status("ruler moved");
             }
@@ -2549,8 +2562,10 @@ impl App {
         self.ruler_pending = None;
         if let Some(pts) = self.curve_pending.take() {
             if pts.len() >= 2 {
-                self.rulers.curves.push(mn_core::CurveRuler { pts });
-                self.rulers.on = true;
+                let before = self.doc.rulers.clone();
+                self.doc.rulers.curves.push(mn_core::CurveRuler { pts });
+                self.doc.rulers.on = true;
+                self.doc.record_rulers(before, "Add ruler");
                 self.set_status("curve ruler created — snapping on");
                 self.needs_redraw = true;
                 return;

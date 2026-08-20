@@ -88,6 +88,15 @@ pub enum UndoGroup {
     /// returns an `Option`. The paper's EYE is not in here on purpose: it is
     /// view state like a layer's eye, and neither is undoable.
     Paper { colour: [u8; 3] },
+    /// The whole ruler set before the change — document-level like
+    /// [`UndoGroup::Paper`]. Rulers are tiny (a handful of anchors), so the
+    /// whole-set snapshot follows the Frames/Texts idiom rather than
+    /// modelling per-ruler edits. The snap SWITCHES ride along in the
+    /// snapshot because they are part of the value; the gestures that
+    /// record one (create / move / clear) all set them as a side effect,
+    /// and a bare toggle records nothing — it is view state, like a
+    /// layer's eye.
+    Rulers { rulers: crate::ruler::Rulers },
 }
 
 impl UndoGroup {
@@ -100,7 +109,8 @@ impl UndoGroup {
             | UndoGroup::Mask { .. }
             | UndoGroup::Tones { .. }
             | UndoGroup::Edges { .. }
-            | UndoGroup::Paper { .. } => 0,
+            | UndoGroup::Paper { .. }
+            | UndoGroup::Rulers { .. } => 0,
         }
     }
 
@@ -117,7 +127,7 @@ impl UndoGroup {
             | UndoGroup::Tones { layer, .. }
             | UndoGroup::Edges { layer, .. }
             | UndoGroup::GenLines { layer, .. } => Some(*layer),
-            UndoGroup::Paper { .. } => None,
+            UndoGroup::Paper { .. } | UndoGroup::Rulers { .. } => None,
         }
     }
 }

@@ -531,6 +531,29 @@ mod tests {
     use super::*;
     use crate::tile::{FIX15_ONE, TileIdx};
 
+    /// Rulers are SESSION-only working aids: they ride the `Document` so
+    /// the one undo history owns them, but nothing writes them into the
+    /// bytes and nothing reads them back. (The app therefore carries them
+    /// across a page switch itself — `App::adopt_page_doc`.)
+    #[test]
+    fn rulers_never_ride_the_document_bytes() {
+        let mut d = Document::new(64, 64);
+        d.rulers.items.push(crate::ruler::Ruler::Line {
+            a: [1.0, 2.0],
+            b: [3.0, 4.0],
+        });
+        d.rulers.curves.push(crate::ruler::CurveRuler {
+            pts: vec![[0.0, 0.0], [5.0, 5.0]],
+        });
+        d.rulers.on = true;
+        let back = bytes_to_doc(&doc_to_bytes(&d).unwrap()).unwrap();
+        assert_eq!(
+            back.rulers,
+            crate::ruler::Rulers::default(),
+            "a decoded page starts with no rulers"
+        );
+    }
+
     fn temp_dir(tag: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!(
             "mnc-wf-{tag}-{}-{}",

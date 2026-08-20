@@ -163,13 +163,13 @@ impl App {
             return;
         }
         for old in std::mem::take(&mut self.frame_rulers) {
-            if let Some(i) = self.rulers.curves.iter().position(|c| *c == old) {
-                self.rulers.curves.remove(i);
+            if let Some(i) = self.doc.rulers.curves.iter().position(|c| *c == old) {
+                self.doc.rulers.curves.remove(i);
             }
         }
-        self.rulers.curves.extend(want.iter().cloned());
+        self.doc.rulers.curves.extend(want.iter().cloned());
         if !want.is_empty() {
-            self.rulers.on = true;
+            self.doc.rulers.on = true;
         }
         self.frame_rulers = want;
         self.needs_redraw = true;

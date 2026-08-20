@@ -1143,6 +1143,19 @@ pub struct Document {
     /// PA-001: the paper under the stack. Drive it with `set_paper_colour`
     /// (undoable) / `set_paper_visible` (view state, like a layer's eye).
     pub paper: Paper,
+    /// The ruler set (TODO #3). **Session-only**: nothing writes it to
+    /// `.ora`/`.mnc` and nothing reads it back — rulers are working aids,
+    /// and the undo history they now ride is session-only too, so
+    /// non-persistence costs nothing. `doc_to_bytes` → `bytes_to_doc`
+    /// therefore returns a document with `Rulers::default()`, which is why
+    /// the app carries them across a page switch itself
+    /// (`App::adopt_page_doc`).
+    ///
+    /// It lives on the Document rather than the App so the document's ONE
+    /// undo history can own ruler edits ([`UndoGroup::Rulers`]) — an
+    /// app-level undo species running beside it would let a Ctrl+Z mean two
+    /// different things depending on what you touched last.
+    pub rulers: crate::ruler::Rulers,
 }
 
 /// PA-001: the opaque base underneath the whole stack — exactly one per
@@ -1256,7 +1269,24 @@ impl Document {
             pending_op_label: None,
             comps: Vec::new(),
             paper: Paper::default(),
+            rulers: crate::ruler::Rulers::default(),
         }
+    }
+
+    /// Record one ruler gesture as ONE undo step: `before` is the whole set
+    /// as it was when the gesture began, and the live `self.rulers` is
+    /// already in its finished state. A no-op gesture pushes nothing.
+    ///
+    /// Deliberately does NOT `touch()`: rulers are not saved, so a ruler
+    /// edit must not move `revision` and make a page look re-encodable
+    /// (page stashing skips a page whose revision did not move).
+    pub fn record_rulers(&mut self, before: crate::ruler::Rulers, label: &str) -> bool {
+        if before == self.rulers {
+            return false;
+        }
+        self.history
+            .push_labeled(label, UndoGroup::Rulers { rulers: before });
+        true
     }
 
     /// Push a MaskField undo group (the BEFORE state; masks are small,
@@ -1815,6 +1845,13 @@ impl Document {
                     colour: self.paper.colour,
                 };
                 self.paper.colour = colour;
+                Some(inverse)
+            }
+            UndoGroup::Rulers { rulers } => {
+                let inverse = UndoGroup::Rulers {
+                    rulers: self.rulers.clone(),
+                };
+                self.rulers = rulers;
                 Some(inverse)
             }
         }
@@ -3915,6 +3952,59 @@ mod mask_tests {
 mod tests {
     use super::*;
     use crate::tile::FIX15_ONE;
+
+    /// The ruler set is document state with ONE undo history: a recorded
+    /// gesture undoes to the exact set that was there before it, redoes to
+    /// the finished one, and a gesture that changed nothing records
+    /// nothing. Document-level, so it belongs to no layer.
+    #[test]
+    fn rulers_undo_and_redo_the_whole_set() {
+        let mut doc = Document::new(64, 64);
+        assert!(doc.rulers.items.is_empty(), "a fresh document has none");
+
+        let before = doc.rulers.clone();
+        doc.rulers.items.push(crate::ruler::Ruler::Line {
+            a: [0.0, 0.0],
+            b: [10.0, 0.0],
+        });
+        doc.rulers.on = true;
+        assert!(doc.record_rulers(before, "Add ruler"));
+        assert_eq!(doc.undo_labels(), ["Add ruler"]);
+
+        // A gesture that ended where it started is not a step.
+        let noop = doc.rulers.clone();
+        assert!(!doc.record_rulers(noop, "Move ruler"));
+        assert_eq!(doc.undo_labels().len(), 1);
+
+        // Move it, then undo back to the exact geometry.
+        let before = doc.rulers.clone();
+        doc.rulers.items[0].translate([0.0, 25.0]);
+        assert!(doc.record_rulers(before, "Move ruler"));
+        assert!(doc.undo());
+        assert_eq!(
+            doc.rulers.items[0],
+            crate::ruler::Ruler::Line {
+                a: [0.0, 0.0],
+                b: [10.0, 0.0]
+            }
+        );
+        assert!(doc.redo(), "and redo puts the move back");
+        assert_eq!(
+            doc.rulers.items[0],
+            crate::ruler::Ruler::Line {
+                a: [0.0, 25.0],
+                b: [10.0, 25.0]
+            }
+        );
+        assert_eq!(doc.redo_labels(), Vec::<String>::new());
+
+        // Undo the move AND the creation: back to nothing, snap switch and
+        // all — the snapshot is the whole value.
+        assert!(doc.undo());
+        assert!(doc.undo());
+        assert!(doc.rulers.items.is_empty());
+        assert!(!doc.rulers.on);
+    }
 
     /// Every mode survives a save/load, and no two share a name.
     #[test]

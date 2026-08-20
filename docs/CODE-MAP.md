@@ -169,6 +169,18 @@ The recurring failure shapes, in order of how often they have shipped:
   next stroke mirrors about where the ruler used to be. Rulers park with
   their document, so an in-flight move index is cleared on a tab switch
   (`forget_document_caches`) like every other armed gesture.
+- The ruler SET lives on the `Document` (`doc.rulers`) so the document's
+  one undo history owns it: create / move / clear each record ONE
+  `UndoGroup::Rulers` whole-set snapshot (`Document::record_rulers`), and
+  a restore clears `ruler_lock`/`ruler_move` and rebuilds the twins
+  (`cmd::resync_rulers`). Two rules ride with it. Rulers are **session
+  only** — no encoder writes them, so any path that re-decodes the page
+  the tab is already editing must go through `App::adopt_page_doc` or a
+  page switch silently throws the set away. And the frame-PUBLISHED curve
+  rulers are derived: `sync_frame_rulers` writes `doc.rulers` directly and
+  must never record a step (its retract-by-value bookkeeping,
+  `App::frame_rulers`, stays on the App and stays in step because ruler
+  and frame snapshots interleave on the same history).
 - Selection coverage is weighted, not boolean, and selection ops go
   through coverage-based bounds — a new op that derives its region from
   one outline loop breaks multi-island selections.

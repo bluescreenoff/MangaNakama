@@ -60,9 +60,6 @@ pub struct DocSession {
     pub doc_path: Option<PathBuf>,
     pub folder_managed: Vec<String>,
     pub folder_next_id: u32,
-    /// Rulers belong to the DOCUMENT, not the app: a perspective set drawn
-    /// for one page must not keep snapping strokes in another.
-    pub rulers: mn_core::Rulers,
 }
 
 impl DocSession {
@@ -157,7 +154,6 @@ impl App {
             doc_path: self.doc_path.take(),
             folder_managed: std::mem::take(&mut self.folder_managed),
             folder_next_id: self.folder_next_id,
-            rulers: std::mem::take(&mut self.rulers),
         }
     }
 
@@ -177,7 +173,6 @@ impl App {
         self.pages_dirty = s.pages_dirty;
         self.doc_path = s.doc_path;
         self.adopt_folder_state(s.folder_next_id, s.folder_managed);
-        self.rulers = s.rulers;
     }
 
     /// Everything cached against the OLD document's layer indices. Called on
@@ -195,8 +190,9 @@ impl App {
         self.object_sel = None;
         self.balloon_sel = None;
         self.gen_sel = None;
-        // Rulers are per-document too (they park with the session), so a
-        // live move's index would aim at the OTHER document's ruler set.
+        // Rulers are per-document too (they ride `doc`, which parks with
+        // the session), so a live move's index would aim at the OTHER
+        // document's ruler set.
         self.ruler_move = None;
         self.renaming = None;
         self.frame_delete_armed = None;

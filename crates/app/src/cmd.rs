@@ -1874,6 +1874,24 @@ fn mask_sig(app: &App) -> Vec<Option<(u64, bool)>> {
         .collect()
 }
 
+/// Undo/redo can restore the whole ruler set (`UndoGroup::Rulers`). The
+/// rulers ARE the geometry — the overlay and the snap read them straight,
+/// so nothing is cached off them — with one exception: the symmetric
+/// ruler's mirror twins hold its centre and axes, and they must be rebuilt
+/// or the next stroke mirrors about the place the ruler used to be. The
+/// in-flight gesture state goes too: a sticky snap lock and a live grab are
+/// both INDICES into the set that was just replaced (the session.rs
+/// pattern, where a tab switch drops them for the same reason).
+fn resync_rulers(app: &mut App, before: &mn_core::Rulers) {
+    if app.doc.rulers == *before {
+        return;
+    }
+    app.ruler_lock = Default::default();
+    app.ruler_move = None;
+    app.rebuild_twins();
+    app.mark_dirty();
+}
+
 pub fn dispatch(app: &mut App, cmd: AppCmd) {
     // FB-039: the last-frame delete confirmation is one-shot — any other
     // command disarms it.
@@ -1903,7 +1921,9 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             // tiles, which the revision compare would keep. Evict on change.
             let tones_before: Vec<_> = app.doc.layers.iter().map(|l| l.tone).collect();
             let masks_before = mask_sig(app);
+            let rulers_before = app.doc.rulers.clone();
             if app.doc.undo() {
+                resync_rulers(app, &rulers_before);
                 for (li, (l, was)) in app.doc.layers.iter().zip(&tones_before).enumerate() {
                     if l.tone != *was {
                         app.renderer.evict_layer(li);
@@ -1926,7 +1946,9 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             app.commit_text_edit();
             let tones_before: Vec<_> = app.doc.layers.iter().map(|l| l.tone).collect();
             let masks_before = mask_sig(app);
+            let rulers_before = app.doc.rulers.clone();
             if app.doc.redo() {
+                resync_rulers(app, &rulers_before);
                 for (li, (l, was)) in app.doc.layers.iter().zip(&tones_before).enumerate() {
                     if l.tone != *was {
                         app.renderer.evict_layer(li);
@@ -2405,7 +2427,8 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             app.pages.insert(i, entry);
             app.pages[i].id = id; // keep A's work-folder file identity
             app.page_index = i;
-            app.doc = doc;
+            // Same tab, same work: the rulers carry (see `adopt_page_doc`).
+            app.adopt_page_doc(doc);
             app.pages[i].doc_rev = app.doc.revision;
             app.mark_pages_dirty();
             app.renderer.invalidate();
@@ -2445,7 +2468,7 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             app.pages[i].id = id; // the left half keeps the spread's file
             app.pages.insert(i + 1, right_entry);
             app.page_index = i;
-            app.doc = l;
+            app.adopt_page_doc(l);
             app.pages[i].doc_rev = app.doc.revision;
             app.mark_pages_dirty();
             app.renderer.invalidate();
@@ -2543,7 +2566,7 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 Err(e) => app.set_error(format!("replace decode failed: {e}")),
                 Ok(doc) => {
                     app.commit_text_edit();
-                    app.doc = doc;
+                    app.adopt_page_doc(doc);
                     let i = app.page_index;
                     // The page's content was swapped wholesale: give it a
                     // fresh revision so a folder save rewrites its file even
@@ -4593,9 +4616,9 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             });
         }
         AppCmd::RulerSnapToggle => {
-            app.rulers.on = !app.rulers.on;
+            app.doc.rulers.on = !app.doc.rulers.on;
             app.rebuild_twins();
-            app.set_status(if app.rulers.on {
+            app.set_status(if app.doc.rulers.on {
                 "ruler snapping ON"
             } else {
                 "ruler snapping OFF (rulers stay drawn)"
@@ -4603,9 +4626,9 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             app.mark_dirty();
         }
         AppCmd::RulerSpecialSnapToggle => {
-            app.rulers.special_on = !app.rulers.special_on;
+            app.doc.rulers.special_on = !app.doc.rulers.special_on;
             app.rebuild_twins();
-            app.set_status(if app.rulers.special_on {
+            app.set_status(if app.doc.rulers.special_on {
                 "special rulers ON (parallel/concentric/guide/symmetry)"
             } else {
                 "special rulers OFF (line/curve/vanishing-point rulers unaffected)"
@@ -4617,6 +4640,7 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             // keep one) and to the default for the next created.
             const LADDER: [u16; 7] = [2, 3, 4, 6, 8, 12, 16];
             let cur = app
+                .doc
                 .rulers
                 .items
                 .iter()
@@ -4632,7 +4656,7 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 .map(|i| LADDER[(i + 1) % LADDER.len()])
                 .unwrap_or(2);
             let mut changed = 0;
-            for r in &mut app.rulers.items {
+            for r in &mut app.doc.rulers.items {
                 if let mn_core::Ruler::Symmetric { lines, .. } = r {
                     *lines = next;
                     changed += 1;
@@ -4648,13 +4672,14 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             app.mark_dirty();
         }
         AppCmd::RulerClear => {
-            app.rulers.items.clear();
+            let before = app.doc.rulers.clone();
+            app.doc.rulers.items.clear();
             // The curve rulers go too (issue #3) — but only the hand-made
             // ones. A panel border published as a ruler is the FRAME's
             // property, and `sync_frame_rulers` retracts by value against
             // `frame_rulers`; dropping those here would desync that
             // bookkeeping (they would vanish now and never be retracted).
-            app.rulers.curves = app.frame_rulers.clone();
+            app.doc.rulers.curves = app.frame_rulers.clone();
             app.ruler_pending = None;
             // A live sticky lock indexing into the cleared set would fall
             // to snap_locked's else (unsnapped) — safe, but stale; drop it
@@ -4663,6 +4688,11 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             // Same for a live move (its index is into the cleared set).
             app.ruler_move = None;
             app.rebuild_twins();
+            // One gesture, one step — and the step's pre-image holds the
+            // hand-made curves the clear dropped, so undo brings exactly
+            // those back. The frame-published ones never left, so undo
+            // cannot double them.
+            app.doc.record_rulers(before, "Delete rulers");
             app.set_status(if app.frame_rulers.is_empty() {
                 "rulers cleared"
             } else {

@@ -314,7 +314,9 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
     // TODO #3: rulers — cyan guide lines, clipped to the canvas. The gate
     // asks about EVERY family: a set holding only curve rulers (or only a
     // half-clicked one) drew nothing while this read `items` alone.
-    if !app.rulers.items.is_empty() || !app.rulers.curves.is_empty() || app.curve_pending.is_some()
+    if !app.doc.rulers.items.is_empty()
+        || !app.doc.rulers.curves.is_empty()
+        || app.curve_pending.is_some()
     {
         let col = egui::Color32::from_rgb(0, 200, 220);
         let far = 1.0e5;
@@ -356,7 +358,7 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
                 egui::Stroke::new(1.5, col),
             );
         };
-        for r in &app.rulers.items {
+        for r in &app.doc.rulers.items {
             match *r {
                 mn_core::Ruler::Line { a, b } => {
                     let d = [b[0] - a[0], b[1] - a[1]];
@@ -465,7 +467,7 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
         }
         // Part 2: curve rulers (their finite path, not infinite lines) and
         // the in-progress curve being clicked out.
-        for c in &app.rulers.curves {
+        for c in &app.doc.rulers.curves {
             for w in c.pts.windows(2) {
                 painter.line_segment(
                     [to_pt(w[0][0], w[0][1]), to_pt(w[1][0], w[1][1])],
@@ -496,12 +498,12 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
                     egui::StrokeKind::Inside,
                 );
             };
-            for r in &app.rulers.items {
+            for r in &app.doc.rulers.items {
                 for p in r.anchors() {
                     handle(p);
                 }
             }
-            for c in &app.rulers.curves {
+            for c in &app.doc.rulers.curves {
                 for p in c.anchors() {
                     handle(*p);
                 }

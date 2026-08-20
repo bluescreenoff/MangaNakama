@@ -230,7 +230,7 @@ fn border_as_ruler_publishes_the_outline_and_retracts_only_its_own() {
     let mine = mn_core::CurveRuler {
         pts: vec![[0.0, 0.0], [10.0, 10.0]],
     };
-    app.rulers.curves.push(mine.clone());
+    app.doc.rulers.curves.push(mine.clone());
     let h = app.doc.add_frame_folder(
         "Frame 1",
         mn_core::FrameSet::single_rect([20.0, 20.0, 380.0, 280.0], 4.0),
@@ -243,10 +243,14 @@ fn border_as_ruler_publishes_the_outline_and_retracts_only_its_own() {
         4.0,
         "the width is remembered, not zeroed"
     );
-    assert_eq!(app.rulers.curves.len(), 2, "the outline joined the rulers");
-    assert!(app.rulers.on, "and snapping came on with it");
     assert_eq!(
-        app.rulers.curves[0], mine,
+        app.doc.rulers.curves.len(),
+        2,
+        "the outline joined the rulers"
+    );
+    assert!(app.doc.rulers.on, "and snapping came on with it");
+    assert_eq!(
+        app.doc.rulers.curves[0], mine,
         "the hand-drawn curve ruler kept its place"
     );
 
@@ -255,9 +259,9 @@ fn border_as_ruler_publishes_the_outline_and_retracts_only_its_own() {
     fs.frames[0].translate(5.0, 7.0);
     app.doc.set_frames(h, fs);
     app.renumber_frames();
-    assert_eq!(app.rulers.curves.len(), 2, "still one frame ruler");
+    assert_eq!(app.doc.rulers.curves.len(), 2, "still one frame ruler");
     assert_eq!(
-        app.rulers.curves[1].pts[0],
+        app.doc.rulers.curves[1].pts[0],
         [25.0, 27.0],
         "and it followed the panel"
     );
@@ -265,7 +269,7 @@ fn border_as_ruler_publishes_the_outline_and_retracts_only_its_own() {
     dispatch(&mut app, AppCmd::FrameBorderRuler { layer: h });
     assert!(!app.doc.layers[h].frames().unwrap().border_ruler);
     assert_eq!(
-        app.rulers.curves,
+        app.doc.rulers.curves,
         vec![mine],
         "only the frame's own curve was retracted"
     );
@@ -284,8 +288,8 @@ fn clearing_rulers_takes_the_hand_made_curves_but_not_the_frames() {
     let mine = mn_core::CurveRuler {
         pts: vec![[0.0, 0.0], [10.0, 10.0]],
     };
-    app.rulers.curves.push(mine.clone());
-    app.rulers.items.push(mn_core::Ruler::Line {
+    app.doc.rulers.curves.push(mine.clone());
+    app.doc.rulers.items.push(mn_core::Ruler::Line {
         a: [0.0, 0.0],
         b: [50.0, 50.0],
     });
@@ -294,17 +298,21 @@ fn clearing_rulers_takes_the_hand_made_curves_but_not_the_frames() {
         mn_core::FrameSet::single_rect([20.0, 20.0, 380.0, 280.0], 4.0),
     );
     dispatch(&mut app, AppCmd::FrameBorderRuler { layer: h });
-    assert_eq!(app.rulers.curves.len(), 2, "hand-made + the panel outline");
+    assert_eq!(
+        app.doc.rulers.curves.len(),
+        2,
+        "hand-made + the panel outline"
+    );
 
     dispatch(&mut app, AppCmd::RulerClear);
-    assert!(app.rulers.items.is_empty(), "the line family went");
+    assert!(app.doc.rulers.items.is_empty(), "the line family went");
     assert_eq!(
-        app.rulers.curves, app.frame_rulers,
+        app.doc.rulers.curves, app.frame_rulers,
         "the hand-made curve went; the panel's own stayed"
     );
-    assert_eq!(app.rulers.curves.len(), 1, "and it is the frame's one");
+    assert_eq!(app.doc.rulers.curves.len(), 1, "and it is the frame's one");
     assert!(
-        !app.rulers.curves.contains(&mine),
+        !app.doc.rulers.curves.contains(&mine),
         "the hand-made one is gone"
     );
 
@@ -312,12 +320,16 @@ fn clearing_rulers_takes_the_hand_made_curves_but_not_the_frames() {
     // retracts exactly it, leaving nothing behind.
     dispatch(&mut app, AppCmd::FrameBorderRuler { layer: h });
     assert!(
-        app.rulers.curves.is_empty(),
+        app.doc.rulers.curves.is_empty(),
         "retraction still finds its own curve after a clear"
     );
 
     // With no frame rulers at all, a clear empties the list outright.
-    app.rulers.curves.push(mine.clone());
+    app.doc.rulers.curves.push(mine.clone());
     dispatch(&mut app, AppCmd::RulerClear);
-    assert!(app.rulers.curves.is_empty(), "{:?}", app.rulers.curves);
+    assert!(
+        app.doc.rulers.curves.is_empty(),
+        "{:?}",
+        app.doc.rulers.curves
+    );
 }

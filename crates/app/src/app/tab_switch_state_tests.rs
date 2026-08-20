@@ -65,17 +65,24 @@ fn rulers_are_parked_with_their_document_not_carried_into_the_next_one() {
         a: [10.0, 10.0],
         b: [200.0, 120.0],
     };
-    app.rulers.items.push(edge);
-    app.rulers.on = true;
+    app.doc.rulers.items.push(edge);
+    app.doc.rulers.on = true;
 
     assert!(app.switch_doc(0));
     assert!(
-        app.rulers.items.is_empty(),
+        app.doc.rulers.items.is_empty(),
         "chapter two's ruler followed the click into chapter one"
     );
-    assert!(!app.rulers.on, "and so did its snap switch");
+    assert!(!app.doc.rulers.on, "and so did its snap switch");
 
     assert!(app.switch_doc(1));
-    assert_eq!(app.rulers.items, vec![edge], "the ruler came back with it");
-    assert!(app.rulers.on, "snapping still on where it was turned on");
+    assert_eq!(
+        app.doc.rulers.items,
+        vec![edge],
+        "the ruler came back with it"
+    );
+    assert!(
+        app.doc.rulers.on,
+        "snapping still on where it was turned on"
+    );
 }

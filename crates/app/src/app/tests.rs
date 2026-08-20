@@ -2468,8 +2468,8 @@ fn ruler_creation_and_snapping() {
     let (x1, y1) = app.viewport.to_screen(400.0, 200.0);
     app.canvas_down(x0, y0, PointerKind::Mouse, &empty);
     app.canvas_up(x1, y1, &empty);
-    assert_eq!(app.rulers.items.len(), 1, "the drag created a ruler");
-    assert!(app.rulers.on, "creation turns snapping on");
+    assert_eq!(app.doc.rulers.items.len(), 1, "the drag created a ruler");
+    assert!(app.doc.rulers.on, "creation turns snapping on");
     // Nothing painted by the creation drag.
     let alpha: u64 = app
         .doc
@@ -2558,7 +2558,7 @@ fn ruler_move_with_the_object_tool() {
         a: [100.0, 200.0],
         b: [400.0, 200.0],
     };
-    assert_eq!(app.rulers.items[0], created);
+    assert_eq!(app.doc.rulers.items[0], created);
     app.tool = crate::cmd::Tool::Object;
 
     // 20 canvas px off the ruler at zoom 1 = 20 screen px: outside the
@@ -2567,7 +2567,7 @@ fn ruler_move_with_the_object_tool() {
     app.canvas_down(mx, my, PointerKind::Mouse, &empty);
     assert!(app.ruler_move.is_none(), "a 20 px miss must not grab");
     app.canvas_up(mx, my, &empty);
-    assert_eq!(app.rulers.items[0], created, "a miss changes nothing");
+    assert_eq!(app.doc.rulers.items[0], created, "a miss changes nothing");
 
     // Body drag: press ON the line, carry it 100 px down.
     let (bx, by) = app.viewport.to_screen(250.0, 200.0);
@@ -2589,9 +2589,9 @@ fn ruler_move_with_the_object_tool() {
     app.canvas_up(bx1, by1, &empty);
     assert!(app.ruler_move.is_none(), "the gesture ended");
     assert!(
-        anchors_are(&app.rulers.items[0], &[[100.0, 300.0], [400.0, 300.0]]),
+        anchors_are(&app.doc.rulers.items[0], &[[100.0, 300.0], [400.0, 300.0]]),
         "both anchors moved by the same delta (rigid): {:?}",
-        app.rulers.items[0]
+        app.doc.rulers.items[0]
     );
 
     // The pen now snaps to where the ruler WENT: a wiggle around y = 300
@@ -2649,13 +2649,13 @@ fn ruler_move_with_the_object_tool() {
     app.canvas_move(ax1, ay1, &empty);
     app.canvas_up(ax1, ay1, &empty);
     assert!(
-        anchors_are(&app.rulers.items[0], &[[100.0, 300.0], [400.0, 400.0]]),
+        anchors_are(&app.doc.rulers.items[0], &[[100.0, 300.0], [400.0, 400.0]]),
         "only the grabbed end moved — the other stayed: {:?}",
-        app.rulers.items[0]
+        app.doc.rulers.items[0]
     );
     // And the snap DIRECTION is the re-aimed line's: (100, 400) projects
     // onto the a→b direction (300, 100) at (130, 310).
-    let q = app.rulers.snap([100.0, 400.0]);
+    let q = app.doc.rulers.snap([100.0, 400.0]);
     assert!(
         (q[0] - 130.0).abs() < 0.2 && (q[1] - 310.0).abs() < 0.2,
         "the snap follows the new direction: {q:?}"
@@ -2704,11 +2704,11 @@ fn moving_a_symmetric_ruler_moves_its_mirror_orbit() {
     app.canvas_up(gx1, gy1, &empty);
     assert!(
         matches!(
-            app.rulers.items[0],
+            app.doc.rulers.items[0],
             mn_core::Ruler::Symmetric { lines: 2, .. }
-        ) && anchors_are(&app.rulers.items[0], &[moved]),
+        ) && anchors_are(&app.doc.rulers.items[0], &[moved]),
         "the centre moved, the axis count did not: {:?}",
-        app.rulers.items[0]
+        app.doc.rulers.items[0]
     );
 
     // Back to the pen (the stroke path reads the tool) and dab at
@@ -2792,12 +2792,12 @@ fn perspective_ruler_creation_and_ray_binding() {
     app.canvas_up(x1, y1, &empty);
     assert!(
         matches!(
-            app.rulers.items.as_slice(),
+            app.doc.rulers.items.as_slice(),
             [mn_core::Ruler::Perspective { .. }]
         ),
         "the drag created the perspective set"
     );
-    assert!(app.rulers.on, "creation turns snapping on");
+    assert!(app.doc.rulers.on, "creation turns snapping on");
 
     // A wobbly stroke aiming at VP-a from (200, 300): every dab rides
     // the ray through (-400, 100) and (200, 300).
@@ -2896,14 +2896,14 @@ fn one_point_perspective_ruler_creation_and_horizontal_family() {
     app.canvas_down(x0, y0, PointerKind::Mouse, &empty);
     app.canvas_up(x1, y1, &empty);
     assert_eq!(
-        app.rulers.items.as_slice(),
+        app.doc.rulers.items.as_slice(),
         [mn_core::Ruler::Perspective1 {
             vp: [500.0, 100.0],
             h: [900.0, 100.0]
         }],
         "the press is the VP, the release the horizon handle"
     );
-    assert!(app.rulers.on, "creation turns snapping on");
+    assert!(app.doc.rulers.on, "creation turns snapping on");
 
     // Travel right, wobbling in y, from a point almost UNDER the VP —
     // there the orthogonal is steep, so a level stroke is unambiguously
@@ -2946,7 +2946,7 @@ fn three_point_perspective_ruler_creation_and_vertical_vp() {
     let (x1, y1) = app.viewport.to_screen(900.0, 100.0);
     app.canvas_down(x0, y0, PointerKind::Mouse, &empty);
     app.canvas_up(x1, y1, &empty);
-    let z = match app.rulers.items.as_slice() {
+    let z = match app.doc.rulers.items.as_slice() {
         [mn_core::Ruler::Perspective3 { a, b, z }] => {
             assert_eq!((*a, *b), ([-400.0, 100.0], [900.0, 100.0]));
             assert!(
@@ -2959,7 +2959,8 @@ fn three_point_perspective_ruler_creation_and_vertical_vp() {
     };
     // It is a grabbable anchor (a 10 screen-px handle at zoom 1).
     assert_eq!(
-        app.rulers
+        app.doc
+            .rulers
             .grab_near([z[0] + 3.0, z[1] - 2.0], 10.0 / app.viewport.zoom),
         Some((0, mn_core::RulerGrab::Anchor(2))),
         "the vertical VP is draggable"
@@ -3076,8 +3077,8 @@ fn ruler_stickiness_and_curve_clamp() {
         app.canvas_down(x0, y0, PointerKind::Mouse, &empty);
         app.canvas_up(x1, y1, &empty);
     }
-    assert_eq!(app.rulers.items.len(), 2);
-    assert!(app.rulers.on);
+    assert_eq!(app.doc.rulers.items.len(), 2);
+    assert!(app.doc.rulers.on);
 
     // A stroke along y≈200 that crosses x=300 (where B is nearer for
     // the y-wobble): every dab must stay on the HORIZONTAL (locked
@@ -3151,7 +3152,7 @@ fn special_rulers_parallel_concentric_and_the_veto() {
     app.canvas_down(x0, y0, PointerKind::Mouse, &empty);
     app.canvas_up(x1, y1, &empty);
     assert!(matches!(
-        app.rulers.items.last(),
+        app.doc.rulers.items.last(),
         Some(mn_core::Ruler::Parallel { .. })
     ));
     app.begin_stroke(PointerKind::Mouse);
@@ -3270,7 +3271,7 @@ fn special_rulers_parallel_concentric_and_the_veto() {
     // THE VETO (RL-031): special off — the same r = 115 arc stays out
     // at ~115 (minus the same engine drift), nowhere near the ring.
     crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::RulerSpecialSnapToggle);
-    assert!(!app.rulers.special_on, "toggled off");
+    assert!(!app.doc.rulers.special_on, "toggled off");
     let unsnapped = stroke_radii(&mut app, arc(115.0));
     let mean = unsnapped.iter().sum::<f32>() / unsnapped.len() as f32;
     assert!(
@@ -3302,7 +3303,7 @@ fn symmetric_ruler_mirrors_into_the_orbit() {
     app.canvas_down(x0, y0, PointerKind::Mouse, &empty);
     app.canvas_up(x1, y1, &empty);
     assert!(matches!(
-        app.rulers.items.last(),
+        app.doc.rulers.items.last(),
         Some(mn_core::Ruler::Symmetric { lines: 2, .. })
     ));
 
@@ -3365,7 +3366,7 @@ fn symmetric_ruler_mirrors_into_the_orbit() {
     crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::RulerSymmetricCount);
     assert_eq!(app.symmetric_lines, 3, "2 → 3 on the ladder");
     assert!(matches!(
-        app.rulers.items.last(),
+        app.doc.rulers.items.last(),
         Some(mn_core::Ruler::Symmetric { lines: 3, .. })
     ));
 }

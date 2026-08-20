@@ -490,6 +490,24 @@ impl App {
         Ok(())
     }
 
+    /// Install a document decoded for the page (or pages) THIS TAB is
+    /// already editing, keeping the rulers.
+    ///
+    /// Rulers live on the `Document` so the document's one undo history can
+    /// own them, but they are session-only — `doc_to_bytes` does not write
+    /// them and `bytes_to_doc` hands back a default set. Every in-session
+    /// re-decode (page switch, spread combine/split, page replace) would
+    /// therefore silently wipe a perspective set the user built, where
+    /// before rulers lived on the App and survived. Carrying them here
+    /// keeps the old behaviour: rulers follow the TAB, not the page.
+    /// (Opening a file or making a new document does NOT come through
+    /// here — a different document gets its own empty set.)
+    pub fn adopt_page_doc(&mut self, doc: Document) {
+        let rulers = std::mem::take(&mut self.doc.rulers);
+        self.doc = doc;
+        self.doc.rulers = rulers;
+    }
+
     /// Switch the editor to another page (decode-on-switch).
     pub fn switch_page(&mut self, i: usize) {
         if i == self.page_index || i >= self.pages.len() {
@@ -509,7 +527,7 @@ impl App {
         };
         match mn_core::project::bytes_to_doc(&bytes) {
             Ok(doc) => {
-                self.doc = doc;
+                self.adopt_page_doc(doc);
                 self.page_index = i;
                 // The page's bytes now equal the decoded doc — record its
                 // revision so an untouched stash is a no-op.
