@@ -30,9 +30,12 @@ struct DabG {
     // Texture-tip crawl offset (mask px) this dab sees; 0 when off.
     tex_u: i32,
     tex_v: i32,
-    // Pad to 64 bytes = 16 scalars, matching Rust's `GpuDab` exactly — the
-    // array stride must agree or dabs[1..] read misaligned fields.
-    _pad: u32,
+    // Dab-anchored stamp rotation (#10 amendment 2), CPU-precomputed
+    // sin/cos — GPU trig intrinsics are orders coarser than libm and broke
+    // the <=1 parity bar. 17 scalars = 68 bytes, matching Rust's `GpuDab`
+    // exactly; the array stride must agree or dabs[1..] read misaligned.
+    tex_sn: f32,
+    tex_cs: f32,
 };
 
 struct TileUni {
@@ -214,13 +217,56 @@ fn main(
             // offsets arrive per dab (tex_u/tex_v, the crawl accumulator
             // int-cast at record time).
             if (tile.tex_size > 0u) {
-                let n = i32(tile.tex_size);
-                var ui = (tile.ox + x + d.tex_u) % n;
-                if (ui < 0) { ui = ui + n; }
-                var vi = (tile.oy + y + d.tex_v) % n;
-                if (vi < 0) { vi = vi + n; }
-                let g = f32(textureLoad(tex, vec2<i32>(ui, vi), 0).r) / 255.0;
-                opa = opa * g;
+                if ((tile.flags & 2u) != 0u) {
+                    // #10 amendment 2: dab-anchored stamp — the mask covers
+                    // the dab's bounding square, rotated by the dab's OWN
+                    // unfolded stamp angle (the precomputed tex_sn/tex_cs,
+                    // NOT the folded elliptical angle), in the profile's
+                    // frame conventions (xxr right, yyr down, +0.5 pixel
+                    // centres); outside its square the stamp is over, not
+                    // wrapped.
+                    let cs = d.tex_cs;
+                    let sn = d.tex_sn;
+                    let xx = f32(x) + 0.5 - lx;
+                    let yy = f32(y) + 0.5 - ly;
+                    let xxr = yy * sn + xx * cs;
+                    let yyr = yy * cs - xx * sn;
+                    let u = (xxr / d.radius * 0.5 + 0.5) * f32(tile.tex_size);
+                    let v = (yyr / d.radius * 0.5 + 0.5) * f32(tile.tex_size);
+                    if (u < 0.0 || v < 0.0
+                        || u >= f32(tile.tex_size) || v >= f32(tile.tex_size)) {
+                        opa = 0.0;
+                    } else {
+                        // BILINEAR, texel centres at +0.5 — the exact
+                        // arithmetic of the C and the repair rasterizer.
+                        let uf = u - 0.5;
+                        let vf = v - 0.5;
+                        let u0f = floor(uf);
+                        let v0f = floor(vf);
+                        let fu = uf - u0f;
+                        let fv = vf - v0f;
+                        let hi = i32(tile.tex_size) - 1;
+                        let u0 = clamp(i32(u0f), 0, hi);
+                        let v0 = clamp(i32(v0f), 0, hi);
+                        let u1 = clamp(i32(u0f) + 1, 0, hi);
+                        let v1 = clamp(i32(v0f) + 1, 0, hi);
+                        let g00 = f32(textureLoad(tex, vec2<i32>(u0, v0), 0).r);
+                        let g10 = f32(textureLoad(tex, vec2<i32>(u1, v0), 0).r);
+                        let g01 = f32(textureLoad(tex, vec2<i32>(u0, v1), 0).r);
+                        let g11 = f32(textureLoad(tex, vec2<i32>(u1, v1), 0).r);
+                        let g = g00 * (1.0 - fu) * (1.0 - fv) + g10 * fu * (1.0 - fv)
+                            + g01 * (1.0 - fu) * fv + g11 * fu * fv;
+                        opa = opa * g / 255.0;
+                    }
+                } else {
+                    let n = i32(tile.tex_size);
+                    var ui = (tile.ox + x + d.tex_u) % n;
+                    if (ui < 0) { ui = ui + n; }
+                    var vi = (tile.oy + y + d.tex_v) % n;
+                    if (vi < 0) { vi = vi + n; }
+                    let g = f32(textureLoad(tex, vec2<i32>(ui, vi), 0).r) / 255.0;
+                    opa = opa * g;
+                }
             }
             let mask = u32(opa * 32768.0);
             if (mask == 0u) { continue; }

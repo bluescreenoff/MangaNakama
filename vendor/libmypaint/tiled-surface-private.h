@@ -11,5 +11,6 @@ void render_dab_mask (uint16_t * mask,
                         float hardness,
                         float aspect_ratio, float angle,
                         int tile_tx, int tile_ty,
-                        float tex_dx, float tex_dy
+                        float tex_dx, float tex_dy,
+                        float tex_angle
                         );

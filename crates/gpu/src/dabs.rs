@@ -23,13 +23,15 @@ use std::collections::BTreeSet;
 /// fix15 colour) precomputed on the CPU so the shader stays dumb integer
 /// math.
 ///
-/// **64 bytes** — 6 × f32 + 7 × u32 + i32 × 2 (texture crawl) + 1 × u32 pad
+/// **68 bytes** — 8 × f32 + 7 × u32 + i32 × 2 (texture crawl), no pad
+/// (storage-buffer stride aligns to 4, so 68 is legal on both sides)
 /// — and WGSL's `DabG` must agree to the byte or the array stride desyncs
 /// and every dab after the first in a flush reads garbage. Round 28 lost
 /// real time to exactly that (56 vs 64); the doc comment here previously
 /// claimed 80, which is why the number is now spelled out with its
 /// arithmetic. The two i32 slots were the first two pad u32s before #0.1 —
-/// same layout, now carrying the per-dab texture scroll.
+/// same layout, now carrying the per-dab texture scroll; #10 amendment 2
+/// appended the stamp sin/cos pair.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct GpuDab {
@@ -49,7 +51,11 @@ struct GpuDab {
     // Texture-tip crawl offset (mask px) this dab sees; 0 when off.
     tex_u: i32,
     tex_v: i32,
-    _pad: u32,
+    /// Dab-anchored stamp rotation (#10 amendment 2) as CPU-precomputed
+    /// sin/cos: GPU trig intrinsics are orders coarser than libm and broke
+    /// the <=1 parity bar at rotated angles.
+    tex_sn: f32,
+    tex_cs: f32,
 }
 
 impl GpuDab {
@@ -77,7 +83,8 @@ impl GpuDab {
                 | (u32::from(p.lock_alpha > 0.0 && p.alpha != 0.0) << 1),
             tex_u: p.tex_off[0],
             tex_v: p.tex_off[1],
-            _pad: 0,
+            tex_sn: (p.tex_angle / 360.0 * 2.0 * std::f32::consts::PI).sin(),
+            tex_cs: (p.tex_angle / 360.0 * 2.0 * std::f32::consts::PI).cos(),
         }
     }
 }
@@ -495,7 +502,7 @@ impl crate::Renderer {
         doc: &mn_core::Document,
         dabs: &[mn_core::dab::DabParams],
         hard_dab: bool,
-        texture: Option<(&[u8], u32)>,
+        texture: Option<(&[u8], u32, bool)>,
     ) {
         self.flush_dabs_impl(doc, None, dabs, hard_dab, texture);
     }
@@ -508,7 +515,7 @@ impl crate::Renderer {
         buf: &mn_core::Document,
         dabs: &[mn_core::dab::DabParams],
         hard_dab: bool,
-        texture: Option<(&[u8], u32)>,
+        texture: Option<(&[u8], u32, bool)>,
     ) {
         self.flush_dabs_impl(buf, Some(()), dabs, hard_dab, texture);
     }
@@ -519,7 +526,7 @@ impl crate::Renderer {
         wash: Option<()>,
         dabs: &[mn_core::dab::DabParams],
         hard_dab: bool,
-        texture: Option<(&[u8], u32)>,
+        texture: Option<(&[u8], u32, bool)>,
     ) {
         if dabs.is_empty() {
             return;
@@ -559,8 +566,11 @@ impl crate::Renderer {
         // pixels (see the seeding invariant above) plus a scratch texture to
         // load them from.
         let device = &self.device;
-        let tex_size = texture.map(|(_, s)| s).unwrap_or(0);
-        DabGpu::ensure_mask(dg, device, &self.queue, texture);
+        let tex_size = texture.map(|(_, s, _)| s).unwrap_or(0);
+        // #10 amendment 2: dab-anchored stamp mode, a per-flush tile flag
+        // (bit 1; bit 0 stays hard-dab).
+        let tex_anchor_dab = texture.is_some_and(|(_, _, a)| a);
+        DabGpu::ensure_mask(dg, device, &self.queue, texture.map(|(d, s, _)| (d, s)));
         // Clone the handle (refcounted) so the dg borrow ends here — the
         // loop below needs &mut dg for scratch textures.
         let mask_view = if texture.is_some() {
@@ -663,7 +673,7 @@ impl crate::Renderer {
                 ox: idx.x * 64,
                 oy: idx.y * 64,
                 dab_count: gpu_dabs.len() as u32,
-                flags: u32::from(hard_dab),
+                flags: u32::from(hard_dab) | (u32::from(tex_anchor_dab) << 1),
                 tex_size,
                 _pad: [0; 11],
             });

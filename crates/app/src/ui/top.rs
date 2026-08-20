@@ -85,7 +85,7 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 app.push_cmd(AppCmd::ImportImage);
                 ui.close();
             }
-            if item(ui, "Import Brushes (.abr, .gbr, .gih)…", "") {
+            if item(ui, "Import Brushes (.abr, .gbr, .gih, .kpp)…", "") {
                 app.push_cmd(AppCmd::ImportAbr);
                 ui.close();
             }

@@ -1134,7 +1134,10 @@ fn resolve_dialog(hwnd: HWND, cmd: AppCmd) -> Option<AppCmd> {
             .map(AppCmd::ImportImagePath),
         AppCmd::ImportAbr => rfd::FileDialog::new()
             .set_title("Import Brushes")
-            .add_filter("Brushes (Photoshop, GIMP)", &["abr", "gbr", "gih"])
+            .add_filter(
+                "Brushes (Photoshop, GIMP, Krita)",
+                &["abr", "gbr", "gih", "kpp"],
+            )
             .pick_file()
             .map(AppCmd::ImportAbrPath),
         AppCmd::ImportPage => rfd::FileDialog::new()

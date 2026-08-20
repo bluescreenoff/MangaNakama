@@ -30,6 +30,10 @@ pub struct DabParams {
     /// `render_dab_mask` would cast it. `[0, 0]` when no texture is active
     /// (and ignored then); the mask DATA itself rides per-flush, not per dab.
     pub tex_off: [i32; 2],
+    /// Dab-anchored stamp angle in degrees, UNFOLDED (PATCHES.md #10
+    /// amendment 2) — captured at record time like `tex_off`. Only read in
+    /// dab-anchored texture mode; 0 otherwise.
+    pub tex_angle: f32,
 }
 
 /// What one stroke recorded: the dab list in issue order plus every tile

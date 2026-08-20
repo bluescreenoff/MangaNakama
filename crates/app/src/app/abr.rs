@@ -237,7 +237,7 @@ fn write_computed(
 
 /// Write one texture (optional) + preset pair. Returns success.
 #[allow(clippy::too_many_arguments)] // a builder for one call site is noise
-fn write_brush(
+pub(super) fn write_brush(
     root: &Path,
     set: &str,
     n: usize,
@@ -290,16 +290,16 @@ fn write_brush(
 // ---------------------------------------------------------------------------
 
 /// The engine's radius is `exp(radius_logarithmic)` — ln, NOT log2.
-fn rlog(diameter_px: f64) -> f64 {
+pub(super) fn rlog(diameter_px: f64) -> f64 {
     (diameter_px / 2.0).max(0.5).ln().clamp(-2.0, 6.2)
 }
 
-fn set_base(s: &mut serde_json::Map<String, Value>, key: &str, v: f64) {
+pub(super) fn set_base(s: &mut serde_json::Map<String, Value>, key: &str, v: f64) {
     s.insert(key.into(), json!({ "base_value": v }));
 }
 
 /// Settings shared by every import: size and a mild stabilizer.
-fn base_settings(diameter_px: f64) -> serde_json::Map<String, Value> {
+pub(super) fn base_settings(diameter_px: f64) -> serde_json::Map<String, Value> {
     let mut s = serde_json::Map::new();
     set_base(&mut s, "radius_logarithmic", rlog(diameter_px));
     set_base(&mut s, "hardness", 0.9);
@@ -312,7 +312,7 @@ fn base_settings(diameter_px: f64) -> serde_json::Map<String, Value> {
 
 /// The pre-dynamics import behavior, for tips with no `desc` entry: a plain
 /// pressure-opacity brush the artist retunes.
-fn legacy_settings(diameter_px: f64) -> serde_json::Map<String, Value> {
+pub(super) fn legacy_settings(diameter_px: f64) -> serde_json::Map<String, Value> {
     let mut s = base_settings(diameter_px);
     set_base(&mut s, "opaque", 0.9);
     s.insert(
@@ -328,7 +328,7 @@ fn legacy_settings(diameter_px: f64) -> serde_json::Map<String, Value> {
 /// Spacing % of tip diameter → dab density, exactly as `Interval::Percent`
 /// converts it (`dabs_per_actual_radius = 100 / (2 × interval)`; the basic
 /// term is zeroed so the gap tracks the live dab).
-fn spacing_settings(s: &mut serde_json::Map<String, Value>, pct: f64) {
+pub(super) fn spacing_settings(s: &mut serde_json::Map<String, Value>, pct: f64) {
     let dabs = (100.0 / (2.0 * pct.clamp(1.0, 1000.0))).clamp(0.05, 50.0);
     set_base(s, "dabs_per_actual_radius", dabs);
     set_base(s, "dabs_per_basic_radius", 0.0);
@@ -376,13 +376,27 @@ fn translate(info: &AbrPresetInfo, diameter_px: f64) -> Translated {
     }
     s.insert("radius_logarithmic".into(), radius);
 
-    // -- angle / roundness dynamics: our texture tips do not rotate or
-    //    squash per dab (the static values are baked instead) --
-    if info.angle_dyn.is_active() {
-        notes.push(format!(
-            "per-dab angle ({})",
-            dyn_label(&info.angle_dyn)
-        ));
+    // -- tip anchoring + angle dynamics. Photoshop stamps its tip PER DAB,
+    //    and since PATCHES.md #10 amendment 2 so can the engine: sampled
+    //    imports anchor to the dab (the faithful behaviour; hand-made
+    //    presets keep the canvas-grain default). Direction-controlled
+    //    angle translates for real — the stamp turns with the stroke.
+    //    Static angle/flips/roundness are baked into the bitmap, and a
+    //    live direction rotation composes with the baked base exactly as
+    //    Photoshop composes them. --
+    if matches!(info.kind, BrushKind::Sampled { .. }) {
+        extras.insert("mn-texture-anchor".into(), json!("dab"));
+    }
+    if info.angle_dyn.control == Control::Direction {
+        extras.insert("mn-texture-rotate".into(), json!("direction"));
+        if info.angle_dyn.jitter_pct > 0.0 {
+            notes.push(format!(
+                "angle jitter {}%",
+                info.angle_dyn.jitter_pct
+            ));
+        }
+    } else if info.angle_dyn.is_active() {
+        notes.push(format!("per-dab angle ({})", dyn_label(&info.angle_dyn)));
     }
     if info.roundness_dyn.is_active() {
         notes.push(format!(
@@ -624,7 +638,7 @@ fn square_mask(gray: &[u8], w: u32, h: u32) -> image::GrayImage {
 /// Never overwrite an existing set: the slug truncates at 24 chars, so
 /// "…Inkers vol 1" and "…Inkers vol 2" collide — and imported/ holds presets
 /// the artist may have RETUNED since. A colliding import suffixes -2, -3, …
-fn free_slug(root: &Path, set: &str) -> String {
+pub(super) fn free_slug(root: &Path, set: &str) -> String {
     let taken = |s: &str| {
         let hit = |dir: &str| {
             std::fs::read_dir(root.join(dir)).is_ok_and(|rd| {
@@ -671,9 +685,9 @@ fn set_slug(stem: &str) -> String {
 }
 
 impl App {
-    /// Import a brush file picked from the menu — Photoshop `.abr` or GIMP
-    /// `.gbr`/`.gih`, by extension. Rescans presets and texture names so the
-    /// new brushes appear without a restart.
+    /// Import a brush file picked from the menu — Photoshop `.abr`, GIMP
+    /// `.gbr`/`.gih` or Krita `.kpp`, by extension. Rescans presets and
+    /// texture names so the new brushes appear without a restart.
     pub fn import_abr(&mut self, path: &Path) {
         let ext = path
             .extension()
@@ -687,6 +701,13 @@ impl App {
             return self.set_error("brush import: no brushes folder found");
         };
         let sum = match ext.as_str() {
+            // Krita: dynamics only — the tip is a separate resource file.
+            "kpp" => match mn_brush::parse_kpp_file(path) {
+                Ok(preset) => {
+                    super::kpp_import::write_kpp_import(&root, &preset, &set_slug(&stem))
+                }
+                Err(e) => return self.set_error(format!("brush import failed: {e}")),
+            },
             "gbr" | "gih" => match mn_brush::parse_gimp_brush_file(path) {
                 Ok(brushes) if brushes.is_empty() => {
                     return self.set_error("brush import: no brushes in that file");
@@ -944,15 +965,21 @@ mod tests {
         assert!(
             (s["opaque"]["inputs"]["random"][0][1].as_f64().unwrap() + 0.15).abs() < 1e-6
         );
-        // The honest notes: per-dab angle, count approximation, wet edges,
-        // dual brush — in mn.unmapped AND the description.
+        // Photoshop stamps per dab: sampled imports anchor to the dab, and
+        // the Direction-controlled angle translates into the live stamp
+        // rotation instead of a note (#10 amendment 2).
+        assert_eq!(myb["mn-texture-anchor"], "dab");
+        assert_eq!(myb["mn-texture-rotate"], "direction");
+        // The honest notes: count approximation, wet edges, dual brush —
+        // in mn.unmapped AND the description. No per-dab-angle note: it
+        // translated.
         let notes: Vec<String> = myb["mn"]["unmapped"]
             .as_array()
             .unwrap()
             .iter()
             .map(|v| v.as_str().unwrap().to_string())
             .collect();
-        assert!(notes.iter().any(|n| n.contains("per-dab angle")));
+        assert!(!notes.iter().any(|n| n.contains("per-dab angle")));
         assert!(notes.iter().any(|n| n.contains("count 2")));
         assert!(notes.iter().any(|n| n.contains("wet edges")));
         assert!(notes.iter().any(|n| n.contains("dual brush")));

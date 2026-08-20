@@ -17,6 +17,7 @@ mod comps;
 mod diag;
 mod engine;
 mod frames;
+mod kpp_import;
 /// TRIAGE 36 (`L-001`/`L-002` magnetic lasso) and 38 (`S-001` layer pick),
 /// end to end through the real pointer path. Its own file so app.rs does not
 /// grow another 200 lines of test.
@@ -2419,8 +2420,7 @@ impl App {
                             .brush
                             .inner()
                             .inner()
-                            .texture_mask()
-                            .map(|m| (m.data.as_slice(), m.size));
+                            .texture_flush();
                         self.renderer.flush_dabs(&self.doc, &dabs, hard, tex);
                         if let Some(st) = &mut self.dab_stroke {
                             st.all_dabs.extend(dabs);
@@ -2561,8 +2561,7 @@ impl App {
             .brush
             .inner()
             .inner()
-            .texture_mask()
-            .map(|m| (m.data.as_slice(), m.size));
+            .texture_flush();
         if wash {
             // #0.1: seed/read from the CPU wash buffer (blank under BYPASS —
             // zero-seed, wet semantics identical to the CPU path). A live
@@ -2623,8 +2622,7 @@ impl App {
                 .brush
                 .inner()
                 .inner()
-                .texture_mask()
-                .map(|m| (m.data.as_slice(), m.size));
+                .texture_flush();
             if st.wash {
                 // `end` left the buffer alive under BYPASS (the GPU owns the
                 // commit). The fallback blank exists only for the impossible
@@ -2680,8 +2678,7 @@ impl App {
                     .brush
                     .inner()
                     .inner()
-                    .texture_mask()
-                    .map(|m| (m.data.as_slice(), m.size));
+                    .texture_flush();
                 mn_brush::rasterize_dabs(&mut scratch, 0, &st.all_dabs, st.hard, tex);
                 let (opacity, blend, erase) = self.brush.inner().inner().wash_commit_params();
                 mn_brush::commit_wash(&scratch, &mut self.doc, opacity, blend, erase);
@@ -2721,8 +2718,7 @@ impl App {
                 .brush
                 .inner()
                 .inner()
-                .texture_mask()
-                .map(|m| (m.data.as_slice(), m.size));
+                .texture_flush();
             mn_brush::rasterize_dabs(&mut self.doc, layer, &st.all_dabs, st.hard, tex);
             self.dab_path_last = "gpu → cpu repair!".into();
         }

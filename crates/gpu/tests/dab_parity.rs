@@ -102,7 +102,7 @@ fn run_gpu_maybe_composited(
     renderer: &mut Renderer,
     hard: bool,
     composite: bool,
-    tex: Option<(&[u8], u32)>,
+    tex: Option<(&[u8], u32, bool)>,
 ) -> (bool, Vec<mn_core::dab::DabParams>) {
     let samples = stroke_samples();
     let mut all_dabs = Vec::new();
@@ -380,7 +380,7 @@ fn gpu_dab_parity_texture_tips() {
     let mut gpu_brush = pen();
     gpu_brush.set_texture(Some(mask.clone()));
     gpu_brush.set_texture_scroll(2.0);
-    let tex = (mask.data.as_slice(), mask.size);
+    let tex = (mask.data.as_slice(), mask.size, false);
     let (canary_ok, all_dabs) = run_gpu_maybe_composited(
         &mut gpu_brush,
         &mut gpu_doc,
@@ -405,5 +405,60 @@ fn gpu_dab_parity_texture_tips() {
     repair_doc.end_op();
     let (max, over) = max_diff(&ref_doc, &repair_doc);
     println!("[test] texture-tips repair parity: max channel diff {max}, over 1: {over}");
+    assert!(max <= 1, "repair parity bar is <= 1, got {max}");
+}
+
+/// #10 amendment 2: DAB-ANCHORED stamps with per-dab rotation. The stroke
+/// is a curve, so direction-following rotates every dab differently — the
+/// per-dab `tex_angle` channel (op snapshot → record → GPU struct) is what
+/// this pins, against the C reference AND through the repair rasterizer.
+/// A wrong or folded angle re-orients whole stamps, not one ulp.
+#[test]
+fn gpu_dab_parity_dab_anchored_stamps() {
+    let _g = gpu_guard();
+    let Some(mut renderer) = renderer() else {
+        return;
+    };
+    if !renderer.gpu_dabs_supported() {
+        println!("[test] SKIP: rgba16uint storage unsupported");
+        return;
+    }
+    let mask = synthetic_mask();
+    let arm = |b: &mut MyBrush| {
+        b.set_texture(Some(mask.clone()));
+        b.set_texture_anchor_dab(true);
+        b.set_texture_rotate_direction(true);
+        b.set_texture_angle_deg(30.0);
+    };
+
+    let mut ref_doc = Document::default();
+    let mut ref_brush = pen();
+    arm(&mut ref_brush);
+    run_stock(ref_brush, &mut ref_doc);
+    assert_inked(&ref_doc);
+
+    let mut gpu_doc = Document::default();
+    let mut gpu_brush = pen();
+    arm(&mut gpu_brush);
+    let tex = (mask.data.as_slice(), mask.size, true);
+    let (canary_ok, all_dabs) = run_gpu_maybe_composited(
+        &mut gpu_brush,
+        &mut gpu_doc,
+        &mut renderer,
+        false,
+        false,
+        Some(tex),
+    );
+
+    let (max, over) = max_diff(&ref_doc, &gpu_doc);
+    println!("[test] dab-anchored stamp parity: max channel diff {max}, over 1: {over}");
+    check(canary_ok, max);
+
+    let mut repair_doc = Document::default();
+    repair_doc.begin_op();
+    mn_brush::rasterize_dabs(&mut repair_doc, 0, &all_dabs, false, Some(tex));
+    repair_doc.end_op();
+    let (max, over) = max_diff(&ref_doc, &repair_doc);
+    println!("[test] dab-anchored stamp repair parity: max diff {max}, over 1: {over}");
     assert!(max <= 1, "repair parity bar is <= 1, got {max}");
 }

@@ -99,7 +99,7 @@ fn mask_of(
     tx: i32,
     ty: i32,
     hard: bool,
-    tex: Option<(&[u8], u32)>,
+    tex: Option<(&[u8], u32, bool)>,
 ) -> u32 {
     let hardness = d.hardness.clamp(0.0, 1.0);
     let angle_rad = d.angle / 360.0 * 2.0 * std::f32::consts::PI;
@@ -150,13 +150,48 @@ fn mask_of(
         }
         o
     };
-    if let Some((data, size)) = tex {
-        let n = size as i32;
-        let cx = tx * TILE_SIZE as i32 + xp + d.tex_off[0];
-        let cy = ty * TILE_SIZE as i32 + yp + d.tex_off[1];
-        let ui = cx.rem_euclid(n) as usize;
-        let vi = cy.rem_euclid(n) as usize;
-        opa *= data[vi * size as usize + ui] as f32 / 255.0;
+    if let Some((data, size, anchor_dab)) = tex {
+        if anchor_dab {
+            // #10 amendment 2: dab-anchored stamp - the mask covers the
+            // dab bounding square, rotated by the dab's OWN unfolded stamp
+            // angle (d.tex_angle - NOT the folded elliptical angle), in the
+            // profile's frame conventions (xxr right, yyr down, +0.5 pixel
+            // centres); outside its square the stamp is over, not wrapped.
+            let ta = d.tex_angle / 360.0 * 2.0 * std::f32::consts::PI;
+            let (tsn, tcs) = ta.sin_cos();
+            let xx = xp as f32 + 0.5 - lx;
+            let yy = yp as f32 + 0.5 - ly;
+            let xxr = yy * tsn + xx * tcs;
+            let yyr = yy * tcs - xx * tsn;
+            let u = (xxr / d.radius * 0.5 + 0.5) * size as f32;
+            let v = (yyr / d.radius * 0.5 + 0.5) * size as f32;
+            if u < 0.0 || v < 0.0 || u >= size as f32 || v >= size as f32 {
+                opa = 0.0;
+            } else {
+                // BILINEAR, texel centres at +0.5 — the exact arithmetic of
+                // the C and the shader (a nearest sample would let 1-ulp
+                // trig skew flip whole texels at rotation boundaries).
+                let (uf, vf) = (u - 0.5, v - 0.5);
+                let (u0f, v0f) = (uf.floor(), vf.floor());
+                let (fu, fv) = (uf - u0f, vf - v0f);
+                let cl = |i: i32| i.clamp(0, size as i32 - 1) as usize;
+                let (u0, v0) = (cl(u0f as i32), cl(v0f as i32));
+                let (u1, v1) = (cl(u0f as i32 + 1), cl(v0f as i32 + 1));
+                let at = |vv: usize, uu: usize| data[vv * size as usize + uu] as f32;
+                let g = at(v0, u0) * (1.0 - fu) * (1.0 - fv)
+                    + at(v0, u1) * fu * (1.0 - fv)
+                    + at(v1, u0) * (1.0 - fu) * fv
+                    + at(v1, u1) * fu * fv;
+                opa *= g / 255.0;
+            }
+        } else {
+            let n = size as i32;
+            let cx = tx * TILE_SIZE as i32 + xp + d.tex_off[0];
+            let cy = ty * TILE_SIZE as i32 + yp + d.tex_off[1];
+            let ui = cx.rem_euclid(n) as usize;
+            let vi = cy.rem_euclid(n) as usize;
+            opa *= data[vi * size as usize + ui] as f32 / 255.0;
+        }
     }
     (opa * 32768.0) as u32
 }
@@ -169,7 +204,7 @@ pub fn rasterize_dabs(
     layer: usize,
     dabs: &[DabParams],
     hard_dab: bool,
-    texture: Option<(&[u8], u32)>,
+    texture: Option<(&[u8], u32, bool)>,
 ) {
     let (ex, ey) = doc.tile_extent();
     let Some(dst) = doc.layers.get_mut(layer) else {

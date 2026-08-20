@@ -40,6 +40,21 @@ int mnc_brush_texture_size(void);
 const unsigned char *mnc_brush_texture_data(void);
 void mnc_brush_texture_scroll(float *dx, float *dy);
 
+/* mnc (PATCHES.md #10 amendment 2): DAB-ANCHORED texture — 1 = the mask
+ * maps onto the dab's bounding square and ROTATES with the dab's
+ * elliptical angle (a stamped tip, Photoshop/Krita per-dab behaviour;
+ * the stamp's rotation is its OWN per-dab channel — see
+ * mnc_brush_texture_stamp_angle below). 0 = the canvas-anchored grain
+ * above, stock mn behaviour. */
+int mnc_brush_texture_anchor_dab(void);
+
+/* mnc (#10 amendment 2): the current dab's STAMP angle in degrees,
+ * UNFOLDED 0..360 — computed Rust-side (fixed base and/or stroke
+ * direction, published per dab from mypaint-brush.c's prepare_draw_dab)
+ * because ACTUAL_ELLIPTICAL_DAB_ANGLE folds mod 180: right for a
+ * symmetric ellipse, wrong for a stamped tip. */
+float mnc_brush_texture_stamp_angle(void);
+
 /* mnc (round 27): RECORD MODE for GPU dab compositing — docs/design/
  * GPU-DABS.md P0, vendor/PATCHES.md #11. Implemented in Rust.
  * mnc_record_dab_mode(): 0 = stock; 1 = TAP (record AND rasterize — P0,
@@ -53,7 +68,8 @@ void mnc_record_dab(float x, float y, float radius,
                     unsigned short color_b, float color_a,
                     float opaque, float hardness,
                     float aspect_ratio, float angle,
-                    float lock_alpha, float paint);
+                    float lock_alpha, float paint,
+                    float tex_angle);
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -345,7 +361,8 @@ void render_dab_mask (uint16_t * mask,
                         float hardness,
                         float aspect_ratio, float angle,
                         int tile_tx, int tile_ty,
-                        float tex_dx, float tex_dy
+                        float tex_dx, float tex_dy,
+                        float tex_angle
                         )
 {
 
@@ -459,13 +476,56 @@ void render_dab_mask (uint16_t * mask,
                           segment2_offset, segment2_slope);
         /* mnc (round 26): texture tips — multiply the profile by the
          * canvas-anchored mask (tile coords come in precisely so this does
-         * not need the surface back-pointer). */
+         * not need the surface back-pointer). #10 amendment 2 adds the
+         * DAB-ANCHORED alternative: the mask covers the dab's bounding
+         * square, rotated by the dab's own sn/cs — the SAME rotation
+         * calculate_rr applies (xxr right-axis, yyr down-axis, +0.5 pixel
+         * centres), so the stamp turns exactly with the ellipse. Outside
+         * its square the stamp is over: opacity 0, not a wrap. */
         if (tex) {
-          const int cxp = tile_tx*MYPAINT_TILE_SIZE + xp;
-          const int cyp = tile_ty*MYPAINT_TILE_SIZE + yp;
-          int ui = (cxp + (int)tex_dx) % tex_size; if (ui < 0) ui += tex_size;
-          int vi = (cyp + (int)tex_dy) % tex_size; if (vi < 0) vi += tex_size;
-          opa *= tex[vi*tex_size + ui] / 255.0f;
+          if (mnc_brush_texture_anchor_dab() > 0) {
+            /* The stamp rotates by its OWN unfolded angle (op->tex_angle),
+             * NOT the folded elliptical sn/cs above. */
+            const float ta = tex_angle/360*2*M_PI;
+            const float tcs = cosf(ta);
+            const float tsn = sinf(ta);
+            const float xx = xp + 0.5f - x;
+            const float yy = yp + 0.5f - y;
+            const float xxr = yy*tsn + xx*tcs;
+            const float yyr = yy*tcs - xx*tsn;
+            const float u = (xxr/radius*0.5f + 0.5f) * tex_size;
+            const float v = (yyr/radius*0.5f + 0.5f) * tex_size;
+            if (u < 0.0f || v < 0.0f || u >= tex_size || v >= tex_size) {
+              opa = 0.0f;
+            } else {
+              /* BILINEAR, texel centres at +0.5 — nearest sampling turns a
+               * 1-ulp trig skew between this cosf and the GPU's cos into a
+               * whole-texel jump at rotation boundaries; a continuous
+               * sample keeps the C/CPU/GPU parity bar at <=1 quantum. All
+               * three implementations use exactly this arithmetic. */
+              const float uf = u - 0.5f, vf = v - 0.5f;
+              float u0f = floorf(uf), v0f = floorf(vf);
+              const float fu = uf - u0f, fv = vf - v0f;
+              int u0 = (int)u0f; int v0 = (int)v0f;
+              int u1 = u0 + 1; int v1 = v0 + 1;
+              if (u0 < 0) u0 = 0; if (v0 < 0) v0 = 0;
+              if (u1 > tex_size-1) u1 = tex_size-1;
+              if (v1 > tex_size-1) v1 = tex_size-1;
+              const float g00 = tex[v0*tex_size + u0];
+              const float g10 = tex[v0*tex_size + u1];
+              const float g01 = tex[v1*tex_size + u0];
+              const float g11 = tex[v1*tex_size + u1];
+              const float g = g00*(1.0f-fu)*(1.0f-fv) + g10*fu*(1.0f-fv)
+                            + g01*(1.0f-fu)*fv + g11*fu*fv;
+              opa *= g / 255.0f;
+            }
+          } else {
+            const int cxp = tile_tx*MYPAINT_TILE_SIZE + xp;
+            const int cyp = tile_ty*MYPAINT_TILE_SIZE + yp;
+            int ui = (cxp + (int)tex_dx) % tex_size; if (ui < 0) ui += tex_size;
+            int vi = (cyp + (int)tex_dy) % tex_size; if (vi < 0) vi += tex_size;
+            opa *= tex[vi*tex_size + ui] / 255.0f;
+          }
         }
         const uint16_t opa_ = opa * (1<<15);
         if (!opa_) {
@@ -499,7 +559,8 @@ process_op(uint16_t *rgba_p, uint16_t *mask,
                     op->hardness,
                     op->aspect_ratio, op->angle,
                     tx, ty,
-                    op->tex_dx, op->tex_dy
+                    op->tex_dx, op->tex_dy,
+                    op->tex_angle
                     );
 
     // second, we use the mask to stamp a dab for each activated blend mode
@@ -665,8 +726,10 @@ gboolean draw_dab_internal (
      * point, so GPU-recorded offsets match these by construction. */
     op->tex_dx = 0.0f;
     op->tex_dy = 0.0f;
+    op->tex_angle = 0.0f;
     if (mnc_brush_texture_size() > 0) {
         mnc_brush_texture_scroll(&op->tex_dx, &op->tex_dy);
+        op->tex_angle = mnc_brush_texture_stamp_angle();
     }
 
     /* mnc (round 27): record-mode tap/bypass (PATCHES.md #11). Placed after
@@ -678,7 +741,7 @@ gboolean draw_dab_internal (
                        (unsigned short)op->color_r, (unsigned short)op->color_g,
                        (unsigned short)op->color_b, op->color_a,
                        op->opaque, op->hardness, op->aspect_ratio, op->angle,
-                       op->lock_alpha, op->paint);
+                       op->lock_alpha, op->paint, op->tex_angle);
         if (mn_rec == 2) {
             /* BYPASS: nothing is rasterized on this path; the bbox stays
              * honest for the day the GPU fills it in. */
@@ -829,7 +892,8 @@ void get_color_internal
                         hardness,
                         aspect_ratio, angle,
                         tx, ty,
-                        gc_tex_dx, gc_tex_dy
+                        gc_tex_dx, gc_tex_dy,
+                        mnc_brush_texture_stamp_angle()
                         );
 
         // TODO: try atomic operations instead

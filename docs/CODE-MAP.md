@@ -97,6 +97,15 @@ The recurring failure shapes, in order of how often they have shipped:
   reference by tests; the GPU dab path is pinned against the CPU path.
   Chain of custody: C reference → CPU → GPU. Break one link and the
   parity tests are testing nothing.
+- Texture tips have TWO anchor modes (PATCHES.md #10): canvas-anchored
+  grain (default) and the dab-anchored STAMP, whose per-dab rotation is
+  its own unfolded channel (`tex_angle`, snapshotted into the op and the
+  record like the crawl offsets) — never the elliptical angle, which
+  folds mod 180. The stamp sample is bilinear with identical arithmetic
+  in C, `cpu_raster` and `dab.wgsl`, and the GPU reads CPU-precomputed
+  sin/cos (GPU trig is too coarse for the parity bar). Changing any one
+  of the three sampling paths without the other two breaks parity at
+  rotation boundaries only — run `gpu_dab_parity_dab_anchored_stamps`.
 - GPU dabs default by MEASUREMENT (`bench::resolve_auto`): an explicit
   choice (the `--gpu-dabs` flag or a `gpu_dabs=` line ui.txt actually
   carries — `gpu_dabs_explicit` is the tri-state) always wins; else a

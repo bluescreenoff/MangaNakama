@@ -1136,6 +1136,112 @@ mod tests {
         );
     }
 
+    /// PATCHES.md #10 amendment 2: DAB-ANCHORED stamps. A half-ink mask in
+    /// dab mode inks each dab's own left half — so a stroke carries ink past
+    /// its left end (trailing dab halves) and stops dry before its right
+    /// end. A 180° stamp angle mirrors that — genuinely, because the stamp
+    /// angle is its own UNFOLDED channel (the elliptical angle folds mod
+    /// 180 and would render 0 and 180 identically). Canvas-anchored grain
+    /// can do neither: its pattern is fixed to the page, not the dab.
+    #[test]
+    fn dab_anchored_stamps_rotate_with_the_dab() {
+        let half_ink = || {
+            let size = 64usize;
+            let mut data = vec![0u8; size * size];
+            for y in 0..size {
+                for x in 0..size / 2 {
+                    data[y * size + x] = 255; // left half ink, right half dry
+                }
+            }
+            Arc::new(TextureMask {
+                name: "half".into(),
+                size: size as u32,
+                data: Arc::new(data),
+            })
+        };
+        let stroke_at = |angle: f32| -> Document {
+            let mut doc = Document::new(512, 512);
+            let mut b = MyBrush::load(&preset("pen.myb")).unwrap();
+            b.set_hard_dab(true);
+            b.set_texture(Some(half_ink()));
+            b.set_texture_anchor_dab(true);
+            b.set_base_value(settings::setting_id("radius_logarithmic").unwrap(), 16f32.ln());
+            b.set_texture_angle_deg(angle);
+            straight_stroke(&mut b, &mut doc, 256.0, 1.0);
+            doc
+        };
+        // Alpha in a window just past each end of the stroke's dab centres
+        // (centres run x = 100..400, radius 16).
+        let window = |doc: &Document, x0: i32, x1: i32| -> u64 {
+            let mut sum = 0u64;
+            for x in x0..x1 {
+                for y in 248..264 {
+                    let idx = TileIdx::of_pixel(x, y);
+                    if let Some(t) = doc.active_layer().tile(idx) {
+                        sum += u64::from(
+                            t.pixel(
+                                (x - idx.origin().0) as usize,
+                                (y - idx.origin().1) as usize,
+                            )[3],
+                        );
+                    }
+                }
+            }
+            sum
+        };
+        let d0 = stroke_at(0.0);
+        assert!(
+            window(&d0, 86, 98) > 0,
+            "angle 0: trailing (left) dab halves ink past the first centre"
+        );
+        assert_eq!(
+            window(&d0, 403, 415),
+            0,
+            "angle 0: the dry right halves leave the far end blank"
+        );
+        let d180 = stroke_at(180.0);
+        assert_eq!(
+            window(&d180, 86, 98),
+            0,
+            "angle 180: the stamp mirrored — left end dry"
+        );
+        assert!(
+            window(&d180, 403, 415) > 0,
+            "angle 180: ink now runs past the right end"
+        );
+
+        // Direction mode: the stamp turns WITH the stroke. The same brush
+        // drawn rightward vs leftward flips which end carries the trailing
+        // ink — the calligraphy-nib behaviour a folded angle cannot give.
+        let directional = |leftward: bool| -> Document {
+            let mut doc = Document::new(512, 512);
+            let mut b = MyBrush::load(&preset("pen.myb")).unwrap();
+            b.set_hard_dab(true);
+            b.set_texture(Some(half_ink()));
+            b.set_texture_anchor_dab(true);
+            b.set_texture_rotate_direction(true);
+            b.set_base_value(
+                settings::setting_id("radius_logarithmic").unwrap(),
+                16f32.ln(),
+            );
+            b.begin(&mut doc);
+            for i in 0..=60 {
+                let x = if leftward {
+                    400.0 - i as f32 * 5.0
+                } else {
+                    100.0 + i as f32 * 5.0
+                };
+                b.sample(&mut doc, sample(x, 256.0, 1.0, i as f64 * 8.0));
+            }
+            b.end(&mut doc);
+            doc
+        };
+        let right = directional(false); // direction ≈ 0°: trailing = left
+        let left = directional(true); // direction ≈ 180°: trailing = right
+        assert!(window(&right, 86, 98) > 0 && window(&right, 403, 415) == 0);
+        assert!(window(&left, 86, 98) == 0 && window(&left, 403, 415) > 0);
+    }
+
     /// Krita texture tips (vendor/PATCHES.md #10): the mask multiplies the
     /// dab profile, so a half-black mask halves the inked band and leaves
     /// dry stripes INSIDE the stroke — visible structure, not just less ink.

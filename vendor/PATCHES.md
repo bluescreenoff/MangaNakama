@@ -272,6 +272,29 @@ accumulator directly (it runs immediately, at draw time). Pin:
 the GPU's true per-dab offsets vs the CPU's per-sample render diverged at
 32756/3022 channels.
 
+**AMENDMENT 2 (2026-08-21, dab-anchored stamps + per-dab rotation):**
+`mnc_brush_texture_anchor_dab()` selects a second sampling mode in
+`render_dab_mask`: the mask covers the DAB'S bounding square (a stamped
+tip, the Photoshop/Krita behaviour this patch originally deviated from)
+instead of wrapping over the canvas. The stamp ROTATES per dab by its own
+angle channel: `mypaint-brush.c` hands the Rust side the UNFOLDED stroke
+direction beside the crawl advance (`mnc_brush_texture_stamp`), Rust
+computes base ± direction and publishes it, and `draw_dab_internal`
+snapshots it into the op (`tex_angle`) exactly like the crawl offsets —
+because `ACTUAL_ELLIPTICAL_DAB_ANGLE` folds mod 180 (right for a
+symmetric ellipse, useless for a stamp: 0 and 180 would render the
+same). Sampling is BILINEAR with texel centres at +0.5, the identical
+arithmetic in all three implementations — nearest sampling let a 1-ulp
+trig skew flip whole texels at rotation boundaries, and the GPU ships
+CPU-precomputed sin/cos in the record (GPU trig intrinsics are orders
+coarser than libm; `GpuDab` grew to 68 bytes for the pair). Outside its
+square the stamp is over (opacity 0), never wrapped. `.myb` keys:
+`mn-texture-anchor: "dab"`, `mn-texture-rotate: "direction"`,
+`mn-texture-angle` (degrees). Pins: `dab_anchored_stamps_rotate_with_the_dab`
+(0 vs 180 genuinely differ; direction mode mirrors with the stroke) and
+`gpu_dab_parity_dab_anchored_stamps` (C → CPU repair → GPU ≤1 quantum on
+a curved stroke with per-dab angles).
+
 ### 11. Record mode for GPU dab compositing (`mypaint-tiled-surface.c`, round 27)
 
 **What:** `draw_dab_internal` gains a tap after its early-outs and clamps

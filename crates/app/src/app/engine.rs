@@ -246,6 +246,23 @@ impl Engine {
         }
     }
 
+    /// Whether the mask stamps per dab (#10 amendment 2) — rides beside
+    /// [`Self::texture_mask`] into the GPU flush and the repair rasterizer.
+    pub fn texture_anchor_dab(&self) -> bool {
+        match &self.main {
+            EngineKind::My(b) => b.texture_anchor_dab(),
+            _ => false,
+        }
+    }
+
+    /// The `(mask bytes, size, dab-anchored)` triple every dab consumer
+    /// takes — ONE spelling so the GPU flush, the wash flush and the repair
+    /// rasterizer can never disagree about the anchor mode.
+    pub fn texture_flush(&self) -> Option<(&[u8], u32, bool)> {
+        self.texture_mask()
+            .map(|m| (m.data.as_slice(), m.size, self.texture_anchor_dab()))
+    }
+
     /// The main brush's live wash buffer (#0.1 GPU wash flush seeding).
     pub fn wash_buffer(&self) -> Option<&mn_core::Document> {
         match &self.main {

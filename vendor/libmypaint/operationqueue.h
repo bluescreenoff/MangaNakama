@@ -30,6 +30,11 @@ typedef struct {
      * documents). */
     float tex_dx;
     float tex_dy;
+    /* mnc (#10 amendment 2): the per-dab STAMP angle (degrees, UNFOLDED —
+     * the elliptical angle folds mod 180, which a non-symmetric stamp
+     * cannot live with), snapshotted at draw time like the crawl above.
+     * Only read in dab-anchored texture mode. */
+    float tex_angle;
 } OperationDataDrawDab;
 
 typedef struct OperationQueue OperationQueue;

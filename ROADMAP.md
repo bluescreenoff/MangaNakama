@@ -67,10 +67,12 @@ Roughly in order. None of this is promised by a date.
    dynamics that map (spacing, pressure size and minimums, jitters,
    scatter, transfer), bakes static tip geometry into the mask, imports
    computed round brushes, and labels honestly what cannot map; GIMP
-   `.gbr`/`.gih` import through the same path, and Krita `.kpp` parses.
-   Still open: translating the parsed `.kpp` dynamics onto the engine,
-   best-effort Clip Studio `.sut` (your own presets), and growing the
-   engine where a missing semantic is worth having natively — per-dab tip
+   `.gbr`/`.gih` import through the same path, and Krita `.kpp` presets
+   bring their dynamics across (spacing, size, size-by-pressure, opacity and
+   flow) onto our own round tip — Krita stores brush tips as separate
+   resource files, so the import labels that limitation rather than faking a
+   tip. Still open: best-effort Clip Studio `.sut` (your own presets), and
+   growing the engine where a missing semantic is worth having natively — per-dab tip
    rotation (Photoshop's angle dynamics) is the headline gap.
 3. **Vector inking layers.** Strokes stored as editable geometry: control-point
    editing, width re-editing, and an eraser that trims a stroke at the

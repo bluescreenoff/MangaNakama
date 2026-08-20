@@ -40,6 +40,7 @@ fn make(x: f32, y: f32, r: f32) -> DabParams {
         lock_alpha: 0.0,
         paint: 0.0,
         tex_off: [0, 0],
+        tex_angle: 0.0,
     }
 }
 

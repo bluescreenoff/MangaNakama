@@ -161,6 +161,15 @@ pub struct MyBrush {
     /// default). The step direction is fixed diagonal (1, 0.5) so the crawl
     /// reads as drift, not wobble.
     texture_scroll_px: f32,
+    /// PATCHES.md #10 amendment 2: the mask is DAB-anchored — a stamped tip
+    /// covering the dab's bounding square. Off = canvas-anchored grain, the
+    /// mn default.
+    texture_anchor_dab: bool,
+    /// Stamp rotation follows the stroke direction (on top of the base).
+    /// UNFOLDED per dab — the elliptical angle cannot do this (mod 180).
+    texture_rotate_direction: bool,
+    /// Stamp base angle, degrees.
+    texture_angle_deg: f32,
     /// Live crawl offset (mask px). Owned here, advanced by the C-side
     /// per-dab hook; reset at every `begin`.
     tex_accum: (f32, f32),
@@ -561,6 +570,24 @@ impl MyBrush {
             .map(|v| v as f32)
             .unwrap_or(0.0)
             .clamp(0.0, 64.0);
+        // #10 amendment 2: "dab" = stamped tip; anything else (or absent) =
+        // the canvas-anchored grain every existing preset means. The stamp's
+        // rotation: a fixed base angle plus, optionally, the live stroke
+        // direction ("mn-texture-rotate": "direction").
+        let texture_anchor_dab = json
+            .get("mn-texture-anchor")
+            .and_then(Value::as_str)
+            .is_some_and(|s| s == "dab");
+        let texture_rotate_direction = json
+            .get("mn-texture-rotate")
+            .and_then(Value::as_str)
+            .is_some_and(|s| s == "direction");
+        let texture_angle_deg = json
+            .get("mn-texture-angle")
+            .and_then(Value::as_f64)
+            .map(|v| v as f32)
+            .filter(|v| v.is_finite())
+            .unwrap_or(0.0);
 
         // Krita sketch mode (round 27): link the stroke back to its recent
         // history — scribble webs / hatching for roughing.
@@ -601,6 +628,9 @@ impl MyBrush {
             wash_erase: false,
             texture,
             texture_scroll_px,
+            texture_anchor_dab,
+            texture_rotate_direction,
+            texture_angle_deg,
             tex_accum: (0.0, 0.0),
             sketch,
             history: Vec::new(),
@@ -1104,6 +1134,27 @@ impl MyBrush {
     }
 
     /// Texture crawl per dab in mask px (0 = static pattern).
+    /// #10 amendment 2: whether the mask stamps per dab (rotating with the
+    /// dab's elliptical angle) instead of reading as canvas grain. The GPU
+    /// flush and the repair rasterizer must follow the same mode.
+    pub fn texture_anchor_dab(&self) -> bool {
+        self.texture_anchor_dab
+    }
+
+    pub fn set_texture_anchor_dab(&mut self, on: bool) {
+        self.texture_anchor_dab = on;
+    }
+
+    /// Stamp rotation follows the stroke direction (dab-anchored mode).
+    pub fn set_texture_rotate_direction(&mut self, on: bool) {
+        self.texture_rotate_direction = on;
+    }
+
+    /// Stamp base angle, degrees (dab-anchored mode).
+    pub fn set_texture_angle_deg(&mut self, deg: f32) {
+        self.texture_angle_deg = if deg.is_finite() { deg } else { 0.0 };
+    }
+
     pub fn set_texture_scroll(&mut self, px_per_dab: f32) {
         self.texture_scroll_px = if px_per_dab.is_finite() {
             px_per_dab.clamp(0.0, 64.0)
@@ -1237,6 +1288,13 @@ impl MyBrush {
     }
 
     /// Read a setting's base value. Handy for tests and for a settings panel.
+    /// Set one libmypaint base value directly (the mirror of
+    /// [`Self::base_value`]). The named accessors stay the app's surface;
+    /// this exists for tools and tests that speak setting ids.
+    pub fn set_base_value(&mut self, setting_id: c_int, v: f32) {
+        unsafe { ffi::mypaint_brush_set_base_value(self.brush, setting_id, v) };
+    }
+
     pub fn base_value(&self, setting_id: c_int) -> f32 {
         unsafe { ffi::mypaint_brush_get_base_value(self.brush, setting_id) }
     }
@@ -1276,6 +1334,9 @@ impl MyBrush {
             self.texture.as_ref(),
             &mut self.tex_accum,
             self.texture_scroll_px,
+            self.texture_anchor_dab,
+            self.texture_rotate_direction,
+            self.texture_angle_deg,
         );
         set_record_hook(self.record_mode, &mut self.record);
         let surface = self.surface.interface();
@@ -1585,6 +1646,16 @@ thread_local! {
     static TEXTURE_SCROLL_Y: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     static TEXTURE_ACCUM: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static TEXTURE_STEP: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// #10 amendment 2: 1 = the mask is DAB-anchored (a stamped tip), 0 =
+    /// canvas-anchored grain.
+    static TEXTURE_ANCHOR_DAB: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+    /// Stamp rotation: 0 = fixed base only, 1 = base + stroke direction.
+    /// The C hands the UNFOLDED direction per dab (`mnc_brush_texture_stamp`)
+    /// because the elliptical angle folds mod 180 — right for an ellipse,
+    /// wrong for a stamp; the published angle is what the dab renders with.
+    static TEXTURE_STAMP_DIRECTION: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+    static TEXTURE_STAMP_BASE: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    static TEXTURE_STAMP_ANGLE: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     /// GPU-dabs record mode (round 27, PATCHES.md #11): the pointer is set
     /// per `stroke_to` to the owning brush's recorder — only dereferenced
     /// inside one call, never across strokes.
@@ -1623,6 +1694,7 @@ pub extern "C" fn mnc_record_dab(
     angle: f32,
     lock_alpha: f32,
     paint: f32,
+    tex_angle: f32,
 ) {
     let p = RECORD_BUF.with(|c| c.get()) as *mut DabRecord;
     if p.is_null() {
@@ -1650,6 +1722,7 @@ pub extern "C" fn mnc_record_dab(
             lock_alpha,
             paint,
             tex_off,
+            tex_angle,
         });
         let r_fringe = radius + 1.0;
         // Mirror the C exactly: floor(floor(x ± r) / 64) — div_euclid because
@@ -1682,7 +1755,20 @@ fn set_radius_random_abs(on: bool) {
 /// Point the vendored texture hooks at this brush's mask for the coming
 /// `stroke_to`. `accum` is the brush's own crawl offset — the hook advances
 /// it in place, per dab.
-fn set_texture_hook(mask: Option<&Arc<TextureMask>>, accum: *mut (f32, f32), step_px: f32) {
+fn set_texture_hook(
+    mask: Option<&Arc<TextureMask>>,
+    accum: *mut (f32, f32),
+    step_px: f32,
+    anchor_dab: bool,
+    rotate_direction: bool,
+    angle_deg: f32,
+) {
+    TEXTURE_ANCHOR_DAB.with(|c| c.set(anchor_dab as i32));
+    TEXTURE_STAMP_DIRECTION.with(|c| c.set(rotate_direction as i32));
+    TEXTURE_STAMP_BASE.with(|c| c.set(angle_deg.to_bits()));
+    // Publish the base so the stroke's FIRST dab (before any direction
+    // exists) renders at it.
+    TEXTURE_STAMP_ANGLE.with(|c| c.set(angle_deg.to_bits()));
     match mask {
         Some(m) => {
             TEXTURE_PTR.with(|c| c.set(m.data.as_ptr() as usize));
@@ -1725,6 +1811,34 @@ pub extern "C" fn mnc_brush_scatter() -> f32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn mnc_brush_texture_size() -> c_int {
     TEXTURE_SIZE.with(|c| c.get())
+}
+
+/// Called from the patched `mypaint-tiled-surface.c` per dab pixel (patch
+/// #10 amendment 2): non-zero = the mask is dab-anchored (stamped tip).
+#[unsafe(no_mangle)]
+pub extern "C" fn mnc_brush_texture_anchor_dab() -> c_int {
+    TEXTURE_ANCHOR_DAB.with(|c| c.get())
+}
+
+/// Called from the patched `mypaint-brush.c` once per dab (#10 amendment
+/// 2), with the dab's UNFOLDED stroke direction in degrees: compute and
+/// publish the stamp angle this dab renders with.
+#[unsafe(no_mangle)]
+pub extern "C" fn mnc_brush_texture_stamp(direction_deg: f32) {
+    let base = f32::from_bits(TEXTURE_STAMP_BASE.with(|c| c.get()));
+    let angle = if TEXTURE_STAMP_DIRECTION.with(|c| c.get()) != 0 && direction_deg.is_finite() {
+        base + direction_deg
+    } else {
+        base
+    };
+    TEXTURE_STAMP_ANGLE.with(|c| c.set(angle.to_bits()));
+}
+
+/// The published stamp angle — snapshotted into the op (and the GPU
+/// record) by `draw_dab_internal`, exactly like the crawl offset.
+#[unsafe(no_mangle)]
+pub extern "C" fn mnc_brush_texture_stamp_angle() -> f32 {
+    f32::from_bits(TEXTURE_STAMP_ANGLE.with(|c| c.get()))
 }
 
 /// The grayscale mask, `size × size` bytes. Only read while a texture is
