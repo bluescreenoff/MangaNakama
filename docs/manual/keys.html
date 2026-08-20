@@ -36,7 +36,8 @@
 <tr><td><kbd>Ctrl+D</kbd></td><td>Deselect (see below)</td></tr>
 <tr><td><kbd>Ctrl+Shift+D</kbd></td><td>Reselect (restore the last deselected selection)</td></tr>
 <tr><td><kbd>Ctrl+0</kbd> / <kbd>Ctrl+1</kbd></td><td>Fit / 100 %</td></tr>
-<tr><td><kbd>Ctrl+9</kbd></td><td>Flip view (mirror, not the layer)</td></tr>
+<tr><td><kbd>Ctrl+9</kbd></td><td>Flip view horizontally (mirror, not the layer)</td></tr>
+<tr><td><kbd>Ctrl+Shift+9</kbd></td><td>Flip view vertically (the other half of the same check)</td></tr>
 <tr><td><kbd>Tab</kbd></td><td>Hide every palette — canvas and chrome only</td></tr>
 <tr><td><kbd>Shift+Tab</kbd></td><td>Hide the menu bar and the status bar too</td></tr>
 <tr><td><kbd>Esc</kbd></td><td>Bring both back (when it has nothing else to cancel)</td></tr>
@@ -50,9 +51,9 @@
 page back” means different things depending on what you touched:</p>
 <table>
 <tr><th>Item</th><th>Resets</th><th>Leaves alone</th></tr>
-<tr><td>Reset rotation</td><td>the angle</td><td>mirror, zoom, pan</td></tr>
-<tr><td>Reset rotation and flip</td><td>angle and mirror</td><td>zoom, pan</td></tr>
-<tr><td>Reset view</td><td>angle, mirror, and refits the page</td><td>—</td></tr>
+<tr><td>Reset rotation</td><td>the angle</td><td>both flips, zoom, pan</td></tr>
+<tr><td>Reset rotation and flip</td><td>angle and BOTH flips</td><td>zoom, pan</td></tr>
+<tr><td>Reset view</td><td>angle, both flips, and refits the page</td><td>—</td></tr>
 </table>
 <div class="quirk"><b>Reset rotation does not unmirror.</b> The mirror
 is the drawing-error check, and you want it to survive straightening a
@@ -61,6 +62,18 @@ after a reset, you wanted the second item.</div>
 <div class="quirk"><b>The middle one keeps your zoom.</b> That is what
 makes it usable mid-drawing — it will not throw you back out to a whole
 page when you are working into a face.</div>
+<div class="quirk"><b>The two flips compose into a half turn, not a
+double mirror.</b> Horizontal and vertical together leave the page upside
+down and the RIGHT way round — the handedness is back to normal, so it is
+not the mirror check any more. Each flip pivots about the centre of the
+view rather than swinging the page away, and a flip survives a fit (the
+page stays flipped, and stays centred).</div>
+<div class="quirk"><b>The status bar carries the flip state.</b>
+<code>mirror</code> for the horizontal flip and <code>mirror V</code> for
+the vertical, beside the zoom and the angle — both segments show when both
+are on. The Navigator's two flip buttons light up the same way. Either
+reset that mentions flip clears both axes: a reset that left the page
+upside down would be a lie.</div>
 
 <h2>Getting the interface out of the way</h2>
 <p><kbd>Tab</kbd> hides every palette. <kbd>Shift+Tab</kbd> also hides

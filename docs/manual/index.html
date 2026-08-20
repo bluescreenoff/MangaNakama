@@ -12,16 +12,17 @@
 behaviour that differs from CSP, one-shot confirmations, modes that arm
 and disarm, actions that are not undoable. It is not a feature tour: a
 feature tour is what every abandoned help file is. If something surprised
-you, it should be on one of these eight pages.</p>
+you, it should be on one of these nine pages.</p>
 
 <h2>The five that bite in the first hour</h2>
 <div class="quirk warn"><b>Clicking a layer's mask square arms mask
 editing.</b> Your brush now writes to the mask, not the layer — the
 square you clicked is the mode. Click it again (or a layer's thumbnail)
 to go back. <a href="layers.html">Layers &amp; masks</a></div>
-<div class="quirk warn"><b>Mask strokes are not undoable.</b> There is
-no undo step that restores a mask stroke; re-paint the change instead.
-<a href="layers.html">Layers &amp; masks</a></div>
+<div class="quirk warn"><b>Selections are not in the undo history.</b>
+Deselecting, growing, inverting — none of it has an undo step. What you
+DO inside a selection is undoable normally; the selection itself is
+session state. <a href="drawing.html">Drawing &amp; selections</a></div>
 <div class="quirk warn"><b>Deleting a frame folder's last frame takes a
 second press.</b> The first Delete arms (the status line says so); any
 other command disarms; the second removes the folder with its layers.
@@ -38,13 +39,14 @@ Reselect; we kept Deselect deliberately. Reselect lives on
 
 <h2>Contents</h2>
 <table>
-<tr><td><a href="drawing.html">Drawing &amp; selections</a></td><td>wash mode, texture grain, the HEX field, recent colours, selection undo, flip bounds</td></tr>
+<tr><td><a href="drawing.html">Drawing &amp; selections</a></td><td>wash mode, brush size and the ladder, imported brushes, texture grain, materials and tiling patterns, the HEX field, recent colours, selection undo, flip bounds</td></tr>
 <tr><td><a href="layers.html">Layers &amp; masks</a></td><td>mask arming, mask undo, screentone shapes and density, what bake leaves outside undo, filters and corrections, the border effect, layer/sub colour and the mono preview</td></tr>
-<tr><td><a href="comic.html">Comic</a></td><td>frames, gutters, effect lines, the last-frame confirm</td></tr>
+<tr><td><a href="comic.html">Comic</a></td><td>frames, gutters, balloons and Fit to text, effect lines, the last-frame confirm</td></tr>
+<tr><td><a href="rulers.html">Rulers &amp; perspective</a></td><td>the creation drags, 1/2/3-point sets, moving a ruler, what Delete all rulers keeps</td></tr>
 <tr><td><a href="text.html">Text &amp; objects</a></td><td>the Object key, the Text→Object handover, style runs</td></tr>
 <tr><td><a href="pages.html">Pages &amp; reading</a></td><td>multi-page, the story editor, the reader</td></tr>
-<tr><td><a href="keys.html">Keys</a></td><td>the key map and every recorded shortcut deviation</td></tr>
-<tr><td><a href="files.html">Files &amp; diagnostics</a></td><td>where the log lives, what to attach to a bug report</td></tr>
+<tr><td><a href="keys.html">Keys</a></td><td>the key map, the view flips and resets, every recorded shortcut deviation</td></tr>
+<tr><td><a href="files.html">Files &amp; diagnostics</a></td><td>where the log lives, CPU or GPU inking, what to attach to a bug report</td></tr>
 </table>
 
 <footer>This manual ships with the app and documents the build it came

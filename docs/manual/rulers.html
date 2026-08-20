@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Rulers &amp; perspective — MangaNakama manual</title>
+<link rel="stylesheet" href="manual.css">
+</head>
+<body>
+<main>
+<nav class="top"><a href="index.html">← manual</a></nav>
+<h1>Rulers &amp; perspective</h1>
+
+<p>Every ruler lives in <b>Layer ▸ Ruler</b>. Picking one <em>arms</em> a
+gesture rather than creating anything: the status bar tells you what to
+drag, and the next drag on the canvas is the ruler.</p>
+
+<h2>The creation drags</h2>
+<div class="quirk"><b>A perspective set is made by dragging its EYE LEVEL
+— except the 1-point set, which is dragged FROM its vanishing point.</b>
+That one difference is the whole of the three gestures:</div>
+<table>
+<tr><th>Ruler</th><th>The drag</th></tr>
+<tr><td>Perspective (1-point)</td><td>press ON the vanishing point, drag
+along the eye level — the press places the VP, the release sets the
+horizon's tilt</td></tr>
+<tr><td>Perspective (2-point)</td><td>drag the eye level; both ends
+become vanishing points</td></tr>
+<tr><td>Perspective (3-point)</td><td>the same eye-level drag, and the
+third (vertical) VP drops on its own</td></tr>
+</table>
+<div class="quirk"><b>The third VP lands on the side the drag points
+to.</b> Dragging the horizon left→right puts it BELOW the eye level (the
+high, looking-down angle); right→left puts it above (looking up). It is
+placed on the perpendicular through the middle of the horizon, at about
+three quarters of the horizon's length — a starting position, not an
+opinion. It is an anchor, so the Object tool drags it where the shot
+actually wants it.</div>
+<div class="quirk"><b>A short drag creates nothing and says so.</b> Under
+about 32 px a perspective drag is refused with the instruction in the
+status bar rather than dropping a degenerate set on the page. The arming
+is spent either way, so a refused drag means going back to the menu — the
+message tells you what the drag should have been.</div>
+<div class="quirk"><b>Perspective sets do not snap to a nearest line —
+they bind.</b> There is no discrete family of rulings to land on: a stroke
+picks one family from its early direction (rays through either VP, or the
+verticals) and then rides that one member for the whole stroke, exactly
+like a pen in the groove of a physical perspective ruler. A 1-point set's
+three families are orthogonals, horizontals and verticals; a 3-point set
+has no parallel family at all, which is what makes its verticals
+converge.</div>
+
+<h2>Moving a ruler</h2>
+<div class="quirk"><b>Every ruler moves with the Object tool: grab an
+anchor to re-aim that end, grab the body to translate the whole thing.</b>
+A translated ruler is rigid — a line keeps its direction, a perspective
+set keeps its horizon length — because only the anchors let you change the
+shape. A guide takes only the component it lives on.</div>
+<div class="quirk"><b>A perspective set is grabbed by its EYE LEVEL
+only.</b> The faint ray fans are decoration; if they were grab targets the
+whole page would be one. The 3-point set's vertical VP is an anchor, and
+anchors are tested first, so it stays grabbable without widening the
+body.</div>
+<div class="quirk"><b>Rulers are grabbed before the art under them.</b>
+With the Object tool, a press within the handle tolerance takes the ruler
+— but only within it, so a press that is not on a ruler still reaches the
+panel or balloon underneath. The status bar names which of the two you
+got.</div>
+
+<h2>Snapping, and what Delete all rulers keeps</h2>
+<div class="quirk"><b><b>Snap: OFF</b> leaves the rulers drawn.</b> The
+geometry stays on the page and keeps its handles; only the pull is gone.
+<b>Special rulers</b> has its own switch (parallel, concentric, guide,
+symmetry) and turning that off does not touch line, curve or
+vanishing-point rulers.</div>
+<div class="quirk warn"><b>Delete all rulers keeps the panel-border
+rulers.</b> A panel border published as a ruler (right-click a frame
+folder's badge ▸ <i>Border off — outline becomes a ruler</i>, see
+<a href="comic.html">Comic</a>) belongs to its FRAME, not to the ruler
+list — the frame retracts it when you ink the border back. So the command
+clears every ruler you made by hand and says <i>panel-border rulers stay
+with their frames</i> when there were any. To be rid of one, turn its
+border back on.</div>
+
+<footer><a href="index.html">← manual</a></footer>
+</main>
+</body>
+</html>

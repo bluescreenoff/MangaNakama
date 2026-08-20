@@ -54,11 +54,17 @@ at the start of a stroke when it is no longer valid (the mask was
 deleted or baked) — those strokes drop instead of painting the layer by
 accident. Click the square again to leave the mode.</div>
 
+<h2>Undo and the mask</h2>
+<div class="quirk"><b>A mask stroke is one undo step.</b> If you learned
+to avoid painting on masks, you can stop: <kbd>Ctrl+Z</kbd> puts the
+coverage back exactly as it was before the stroke and <kbd>Ctrl+Y</kbd>
+paints it again. A gesture that laid nothing down — pen touched, pen
+lifted — costs you no undo press. <span class="why">Mask dabs are written
+live, straight into the coverage field, so the ordinary layer recording
+never saw them; the bracket that makes this work has to be opened at pen
+DOWN, before the first dab.</span></div>
+
 <h2>What undo does not cover</h2>
-<div class="quirk warn"><b>Mask strokes are not undoable.</b> Painting
-on a mask writes the mask field directly; there is no undo group for
-it. If a mask stroke went wrong, re-paint it — or clear the mask
-(Layer ▸ Layer Mask ▸ Clear) and redo it.</div>
 <div class="quirk warn"><b>Baking a mask leaves the mask outside the
 undo bracket.</b> Layer ▸ Layer Mask ▸ Apply commits the mask into the
 pixels as one undo step — but undoing that step restores the pixels and

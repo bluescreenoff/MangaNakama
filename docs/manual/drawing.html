@@ -83,6 +83,105 @@ such control. The choice lives with the tool for the session — brush
 preset files on disk can only carry Normal, Multiply and Screen, so a
 stroke blend you set here is gone next launch.</div>
 
+<h2>Brush size</h2>
+<div class="quirk"><b>Size is an absolute dab diameter in canvas pixels,
+and <kbd>[</kbd>/<kbd>]</kbd> walk a ladder the Size slider can also
+reach.</b> The rungs are round numbers with widening gaps — <kbd>]</kbd>
+on 1 px gives 2, on 100 gives 120, on 120 gives 150 — from a 1 px floor to
+a 2000 px top rung, and a value between rungs steps past itself rather
+than back onto itself. There is no hidden ceiling: a 10 px brush walks all
+the way up. <span class="why">Size used to be a 0.25–4× multiplier on
+whatever the preset shipped at, so the ladder silently stopped four times
+past it and a 10 px brush could never be pressed above 40.</span></div>
+<div class="quirk"><b>Each sub tool keeps its own size across restarts —
+but only if you moved it.</b> A size you changed is written into
+<code>ui.txt</code> (<code>sub_tool_size_px=</code>) against the preset's
+path, so re-installing or moving the app keeps it. A sub tool you never
+re-sized has no entry at all and goes on taking its size from the preset,
+which is what lets an updated preset move it: the preset's size is the
+default, never a ceiling.</div>
+<div class="quirk"><b>“Reset to preset” hands back the preset's own size
+AND forgets the override.</b> The stored entry is deleted rather than
+overwritten with the default, so "back to the preset" that only lasted
+until the next launch cannot happen. See the padlock below for the other
+half: a <em>locked</em> sub tool never writes the nudge you took for one
+panel, so what the next launch restores is the snapshot the padlock
+froze.</div>
+
+<h2>Importing brushes (.abr, .gbr, .gih)</h2>
+<div class="quirk"><b>Imported brushes land in the group
+<code>imported</code>, and a set imported twice is suffixed rather than
+overwritten.</b> <b>File ▸ Import Brushes</b> reads Photoshop
+<code>.abr</code> and GIMP <code>.gbr</code>/<code>.gih</code>: each tip
+becomes a grayscale texture the Tool Property texture picker lists, each
+brush a preset in <code>imported/</code>. Import a set whose name is
+already taken and it arrives as <code>&lt;set&gt;-2</code> — so the copy
+you spent an evening retuning is still exactly where you left it, and the
+new import sits beside it.</div>
+<div class="quirk"><b>Dynamics are translated as far as they honestly
+map.</b> Spacing, size by pen pressure (with its minimum), size jitter,
+opacity and flow by pressure, opacity jitter, scatter and dab count all
+become real engine settings; a tip's static geometry — flip X/Y, angle,
+roundness — is baked into the texture bitmap, which for a static value is
+exact rather than approximate. Photoshop's computed (parametric round)
+brushes, which used to be dropped, come in as presets with their hardness,
+roundness and angle.</div>
+<div class="quirk warn"><b>What could NOT be translated is written into
+the preset's description, after “Not translated:”.</b> Fade, tilt and
+direction controllers, per-dab angle jitter (our texture tips do not
+rotate per dab), wet edges, airbrush build-up, dual brush, colour dynamics
+and pattern texture have no equivalent here. Rather than drawing
+differently and saying nothing, each one is named in the description of
+the preset it belongs to. <span class="why">The same convention the Clip
+Studio import uses — a brush that lies about what it kept is worse than a
+brush that lists what it lost.</span></div>
+
+<h2>Materials and tiling patterns</h2>
+<div class="quirk"><b>Right-click a material cell to tag it; the one
+search box matches names AND tags.</b> There is no second field and no
+<code>tag:</code> prefix syntax. Tags are comma-separated and normalised
+on save, and clearing them all leaves the material byte-identical to one
+that was never tagged. Left-click still pastes — that is why tagging is on
+the right-click menu.</div>
+<div class="quirk warn"><b>Tags live in <code>tags.txt</code> beside the
+images and are keyed by FILE NAME, so renaming a material file loses its
+tags.</b> The same trade the use counters make (those key on the full
+path, so a folder you move loses its counts). What the sidecar buys is
+worth it: copy a material folder to another machine and the tags travel
+with the images, and a folder the bank has never seen is already tagged
+the first time you add it. A rewrite keeps lines it does not understand,
+and keeps entries naming files that are not in the folder right now —
+so a rescan, or a drive that was not mounted, does not eat them.</div>
+<div class="quirk"><b>A folder import carries the tags of the files it
+copied, and only those.</b> A file the copy skipped because its name was
+already taken contributes nothing, and whatever the destination already
+said about that name stands. If none of the copied files were tagged, no
+sidecar is created — “no <code>tags.txt</code>” stays the honest resting
+state for an untagged folder.</div>
+<div class="quirk"><b><b>File ▸ New Tiling Pattern</b> opens a square
+canvas in a NEW tab with wrap on both axes.</b> A dab that crosses an edge
+continues on the opposite side, so the tile is seamless by construction
+rather than by touching up afterwards, and the Pattern Studio window shows
+the canvas repeated 2×2 or 3×3, re-rendered live as you draw. Mirror
+(symmetry) painting drops when the pattern canvas opens: wrap and mirror
+share the same axis slot.</div>
+<div class="quirk warn"><b>Turn wrap off mid-draw and the tile
+seams.</b> The preview goes on repeating whatever is on the canvas, seam
+and all, so the studio says <i>wrap is off — strokes will seam at the
+edges</i> in the warning colour with a one-click way back, rather than
+letting the preview quietly lie.</div>
+<div class="quirk warn"><b>An empty tile refuses to save.</b> <i>Save as
+material</i> composites the whole document on a transparent background at
+full resolution and registers it in the material bank — <em>never</em>
+trimmed to the ink, because the canvas rectangle IS the repeat and
+trimming it would change the tile. A canvas with nothing on it is a
+mistake rather than a material, so nothing is written and no file
+appears. The name is slugged (spaces and punctuation become underscores)
+and saving twice under one name suffixes — <code>dots-2</code> — like
+every other registered material. It lands in your own materials folder,
+or in a <code>materials-mine</code> beside the exe if you have not added
+one.</div>
+
 <h2>Locking a sub tool</h2>
 <p>The padlock beside the wrench in <b>Tool Property</b> pins the sub
 tool you are on — for the pen you spent an afternoon calibrating and

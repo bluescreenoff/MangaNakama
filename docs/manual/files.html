@@ -117,6 +117,37 @@ write is not free: turn it on for the session you cannot afford to
 repeat, not as a permanent setting. The checkbox greys out when
 <code>Autosave</code> is <code>Off</code>, because Off means off.</div>
 
+<h2>Which path inks your strokes</h2>
+<div class="quirk"><b>The first launch measures this machine in the
+background, and the answer applies from the NEXT launch.</b> Nothing
+becomes the default on your hardware without a measured number, so the
+first start stays on the CPU path and spawns a one-shot benchmark as a
+separate windowless process — it times five brush classes on both paths,
+writes down what it found and exits. Inking moves to the GPU only if that
+run said it was clearly faster: the strategic class (the big soft
+airbrush, where cost scales with the tip's area) has to win outright, and
+nothing may lose badly, so a knife that pays 1.5× vetoes even a 2×
+airbrush win. If the measuring process dies, no verdict is written and the
+next launch simply tries again.</div>
+<div class="quirk"><b><code>gpu-verdict.txt</code> beside the exe holds
+the verdict — delete it to re-measure.</b> Three lines: which adapter was
+measured, <code>on</code> or <code>off</code>, and the ratios as a note
+for humans. The adapter line is the identity, so a driver update or a new
+GPU re-measures by itself; a damaged file counts as no file rather than
+deciding anything.</div>
+<div class="quirk"><b>The View menu always wins, and sticks.</b>
+<b>View ▸ GPU dab strokes</b> is an explicit choice: it is remembered in
+<code>ui.txt</code>, it is never overruled by a measurement, and once you
+have set it the app stops measuring. It takes effect from the next stroke,
+so flipping it mid-page is safe. On an adapter that cannot run the path at
+all the item is greyed rather than dead, and a <code>ui.txt</code> carried
+to a weaker machine just stays on the CPU.</div>
+<div class="quirk"><b>Only the speed differs.</b> Undo, masks, wash,
+smudge, erasing, textured tips — everything behaves the same either way,
+and the two paths are held to the same pixels by tests. If a drawing
+behaves differently with the switch flipped, that is a bug worth
+reporting, not a setting.</div>
+
 <h2>Reporting a problem</h2>
 <div class="quirk"><b>Attach <code>manganakama.log</code> — one file,
 safe to post.</b> The log is written to contain nothing personal: no

@@ -83,7 +83,9 @@ real pressure and brush character. Two consequences worth knowing:
 <b>it switches ruler snapping ON</b> for the whole document (a ruler
 you cannot snap to is not a ruler), and the border width you had is
 remembered, not thrown away — the same menu item inks it back at the
-same weight.</div>
+same weight. A border ruler belongs to its frame, which is why
+<b>Delete all rulers</b> leaves it alone — see
+<a href="rulers.html">Rulers &amp; perspective</a>.</div>
 <h2>Balloons</h2>
 <div class="quirk"><b>There is no &ldquo;fill inside frame&rdquo; switch &mdash;
 set Fill opacity to 0.</b> A bubble with no fill is a bubble whose fill you
@@ -109,6 +111,41 @@ no tail comes out of the drag identical). Draw the bubble with the Balloon
 tool&rsquo;s pen mode if you need it tilted. This is also why turning an
 ellipse does not take its lettering with it &mdash; see
 <a href="text.html">Text &amp; objects</a>.</div>
+<div class="quirk"><b>Fit to text sizes the bubble around the topmost
+visible lettering inside its BODY.</b> The button is in Tool Property with
+the balloon selected in the Object tool. There is no stored balloon→text
+link in this app and Fit does not invent one — the pairing is geometry,
+the same way a click finds things: every visible text layer is walked
+bottom to top and the last hit wins. An item belongs when its centre is
+inside the body, or (for lettering already spilling out of a bubble too
+small for it, which is the whole reason to press Fit) when any of its
+corners is. A tail is somewhere the bubble points, not somewhere lettering
+goes, so an SFX sitting over the tail cannot capture the fit.</div>
+<div class="quirk"><b>The centre stays where you put it, and the tail
+comes along.</b> The bubble is resized about where it already sits rather
+than moved onto the text's centre — you placed it against the art. Each
+tail's BASE rides the boundary out with the body and its TIP does not
+move, because the speaker did not move; tail kinds, bends, widths, the
+ink style and the border width are not a fit's business. Off-centre
+lettering therefore grows the bubble on that side instead of sliding it.
+The margin is 0.75 em of the lettering's own type size, so a 9 pt bubble
+and a 24 pt shout get the same optical breathing room rather than the same
+pixel count.</div>
+<div class="quirk"><b>A hand-drawn bubble scales UNIFORMLY and keeps its
+shape.</b> One factor on both axes, measured against the drawn outline
+itself rather than its bounding box — so a concave bubble is honoured,
+every anchor's pressure survives, and it is never rounded back into an
+ellipse. Ellipses and rounded rects get a writing-direction clamp instead
+(a little taller than wide for tategaki, wider than tall for yokogaki);
+that clamp is deliberately not applied to a drawing, because restyling
+your drawing is not what you asked for.</div>
+<div class="quirk warn"><b>Hidden text layers are skipped — locked ones
+are not.</b> You cannot size a bubble against lettering you cannot see, so
+a hidden layer is not a candidate at all. A LOCKED layer still counts: the
+fit reads the lettering and writes only the balloon, so nothing locked is
+edited. With no lettering found inside the body the status bar says so and
+nothing moves, and a bubble that already fits is left alone. One press is
+one undo step.</div>
 <div class="quirk"><b>Two balloons that overlap on one layer become one
 balloon &mdash; including their colour.</b> The shared edge is erased, which is
 what makes a tail merge into its bubble. Where two <em>differently</em>
@@ -118,11 +155,20 @@ them on separate balloon layers if you want a hard edge instead.</div>
 
 <h2>Effect lines</h2>
 <div class="quirk warn"><b>Regenerating effect lines replaces the
-layer's pixels wholesale — and is not undoable.</b> Layer ▸ Edit effect
-lines ▸ Apply re-runs the generator with the dialog's values; the old
-raster is gone (including anything painted on top of it), and there is
-no undo step. The generator parameters themselves are remembered per
-layer and only update when a regeneration succeeds.</div>
+layer's pixels wholesale, including anything painted on top of them.</b>
+Layer ▸ Edit effect lines ▸ Apply re-runs the generator with the dialog's
+values and the old raster is gone. It <em>is</em> one undo step now — if
+you learned to avoid the button, you can stop: <kbd>Ctrl+Z</kbd> brings
+the previous lines back. <span class="why">It was not undoable at all
+before: the regen swapped the layer's tiles wholesale, behind the recording
+that makes undo work, and had to purge the layer's history to stay
+consistent.</span></div>
+<div class="quirk"><b>Only a generated layer regenerates.</b> This is the
+in-place door; pointing it at an ink layer would eat the drawing, so a
+layer that was not generated is refused with a note in the status bar
+(Layer ▸ Generate effect lines makes a new one). The generator parameters
+are remembered per layer and only update when a regeneration
+succeeds.</div>
 
 <footer><a href="index.html">← manual</a></footer>
 </main>
