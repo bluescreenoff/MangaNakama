@@ -62,8 +62,14 @@ jobs:
       # toolchain/w64devkit where build.sh expects it (SETUP.md step 2).
       - name: w64devkit
         shell: pwsh
+        # AUTHENTICATED lookup: GitHub-hosted runners share egress IPs, so
+        # the anonymous 60/hr API limit is a coin toss (a release run died
+        # on it 2026-08-20 in 36s). GITHUB_TOKEN works against any public
+        # repo and is per-repo rate-limited, not per-IP.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $rel = Invoke-RestMethod https://api.github.com/repos/skeeto/w64devkit/releases/latest
+          $rel = Invoke-RestMethod -Headers @{ Authorization = "Bearer $env:GH_TOKEN" } https://api.github.com/repos/skeeto/w64devkit/releases/latest
           $asset = $rel.assets | Where-Object { $_.name -match '^w64devkit-x64-.*\.(exe|7z)$' } | Select-Object -First 1
           curl.exe -L -o w64devkit.exe $asset.browser_download_url
           if ($asset.name -match '\.7z$') {
