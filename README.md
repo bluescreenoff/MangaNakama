@@ -6,6 +6,14 @@ so you can read your own chapter the way a reader will. Local files, no
 cloud, no account. MIT OR Apache-2.0. Early development, moving fast —
 [`ROADMAP.md`](ROADMAP.md) is what works today and what comes next.
 
+## Why this exists
+
+An open alternative for mangaka who can't justify Clip Studio PAINT's price
+tag — or who are tired of a CPU-bound pipeline that makes big brushes, tone
+layers and selected-area rotation feel like the 2000s. **Everything that can
+run on the GPU, runs on the GPU** is the rule this app is built to — the
+"More" fold at the bottom continues this in detail.
+
 ## Download
 
 Grab the zip from the [Releases](../../releases) page, unzip it anywhere, run
@@ -37,15 +45,11 @@ changing anything. `ROADMAP.md` ends with a list of good first issues.
 <details>
 <summary><b>More: what's under the hood, and the tester's guide</b></summary>
 
-### Why this exists
+### Why this exists, in more detail
 
-An open alternative for mangaka who can't justify Clip Studio PAINT's price
-tag, or who are tired of a CPU-bound pipeline that makes basic operations
-(selected-area rotation, big brushes, tone layers) feel like the 2000s.
-**Everything that can run on the GPU, runs on the GPU** is the rule we build
-to — a direction, not a finished claim. On the GPU today: the whole
-compositor (layer blending, group flattening, tile upload, display) plus
-brush dab rasterization behind `--gpu-dabs`. Gradients, transforms and
+The GPU rule is a direction, not a finished claim. On the GPU today: the
+whole compositor (layer blending, group flattening, tile upload, display)
+plus brush dab rasterization behind `--gpu-dabs`. Gradients, transforms and
 filters are still CPU; they are the queue.
 
 Inking runs on a libmypaint engine with Krita-inspired modes (hard-stamp
