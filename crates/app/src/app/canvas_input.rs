@@ -611,6 +611,13 @@ impl App {
                     self.needs_redraw = true;
                     return;
                 }
+                // Vector strokes are LAYER-SCOPED: only when the active
+                // layer records do its strokes take the press (you selected
+                // the layer to edit it — the mask-editing scoping).
+                if self.doc.active_layer().strokes.is_some() && self.vector_hit(cx, cy) {
+                    self.needs_redraw = true;
+                    return;
+                }
                 if !self.text_object_hit(cx, cy) {
                     self.object_hit(cx, cy);
                 }
@@ -1671,6 +1678,12 @@ impl App {
             self.needs_redraw = true;
             return;
         }
+        if self.vector_drag.is_some() {
+            // Geometry moves live (the overlay draws it); the raster
+            // re-derives once at release.
+            self.vector_drag_move(cx, cy);
+            return;
+        }
         if let Some(d) = &mut self.gen_drag {
             d.cur = (cx, cy);
             self.needs_redraw = true;
@@ -1987,6 +2000,10 @@ impl App {
                 self.set_status("ruler moved");
             }
             self.needs_redraw = true;
+            return;
+        }
+        if self.vector_drag.is_some() {
+            self.vector_drag_release();
             return;
         }
         if self.rotating() {

@@ -12,6 +12,7 @@ fn vector_app() -> Option<App> {
     // Deterministic pipeline for the replay comparison: no stabilizer pull,
     // no mouse smoothing floor.
     app.props_current.stabilizer = 0.0;
+    app.props_current.size_px = 8.0;
     app.prefs.mouse_smooth_px = 0.0;
     app.apply_props();
     app.viewport.zoom = 1.0;
@@ -149,6 +150,93 @@ fn the_record_reproduces_the_ink_exactly() {
         bbox(&replayed)
     );
     assert_eq!(replayed, snapshot, "replayed ink differs from the original");
+}
+
+/// Phase 2: grabbing a stroke's body with the Object tool and dragging
+/// TRANSLATES it — geometry and re-derived ink together — and one undo
+/// restores both exactly.
+#[test]
+fn translating_a_stroke_moves_ink_and_geometry_as_one_step() {
+    let Some(mut app) = vector_app() else { return };
+    let li = app.doc.active;
+    drag(&mut app, 200.0);
+    let tiles_before: std::collections::BTreeMap<TileIdx, Vec<u16>> = app.doc.layers[li]
+        .tiles()
+        .map(|(idx, t)| (idx, t.data().to_vec()))
+        .collect();
+    let geom_before = app.doc.layers[li].strokes.as_ref().unwrap().strokes[0].clone();
+    let steps_before = app.doc.undo_len();
+
+    // Grab the stroke mid-body (a sample point sits at x=120,y=200) and
+    // drag 40 px right through the real press/move/release path.
+    app.tool = Tool::Object;
+    assert!(app.vector_hit(120.0, 200.0), "the stroke takes the press");
+    assert!(app.vector_drag_move(160.0, 200.0));
+    assert!(app.vector_drag_release());
+
+    let moved = &app.doc.layers[li].strokes.as_ref().unwrap().strokes[0];
+    assert!(
+        (moved.points[0].0 - (geom_before.points[0].0 + 40.0)).abs() < 1e-3,
+        "geometry translated"
+    );
+    assert_eq!(app.doc.undo_len(), steps_before + 1, "one step per gesture");
+    // The ink moved with it: the original left edge is now blank.
+    let col = |app: &App, x: i32| -> u64 {
+        let mut sum = 0;
+        for y in 180..220 {
+            let idx = TileIdx::of_pixel(x, y);
+            if let Some(t) = app.doc.layers[li].tile(idx) {
+                sum += u64::from(
+                    t.pixel((x - idx.origin().0) as usize, (y - idx.origin().1) as usize)[3],
+                );
+            }
+        }
+        sum
+    };
+    assert_eq!(col(&app, 58), 0, "ink left the old start");
+    assert!(col(&app, 98) > 0, "…and begins at the new one");
+
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::Undo);
+    let tiles_after_undo: std::collections::BTreeMap<TileIdx, Vec<u16>> = app.doc.layers[li]
+        .tiles()
+        .map(|(idx, t)| (idx, t.data().to_vec()))
+        .collect();
+    assert_eq!(tiles_after_undo, tiles_before, "undo restores the ink exactly");
+    assert_eq!(
+        app.doc.layers[li].strokes.as_ref().unwrap().strokes[0], geom_before,
+        "…and the geometry, same step"
+    );
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::Redo);
+    assert!(
+        (app.doc.layers[li].strokes.as_ref().unwrap().strokes[0].points[0].0
+            - (geom_before.points[0].0 + 40.0))
+            .abs()
+            < 1e-3
+    );
+    assert!(col(&app, 98) > 0);
+}
+
+/// Phase 2: dragging one POINT deforms locally — the grabbed sample moves
+/// fully, distant samples stay put (raised-cosine falloff).
+#[test]
+fn a_point_drag_deforms_locally() {
+    let Some(mut app) = vector_app() else { return };
+    let li = app.doc.active;
+    drag(&mut app, 200.0);
+    app.tool = Tool::Object;
+    // Grab exactly the first sample (x=60) and pull it up 30 px.
+    assert!(app.vector_hit(60.0, 200.0));
+    assert!(app.vector_drag.as_ref().unwrap().point.is_some(), "point grab");
+    assert!(app.vector_drag_move(60.0, 170.0));
+    assert!(app.vector_drag_release());
+    let s = &app.doc.layers[li].strokes.as_ref().unwrap().strokes[0];
+    assert!((s.points[0].1 - 170.0).abs() < 1.0, "the grabbed point followed");
+    let far = s.points.last().unwrap();
+    assert!(
+        (far.1 - 200.0).abs() < 1e-3,
+        "the far end never moved (falloff): {}",
+        far.1
+    );
 }
 
 /// Ordinary layers keep ordinary strokes: nothing records, undo behaves

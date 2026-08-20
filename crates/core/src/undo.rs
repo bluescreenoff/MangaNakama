@@ -95,6 +95,16 @@ pub enum UndoGroup {
         stroke: Box<crate::stroke_set::VectorStroke>,
         present: bool,
     },
+    /// Vector inking phase 2: one EDIT of an existing recorded stroke
+    /// (move/deform). The carried stroke is the OTHER version — swapping
+    /// exchanges it with `strokes[index]` while the tile pre-images swap
+    /// the re-derived pixels, so geometry and ink stay one step.
+    VectorEdit {
+        layer: usize,
+        tiles: Vec<(TileIdx, Option<Arc<Tile>>)>,
+        index: usize,
+        stroke: Box<crate::stroke_set::VectorStroke>,
+    },
     /// PA-001: the paper colour before the change. The only DOCUMENT-level
     /// group — it belongs to no layer, which is why [`UndoGroup::layer`]
     /// returns an `Option`. The paper's EYE is not in here on purpose: it is
@@ -116,7 +126,8 @@ impl UndoGroup {
         match self {
             UndoGroup::Tiles { tiles, .. }
             | UndoGroup::GenLines { tiles, .. }
-            | UndoGroup::VectorStroke { tiles, .. } => tiles.len(),
+            | UndoGroup::VectorStroke { tiles, .. }
+            | UndoGroup::VectorEdit { tiles, .. } => tiles.len(),
             UndoGroup::Frames { .. }
             | UndoGroup::Balloons { .. }
             | UndoGroup::Texts { .. }
@@ -141,7 +152,8 @@ impl UndoGroup {
             | UndoGroup::Tones { layer, .. }
             | UndoGroup::Edges { layer, .. }
             | UndoGroup::GenLines { layer, .. }
-            | UndoGroup::VectorStroke { layer, .. } => Some(*layer),
+            | UndoGroup::VectorStroke { layer, .. }
+            | UndoGroup::VectorEdit { layer, .. } => Some(*layer),
             UndoGroup::Paper { .. } | UndoGroup::Rulers { .. } => None,
         }
     }

@@ -28,6 +28,7 @@ mod layout;
 pub mod materials;
 mod pages;
 pub mod pattern;
+pub(crate) mod vector_edit;
 pub mod prefs;
 pub(crate) mod reader;
 mod session;
@@ -439,6 +440,12 @@ pub struct App {
     /// captured samples — `Some` only between begin/end of a plain ink
     /// stroke on a recording layer.
     pub vector_capture: Option<Vec<PenSample>>,
+    /// The Object tool's selected stroke INDEX on the ACTIVE layer
+    /// (layer-scoped editing). Cleared on layer/tab switches and undo —
+    /// indices shift under it (CODE-MAP seam #2).
+    pub vector_sel: Option<usize>,
+    /// A stroke drag in flight (`vector_edit.rs`).
+    pub vector_drag: Option<vector_edit::VectorDrag>,
     /// The autosave interval changed: `main::pump_commands` re-arms the
     /// Win32 timer with this many ms (0 = kill it, autosave off). An App
     /// field rather than a direct `SetTimer` because this crate stays free
@@ -1287,6 +1294,8 @@ impl App {
             prefs,
             pattern: pattern::PatternStudio::default(),
             vector_capture: None,
+            vector_sel: None,
+            vector_drag: None,
             autosave_rearm: None,
             autosave_op_seen: 0,
             pointer_visible: false,
@@ -2500,7 +2509,7 @@ impl App {
                     .map(|i| self.preset_key(&self.presets[i].1.clone()))
                     .unwrap_or_default();
                 let c = self.active_color();
-                let stroke = mn_core::VectorStroke::from_samples(
+                let mut stroke = mn_core::VectorStroke::from_samples(
                     &samples,
                     &preset,
                     self.props_current.size_px,
@@ -2511,6 +2520,9 @@ impl App {
                     ],
                     self.eraser_active(),
                 );
+                // The samples are captured BEFORE the pull-string — the
+                // replay must re-run it at the same strength.
+                stroke.stabilizer = self.props_current.stabilizer;
                 self.doc.end_op_vector_stroke(stroke);
             }
             _ => {

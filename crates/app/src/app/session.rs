@@ -194,6 +194,9 @@ impl App {
         // the session), so a live move's index would aim at the OTHER
         // document's ruler set.
         self.ruler_move = None;
+        // Vector stroke selection/drag index the parked document's set.
+        self.vector_sel = None;
+        self.vector_drag = None;
         self.renaming = None;
         self.frame_delete_armed = None;
         self.last_selection = None;

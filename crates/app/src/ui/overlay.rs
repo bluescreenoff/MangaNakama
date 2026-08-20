@@ -698,6 +698,35 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
     }
 
     if app.tool == Tool::Object {
+        // Vector inking phase 2: the selected recorded stroke, live —
+        // during a drag the geometry moves (the raster re-derives at
+        // release), so the polyline IS the honest preview. Handles at the
+        // endpoints and every 8th sample (every sample would be fog; the
+        // hit test still accepts any of them).
+        if let Some(si) = app.vector_sel
+            && let Some(s) = app
+                .doc
+                .active_layer()
+                .strokes
+                .as_ref()
+                .and_then(|set| set.strokes.get(si))
+        {
+            let pts: Vec<egui::Pos2> = s.points.iter().map(|p| to_pt(p.0, p.1)).collect();
+            painter.add(egui::Shape::line(
+                pts.clone(),
+                egui::Stroke::new(1.5, theme::ACCENT),
+            ));
+            for i in crate::app::vector_edit::handle_indices(s) {
+                let hrect = egui::Rect::from_center_size(pts[i], egui::vec2(7.0, 7.0));
+                painter.rect_filled(hrect, 1.0, egui::Color32::WHITE);
+                painter.rect_stroke(
+                    hrect,
+                    1.0,
+                    egui::Stroke::new(1.2, theme::ACCENT),
+                    egui::StrokeKind::Inside,
+                );
+            }
+        }
         if let Some((li, fi)) = app.object_sel {
             let shown = match &app.object_drag {
                 Some(d) => Some(d.preview()),

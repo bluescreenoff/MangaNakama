@@ -1927,6 +1927,9 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             let rulers_before = app.doc.rulers.clone();
             if app.doc.undo() {
                 resync_rulers(app, &rulers_before);
+                // Vector selection indexes into a set undo just reshaped.
+                app.vector_sel = None;
+                app.vector_drag = None;
                 for (li, (l, was)) in app.doc.layers.iter().zip(&tones_before).enumerate() {
                     if l.tone != *was {
                         app.renderer.evict_layer(li);
@@ -1952,6 +1955,8 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             let rulers_before = app.doc.rulers.clone();
             if app.doc.redo() {
                 resync_rulers(app, &rulers_before);
+                app.vector_sel = None;
+                app.vector_drag = None;
                 for (li, (l, was)) in app.doc.layers.iter().zip(&tones_before).enumerate() {
                     if l.tone != *was {
                         app.renderer.evict_layer(li);
@@ -2253,6 +2258,8 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             app.commit_text_edit();
             let tones_before: Vec<_> = app.doc.layers.iter().map(|l| l.tone).collect();
             let masks_before = mask_sig(app);
+            app.vector_sel = None;
+            app.vector_drag = None;
             let mut steps = 0usize;
             while app.doc.undo_len() > keep && app.doc.undo() {
                 steps += 1;

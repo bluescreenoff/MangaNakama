@@ -1676,6 +1676,30 @@ impl Document {
         true
     }
 
+    /// Vector inking phase 2: close the open op as ONE stroke-edit group —
+    /// the re-derived tiles' pre-images plus the stroke as it was BEFORE
+    /// the edit (`strokes[index]` must already hold the edited version).
+    pub fn end_op_vector_edit(
+        &mut self,
+        index: usize,
+        before: crate::stroke_set::VectorStroke,
+    ) -> bool {
+        let Some((li, _label, tiles)) = self.take_op() else {
+            return false;
+        };
+        self.history.push_labeled(
+            "Move stroke",
+            UndoGroup::VectorEdit {
+                layer: li,
+                tiles,
+                index,
+                stroke: Box::new(before),
+            },
+        );
+        self.touch();
+        true
+    }
+
     /// Close the open op and hand back its layer, label and sorted
     /// pre-images WITHOUT pushing a group — the shared half of `end_op`,
     /// for the ops that wrap the same recording in a richer group (the
@@ -1826,6 +1850,32 @@ impl Document {
                     tiles: inverse,
                     stroke,
                     present: !present,
+                })
+            }
+            UndoGroup::VectorEdit {
+                layer,
+                tiles,
+                index,
+                mut stroke,
+            } => {
+                let l = self.layers.get_mut(layer)?;
+                let mut inverse = Vec::with_capacity(tiles.len());
+                for (idx, snapshot) in tiles {
+                    inverse.push((idx, l.tile_arc(idx).cloned()));
+                    l.set_tile(idx, snapshot);
+                }
+                if let Some(s) = l
+                    .strokes
+                    .as_mut()
+                    .and_then(|set| set.strokes.get_mut(index))
+                {
+                    std::mem::swap(s, &mut stroke);
+                }
+                Some(UndoGroup::VectorEdit {
+                    layer,
+                    tiles: inverse,
+                    index,
+                    stroke,
                 })
             }
             UndoGroup::Frames { layer, frames } => {

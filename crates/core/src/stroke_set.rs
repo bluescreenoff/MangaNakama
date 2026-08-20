@@ -26,6 +26,12 @@ pub struct VectorStroke {
     /// Straight RGB.
     pub color: [u8; 3],
     pub eraser: bool,
+    /// The stabilizer strength the stroke was drawn under — the samples
+    /// are captured BEFORE the pull-string, so a faithful replay re-runs
+    /// it at the same strength. serde(default) keeps older sidecars
+    /// loading (they replay unstabilized, degraded not lost).
+    #[serde(default)]
+    pub stabilizer: f32,
     /// Future re-width edits multiply here; 1.0 as drawn.
     pub width_scale: f32,
 }
@@ -58,6 +64,7 @@ impl VectorStroke {
             size_px,
             color,
             eraser,
+            stabilizer: 0.0,
             width_scale: 1.0,
         }
     }
