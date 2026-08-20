@@ -1089,8 +1089,8 @@ fn resolve_dialog(hwnd: HWND, cmd: AppCmd) -> Option<AppCmd> {
             .pick_file()
             .map(AppCmd::ImportImagePath),
         AppCmd::ImportAbr => rfd::FileDialog::new()
-            .set_title("Import Photoshop Brush Set")
-            .add_filter("Photoshop brushes", &["abr"])
+            .set_title("Import Brushes")
+            .add_filter("Brushes (Photoshop, GIMP)", &["abr", "gbr", "gih"])
             .pick_file()
             .map(AppCmd::ImportAbrPath),
         AppCmd::ImportPage => rfd::FileDialog::new()
@@ -1198,7 +1198,7 @@ fn apply_cursor(app: &App) {
 /// G fill, W wand, M select, O object, U frame, T text, I eyedropper, H hand),
 /// menu keys match the dump (Ctrl+A/D, Ctrl+Shift+D/I, Alt+Del fill,
 /// Shift+Del clear-outside, Ctrl+Shift+E stamp, Alt+[/] layer walk, `,`/`.`
-/// sub tool step, Ctrl+9 flip view).
+/// sub tool step, Ctrl+9 / Ctrl+Shift+9 flip view H / V).
 fn shortcut(app: &mut App, vk: u16, repeat: bool) -> bool {
     // The reader OWNS the keyboard while open (owner top item
     // 2026-08-18): Esc exits, F11 fullscreen, arrows / PgUp / PgDn turn
@@ -1266,6 +1266,7 @@ fn shortcut(app: &mut App, vk: u16, repeat: bool) -> bool {
         (true, 0x30) if alt => Some(AppCmd::Zoom100), // Ctrl+Alt+0 (CSP pixel size)
         (true, 0x30) => Some(AppCmd::ZoomFit), // Ctrl+0
         (true, 0x31) => Some(AppCmd::Zoom100), // Ctrl+1
+        (true, 0x39) if shift => Some(AppCmd::FlipViewV), // Ctrl+Shift+9
         (true, 0x39) => Some(AppCmd::FlipView), // Ctrl+9 (owner's viewreversehorz)
         (true, 0x41) => Some(AppCmd::SelectAll), // Ctrl+A
         (true, 0x44) if shift => Some(AppCmd::Reselect), // Ctrl+Shift+D

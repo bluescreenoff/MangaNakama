@@ -32,6 +32,7 @@ pub enum Icon {
     RotateRight,
     RotateReset,
     FlipH,
+    FlipV,
     Eye,
     EyeOff,
     Plus,
@@ -242,6 +243,25 @@ pub fn paint(p: &Painter, r: Rect, icon: Icon, color: Color32) {
             ));
             p.add(Shape::convex_polygon(
                 poly(r, &[(0.58, 0.18), (0.58, 0.82), (0.92, 0.50)]),
+                Color32::TRANSPARENT,
+                thin,
+            ));
+        }
+        // FlipH a quarter turn over: dashed axis across, solid half on top.
+        Icon::FlipV => {
+            p.extend(Shape::dashed_line(
+                &poly(r, &[(0.08, 0.50), (0.92, 0.50)]),
+                thin,
+                w * 0.14,
+                w * 0.12,
+            ));
+            p.add(Shape::convex_polygon(
+                poly(r, &[(0.18, 0.42), (0.82, 0.42), (0.50, 0.08)]),
+                color,
+                Stroke::NONE,
+            ));
+            p.add(Shape::convex_polygon(
+                poly(r, &[(0.18, 0.58), (0.82, 0.58), (0.50, 0.92)]),
                 Color32::TRANSPARENT,
                 thin,
             ));

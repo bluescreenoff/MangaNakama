@@ -1,9 +1,8 @@
 //! The Navigator palette (CV-030/031/036, TODO #4): the whole page as a
-//! live thumbnail with the RED VIEW-RECT (drag it to pan), the 13-control
-//! strip (zoom bar/steps/reset/fit, rotation steps/reset, flip H — lit
-//! while mirrored; flip V deferred: the viewport math is flip-h-only
-//! cross-cutting), and sticky FIT-TO-NAVIGATOR (re-fit on every window
-//! resize until toggled off).
+//! live thumbnail with the RED VIEW-RECT (drag it to pan), the 14-control
+//! strip (zoom bar/steps/reset/fit, rotation steps/reset, flip H and flip
+//! V — each lit while that axis is flipped), and sticky FIT-TO-NAVIGATOR
+//! (re-fit on every window resize until toggled off).
 //!
 //! The thumbnail re-renders only when the document revision moves; the
 //! rect and readouts are per-frame painter work on top.
@@ -116,16 +115,24 @@ pub(super) fn navigator_palette(ui: &mut egui::Ui, app: &mut App) {
         {
             app.push_cmd(AppCmd::RotateReset);
         }
-        // LIT while mirrored (CV-031: "the flip icons stay highlighted so
-        // you never forget you are mirrored").
-        let flipped = app.viewport.flip_h;
-        let btn = egui::Button::new(if flipped { "⇄ ●" } else { "⇄" });
+        // LIT while flipped (CV-031: "the flip icons stay highlighted so
+        // you never forget you are mirrored"), one button per axis — both
+        // lit means the page is simply upside down.
+        let btn = egui::Button::new(if app.viewport.flip_h { "⇄ ●" } else { "⇄" });
         if ui
             .add(btn)
             .on_hover_text("flip view horizontally (Ctrl+9)")
             .clicked()
         {
             app.push_cmd(AppCmd::FlipView);
+        }
+        let btn = egui::Button::new(if app.viewport.flip_v { "⇅ ●" } else { "⇅" });
+        if ui
+            .add(btn)
+            .on_hover_text("flip view vertically (Ctrl+Shift+9)")
+            .clicked()
+        {
+            app.push_cmd(AppCmd::FlipViewV);
         }
     });
     ui.horizontal(|ui| {

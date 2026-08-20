@@ -81,7 +81,7 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 app.push_cmd(AppCmd::ImportImage);
                 ui.close();
             }
-            if item(ui, "Import Photoshop Brush Set (.abr)…", "") {
+            if item(ui, "Import Brushes (.abr, .gbr, .gih)…", "") {
                 app.push_cmd(AppCmd::ImportAbr);
                 ui.close();
             }
@@ -794,6 +794,10 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 app.push_cmd(AppCmd::FlipView);
                 ui.close();
             }
+            if item(ui, "Flip vertical (view)", "Ctrl+Shift+9") {
+                app.push_cmd(AppCmd::FlipViewV);
+                ui.close();
+            }
             ui.separator();
             // CV-041. Phrased as what it shows, ticked when shown, so the
             // menu never has to say "un-hide". Persisted (ui.txt), unlike
@@ -985,7 +989,7 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 app.push_cmd(AppCmd::Zoom100);
             }
         }
-        if fits(ui, 130.0) {
+        if fits(ui, 160.0) {
             ui.separator();
             let step = app.prefs.rotate_step_deg.to_radians();
             if icon_btn(ui, Icon::RotateLeft, s, false, true, "Rotate CCW (-)").clicked() {
@@ -1008,6 +1012,18 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
             .clicked()
             {
                 app.push_cmd(AppCmd::FlipView);
+            }
+            if icon_btn(
+                ui,
+                Icon::FlipV,
+                s,
+                app.viewport.flip_v,
+                true,
+                "Flip view vertically (Ctrl+Shift+9)",
+            )
+            .clicked()
+            {
+                app.push_cmd(AppCmd::FlipViewV);
             }
         }
         let flow_end = ui.cursor().min.x;
@@ -1311,6 +1327,9 @@ pub(super) fn status_bar(ui: &mut egui::Ui, app: &mut App) {
         seg(ui, format!("{:+.1}°", app.viewport.rotate_rad.to_degrees()));
         if app.viewport.flip_h {
             seg(ui, "mirror".to_owned());
+        }
+        if app.viewport.flip_v {
+            seg(ui, "mirror V".to_owned());
         }
         if app.mirror_x || app.mirror_y {
             seg(

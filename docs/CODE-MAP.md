@@ -77,6 +77,12 @@ The recurring failure shapes, in order of how often they have shipped:
 - The NaN-pressure guard in `MyBrush::stroke_to` drops non-finite
   samples at the FFI boundary. Do not remove it: the corruption it
   prevents surfaces later, inside an unrelated preset's heap.
+- The view transform reaches the C through `Viewport::brush_view()`, never
+  the raw viewport fields: patch #12 knows only a HORIZONTAL mirror, so a
+  vertical flip is handed to it as the equivalent mirror-plus-half-turn
+  (and H+V as a plain half turn, which is not a mirror at all). A new view
+  axis that skips this still paints — with every direction-mapped dynamic
+  reading the mirrored angle.
 - `mn-brush`'s CPU rasterizer is pinned ≤1 quantum against the C
   reference by tests; the GPU dab path is pinned against the CPU path.
   Chain of custody: C reference → CPU → GPU. Break one link and the

@@ -2265,14 +2265,17 @@ impl App {
         // goes in RAW RADIANS: the C applies DEGREES() itself, and our
         // viewport's screen = R(rotate_rad)·canvas means the C's
         // dir_angle + viewrotation arithmetic lands in true screen space.
-        // flip_h rides along for the mirror case (patch #12's flip
-        // extension — the flip has already negated rotate_rad). At
+        // The mirror rides along for patch #12's flip extension (the flip
+        // has already negated rotate_rad). It comes from `brush_view()`,
+        // NOT from `flip_h`: the C knows only a horizontal mirror, so a
+        // vertical flip is handed to it as the equivalent mirror-plus-half-
+        // turn, and H+V as a plain half turn with no mirror at all. At
         // 100%/0°/unflipped this is bit-identical to the stock entry point.
-        self.brush.inner_mut().inner_mut().set_view(
-            self.viewport.zoom,
-            self.viewport.rotate_rad,
-            self.viewport.flip_h,
-        );
+        let (view_rot, view_mirrored) = self.viewport.brush_view();
+        self.brush
+            .inner_mut()
+            .inner_mut()
+            .set_view(self.viewport.zoom, view_rot, view_mirrored);
         let kind = self
             .stroke
             .as_ref()
@@ -3270,6 +3273,7 @@ fn fitted_viewport_in(doc: &Document, origin: [f32; 2], size: (f32, f32), margin
         zoom,
         rotate_rad: 0.0,
         flip_h: false,
+        flip_v: false,
     }
 }
 
@@ -3292,6 +3296,7 @@ fn fitted_viewport(doc: &Document, client: (u32, u32), margin: f32) -> Viewport 
         zoom,
         rotate_rad: 0.0,
         flip_h: false,
+        flip_v: false,
     }
 }
 
@@ -3427,6 +3432,11 @@ mod tone_round_tests;
 
 #[cfg(test)]
 mod view_reset_and_tool_lock_tests;
+
+/// ROADMAP good-first-issue #1: the vertical view flip, and the brush
+/// compensation it has to reach.
+#[cfg(test)]
+mod view_flip_tests;
 
 /// E-014/E-016: the eyedropper's referent and its averaging box, driven
 /// through `dispatch` the way a click drives them. `cmd.rs` has no test

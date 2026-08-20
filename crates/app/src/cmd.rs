@@ -1752,6 +1752,9 @@ pub enum AppCmd {
     SetToolLock(bool),
     /// Mirror the view horizontally (the drawing-error check).
     FlipView,
+    /// The same check about the other axis: flip the view vertically.
+    /// Composes with [`AppCmd::FlipView`] — both on is a 180° turn.
+    FlipViewV,
     // --- per-layer effects (TRIAGE 21/27/30) --------------------------------
     /// `LP-002`/`LP-003` border effect on the layer: `Some` grows an outline
     /// around the layer's own alpha, `None` removes it. Non-destructive both
@@ -1798,6 +1801,18 @@ pub fn default_export_stem(app: &App) -> String {
 /// reopened work splitting correctly.
 fn is_spread_page(d: &mn_core::Document, flagged: bool, normal_w: Option<u32>) -> bool {
     flagged || normal_w.is_some_and(|w| w > 0 && d.size.0 as f32 >= w as f32 * 1.5)
+}
+
+/// The status line after either view flip. Both flags read together: with
+/// the vertical flip in, "view back to normal" is only true when NEITHER
+/// axis is flipped, and H+V is a half turn rather than a mirror.
+fn flip_status(vp: &mn_gpu::Viewport) -> &'static str {
+    match (vp.flip_h, vp.flip_v) {
+        (true, true) => "view turned 180° — mirrored both ways is a half turn",
+        (true, false) => "view mirrored — the classic drawing-error check",
+        (false, true) => "view flipped vertically — the same check, upside down",
+        (false, false) => "view back to normal",
+    }
 }
 
 pub fn dispatch(app: &mut App, cmd: AppCmd) {
@@ -5430,11 +5445,14 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
         }
         AppCmd::RotateFlipReset => {
             let c = app.canvas_center();
-            // The flip is a TOGGLE, so it is only sent when mirrored;
-            // unflipping also mirrors the rotation, so it goes first and
-            // the absolute rotation reset lands on top.
+            // Each flip is a TOGGLE, so it is only sent when that axis is
+            // flipped; unflipping also mirrors the rotation, so they go
+            // first and the absolute rotation reset lands on top.
             if app.viewport.flip_h {
                 app.viewport.flip_around(c);
+            }
+            if app.viewport.flip_v {
+                app.viewport.flip_v_around(c);
             }
             app.viewport.set_rotation_around(c, 0.0);
             app.set_status("view reset — upright and unmirrored");
@@ -5444,6 +5462,9 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             let c = app.canvas_center();
             if app.viewport.flip_h {
                 app.viewport.flip_around(c);
+            }
+            if app.viewport.flip_v {
+                app.viewport.flip_v_around(c);
             }
             app.viewport.set_rotation_around(c, 0.0);
             app.fit_to_view();
@@ -5483,11 +5504,13 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
         AppCmd::FlipView => {
             let c = app.canvas_center();
             app.viewport.flip_around(c);
-            app.set_status(if app.viewport.flip_h {
-                "view mirrored — the classic drawing-error check"
-            } else {
-                "view back to normal"
-            });
+            app.set_status(flip_status(&app.viewport));
+            app.mark_dirty();
+        }
+        AppCmd::FlipViewV => {
+            let c = app.canvas_center();
+            app.viewport.flip_v_around(c);
+            app.set_status(flip_status(&app.viewport));
             app.mark_dirty();
         }
         // --- per-layer effects (TRIAGE 21/27/30) ---------------------------

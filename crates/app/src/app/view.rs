@@ -51,13 +51,18 @@ impl App {
     /// headless renderer reports 0x0 and must never fit).
     pub fn fit_to_view_sized(&mut self, client: (u32, u32)) {
         if client.0 > 0 && client.1 > 0 {
-            let flipped = self.viewport.flip_h;
+            let (flip_h, flip_v) = (self.viewport.flip_h, self.viewport.flip_v);
             self.viewport = fitted_viewport(&self.doc, client, self.prefs.fit_margin);
-            if flipped {
+            if flip_h {
                 self.viewport.flip_h = true;
                 // pan is the top-left's screen spot; mirrored, the page runs
                 // left from it, so shift by the page width to recentre.
                 self.viewport.pan[0] += self.doc.size.0 as f32 * self.viewport.zoom;
+            }
+            if flip_v {
+                // Same one axis over: flipped, the page runs UP from pan.
+                self.viewport.flip_v = true;
+                self.viewport.pan[1] += self.doc.size.1 as f32 * self.viewport.zoom;
             }
         }
         self.needs_redraw = true;

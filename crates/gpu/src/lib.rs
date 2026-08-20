@@ -121,6 +121,11 @@ pub struct Viewport {
     /// corner while flipped — callers never notice, they go through
     /// to_screen/to_canvas.
     pub flip_h: bool,
+    /// The vertical half of the same check: canvas y negates before the
+    /// rotate+pan. Both flips at once is a 180° point reflection, not a
+    /// mirror — see [`Self::brush_view`], which is what the brush engine
+    /// must be told.
+    pub flip_v: bool,
 }
 
 impl Default for Viewport {
@@ -130,6 +135,7 @@ impl Default for Viewport {
             zoom: 1.0,
             rotate_rad: 0.0,
             flip_h: false,
+            flip_v: false,
         }
     }
 }
@@ -157,13 +163,17 @@ impl Viewport {
             let (s, c) = self.rotate_rad.sin_cos();
             ((c * dx + s * dy) / z, (-s * dx + c * dy) / z)
         };
-        if self.flip_h { (-cx, cy) } else { (cx, cy) }
+        (
+            if self.flip_h { -cx } else { cx },
+            if self.flip_v { -cy } else { cy },
+        )
     }
 
     /// Canvas pixels -> screen (client) pixels.
     #[inline]
     pub fn to_screen(&self, cx: f32, cy: f32) -> (f32, f32) {
         let cx = if self.flip_h { -cx } else { cx };
+        let cy = if self.flip_v { -cy } else { cy };
         let (x, y) = (cx * self.zoom, cy * self.zoom);
         if self.rotate_rad == 0.0 {
             return (x + self.pan[0], y + self.pan[1]);
@@ -176,10 +186,56 @@ impl Viewport {
     /// `screen` pinned and mirroring the view rotation so the page flips in
     /// place instead of swinging.
     pub fn flip_around(&mut self, screen: [f32; 2]) {
+        self.flip_toggle_around(screen, true);
+    }
+
+    /// The vertical half: the same in-place toggle about a horizontal axis
+    /// through `screen`.
+    pub fn flip_v_around(&mut self, screen: [f32; 2]) {
+        self.flip_toggle_around(screen, false);
+    }
+
+    /// Either flip. Mirroring the SCREEN image about an axis through the
+    /// anchor is `M·R(t)·S·F` = `R(-t)·S·(M·F)`, because a mirror conjugates
+    /// a rotation into its inverse — so both flips toggle their own field and
+    /// negate the rotation, whatever the other flip is doing.
+    fn flip_toggle_around(&mut self, screen: [f32; 2], horizontal: bool) {
         let anchor = self.to_canvas(screen[0], screen[1]);
-        self.flip_h = !self.flip_h;
+        if horizontal {
+            self.flip_h = !self.flip_h;
+        } else {
+            self.flip_v = !self.flip_v;
+        }
         self.rotate_rad = wrap_angle(-self.rotate_rad);
         self.repin(anchor, screen);
+    }
+
+    /// Is the view MIRRORED (handedness reversed)? Both flips at once is a
+    /// 180° rotation, which is not a mirror — the thing every "are we
+    /// flipped?" consumer actually means.
+    #[inline]
+    pub fn mirrored(&self) -> bool {
+        self.flip_h != self.flip_v
+    }
+
+    /// `(rotation_rad, mirrored)` for the brush engine's view compensation
+    /// (vendor patch #12, which knows only a HORIZONTAL flip).
+    ///
+    /// The engine sees the linear part `R(t)·S·F` only, so any `(t', flip')`
+    /// with the same linear map behaves identically. A vertical flip is a
+    /// horizontal one turned half a circle — `diag(1,-1) = R(pi)·diag(-1,1)`
+    /// — so `flip_v` costs `+pi` of rotation and flips the mirror bit, and
+    /// H+V lands on a plain `t+pi` with no mirror at all. Skip this and a
+    /// vertically flipped view feeds the C mirrored motion directions,
+    /// which the direction-mapped dynamics render as subtly wrong dabs.
+    #[inline]
+    pub fn brush_view(&self) -> (f32, bool) {
+        let rot = if self.flip_v {
+            wrap_angle(self.rotate_rad + std::f32::consts::PI)
+        } else {
+            self.rotate_rad
+        };
+        (rot, self.mirrored())
     }
 
     /// Multiply the zoom, keeping the canvas point currently under `screen`
@@ -234,6 +290,7 @@ impl Viewport {
             zoom,
             rotate_rad: 0.0,
             flip_h: false,
+            flip_v: false,
         }
     }
 
@@ -3267,6 +3324,148 @@ mod viewport_tests {
         assert!(close(vp.rotate_rad, 0.3));
         let s = vp.to_screen(anchor.0, anchor.1);
         assert!(close2(s, (centre[0], centre[1])));
+    }
+
+    /// The vertical half of the flip (ROADMAP good-first-issue #1). Same
+    /// shape as the horizontal test above, one axis over: round trips hold,
+    /// the anchor stays put, DOWN becomes UP, and x is left alone.
+    #[test]
+    fn flip_v_mirrors_the_other_axis_and_pins_its_anchor() {
+        let mut vp = Viewport {
+            pan: [200.0, 100.0],
+            zoom: 2.0,
+            rotate_rad: 0.3,
+            ..Default::default()
+        };
+        let centre = [512.0f32, 384.0];
+        let anchor = vp.to_canvas(centre[0], centre[1]);
+
+        vp.flip_v_around(centre);
+        assert!(vp.flip_v && !vp.flip_h);
+        let s = vp.to_screen(anchor.0, anchor.1);
+        assert!(
+            close2(s, (centre[0], centre[1])),
+            "flip moved the anchor: {s:?}"
+        );
+        for (cx, cy) in [(0.0, 0.0), (128.0, 64.0), (-40.0, 900.0)] {
+            let sc = vp.to_screen(cx, cy);
+            assert!(
+                close2(vp.to_canvas(sc.0, sc.1), (cx, cy)),
+                "flip_v roundtrip {cx},{cy}"
+            );
+        }
+        // Unrotated so the axes read straight: below the anchor lands above.
+        let mut flat = Viewport {
+            pan: [200.0, 100.0],
+            zoom: 2.0,
+            flip_v: true,
+            ..Default::default()
+        };
+        let a = flat.to_screen(50.0, 50.0);
+        let below = flat.to_screen(50.0, 60.0);
+        assert!(below.1 < a.1, "mirror reverses y: {below:?} vs {a:?}");
+        let right = flat.to_screen(60.0, 50.0);
+        assert!(right.0 > a.0, "x is untouched: {right:?} vs {a:?}");
+
+        // zoom_around still pins its anchor while flipped (the transform
+        // helpers all go through to_canvas/to_screen).
+        let pinned = flat.to_canvas(centre[0], centre[1]);
+        flat.zoom_around(centre, 2.0);
+        assert!(
+            close2(flat.to_screen(pinned.0, pinned.1), (centre[0], centre[1])),
+            "zoom_around moved the anchor under a vertical flip"
+        );
+        assert!(close(flat.zoom, 4.0));
+
+        // Flipping back restores the original transform.
+        vp.flip_v_around(centre);
+        assert!(!vp.flip_v);
+        assert!(close(vp.rotate_rad, 0.3));
+        assert!(close2(vp.to_screen(anchor.0, anchor.1), (centre[0], centre[1])));
+    }
+
+    /// H+V composed is a 180° POINT reflection, not a mirror: both axes
+    /// reverse, round trips hold, and the view is not `mirrored()`.
+    #[test]
+    fn both_flips_compose_into_a_point_reflection() {
+        let mut vp = Viewport {
+            pan: [200.0, 100.0],
+            zoom: 2.0,
+            ..Default::default()
+        };
+        let centre = [512.0f32, 384.0];
+        vp.flip_around(centre);
+        vp.flip_v_around(centre);
+        assert!(vp.flip_h && vp.flip_v);
+        assert!(!vp.mirrored(), "two flips cancel the handedness reversal");
+
+        let a = vp.to_screen(50.0, 50.0);
+        for (dx, dy) in [(10.0f32, 0.0f32), (0.0, 10.0), (7.0, -3.0)] {
+            let p = vp.to_screen(50.0 + dx, 50.0 + dy);
+            let plain = Viewport {
+                pan: vp.pan,
+                zoom: vp.zoom,
+                rotate_rad: vp.rotate_rad,
+                ..Default::default()
+            };
+            let q = plain.to_screen(50.0, 50.0);
+            let q2 = plain.to_screen(50.0 - dx, 50.0 - dy);
+            assert!(
+                close2((p.0 - a.0, p.1 - a.1), (q2.0 - q.0, q2.1 - q.1)),
+                "H+V must negate the offset: {dx},{dy}"
+            );
+        }
+        for (cx, cy) in [(0.0, 0.0), (128.0, 64.0), (-40.0, 900.0)] {
+            let sc = vp.to_screen(cx, cy);
+            assert!(
+                close2(vp.to_canvas(sc.0, sc.1), (cx, cy)),
+                "H+V roundtrip {cx},{cy}"
+            );
+        }
+        let pinned = vp.to_canvas(centre[0], centre[1]);
+        vp.zoom_around(centre, 0.5);
+        assert!(
+            close2(vp.to_screen(pinned.0, pinned.1), (centre[0], centre[1])),
+            "zoom_around moved the anchor under H+V"
+        );
+    }
+
+    /// `brush_view()` must hand patch #12 a `(rotation, mirror)` pair whose
+    /// linear map IS the viewport's own — that equivalence is the whole
+    /// reason the brush needs no vertical-flip flag of its own.
+    #[test]
+    fn brush_view_reproduces_the_real_transform() {
+        for &rot in &[0.0f32, 0.3, -1.9, FRAC_PI_2] {
+            for &(fh, fv) in &[(false, false), (true, false), (false, true), (true, true)] {
+                let vp = Viewport {
+                    pan: [17.0, -4.0],
+                    zoom: 2.0,
+                    rotate_rad: rot,
+                    flip_h: fh,
+                    flip_v: fv,
+                };
+                let (brot, bmirror) = vp.brush_view();
+                // The pair, as a viewport the brush COULD have been given.
+                let equiv = Viewport {
+                    pan: vp.pan,
+                    zoom: vp.zoom,
+                    rotate_rad: brot,
+                    flip_h: bmirror,
+                    flip_v: false,
+                };
+                let o = vp.to_screen(0.0, 0.0);
+                let oe = equiv.to_screen(0.0, 0.0);
+                for (cx, cy) in [(10.0, 0.0), (0.0, 10.0), (-3.0, 7.0)] {
+                    let d = vp.to_screen(cx, cy);
+                    let de = equiv.to_screen(cx, cy);
+                    assert!(
+                        close2((d.0 - o.0, d.1 - o.1), (de.0 - oe.0, de.1 - oe.1)),
+                        "brush_view diverges at rot {rot} flips {fh}/{fv}"
+                    );
+                }
+                assert!(brot.abs() <= PI + 1e-6, "brush rotation stays wrapped");
+            }
+        }
     }
 
     #[test]

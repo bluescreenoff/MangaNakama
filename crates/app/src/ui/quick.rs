@@ -109,6 +109,7 @@ pub fn command_index() -> Vec<(&'static str, &'static str, AppCmd)> {
         ("Zoom fit", "View (Ctrl+0)", ZoomFit),
         ("Pixel size (100%)", "View (Ctrl+1)", Zoom100),
         ("Flip view", "View (Ctrl+9)", FlipView),
+        ("Flip view vertically", "View (Ctrl+Shift+9)", FlipViewV),
         ("Reset rotation", "View", RotateReset),
         ("Reset rotation and flip", "View", RotateFlipReset),
         ("Reset view (upright, unmirrored, fitted)", "View", ViewReset),
