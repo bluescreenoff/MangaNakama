@@ -396,11 +396,21 @@ impl Rulers {
                 let Ruler::Perspective { a, b } = self.items[pi] else {
                     unreachable!("position() found a Perspective");
                 };
+                // The third family is perpendicular TO THE EYE LEVEL, not
+                // to the canvas — a tilted horizon tilts its verticals with
+                // it. Degenerate a == b has no eye level: canvas-up.
+                let ed = [b[0] - a[0], b[1] - a[1]];
+                let en = (ed[0] * ed[0] + ed[1] * ed[1]).sqrt();
+                let vert = if en < 1e-3 {
+                    [0.0, 1.0]
+                } else {
+                    [-ed[1] / en, ed[0] / en]
+                };
                 // Best |cos| between the stroke's direction and each
                 // family's direction at the anchor; the verticals are
                 // always a candidate.
                 let mut best_dot = -1.0;
-                let mut line = (p0, [0.0, 1.0]);
+                let mut line = (p0, vert);
                 for vp in [a, b] {
                     let vd = [p0[0] - vp[0], p0[1] - vp[1]];
                     let vn = (vd[0] * vd[0] + vd[1] * vd[1]).sqrt();
@@ -413,8 +423,8 @@ impl Rulers {
                         line = (vp, [vd[0] / vn, vd[1] / vn]);
                     }
                 }
-                if nd[1].abs() > best_dot {
-                    line = (p0, [0.0, 1.0]);
+                if (nd[0] * vert[0] + nd[1] * vert[1]).abs() > best_dot {
+                    line = (p0, vert);
                 }
                 lock.ruler = Some(pi);
                 lock.line = Some(line);
@@ -738,6 +748,44 @@ mod part3_tests {
         for q in &out[1..] {
             assert!((q[0] - 100.0).abs() < 1e-3, "x pinned: {q:?}");
         }
+    }
+
+    /// The third family is PERPENDICULAR TO THE EYE LEVEL, not to the
+    /// canvas: tilt the horizon (Dutch angle) and the verticals tilt with
+    /// it. Canvas-vertical would draw a sheared pseudo-vertical here.
+    #[test]
+    fn perspective_verticals_follow_a_tilted_horizon() {
+        let (a, b) = ([0.0f32, 0.0], [100.0f32, 30.0]);
+        let rs = Rulers {
+            items: vec![Ruler::Perspective { a, b }],
+            on: true,
+            ..Default::default()
+        };
+        let ed = [b[0] - a[0], b[1] - a[1]];
+        let en = (ed[0] * ed[0] + ed[1] * ed[1]).sqrt();
+        let perp = [-ed[1] / en, ed[0] / en];
+        let anchor = [200.0, 200.0];
+        // Travel along the perpendicular, then wander: the bind holds.
+        let out = stroke(
+            &rs,
+            &[
+                anchor,
+                [anchor[0] + perp[0] * 40.0, anchor[1] + perp[1] * 40.0],
+                [170.0, 300.0],
+                [230.0, 400.0],
+            ],
+        );
+        for q in &out[1..] {
+            assert!(
+                on_line(*q, anchor, perp),
+                "sample {q:?} rides the perpendicular-to-horizon member"
+            );
+        }
+        // And the drawn direction really is perpendicular to a→b.
+        let seg = [out[3][0] - out[2][0], out[3][1] - out[2][1]];
+        let sn = (seg[0] * seg[0] + seg[1] * seg[1]).sqrt();
+        let cos = (seg[0] * ed[0] + seg[1] * ed[1]) / (sn * en);
+        assert!(cos.abs() < 1e-3, "cos to the eye level = {cos}");
     }
 
     /// Acquisition arbitration: a pen ON a discrete ruler (≤8 px) keeps
