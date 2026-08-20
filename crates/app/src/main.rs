@@ -1381,6 +1381,7 @@ fn shortcut(app: &mut App, vk: u16, repeat: bool) -> bool {
                 app.object_sel
                     .map(|(layer, frame)| AppCmd::FrameDelete { layer, frame })
             })
+            .or_else(|| app.vector_sel.map(|stroke| AppCmd::VectorDelete { stroke }))
             .or(Some(AppCmd::ClearLayer)),
         (false, 0x2E) => Some(AppCmd::ClearLayer),
         // E toggles between the Eraser tool and the Pen (CSP's default keys).

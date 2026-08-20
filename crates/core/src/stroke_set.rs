@@ -77,6 +77,115 @@ pub struct StrokeSet {
 }
 
 impl StrokeSet {
+    /// The vector eraser's TRIM (docs/VECTOR-INKING.md phase 3, Clip
+    /// Studio's "erase up to intersection"): every stroke the eraser path
+    /// touches (within `radius`) loses the touched span EXTENDED to the
+    /// nearest crossings with OTHER strokes — or to its own ends. A
+    /// remainder shorter than two samples vanishes; a middle cut splits
+    /// the stroke in two. Returns whether anything changed.
+    ///
+    /// v1 grain: cuts land on the sample nearest the crossing, not the
+    /// exact intersection coordinate — samples are input-density (a couple
+    /// of px apart), so the error is subpixel-ish and the replay stays
+    /// sample-faithful.
+    pub fn trim(&mut self, eraser: &[(f32, f32)], radius: f32) -> bool {
+        if eraser.is_empty() || self.strokes.is_empty() {
+            return false;
+        }
+        // Which sample indices of stroke `si` cross any OTHER stroke.
+        let crossings = |strokes: &[VectorStroke], si: usize| -> Vec<usize> {
+            let s = &strokes[si];
+            let mut out = Vec::new();
+            for (a, w) in s.points.windows(2).enumerate() {
+                let seg_a = ([w[0].0, w[0].1], [w[1].0, w[1].1]);
+                'others: for (oi, o) in strokes.iter().enumerate() {
+                    if oi == si {
+                        continue;
+                    }
+                    for v in o.points.windows(2) {
+                        if segments_cross(seg_a, ([v[0].0, v[0].1], [v[1].0, v[1].1])) {
+                            out.push(a);
+                            break 'others;
+                        }
+                    }
+                }
+            }
+            out
+        };
+        let touched = |s: &VectorStroke| -> Vec<bool> {
+            s.points
+                .iter()
+                .map(|p| {
+                    eraser.len() == 1 && {
+                        let e = eraser[0];
+                        (p.0 - e.0).hypot(p.1 - e.1) <= radius
+                    } || eraser.windows(2).any(|w| {
+                        seg_point_dist([w[0].0, w[0].1], [w[1].0, w[1].1], [p.0, p.1]) <= radius
+                    })
+                })
+                .collect()
+        };
+
+        let mut result: Vec<VectorStroke> = Vec::with_capacity(self.strokes.len());
+        let mut changed = false;
+        for si in 0..self.strokes.len() {
+            let s = &self.strokes[si];
+            let touch = touched(s);
+            if !touch.iter().any(|&t| t) {
+                result.push(s.clone());
+                continue;
+            }
+            changed = true;
+            let cuts = crossings(&self.strokes, si);
+            // Erase mask: every touched run, widened to the neighbouring
+            // crossings (or the ends).
+            let n = s.points.len();
+            let mut erase = vec![false; n];
+            let mut i = 0;
+            while i < n {
+                if touch[i] {
+                    let run_end = (i..n).take_while(|&j| touch[j]).last().unwrap_or(i);
+                    // Nearest crossing strictly below the run start; the
+                    // span keeps [0..=lo] alive, so erase from lo+1.
+                    let lo = cuts.iter().rev().find(|&&c| c < i).map_or(0, |&c| c + 1);
+                    // Nearest crossing at/after the run end: samples up to
+                    // and including the crossing segment's start die.
+                    let hi = cuts
+                        .iter()
+                        .find(|&&c| c >= run_end)
+                        .map_or(n - 1, |&c| c);
+                    for e in erase.iter_mut().take(hi + 1).skip(lo) {
+                        *e = true;
+                    }
+                    i = hi + 1;
+                } else {
+                    i += 1;
+                }
+            }
+            // Kept intervals (≥ 2 samples) become strokes.
+            let mut start: Option<usize> = None;
+            for j in 0..=n {
+                let keep = j < n && !erase[j];
+                match (start, keep) {
+                    (None, true) => start = Some(j),
+                    (Some(a), false) => {
+                        if j - a >= 2 {
+                            let mut part = s.clone();
+                            part.points = s.points[a..j].to_vec();
+                            result.push(part);
+                        }
+                        start = None;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if changed {
+            self.strokes = result;
+        }
+        changed
+    }
+
     /// Serialize for the `.ora` sidecar entry (`data/layerN.strokes.json`).
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).unwrap_or_else(|_| "{\"strokes\":[]}".into())
@@ -90,9 +199,106 @@ impl StrokeSet {
     }
 }
 
+/// Proper segment intersection (touching endpoints count — a T-junction is
+/// a junction).
+fn segments_cross(a: ([f32; 2], [f32; 2]), b: ([f32; 2], [f32; 2])) -> bool {
+    let d = |p: [f32; 2], q: [f32; 2], r: [f32; 2]| {
+        (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
+    };
+    let (d1, d2) = (d(b.0, b.1, a.0), d(b.0, b.1, a.1));
+    let (d3, d4) = (d(a.0, a.1, b.0), d(a.0, a.1, b.1));
+    if ((d1 > 0.0 && d2 < 0.0) || (d1 < 0.0 && d2 > 0.0))
+        && ((d3 > 0.0 && d4 < 0.0) || (d3 < 0.0 && d4 > 0.0))
+    {
+        return true;
+    }
+    let on = |p: [f32; 2], q: [f32; 2], r: [f32; 2]| {
+        d(p, q, r).abs() < 1e-6
+            && r[0] >= p[0].min(q[0]) - 1e-6
+            && r[0] <= p[0].max(q[0]) + 1e-6
+            && r[1] >= p[1].min(q[1]) - 1e-6
+            && r[1] <= p[1].max(q[1]) + 1e-6
+    };
+    on(b.0, b.1, a.0) || on(b.0, b.1, a.1) || on(a.0, a.1, b.0) || on(a.0, a.1, b.1)
+}
+
+fn seg_point_dist(a: [f32; 2], b: [f32; 2], p: [f32; 2]) -> f32 {
+    let (abx, aby) = (b[0] - a[0], b[1] - a[1]);
+    let len2 = abx * abx + aby * aby;
+    let t = if len2 <= f32::EPSILON {
+        0.0
+    } else {
+        (((p[0] - a[0]) * abx + (p[1] - a[1]) * aby) / len2).clamp(0.0, 1.0)
+    };
+    (p[0] - (a[0] + abx * t)).hypot(p[1] - (a[1] + aby * t))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn line(x0: f32, y0: f32, x1: f32, y1: f32, n: usize) -> VectorStroke {
+        let pts: Vec<PenSample> = (0..n)
+            .map(|i| {
+                let t = i as f32 / (n - 1) as f32;
+                PenSample {
+                    x: x0 + (x1 - x0) * t,
+                    y: y0 + (y1 - y0) * t,
+                    pressure: 1.0,
+                    tilt_x: 0.0,
+                    tilt_y: 0.0,
+                    t_ms: i as f64,
+                }
+            })
+            .collect();
+        VectorStroke::from_samples(&pts, "pen", 8.0, [0, 0, 0], false)
+    }
+
+    /// The headline behaviour: a horizontal stroke crossed by two verticals
+    /// — the eraser touches the middle span, and exactly the between-the-
+    /// crossings piece dies; the outer pieces survive as TWO strokes.
+    #[test]
+    fn trim_erases_up_to_the_neighbouring_intersections() {
+        let mut set = StrokeSet {
+            strokes: vec![
+                line(0.0, 50.0, 300.0, 50.0, 61), // horizontal, every 5px
+                line(100.0, 0.0, 100.0, 100.0, 21),
+                line(200.0, 0.0, 200.0, 100.0, 21),
+            ],
+        };
+        // Touch the horizontal at x≈150 only.
+        assert!(set.trim(&[(150.0, 50.0)], 6.0));
+        assert_eq!(set.strokes.len(), 4, "middle span died, two pieces + verticals");
+        // Piece 1 ends at the first crossing (x≈100), piece 2 begins at the
+        // second (x≈200) — sample-grain tolerance.
+        let xs: Vec<(f32, f32)> = set.strokes[..2]
+            .iter()
+            .map(|s| (s.points.first().unwrap().0, s.points.last().unwrap().0))
+            .collect();
+        assert!(xs[0].0 <= 0.5 && (xs[0].1 - 100.0).abs() <= 6.0, "{xs:?}");
+        assert!((xs[1].0 - 200.0).abs() <= 6.0 && xs[1].1 >= 299.0, "{xs:?}");
+        // The verticals are untouched.
+        assert_eq!(set.strokes[2].points.len(), 21);
+        assert_eq!(set.strokes[3].points.len(), 21);
+    }
+
+    /// No crossings: the touched stroke dies to its ENDS — the whole
+    /// stroke vanishes (the overshooting-hatch case with nothing to stop
+    /// at).
+    #[test]
+    fn trim_without_intersections_takes_the_whole_stroke() {
+        let mut set = StrokeSet {
+            strokes: vec![line(0.0, 50.0, 300.0, 50.0, 61)],
+        };
+        assert!(set.trim(&[(150.0, 50.0)], 6.0));
+        assert!(set.strokes.is_empty());
+        // And an eraser that touches nothing changes nothing.
+        let mut set = StrokeSet {
+            strokes: vec![line(0.0, 50.0, 300.0, 50.0, 61)],
+        };
+        assert!(!set.trim(&[(150.0, 500.0)], 6.0));
+        assert_eq!(set.strokes.len(), 1);
+    }
 
     /// One drawn stroke = ONE undo step that takes back pixels AND record
     /// together (a half-undo would leave geometry describing missing ink).

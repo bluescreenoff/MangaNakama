@@ -2291,9 +2291,14 @@ impl App {
         }
         // Vector inking phase 1 (docs/VECTOR-INKING.md): a plain ink stroke
         // on a recording layer captures its post-snap samples beside the
-        // pixels — `end_stroke` closes both into ONE undo group.
+        // pixels — `end_stroke` closes both into ONE undo group. Mirror and
+        // wrap strokes deliberately do NOT record: their twin-engine halves
+        // are not in the captured samples, so an edit re-render would drop
+        // the mirrored ink — leaving them out of the record is the honest
+        // half (the manual says so).
         self.vector_capture = (!(self.mask_edit || live)
             && !sel_paint
+            && !(self.mirror_x || self.mirror_y || self.wrap_x || self.wrap_y)
             && self.doc.active_layer().strokes.is_some())
         .then(Vec::new);
         self.input_resampler.reset();
@@ -2503,6 +2508,31 @@ impl App {
         // Vector inking: close the op as ONE pixels-plus-record group when
         // this stroke captured (docs/VECTOR-INKING.md); otherwise stock.
         match self.vector_capture.take() {
+            // Phase 3: the ERASER on a vector layer TRIMS geometry (up to
+            // the neighbouring intersections) instead of recording an
+            // eraser stroke. The live raster erase already happened inside
+            // the op; the re-derive replaces it with the trimmed truth —
+            // and an eraser that touched no stroke reverts to the op's own
+            // pre-images and spends nothing.
+            Some(samples) if !samples.is_empty() && self.eraser_active() => {
+                let li = self.doc.active;
+                let before = self.doc.layers[li].strokes.clone().unwrap_or_default();
+                let path: Vec<(f32, f32)> = samples.iter().map(|s| (s.x, s.y)).collect();
+                let radius = (self.props_current.size_px / 2.0).max(1.0);
+                let changed = self.doc.layers[li]
+                    .strokes
+                    .as_mut()
+                    .is_some_and(|set| set.trim(&path, radius));
+                if changed {
+                    self.vector_sel = None; // indices just restructured
+                    self.rederive_vector_layer(li);
+                    self.doc.end_op_vector_set(before, "Trim strokes");
+                    self.set_status("strokes trimmed to their crossings");
+                } else {
+                    self.doc.abort_op_restore();
+                }
+                self.renderer.invalidate();
+            }
             Some(samples) if !samples.is_empty() => {
                 let preset = self
                     .selected_preset

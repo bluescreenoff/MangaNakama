@@ -1676,6 +1676,29 @@ impl Document {
         true
     }
 
+    /// Vector inking phase 3: close the open op as ONE set-restructuring
+    /// group (trim eraser, stroke delete) — the re-derived tiles' pre-images
+    /// plus the whole set as it was BEFORE.
+    pub fn end_op_vector_set(
+        &mut self,
+        before: crate::stroke_set::StrokeSet,
+        label: &str,
+    ) -> bool {
+        let Some((li, _label, tiles)) = self.take_op() else {
+            return false;
+        };
+        self.history.push_labeled(
+            label,
+            UndoGroup::VectorSet {
+                layer: li,
+                tiles,
+                strokes: before,
+            },
+        );
+        self.touch();
+        true
+    }
+
     /// Vector inking phase 2: close the open op as ONE stroke-edit group —
     /// the re-derived tiles' pre-images plus the stroke as it was BEFORE
     /// the edit (`strokes[index]` must already hold the edited version).
@@ -1721,6 +1744,19 @@ impl Document {
             .take()
             .unwrap_or_else(|| "Edit".into());
         Some((li, label, tiles))
+    }
+
+    /// Close the open op by RESTORING every pre-image — as if the op never
+    /// happened, and no step is spent. (The vector eraser that touched no
+    /// stroke reverts its live raster erase this way.)
+    pub fn abort_op_restore(&mut self) {
+        if let Some((li, _label, tiles)) = self.take_op()
+            && let Some(l) = self.layers.get_mut(li)
+        {
+            for (idx, snap) in tiles {
+                l.set_tile(idx, snap);
+            }
+        }
     }
 
     /// Drop the open op's recording **without** restoring anything. The pixels
@@ -1876,6 +1912,27 @@ impl Document {
                     tiles: inverse,
                     index,
                     stroke,
+                })
+            }
+            UndoGroup::VectorSet {
+                layer,
+                tiles,
+                strokes,
+            } => {
+                let l = self.layers.get_mut(layer)?;
+                let mut inverse = Vec::with_capacity(tiles.len());
+                for (idx, snapshot) in tiles {
+                    inverse.push((idx, l.tile_arc(idx).cloned()));
+                    l.set_tile(idx, snapshot);
+                }
+                let strokes_before = match &mut l.strokes {
+                    Some(set) => std::mem::replace(set, strokes),
+                    None => strokes,
+                };
+                Some(UndoGroup::VectorSet {
+                    layer,
+                    tiles: inverse,
+                    strokes: strokes_before,
                 })
             }
             UndoGroup::Frames { layer, frames } => {

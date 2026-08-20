@@ -1329,6 +1329,8 @@ pub enum AppCmd {
     /// Vector inking (docs/VECTOR-INKING.md): a raster layer that RECORDS
     /// its strokes as editable geometry beside the pixels.
     AddVectorLayer,
+    /// Delete the Object tool's selected recorded stroke (Del).
+    VectorDelete { stroke: usize },
     /// New empty folder above the active layer (CSP layer-palette button).
     AddFolder,
     /// Expand/collapse a folder row in the Layers palette.
@@ -3131,6 +3133,28 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             app.doc.set_active(li);
             app.renderer.invalidate();
             app.set_status("vector layer: strokes record as editable geometry");
+            app.mark_dirty();
+        }
+        AppCmd::VectorDelete { stroke } => {
+            let li = app.doc.active;
+            let Some(before) = app.doc.layers[li].strokes.clone() else {
+                return;
+            };
+            if stroke >= before.strokes.len() {
+                return;
+            }
+            app.doc.begin_op_on(li);
+            app.doc.layers[li]
+                .strokes
+                .as_mut()
+                .expect("checked above")
+                .strokes
+                .remove(stroke);
+            app.vector_sel = None;
+            app.rederive_vector_layer(li);
+            app.doc.end_op_vector_set(before, "Delete stroke");
+            app.renderer.invalidate();
+            app.set_status("stroke deleted");
             app.mark_dirty();
         }
         AppCmd::AddFolder => {

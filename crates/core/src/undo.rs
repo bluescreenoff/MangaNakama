@@ -105,6 +105,17 @@ pub enum UndoGroup {
         index: usize,
         stroke: Box<crate::stroke_set::VectorStroke>,
     },
+    /// Vector inking phase 3: a set-RESTRUCTURING gesture (the trim eraser
+    /// splits and deletes across many strokes; stroke delete). Whole-set
+    /// snapshot beside the re-derived tiles' pre-images. TRADE, recorded:
+    /// unlike Arc-cheap tile snapshots this deep-copies the affected sets —
+    /// fine at to-day's stroke counts; a hatching-heavy page may want a
+    /// changed-strokes diff here later.
+    VectorSet {
+        layer: usize,
+        tiles: Vec<(TileIdx, Option<Arc<Tile>>)>,
+        strokes: crate::stroke_set::StrokeSet,
+    },
     /// PA-001: the paper colour before the change. The only DOCUMENT-level
     /// group — it belongs to no layer, which is why [`UndoGroup::layer`]
     /// returns an `Option`. The paper's EYE is not in here on purpose: it is
@@ -127,7 +138,8 @@ impl UndoGroup {
             UndoGroup::Tiles { tiles, .. }
             | UndoGroup::GenLines { tiles, .. }
             | UndoGroup::VectorStroke { tiles, .. }
-            | UndoGroup::VectorEdit { tiles, .. } => tiles.len(),
+            | UndoGroup::VectorEdit { tiles, .. }
+            | UndoGroup::VectorSet { tiles, .. } => tiles.len(),
             UndoGroup::Frames { .. }
             | UndoGroup::Balloons { .. }
             | UndoGroup::Texts { .. }
@@ -153,7 +165,8 @@ impl UndoGroup {
             | UndoGroup::Edges { layer, .. }
             | UndoGroup::GenLines { layer, .. }
             | UndoGroup::VectorStroke { layer, .. }
-            | UndoGroup::VectorEdit { layer, .. } => Some(*layer),
+            | UndoGroup::VectorEdit { layer, .. }
+            | UndoGroup::VectorSet { layer, .. } => Some(*layer),
             UndoGroup::Paper { .. } | UndoGroup::Rulers { .. } => None,
         }
     }

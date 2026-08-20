@@ -108,6 +108,31 @@ half: a <em>locked</em> sub tool never writes the nudge you took for one
 panel, so what the next launch restores is the snapshot the padlock
 froze.</div>
 
+<h2>Vector layers</h2>
+<div class="quirk"><b>A vector layer is a normal raster layer that also
+REMEMBERS every stroke as editable geometry.</b> <b>Layer ▸ New vector
+layer</b> starts one; drawing feels identical — the record rides beside
+the pixels. With the <b>Object tool</b> on that layer, click a stroke:
+drag a square handle to bend it locally (about one brush-width of
+neighbourhood moves), drag anywhere else on the line to slide the whole
+stroke, press <b>Del</b> to remove it. The line follows your cursor
+live; the ink re-renders the moment you let go — through the same brush,
+pressure and stabilizer it was drawn with.</div>
+<div class="quirk"><b>The eraser on a vector layer erases UP TO THE
+CROSSINGS.</b> Touch a line with the eraser and the touched span dies
+out to where that line crosses other lines — or to its ends, so a line
+that crosses nothing vanishes whole. This is the overshoot cleaner:
+hatch past the border, sweep the eraser along the spill, and every tail
+snaps back to the border line. An eraser pass that touches no line
+changes nothing and spends no undo step.</div>
+<div class="quirk"><b>Two things do not record yet, and say so.</b>
+Strokes drawn with mirror or wrap-around active still ink normally but
+are not remembered as geometry (an edit re-render would drop their
+mirrored halves — so they are left out of the record instead). And
+editing re-renders ONLY what the layer remembers: ink that got onto a
+vector layer any other way (paste, fill) disappears at the first edit.
+Keep pasted material on ordinary layers.</div>
+
 <h2>Importing brushes (.abr, .gbr, .gih)</h2>
 <div class="quirk"><b>Imported brushes land in the group
 <code>imported</code>, and a set imported twice is suffixed rather than
