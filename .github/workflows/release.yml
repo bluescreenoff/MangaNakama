@@ -107,13 +107,23 @@ jobs:
         # "failure" run (the owner's mystery emails). A workflow whose name
         # shows as its file PATH in the Actions tab is one GitHub failed to
         # parse.
+        # Pre-release is decided by the TAG, semver-style, so nobody has to
+        # promote by hand afterwards (v0.1.0 needed a manual `gh release
+        # edit --prerelease=false --latest` because this used to hardcode
+        # --prerelease): a plain `vX.Y.Z` publishes as the featured Latest
+        # release; a suffixed `vX.Y.Z-anything` (rc, beta, test) stays a
+        # pre-release the front page does not showcase.
         run: |
           {
             printf '%s\n' 'Early build for testers. Windows 10/11, 64-bit. Unzip anywhere and run manganakama.exe — keep `assets/` and `manual/` beside it.'
             printf '\n'
             printf '%s\n' 'Bug reports: attach `manganakama.log` from beside the exe (it names the build and records the last crash) and say what you were drawing. Feature requests are welcome as issues.'
           } > release-notes.md
+          case "${{ steps.pack.outputs.tag }}" in
+            *-*) flag="--prerelease" ;;
+            *)   flag="--latest" ;;
+          esac
           gh release create "${{ steps.pack.outputs.tag }}" "${{ steps.pack.outputs.zip }}" \
             --title "MangaNakama ${{ steps.pack.outputs.tag }}" \
             --notes-file release-notes.md \
-            --prerelease
+            "$flag"
