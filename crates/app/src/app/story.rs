@@ -145,10 +145,21 @@ impl App {
     /// PM-045: apply the Text tool's current settings (font, size,
     /// vertical, outline, alignment, spacing) to every visible field in
     /// the chapter. Returns the field count.
+    ///
+    /// `story_fields` lists one entry per ITEM but a restyle rewrites a
+    /// whole text LAYER, so the targets collapse to distinct layers first
+    /// (the list is already page- then layer-ordered, so `dedup` is
+    /// enough). One write per layer = one raster, one re-encode and one
+    /// undo step each: one Ctrl+Z takes the whole button press back.
     pub fn story_apply_tool_style(&mut self) -> usize {
         let mut n = 0;
-        let fields = self.story_fields();
-        for (p, l, _i) in fields {
+        let mut targets: Vec<(usize, usize)> = self
+            .story_fields()
+            .into_iter()
+            .map(|(p, l, _i)| (p, l))
+            .collect();
+        targets.dedup();
+        for (p, l) in targets {
             let styled = {
                 let doc = match p {
                     k if k == self.page_index => &self.doc,
@@ -166,10 +177,12 @@ impl App {
                 }
                 set
             };
+            // One write, but the caller counts FIELDS, not layers.
+            let fields = styled.texts.len();
             if p == self.page_index {
                 self.warm_texts(l);
                 if self.doc.set_texts(l, styled) {
-                    n += 1;
+                    n += fields;
                 }
             } else {
                 let bytes = {
@@ -189,7 +202,7 @@ impl App {
                         e.doc_rev = 0;
                     }
                     self.mark_pages_dirty();
-                    n += 1;
+                    n += fields;
                 }
             }
         }

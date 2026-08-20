@@ -80,7 +80,14 @@ pub struct ReaderState {
     /// handle). Placeholder textures come from the preview tier; the
     /// sharp pass replaces them. A moved rev re-renders â that is the
     /// edit-and-return round trip's "only changed pages re-render".
-    pub tex: std::collections::HashMap<usize, (u64, bool, (u32, u32), egui::TextureHandle)>,
+    ///
+    /// Keyed by `PageEntry::uid`, NOT by page index: a reorder (or an
+    /// insert/delete before a cached page) slides every later page into
+    /// somebody else's slot, and the rev guard cannot catch that because
+    /// two pages can carry the SAME rev — a single-file `.mnc` loads them
+    /// all at revision 0. Under a uid key, a lookup for page X can only
+    /// ever return page X's art.
+    pub tex: std::collections::HashMap<u64, (u64, bool, (u32, u32), egui::TextureHandle)>,
 }
 
 impl Default for ReaderState {
@@ -129,12 +136,21 @@ fn page_rev(app: &App, i: usize) -> u64 {
     }
 }
 
-/// The work folder's reader state (v2.1): flagged pages + last screen,
-/// persisted beside work.mnc so a proofreading pass survives restarts and
-/// projects never see each other's state.
+/// The work folder's reader state (v2.1): flagged pages + where he
+/// stopped, persisted beside work.mnc so a proofreading pass survives
+/// restarts and projects never see each other's state.
+///
+/// The position is a PAGE, not a screen. Screen indices depend on the
+/// view mode and the shift-pair offset, and BOTH are session-only — a
+/// Single-mode screen 90 restored into the default Double mode landed
+/// near page 180. The old key was `last` (a screen); it is renamed here
+/// so an old file's value is an unknown field and gets ignored rather
+/// than read as a page. `serde(default)` keeps that from costing the
+/// flags: a sidecar with no `last_page` still loads its notes.
 #[derive(serde::Serialize, serde::Deserialize, Default)]
+#[serde(default)]
 struct ReaderSidecar {
-    last: usize,
+    last_page: usize,
     /// Flagged page -> note ("" = flagged, not yet described).
     flags: std::collections::BTreeMap<usize, String>,
 }
@@ -190,33 +206,31 @@ impl App {
             self.reader.screen = 0;
         }
         // Reader v2.1: a work folder carries its own reader state — flags
-        // AND last screen — in `mnc-reader.json` beside work.mnc (the r106
-        // recorded follow-up: a proofreading pass survives restarts and
-        // projects never see each other's state).
-        if let Some((last, flags)) = self.reader_load_state() {
+        // AND the last-read page — in `mnc-reader.json` beside work.mnc
+        // (the r106 recorded follow-up: a proofreading pass survives
+        // restarts and projects never see each other's state).
+        let last = if let Some((last_page, flags)) = self.reader_load_state() {
             self.reader.flags = flags;
-            if self.reader.screen == 0 && last > 0 && last < self.reader_screens() {
-                self.reader.screen = last;
-                self.set_status(format!(
-                    "reader — resumed at screen {} (F flags a mistake)",
-                    last + 1
-                ));
-                self.needs_redraw = true;
-                return;
-            }
-        } else if self.reader.screen == 0 && self.layout.reader_last > 0 {
-            // The r106 app-level fallback (ui.txt `reader_last=`) — the
+            last_page
+        } else {
+            // The r106 app-level fallback (ui.txt `reader_page=`) — the
             // only memory a folderless session has.
-            let last = self.layout.reader_last;
-            if last < self.reader_screens() {
-                self.reader.screen = last;
-                self.set_status(format!(
-                    "reader — resumed at screen {} (F flags a mistake)",
-                    last + 1
-                ));
-                self.needs_redraw = true;
-                return;
-            }
+            self.layout.reader_page
+        };
+        // The saved position is a PAGE: map it to whichever screen shows
+        // it under the mode/offset in force NOW. A page that no longer
+        // exists maps to nothing and starts from the front.
+        if self.reader.screen == 0
+            && last > 0
+            && let Some(s) = self.reader_screen_of_page(last)
+        {
+            self.reader.screen = s;
+            self.set_status(format!(
+                "reader — resumed at page {} (F flags a mistake)",
+                last + 1
+            ));
+            self.needs_redraw = true;
+            return;
         }
         self.set_status("reader — ←/→ turns, F11 fullscreen, F flags, Esc exits");
         self.needs_redraw = true;
@@ -224,8 +238,8 @@ impl App {
     pub fn reader_close(&mut self) {
         self.reader.open = false;
         // Reader v2: remember where he stopped (ui.txt via UiLayout).
-        self.layout.note_reader_last(self.reader.screen);
-        // v2.1: the work folder's sidecar carries flags + last screen.
+        self.layout.note_reader_page(self.reader_screen_first_page());
+        // v2.1: the work folder's sidecar carries flags + last page.
         self.reader_save_state();
         if self.reader.fs_used {
             self.reader_set_fullscreen(false);
@@ -335,7 +349,7 @@ impl App {
             return;
         };
         let sc = ReaderSidecar {
-            last: self.reader.screen,
+            last_page: self.reader_screen_first_page(),
             flags: self
                 .reader
                 .flags
@@ -364,28 +378,56 @@ impl App {
         let sc: ReaderSidecar = serde_json::from_str(&s).ok()?;
         let n = self.pages.len();
         Some((
-            sc.last,
+            sc.last_page,
             sc.flags.into_iter().filter(|(p, _)| *p < n).collect(),
         ))
     }
 
     /// Reader v2: open the screen that shows page `i` (the flag list's Go).
     pub fn reader_goto_page(&mut self, i: usize) {
+        if let Some(s) = self.reader_screen_of_page(i) {
+            self.reader.screen = s;
+            self.needs_redraw = true;
+        }
+    }
+
+    /// Which screen shows page `i` under the CURRENT mode/offset — the
+    /// half of the persistence contract that turns a saved page back
+    /// into a position. `None` for a page that no longer exists.
+    pub fn reader_screen_of_page(&self, i: usize) -> Option<usize> {
         if i >= self.pages.len() {
-            return;
+            return None;
         }
-        for s in 0..self.reader_screens() {
-            if self.reader_screen_pages(s).contains(&Some(i)) {
-                self.reader.screen = s;
-                self.needs_redraw = true;
-                return;
-            }
-        }
+        (0..self.reader_screens()).find(|&s| self.reader_screen_pages(s).contains(&Some(i)))
+    }
+
+    /// The FIRST page of the screen being read — the mode-independent
+    /// position the reader persists. A spread's earlier page, whichever
+    /// cell the binding puts it in.
+    pub fn reader_screen_first_page(&self) -> usize {
+        self.reader_screen_pages(self.reader.screen)
+            .iter()
+            .flatten()
+            .copied()
+            .min()
+            .unwrap_or(0)
     }
 
     pub fn reader_return(&mut self) {
         self.reader.open = true;
         self.needs_redraw = true;
+    }
+
+    /// The display texture for page `i` — the ONE place the reader's
+    /// texture map is read (the overlay draws through it too), so the
+    /// index-to-identity step cannot be forgotten at a call site.
+    pub fn reader_tex(&self, i: usize) -> Option<&(u64, bool, (u32, u32), egui::TextureHandle)> {
+        self.reader.tex.get(&self.page_uid(i))
+    }
+
+    /// Page `i`'s runtime identity; 0 (no page) past the end.
+    fn page_uid(&self, i: usize) -> u64 {
+        self.pages.get(i).map_or(0, |e| e.uid)
     }
 
     /// Number of reader screens under the current mode/pairing.
@@ -499,7 +541,7 @@ impl App {
         // at all (cheap, whole current screen).
         for &i in &order {
             let rev = page_rev(self, i);
-            let stale = self.reader.tex.get(&i).is_none_or(|(r, ..)| *r != rev);
+            let stale = self.reader_tex(i).is_none_or(|(r, ..)| *r != rev);
             if stale
                 && i != self.page_index
                 && let Some(gray) = self.preview_for(i)
@@ -515,12 +557,13 @@ impl App {
                             egui::Color32::from_gray(gray.get_pixel(x as u32, y as u32)[0]);
                     }
                 }
+                let uid = self.page_uid(i);
                 let t = self.shell.ctx.load_texture(
-                    format!("mn.reader.{i}"),
+                    format!("mn.reader.{uid}"),
                     ci,
                     egui::TextureOptions::LINEAR,
                 );
-                self.reader.tex.insert(i, (rev, false, (w, h), t));
+                self.reader.tex.insert(uid, (rev, false, (w, h), t));
             }
         }
 
@@ -529,7 +572,7 @@ impl App {
         // shared frame_px drift check does not apply there.
         for &i in &order {
             let rev = page_rev(self, i);
-            let needs = self.reader.tex.get(&i).is_none_or(|(r, sharp, sz, _)| {
+            let needs = self.reader_tex(i).is_none_or(|(r, sharp, sz, _)| {
                 *r != rev || !*sharp || (!self.reader.opts.zoom_100 && self.reader.size_drift(sz))
             });
             if needs {
@@ -544,7 +587,8 @@ impl App {
         // prefetch neighbours; anything else re-renders on revisit.
         const TEX_CAP: usize = 12;
         if self.reader.tex.len() > TEX_CAP {
-            let keep: std::collections::HashSet<usize> = order.iter().copied().collect();
+            let keep: std::collections::HashSet<u64> =
+                order.iter().map(|&i| self.page_uid(i)).collect();
             self.reader.tex.retain(|k, _| keep.contains(k));
         }
     }
@@ -594,11 +638,13 @@ impl App {
         };
         let (iw, ih) = (img.width(), img.height());
         let ci = egui::ColorImage::from_rgba_unmultiplied([iw as usize, ih as usize], img.as_raw());
-        let t =
-            self.shell
-                .ctx
-                .load_texture(format!("mn.reader.{i}"), ci, egui::TextureOptions::LINEAR);
-        self.reader.tex.insert(i, (rev, true, (iw, ih), t));
+        let uid = self.page_uid(i);
+        let t = self.shell.ctx.load_texture(
+            format!("mn.reader.{uid}"),
+            ci,
+            egui::TextureOptions::LINEAR,
+        );
+        self.reader.tex.insert(uid, (rev, true, (iw, ih), t));
     }
 }
 

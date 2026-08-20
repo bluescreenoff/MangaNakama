@@ -3082,17 +3082,17 @@ fn reader_turns_edits_and_returns() {
     // it skips the placeholder tier by design and goes straight to
     // its sharp render.)
     app.reader_frame();
-    assert!(app.reader.tex.contains_key(&1), "screen-1 page textured");
+    assert!(app.reader_tex(1).is_some(), "screen-1 page textured");
     assert!(
-        app.reader.tex[&1].1,
+        app.reader_tex(1).unwrap().1,
         "current screen's page sharp after frame 1"
     );
     assert!(
-        !app.reader.tex.contains_key(&0),
+        app.reader_tex(0).is_none(),
         "the ACTIVE page skips the preview placeholder (renders sharp)"
     );
     app.reader_frame();
-    assert!(app.reader.tex[&0].1, "prefetch sharpens on frame 2");
+    assert!(app.reader_tex(0).unwrap().1, "prefetch sharpens on frame 2");
 
     // Edit-and-return: editing page 1 switches the editor there and
     // closes the reader, remembering screen 1.
@@ -3106,7 +3106,7 @@ fn reader_turns_edits_and_returns() {
 
     // The edited page's revision moved (it is now the live doc) —
     // its texture re-renders, keyed on the new revision.
-    let rev_before = app.reader.tex[&1].0;
+    let rev_before = app.reader_tex(1).unwrap().0;
     app.doc.begin_op();
     app.doc
         .active_layer_mut()
@@ -3116,7 +3116,8 @@ fn reader_turns_edits_and_returns() {
     assert!(app.doc.revision > rev_before);
     app.reader_frame();
     assert_eq!(
-        app.reader.tex[&1].0, app.doc.revision,
+        app.reader_tex(1).unwrap().0,
+        app.doc.revision,
         "only the changed page re-rendered, at its new revision"
     );
 }
@@ -3871,8 +3872,8 @@ fn lasso_fill_drag_paints_the_shape_over_the_lineart() {
 
 /// Reader v2: F flags the current spread (pages, not screens), the
 /// flag list's Go jumps, notes round-trip through reader_set_note,
-/// and the last-read screen persists through reader_close/open (the
-/// ui.txt `reader_last=` memory).
+/// and the last-read position persists through reader_close/open (the
+/// ui.txt `reader_page=` memory).
 #[test]
 fn reader_flags_notes_and_last_read() {
     let Some(renderer) = headless_renderer() else {
@@ -3916,15 +3917,17 @@ fn reader_flags_notes_and_last_read() {
     app.reader_goto_page(some_page);
     assert_eq!(app.reader.screen, end, "Go returns to the flagged spread");
 
-    // The last-read memory: close notes it, a FRESH open restores it.
+    // The last-read memory: close notes the screen's first PAGE, and a
+    // FRESH open maps that page back to a screen.
+    let end_first = app.reader_screen_first_page();
     app.reader_close();
-    assert_eq!(app.layout.reader_last, end, "noted for ui.txt");
+    assert_eq!(app.layout.reader_page, end_first, "noted for ui.txt");
     app.reader.screen = 0; // simulate a fresh session
     app.reader_open();
     assert_eq!(app.reader.screen, end, "resumed where he stopped");
     // A stale memory (pages removed) falls back to the start safely.
     app.reader_close();
-    app.layout.note_reader_last(999);
+    app.layout.note_reader_page(999);
     app.reader.screen = 0;
     app.reader_open();
     assert_eq!(app.reader.screen, 0, "stale last-read ignored");
@@ -4027,6 +4030,151 @@ fn reader_sidecar_persists_flags_notes_and_last() {
 
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&dir2);
+}
+
+/// Audit 2026-08-21: the reader persisted a SCREEN index while the view
+/// mode and the shift-pair offset it depends on are session-only — read
+/// to Single-page screen 90, close, reopen in the default Double mode
+/// and the "resume" landed near page 180. The persisted position is now
+/// the screen's FIRST PAGE (mode-independent), mapped back to whichever
+/// screen shows it under the mode in force at open. Both stores are
+/// pinned: the ui.txt fallback and the work folder's sidecar.
+#[test]
+fn reader_resume_is_a_page_not_a_screen() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    // Tiny pages: this test is about index arithmetic, and 19 full
+    // manuscript-sized encodes cost the suite a minute for nothing.
+    for _ in 0..19 {
+        let d = mn_core::Document::new(64, 64);
+        let b = mn_core::project::doc_to_bytes(&d).unwrap();
+        let e = app.fresh_page(Some(b), None);
+        app.pages.push(e);
+    }
+    assert_eq!(app.pages.len(), 20);
+
+    // --- the ui.txt fallback (a folderless session) ---
+    // Single mode: screen 9 IS page 9.
+    app.reader.opts.mode = super::reader::ReaderMode::Single;
+    app.reader_open();
+    app.reader.screen = 9;
+    app.reader_close();
+    // A fresh session opens in the DEFAULT mode — double spreads.
+    app.reader.opts.mode = super::reader::ReaderMode::Double;
+    app.reader.screen = 0;
+    app.reader_open();
+    let cells = app.reader_screen_pages(app.reader.screen);
+    assert!(
+        cells.contains(&Some(9)),
+        "resumed on the spread that SHOWS page 9, not on spread 9: {cells:?}"
+    );
+
+    // And the other way: a spread's first page resumes in Single mode.
+    app.reader.screen = 3;
+    let first = app
+        .reader_screen_pages(3)
+        .iter()
+        .flatten()
+        .copied()
+        .min()
+        .unwrap();
+    app.reader_close();
+    app.reader.opts.mode = super::reader::ReaderMode::Single;
+    app.reader.screen = 0;
+    app.reader_open();
+    assert_eq!(
+        app.reader.screen, first,
+        "Single mode resumes ON that page, not on screen 3"
+    );
+
+    // --- the work folder's sidecar ---
+    let dir = std::env::temp_dir().join(format!("mnc-reader-page-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    app.doc_path = Some(dir.join("work.mnc"));
+    app.reader.screen = 12; // Single: page 12
+    app.reader_close();
+    app.reader.opts.mode = super::reader::ReaderMode::Double;
+    app.reader.screen = 0;
+    app.reader_open();
+    let cells = app.reader_screen_pages(app.reader.screen);
+    assert!(
+        cells.contains(&Some(12)),
+        "the sidecar resumes on the spread showing page 12: {cells:?}"
+    );
+
+    // A pre-rename sidecar (`last` = a screen index) must be IGNORED
+    // rather than read as a page — the key changed meaning, so the old
+    // one is unknown. Its flags still load: renaming the position must
+    // not cost a proofreading pass.
+    std::fs::write(
+        dir.join("mnc-reader.json"),
+        r#"{"last":7,"flags":{"4":"old note"}}"#,
+    )
+    .unwrap();
+    app.reader.flags.clear();
+    app.reader.screen = 0;
+    app.reader_open();
+    assert_eq!(app.reader.screen, 0, "a legacy screen index is ignored");
+    assert_eq!(
+        app.reader.flags.get(&4).map(String::as_str),
+        Some("old note"),
+        "the legacy sidecar's flags still load"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Audit 2026-08-21: the reader's display-texture cache was keyed by
+/// PAGE INDEX, so a reorder handed a slot the previous occupant's art.
+/// The content revision did not catch it — a single-file `.mnc` loads
+/// EVERY page at revision 0, so the two pages compare equal and the
+/// stale texture survives until the cap evicts it. Keyed by the page's
+/// stable identity the mix-up cannot be expressed at all.
+#[test]
+fn reader_textures_follow_the_page_not_the_slot() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    // Four stashed pages whose PREVIEW sizes differ: the placeholder
+    // texture's width is the marker saying whose art landed in a slot.
+    for k in 0..4u32 {
+        let doc = mn_core::Document::new(64, 64);
+        let mut png = Vec::new();
+        image::DynamicImage::ImageLuma8(image::GrayImage::new(4 + k, 4))
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let mut bytes = Vec::new();
+        mn_core::ora::save_to_with(&doc, std::io::Cursor::new(&mut bytes), Some(&png)).unwrap();
+        let mut e = app.fresh_page(Some(bytes), None);
+        e.rev = 0; // as a single-file .mnc loads them — all revision 0
+        app.pages.push(e);
+    }
+    // pages[0] is the pre-existing ACTIVE entry; the loop lands at
+    // [1..5], so page i carries preview width 3 + i.
+    fn marker(app: &App, i: usize) -> Option<u32> {
+        app.reader_tex(i).map(|(_, _, (w, _), _)| *w)
+    }
+
+    app.reader.opts.mode = super::reader::ReaderMode::Single;
+    app.reader_open();
+    app.reader.screen = 2;
+    // One frame: placeholders for the screen and both neighbours, plus
+    // ONE sharp render (the current screen, which trades its marker for
+    // a display-size render — the neighbours keep theirs).
+    app.reader_frame();
+    assert_eq!(marker(&app, 3), Some(6), "page 3's own art is cached");
+
+    // Move page 1 down to slot 3: slot 3 now holds the OLD page 1, and
+    // it must not keep showing what page 3 left behind.
+    crate::cmd::dispatch(&mut app, AppCmd::MovePage { from: 1, to: 3 });
+    assert_eq!(
+        marker(&app, 3),
+        Some(4),
+        "slot 3 shows the page that now lives there, not the one that left"
+    );
 }
 
 /// Audit D, 2026-08-19: the O-011 gutter carry pushed every carried
@@ -4306,6 +4454,58 @@ fn story_editor_writes_replaces_and_restyles() {
     app.doc.set_layer_visible(hidden, false);
     app.story_refresh();
     assert_eq!(app.story_fields().len(), 2, "hidden layer not shown");
+}
+
+/// PM-045 restyle: `story_fields` lists one entry per text ITEM, so the
+/// restyle rewrote the WHOLE layer once per item — k rasterizes, k
+/// re-encodes and k undo steps to take back one button press. One write
+/// per layer, and the number reported is still the fields.
+#[test]
+fn story_apply_tool_style_writes_each_layer_once() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    let mut set = mn_core::TextSet { texts: Vec::new() };
+    for i in 0..3 {
+        let mut it = mn_core::text::TextItem::new(
+            [64.0, 64.0 + 40.0 * i as f32],
+            "serif".into(),
+            12.0,
+            [0, 0, 0],
+            true,
+        );
+        it.text = format!("field {i}");
+        set.texts.push(it);
+    }
+    let mut l = mn_core::Layer::new("script");
+    l.kind = mn_core::LayerKind::Text(set);
+    app.doc.layers.push(l);
+    let li = app.doc.layers.len() - 1;
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::StoryEditor);
+    assert_eq!(app.story_fields().len(), 3, "three fields on one layer");
+
+    app.text_size_pt = 20.0;
+    let undo_before = app.doc.undo_len();
+    let n = app.story_apply_tool_style();
+    assert_eq!(n, 3, "the true field count");
+    assert_eq!(
+        app.doc.undo_len() - undo_before,
+        1,
+        "one button press, one undo step"
+    );
+    let sizes = |app: &App| {
+        app.doc.layers[li]
+            .texts()
+            .unwrap()
+            .texts
+            .iter()
+            .map(|t| t.size_pt)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(sizes(&app), [20.0, 20.0, 20.0], "every field restyled");
+    assert!(app.doc.undo(), "and one undo takes the whole restyle back");
+    assert_eq!(sizes(&app), [12.0, 12.0, 12.0]);
 }
 
 /// TRIAGE 143 / PM-030..033: combine two inked pages into one wide
@@ -5846,6 +6046,17 @@ fn paste_target_resolution_order() {
     let t = resolve_paste_target(&doc, loose, Some((310.0, 500.0))).unwrap();
     assert_eq!(t.folder, None);
     assert_eq!(t.rect, [10.0, 10.0, 90.0, 90.0]);
+    // A frame folder with NO frames has no panel to aim at: rule 1 must
+    // fall through to the pointer instead of indexing an empty set.
+    let empty = mn_core::FrameSet {
+        frames: Vec::new(),
+        ..mn_core::FrameSet::single_rect([0.0, 0.0, 1.0, 1.0], 4.0)
+    };
+    doc.add_frame_folder("Empty", empty);
+    let inside = doc.active; // add_frame_folder leaves ITS draw layer active
+    let a = doc.layers.iter().position(|l| l.name == "Frame 1").unwrap();
+    let t = resolve_paste_target(&doc, inside, Some((150.0, 200.0))).unwrap();
+    assert_eq!(t.folder, Some(a), "fell through to the pointer panel");
     let _ = loose;
 }
 

@@ -154,13 +154,17 @@ pub(crate) fn resolve_paste_target(
     while let Some(i) = f {
         if doc.layers[i].is_frame() {
             let fi = frame_index_for(doc, i, active);
-            let rect = doc.layers[i].frames().map(|fs| fs.frames[fi].bbox())?;
-            return Some(PasteTarget {
-                folder: Some(i),
-                owns_active: true,
-                rect,
-                label: doc.layers[i].name.clone(),
-            });
+            // Invariant: a frame folder holds at least one frame, so `fi`
+            // indexes something. An empty set would mean no panel to aim
+            // at, which is rule 2's case, not a panic.
+            if let Some(fr) = doc.layers[i].frames().and_then(|fs| fs.frames.get(fi)) {
+                return Some(PasteTarget {
+                    folder: Some(i),
+                    owns_active: true,
+                    rect: fr.bbox(),
+                    label: doc.layers[i].name.clone(),
+                });
+            }
         }
         f = enclosing_folder(doc, i);
     }
@@ -2710,6 +2714,7 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                                     .map(|(i, fp)| PageEntry {
                                         bytes: (i != 0).then_some(fp.bytes),
                                         thumb: None,
+                                        uid: PageEntry::next_uid(),
                                         id: fp.id,
                                         rev: fp.rev,
                                         saved_rev: fp.saved_rev,
@@ -3273,7 +3278,10 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                     });
                     app.mark_dirty();
                 }
-                None => app.set_status("those folders cannot combine (not siblings)"),
+                None => app.set_status(
+                    "those folders cannot combine — they must be siblings and \
+                     agree on eye, opacity, blend, border and reading pin",
+                ),
             }
         }
         AppCmd::FrameFoldersGroup => {

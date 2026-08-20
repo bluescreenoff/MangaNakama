@@ -67,11 +67,16 @@ pub struct UiLayout {
     /// forgets it again; a Color Set that grows on its own is noise by the
     /// end of the first working day, and it is the half the user curates.
     pub auto_swatch: bool,
-    /// Reader v2: the last-read SCREEN index (reader_close notes it;
-    /// reader_open restores it while valid). App-level — the honest
+    /// Reader v2: the last-read PAGE index (reader_close notes it;
+    /// reader_open maps it back to a screen). App-level — the honest
     /// single-project v1: multi-project projects overwrite each other
     /// (recorded; per-project needs work-folder identity in the key).
-    pub reader_last: usize,
+    ///
+    /// A page, not a screen: screen numbering depends on the view mode
+    /// and the shift-pair offset, neither of which is persisted. The key
+    /// is `reader_page=` — the old `reader_last=` meant a screen, so it
+    /// falls through the unknown-key branch instead of being misread.
+    pub reader_page: usize,
     /// CV-041: the manuscript crop marks and margins (bleed / trim / inner
     /// border / safety) are hidden from the canvas. The page keeps them —
     /// this draws nothing, it deletes nothing, and export never saw them.
@@ -107,7 +112,7 @@ impl Default for UiLayout {
             touch_gestures: 0,
             color_history: Vec::new(),
             auto_swatch: false,
-            reader_last: 0,
+            reader_page: 0,
             guides_hidden: false,
             gradients: String::new(),
             dirty: false,
@@ -267,10 +272,10 @@ impl UiLayout {
         }
     }
 
-    /// Reader v2: remember the last-read screen (ui.txt `reader_last=`).
-    pub fn note_reader_last(&mut self, screen: usize) {
-        if self.reader_last != screen {
-            self.reader_last = screen;
+    /// Reader v2: remember the last-read page (ui.txt `reader_page=`).
+    pub fn note_reader_page(&mut self, page: usize) {
+        if self.reader_page != page {
+            self.reader_page = page;
             self.dirty = true;
         }
     }
@@ -303,7 +308,7 @@ impl UiLayout {
     /// The full ui.txt content (one k=v per line — keys are shipped API).
     fn to_body(&self) -> String {
         format!(
-            "left_w={:.0}\nright_w={:.0}\ndock_left={}\ndock_right={}\nprop_hidden={}\nwin={}\ngpu_dabs={}\nrecent_fonts={}\nmaterial_folders={}\nmaterial_uses={}\nquick_pins={}\nworkspaces={}\nworkspace_current={}\ntouch_gestures={}\ncolor_history={}\nauto_swatch={}\nreader_last={}\nguides_hidden={}\ngradients={}\n",
+            "left_w={:.0}\nright_w={:.0}\ndock_left={}\ndock_right={}\nprop_hidden={}\nwin={}\ngpu_dabs={}\nrecent_fonts={}\nmaterial_folders={}\nmaterial_uses={}\nquick_pins={}\nworkspaces={}\nworkspace_current={}\ntouch_gestures={}\ncolor_history={}\nauto_swatch={}\nreader_page={}\nguides_hidden={}\ngradients={}\n",
             self.left_w,
             self.right_w,
             self.dock_left,
@@ -320,7 +325,7 @@ impl UiLayout {
             self.touch_gestures,
             self.color_history.join(","),
             self.auto_swatch as u8,
-            self.reader_last,
+            self.reader_page,
             self.guides_hidden as u8,
             self.gradients.replace('\n', ""),
         )
@@ -343,7 +348,9 @@ impl UiLayout {
             "quick_pins" => self.quick_pins = v.trim().to_owned(),
             "workspaces" => self.workspaces = v.trim().to_owned(),
             "workspace_current" => self.workspace_current = v.trim().to_owned(),
-            "reader_last" => self.reader_last = v.trim().parse().unwrap_or(self.reader_last),
+            // `reader_page` only: a pre-rename `reader_last=` held a SCREEN
+            // index, so it is deliberately unknown here and ignored.
+            "reader_page" => self.reader_page = v.trim().parse().unwrap_or(self.reader_page),
             // Junk degrades to 0 (all gestures off), never to "all on".
             "touch_gestures" => self.touch_gestures = v.trim().parse().unwrap_or(0),
             // Comma-joined `#rrggbb`. Entries that are not colours are kept

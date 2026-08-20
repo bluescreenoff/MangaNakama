@@ -59,9 +59,7 @@ fn reader_pages(ui: &mut egui::Ui, app: &mut App) {
         .iter()
         .map(|&c| {
             c.and_then(|i| {
-                app.reader
-                    .tex
-                    .get(&i)
+                app.reader_tex(i)
                     .map(|(_, _, (w, h), _)| (*h).max(1) as f32 / (*w).max(1) as f32)
             })
             .unwrap_or(doc_asp)
@@ -136,7 +134,7 @@ fn reader_pages(ui: &mut egui::Ui, app: &mut App) {
             page_rects.push((i, rect));
             let p = ui.painter();
             p.rect_filled(rect, 2.0, egui::Color32::WHITE);
-            if let Some((_, _, _, t)) = app.reader.tex.get(&i) {
+            if let Some((_, _, _, t)) = app.reader_tex(i) {
                 p.image(
                     t.id(),
                     rect,

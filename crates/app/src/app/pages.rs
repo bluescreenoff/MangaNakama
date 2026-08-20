@@ -11,6 +11,15 @@ use mn_core::{Document, PageSetup, ResizeAnchor};
 pub struct PageEntry {
     pub bytes: Option<Vec<u8>>,
     pub thumb: Option<egui::TextureHandle>,
+    /// Stable RUNTIME identity — this page, for as long as the session
+    /// holds it, whatever index it drifts to. Caches key on it instead of
+    /// the index: the reader's texture map was keyed by index and served
+    /// the previous occupant's art after a reorder, because `rev` cannot
+    /// tell two pages apart (a single-file `.mnc` loads every page at
+    /// revision 0, and cmd.rs already warns about coincidental matches).
+    /// Not persisted — `id` is the on-disk identity; this one only has to
+    /// be unique while the app is running.
+    pub uid: u64,
     /// Stable work-folder file identity (`pNNN.ora`); 0 until the first
     /// folder save assigns one — order changes never rename files.
     pub id: u32,
@@ -42,10 +51,20 @@ pub struct PageEntry {
 }
 
 impl PageEntry {
+    /// The next runtime page identity. A process-wide counter rather than
+    /// an App field so EVERY construction path gets one — including the
+    /// `..PageEntry::active()` shorthands — and pages from two open tabs
+    /// never collide. Starts at 1: 0 means "no such page".
+    pub fn next_uid() -> u64 {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub fn active() -> Self {
         Self {
             bytes: None,
             thumb: None,
+            uid: Self::next_uid(),
             id: 0,
             rev: 0,
             saved_rev: 0,
@@ -192,6 +211,7 @@ impl App {
         PageEntry {
             bytes,
             thumb,
+            uid: PageEntry::next_uid(),
             id: 0,
             rev,
             saved_rev: 0,
