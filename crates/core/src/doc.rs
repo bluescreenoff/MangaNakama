@@ -2409,6 +2409,32 @@ impl Document {
         if self.enclosing_folder(ia) != self.enclosing_folder(ib) {
             return None; // same depth, DIFFERENT parents — not siblings
         }
+        // Audit 2026-08-21: the combine DESTROYS B's header, and everything
+        // that renders at FOLDER level goes with it — the compositor reads
+        // visibility/opacity/blend/through/draft off the header, and border
+        // width, the ruler flag and the reading pin live on the `FrameSet`,
+        // not on a `Frame`. None of it has a per-child home to move to (a
+        // group blend is not a per-child blend, a hidden group is not a
+        // hidden child, and a `Frame` carries no border of its own), so a
+        // pair that disagrees refuses instead of silently repainting one
+        // side's panels in the other's style. `slot` is exempt: it is
+        // divide provenance, and clearing it is this op's documented job.
+        let look = |l: &Layer| {
+            (
+                l.visible,
+                l.through,
+                l.draft,
+                l.opacity.to_bits(),
+                l.blend,
+                l.frames()
+                    .map(|f| (f.border_px.to_bits(), f.border_ruler, f.reading_pin)),
+            )
+        };
+        // A layer mask is a canvas-space raster: it cannot be split between
+        // the two, and the survivor's would start clipping the partner's ink.
+        if look(ha) != look(hb) || ha.mask.is_some() || hb.mask.is_some() {
+            return None;
+        }
         let mut set_a = ha.frames()?.clone();
         let set_b = hb.frames()?.clone();
         if merge_borders && set_a.frames.len() == 1 && set_b.frames.len() == 1 {
@@ -5169,6 +5195,66 @@ mod combine_tests {
             doc3.combine_frame_folders(x, z, false).is_none(),
             "differing depths refuse"
         );
+    }
+
+    /// The combine DESTROYS B's header, so everything the compositor reads
+    /// from a folder (visibility, opacity, blend, through, draft) and
+    /// everything that lives on the `FrameSet` rather than on a `Frame`
+    /// (border width, the ruler flag, the reading pin) went with it — B's
+    /// panels silently re-rendered wearing A's look. None of it pushes down:
+    /// a GROUP blend/opacity is not a per-child blend/opacity, a hidden
+    /// group is not a hidden child, and a `Frame` has no border of its own.
+    /// So a pair that disagrees refuses rather than restyling art.
+    #[test]
+    fn combine_frame_folders_refuses_to_silently_restyle_the_partner() {
+        let build = || {
+            let mut doc = Document::new(400, 400);
+            let a = doc.add_frame_folder(
+                "Frame 1",
+                FrameSet::single_rect([16.0, 16.0, 200.0, 300.0], 4.0),
+            );
+            let b = doc.add_frame_folder(
+                "Frame 2",
+                FrameSet::single_rect([200.0, 16.0, 384.0, 300.0], 4.0),
+            );
+            (doc, a, b)
+        };
+        // Two folders that agree still combine — the divide-siblings case.
+        let (mut doc, a, b) = build();
+        assert!(doc.combine_frame_folders(a, b, false).is_some());
+
+        let cases: [(&str, fn(&mut Layer)); 9] = [
+            ("blend", |l| l.blend = Blend::Multiply),
+            ("opacity", |l| l.opacity = 0.5),
+            ("visibility", |l| l.visible = false),
+            ("through", |l| l.through = true),
+            ("draft", |l| l.draft = true),
+            ("mask", |l| l.mask = Some(LayerMask::default())),
+            ("border width", |l| {
+                l.frames_mut().unwrap().border_px = 9.0;
+            }),
+            ("border ruler", |l| {
+                l.frames_mut().unwrap().border_ruler = true;
+            }),
+            ("reading pin", |l| {
+                l.frames_mut().unwrap().reading_pin = Some(3);
+            }),
+        ];
+        for (what, edit) in cases {
+            let (mut doc, a, b) = build();
+            edit(&mut doc.layers[b]);
+            assert!(
+                doc.combine_frame_folders(a, b, false).is_none(),
+                "B's {what} would have been dropped"
+            );
+            // The same disagreement refuses from either side.
+            let (mut doc, a, b) = build();
+            edit(&mut doc.layers[a]);
+            assert!(
+                doc.combine_frame_folders(a, b, false).is_none(),
+                "A's {what} would have been forced onto B"
+            );
+        }
     }
 
     #[test]
