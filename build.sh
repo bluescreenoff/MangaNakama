@@ -2,6 +2,9 @@
 # Build wrapper: puts the project-local C toolchain + cargo on PATH.
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 export PATH="$ROOT/toolchain/w64devkit/bin:$HOME/.cargo/bin:$PATH"
+# Incremental artifacts have corrupted twice on this project and grow the
+# target dir by gigabytes; every documented workflow runs without them.
+export CARGO_INCREMENTAL=0
 cd "$ROOT"
 case "$1" in
   --release) shift; exec cargo build --release "$@" ;;

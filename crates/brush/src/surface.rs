@@ -335,8 +335,10 @@ pub unsafe extern "C" fn mn_brush_tile_request_start(
         // LM-004: the paint path lands in the mask's coverage tiles.
         // Arc::make_mut unshares against snapshots; the mask revision is
         // the GPU upload-fold's rebuild signal. NOTE: these writes bypass
-        // the layer's op recording — a mask stroke is NOT undoable in v1
-        // (the MaskField undo group is named follow-up work).
+        // the layer's op recording — undo comes from the app's
+        // mask_op_begin/mask_op_end bracket instead, and BECAUSE the writes
+        // land live per dab, that bracket must open at stroke BEGIN (the
+        // begin-half rule in docs/CODE-MAP.md).
         //
         // Audit H1 (rounds 50-68): the flag can outlive the mask — layer
         // selection, mask delete, bake, undo all move the ground under it.

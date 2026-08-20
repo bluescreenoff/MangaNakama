@@ -3092,6 +3092,12 @@ fn request_gpu(
     device.on_uncaptured_error(std::sync::Arc::new(|e| {
         eprintln!("[gpu] uncaptured error: {e}")
     }));
+    // A lost device fails SILENTLY otherwise: every later create_* hands
+    // back an invalid resource and the first visible symptom is a baffling
+    // "buffer is invalid" far from the cause (seen on the 19041 WARP).
+    device.set_device_lost_callback(|reason, msg| {
+        eprintln!("[gpu] DEVICE LOST ({reason:?}): {msg}");
+    });
 
     Ok((adapter, device, queue))
 }
@@ -3172,8 +3178,17 @@ fn read_texture_rgba(
     queue.submit([enc.finish()]);
 
     let slice = buffer.slice(..);
-    slice.map_async(wgpu::MapMode::Read, |_| {});
+    // Keep the map result: swallowing it (`|_| {}`) turns a real WARP/device
+    // error into a baffling "buffer is invalid" at get_mapped_range.
+    let map_result = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let map_result_cb = map_result.clone();
+    slice.map_async(wgpu::MapMode::Read, move |r| {
+        *map_result_cb.lock().unwrap() = Some(r);
+    });
     let _ = device.poll(wgpu::PollType::wait_indefinitely());
+    if let Some(Err(e)) = map_result.lock().unwrap().take() {
+        panic!("map readback buffer: map_async failed: {e:?}");
+    }
 
     let mut out = image::RgbaImage::new(w, h);
     {
