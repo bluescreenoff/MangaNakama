@@ -6,9 +6,7 @@ so you can read your own chapter the way a reader will. Local files, no
 cloud, no account. MIT OR Apache-2.0. Early development, moving fast —
 [`ROADMAP.md`](ROADMAP.md) is what works today and what comes next.
 
-*(Shameless plug: the dev draws too —
-**[read my Webtoon here](https://mangadex.org/title/6a08b268-e032-4198-a53a-ef705e592dc3/tekno)**.
-This app exists so making it hurts less.)*
+**[Read my Webtoon here.](https://mangadex.org/title/6a08b268-e032-4198-a53a-ef705e592dc3/tekno)**
 
 ## Why this exists
 
