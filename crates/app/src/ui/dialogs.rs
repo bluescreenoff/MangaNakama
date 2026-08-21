@@ -324,13 +324,16 @@ pub(super) fn new_doc_window(ctx: &egui::Context, app: &mut App) {
 }
 
 /// Work Settings: edit story/binding/page geometry after creation. Geometry
-/// changes affect guides + new pages only — existing pixels stay untouched.
+/// changes affect guides + new pages only — existing pixels stay untouched
+/// unless "Resize existing pages…" hands them to the canvas-size dialog,
+/// which is the one door that moves a work's page size after creation.
 pub(super) fn work_settings_window(ctx: &egui::Context, app: &mut App) {
     if !app.work_settings_open {
         return;
     }
     let mut open = app.work_settings_open;
     let mut apply = false;
+    let mut resize = false;
     let mut cancel = false;
     egui::Window::new("Work Settings")
         .open(&mut open)
@@ -483,6 +486,15 @@ pub(super) fn work_settings_window(ctx: &egui::Context, app: &mut App) {
             ui.weak(
                 "Geometry changes affect guides and NEW pages; existing pages keep their pixels.",
             );
+            if ui
+                .button("Resize existing pages…")
+                .on_hover_text(
+                    "Apply these settings, then change the pixel size of the pages themselves — content is moved, never resampled",
+                )
+                .clicked()
+            {
+                resize = true;
+            }
             ui.add_space(2.0);
             ui.separator();
             ui.horizontal(|ui| {
@@ -494,7 +506,14 @@ pub(super) fn work_settings_window(ctx: &egui::Context, app: &mut App) {
                 }
             });
         });
-    if apply {
+    if resize {
+        // Apply FIRST: the size dialog seeds from the work's paper, so the
+        // draft's geometry has to be the work's geometry by then (the queue
+        // runs in order).
+        app.push_cmd(AppCmd::WorkSettingsApply);
+        app.push_cmd(AppCmd::OpenPageSize);
+        app.work_settings_open = false;
+    } else if apply {
         app.push_cmd(AppCmd::WorkSettingsApply);
         app.work_settings_open = false;
     } else {
@@ -581,6 +600,21 @@ pub(super) fn canvas_size_window(ctx: &egui::Context, app: &mut App) {
                 ui.weak(format!("{mw:.1} × {mh:.1} mm"));
             }
             ui.weak("Content is not resampled; the undo history is cleared.");
+            // The work-wide half: every other page is written DIRECTLY, so
+            // the box has to say what undo will not cover (same wording
+            // contract as the batch dialog).
+            let n = app.pages.len();
+            let d = &mut app.canvas_size_draft;
+            ui.checkbox(&mut d.all_pages, "Apply to every page of the work")
+                .on_hover_text(
+                    "Also moves the work's default size, so pages added later match",
+                );
+            if d.all_pages {
+                ui.weak(format!(
+                    "{} other page(s) are resized and saved directly — that cannot be undone. Spreads take double the width.",
+                    n.saturating_sub(1)
+                ));
+            }
             ui.add_space(2.0);
             ui.separator();
             ui.horizontal(|ui| {

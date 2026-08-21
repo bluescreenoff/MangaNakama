@@ -1431,6 +1431,10 @@ pub enum AppCmd {
     WorkSettingsApply,
     /// Open the Change Canvas Size dialog (Edit menu).
     OpenCanvasSize,
+    /// Same dialog from Work Settings, seeded with the work's paper size and
+    /// the all-pages box already ticked — "make the existing pages match the
+    /// settings I just applied".
+    OpenPageSize,
     /// Apply the canvas-size draft: new size + the anchor the content pins to.
     ResizeCanvasApply,
     /// Crop the canvas to the selection's bounding box (Edit ▸ Crop /
@@ -2063,7 +2067,11 @@ pub fn default_export_stem(app: &App) -> String {
 /// wide as a normal page. The flag is a session flag on the page entry
 /// and does NOT survive a reload, so the width test is what keeps a
 /// reopened work splitting correctly.
-fn is_spread_page(d: &mn_core::Document, flagged: bool, normal_w: Option<u32>) -> bool {
+pub(crate) fn is_spread_page(
+    d: &mn_core::Document,
+    flagged: bool,
+    normal_w: Option<u32>,
+) -> bool {
     flagged || normal_w.is_some_and(|w| w > 0 && d.size.0 as f32 >= w as f32 * 1.5)
 }
 
@@ -2905,14 +2913,58 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 w: app.doc.size.0,
                 h: app.doc.size.1,
                 anchor: ResizeAnchor::Center,
+                all_pages: false,
             };
             app.canvas_size_open = true;
         }
+        AppCmd::OpenPageSize => {
+            // The work's paper is the target the Work Settings draft was
+            // just applied to; a pixel preset has none, so the open page
+            // stands in.
+            let (w, h) = app
+                .page
+                .as_ref()
+                .filter(|s| s.has_guides())
+                .map(|s| s.paper_px())
+                .unwrap_or(app.doc.size);
+            app.canvas_size_draft = crate::app::CanvasSizeDraft {
+                w,
+                h,
+                anchor: ResizeAnchor::Center,
+                all_pages: true,
+            };
+            app.work_settings_open = false;
+            app.canvas_size_open = true;
+            app.mark_dirty();
+        }
         AppCmd::ResizeCanvasApply => {
             let d = app.canvas_size_draft;
-            let (dx, dy) = d.anchor.offsets(app.doc.size, (d.w.max(1), d.h.max(1)));
+            let (w, h) = (d.w.max(1), d.h.max(1));
+            let (dx, dy) = d.anchor.offsets(app.doc.size, (w, h));
             app.canvas_size_open = false;
-            apply_canvas_resize(app, d.w.max(1), d.h.max(1), dx, dy);
+            // What a NORMAL page is, for the spread test, BEFORE the resize
+            // moves the answer (`is_spread_page`'s width rule).
+            let normal_w = app
+                .page
+                .as_ref()
+                .map(|s| s.paper_px().0)
+                .unwrap_or(app.doc.size.0);
+            apply_canvas_resize(app, w, h, dx, dy);
+            if d.all_pages {
+                // The work's DEFAULT page size moves too, or the next
+                // AddPage re-introduces the old geometry (blank_page_doc
+                // reads `page.paper_px()`).
+                if let Some(s) = app.page.as_mut() {
+                    s.set_paper_px(w, h);
+                    app.preflight_stale = true;
+                }
+                let (done, failed) = app.resize_other_pages(w, h, d.anchor, Some(normal_w));
+                let mut s = format!("canvas {w}×{h} — {done} other page(s) resized directly");
+                if failed > 0 {
+                    s.push_str(&format!(", {failed} could not be read"));
+                }
+                app.set_status(s);
+            }
         }
         AppCmd::CropSelection => {
             let bbox = app.doc.selection.as_ref().and_then(selection_bbox);

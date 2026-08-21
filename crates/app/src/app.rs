@@ -1215,6 +1215,7 @@ impl App {
                 w: prefs.new_canvas.0,
                 h: prefs.new_canvas.1,
                 anchor: ResizeAnchor::Center,
+                all_pages: false,
             },
             print_margin_info: false,
             expression: mn_core::Expression::Mono,
@@ -3777,6 +3778,12 @@ mod balloon_fit_tests;
 /// compositor.
 #[cfg(test)]
 mod mask_stroke_undo_tests;
+
+/// ROADMAP "further out": changing a work's page size after creation —
+/// the anchor, the all-pages bytes round trip, and the default new pages
+/// inherit. Same frugality rule as `new_document_tests`: 72 dpi drafts.
+#[cfg(test)]
+mod page_size_tests;
 
 /// ROADMAP good-first-issue: ruler creation/move/clear on the document's
 /// one undo history — and the two things that must NOT be steps (the

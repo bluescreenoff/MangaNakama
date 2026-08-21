@@ -144,6 +144,10 @@ pub struct CanvasSizeDraft {
     pub w: u32,
     pub h: u32,
     pub anchor: ResizeAnchor,
+    /// Resize EVERY page of the work, not only the open one, and move the
+    /// work's default page size with it. Undo still covers the open page
+    /// only — the others are written directly (see [`App::resize_other_pages`]).
+    pub all_pages: bool,
 }
 
 impl App {
@@ -488,6 +492,80 @@ impl App {
             e.doc_rev = self.doc.revision;
         }
         Ok(())
+    }
+
+    /// Resize every OTHER page of the work to `w × h`, pinning content to
+    /// `anchor`. The OPEN page is not touched here — its caller takes it
+    /// through the normal canvas door so undo, caches and the renderer all
+    /// see it.
+    ///
+    /// Same bytes round trip as `App::batch_other_pages` /
+    /// `AppCmd::CompApplyAllPages`: stash the open page first, decode each
+    /// parked page's bytes, edit the decoded document, re-encode, hand it a
+    /// fresh content revision and drop its thumbnail (the Pages panel and
+    /// the rev-keyed sharp preview both cache on that). The decoded
+    /// documents never become `self.doc`, so the `adopt_page_doc` ruler trap
+    /// cannot bite. Afterwards the active-page invariant is restored: bytes
+    /// live in `doc`.
+    ///
+    /// A COMBINED spread is a double-width page, so it takes `2w × h` — the
+    /// same 1.5× width test the export split uses decides, because the
+    /// `spread` flag is runtime-only and a reloaded work has none.
+    ///
+    /// These writes are DIRECT: undo covers the open page only. Returns
+    /// (resized, unreadable).
+    pub fn resize_other_pages(
+        &mut self,
+        w: u32,
+        h: u32,
+        anchor: ResizeAnchor,
+        normal_w: Option<u32>,
+    ) -> (usize, usize) {
+        if let Err(e) = self.stash_current_page() {
+            self.set_error(format!("other pages skipped: {e}"));
+            return (0, self.pages.len().saturating_sub(1));
+        }
+        let (mut done, mut failed) = (0usize, 0usize);
+        for i in 0..self.pages.len() {
+            if i == self.page_index {
+                continue; // the live document already took it
+            }
+            let Some(bytes) = self.pages[i].bytes.as_deref() else {
+                failed += 1;
+                continue;
+            };
+            let Ok(mut doc) = mn_core::project::bytes_to_doc(bytes) else {
+                failed += 1;
+                continue;
+            };
+            let target = if crate::cmd::is_spread_page(&doc, self.pages[i].spread, normal_w) {
+                (w.saturating_mul(2).max(1), h)
+            } else {
+                (w, h)
+            };
+            if doc.size == target {
+                continue;
+            }
+            doc.resize_canvas(target.0, target.1, anchor);
+            let Ok(nb) = mn_core::project::doc_to_bytes(&doc) else {
+                failed += 1;
+                continue;
+            };
+            let rev = self.page_rev_next();
+            let e = &mut self.pages[i];
+            e.bytes = Some(nb);
+            e.rev = rev;
+            e.doc_rev = 0;
+            e.thumb = None;
+            // The reader's 1:1 view reads this cache, not the bytes.
+            e.canvas = Some(target);
+            done += 1;
+        }
+        // Restore the active-page invariant (bytes live in `doc`).
+        self.pages[self.page_index].bytes = None;
+        self.mark_pages_dirty();
+        self.mark_dirty();
+        (done, failed)
     }
 
     /// Install a document decoded for the page (or pages) THIS TAB is

@@ -42,6 +42,21 @@ impl PageSetup {
         )
     }
 
+    /// Restate the paper size from PIXELS — the exact inverse of
+    /// [`Self::paper_px`], so a set-then-read round trips at this dpi. The work's
+    /// default page size for NEW pages is derived from `paper_mm`, so a
+    /// resize that means to move the default has to come through here
+    /// rather than writing px into a mm field.
+    pub fn set_paper_px(&mut self, w: u32, h: u32) {
+        let (w, h) = (w.max(1) as f32, h.max(1) as f32);
+        self.paper_mm = if self.dpi == 0 {
+            (w, h)
+        } else {
+            let per_px = 25.4 / self.dpi as f32;
+            (w * per_px, h * per_px)
+        };
+    }
+
     /// Pixel presets carry no mm geometry, so no guides.
     pub fn has_guides(&self) -> bool {
         self.dpi != 0
