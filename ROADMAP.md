@@ -46,7 +46,13 @@ clip flag that lost its base and the status line says so. An Auto Actions
 tab beside the Layers palette records sequences of layer commands (new
 layer/folder/frame folder, rename, border effect, layer colour, tone,
 blur, select above/below) and replays them — one press to run, one undo
-to take the whole run back, steps toggleable per run like Clip Studio's.
+to take the whole run back, steps toggleable per run like Clip Studio's;
+a fresh install ships with starter actions. Ctrl+K opens a command
+palette over every command and every brush. A layer inside a frame
+folder can burst out of the panel (drawn over the border, outside the
+mask, panel stays editable), and a plain folder's border effect doubles
+as "knock out behind" — the white mat under balloons and SFX, generated
+from the group's own ink and kept fresh automatically.
 
 **Manga.** Frame folders and panel division with automatic reading-order
 numbering plus an on-canvas reading-path overlay; balloons with editable
@@ -71,7 +77,9 @@ at all. A release workflow builds a zip that a tester can unzip and run.
 
 ## What is being built next
 
-Roughly in order. None of this is promised by a date.
+Roughly in order. None of this is promised by a date. The queue is fed by
+research into what Clip Studio's own tutorials and forums confess is hard —
+every multi-step official recipe is a feature opportunity.
 
 1. **GPU dabs, the last exclusions.** Wash, texture and smudge brushes ride
    the GPU path now, a benchmark harness exists (`--bench-dabs`), and the
@@ -79,15 +87,35 @@ Roughly in order. None of this is promised by a date.
    background benchmark decides, never a blanket default. Still CPU-only:
    smudge combined with wash (the sampler would have to read the in-flight
    wash buffer) and the spectral-paint / colorize / posterize presets.
-2. **A small scripting surface.** The batch half shipped (Layer > Batch
-   operations: rename/renumber by pattern, apply/clear tone as one undo
-   step, export a PNG per layer — scoped by all/folder/name-prefix).
-   What remains is the scripting surface proper, if real use ever asks
-   for more than the dialog covers.
-3. **HDR / linear-light colour.**
-4. **The manual, kept honest.** Static HTML beside the executable exists;
+2. **Text styles on the work.** Named styles — dialogue, thought, shout,
+   narration — with Japanese Q sizes and line spacing as defaults. Edit the
+   style and every balloon on every page reflows; no more "change the font
+   mid-chapter and go fix thirty pages by hand".
+3. **Speed lines and focus lines as live objects.** Drag inside a panel;
+   focus point, spread, density, taper and an outline switch are on-canvas
+   handles from the first stroke. Clips to the panel, stays editable.
+4. **Brushes and materials without ceremony.** Lasso marks on the canvas
+   and "make brush" / "make material" from them; tune with a live test
+   stroke; edit and organise in place instead of a register-material tour.
+5. **A reference-images palette.** Drop images in, get a thumbnail strip
+   plus as many viewers as you want — dockable or floating free.
+6. **A small scripting surface.** Batch operations now cover rename,
+   tone, draft, layer colour and blend over name patterns (`*` wildcards)
+   — on one page or every page in the work. The scripting surface proper
+   waits until real use asks for more than the dialog covers.
+7. **HDR / linear-light colour.**
+8. **The manual, kept honest.** Static HTML beside the executable exists;
    its job is the quirks — the interlocks you would otherwise discover by
    having something silently do nothing — and it grows with every round.
+
+Further out, in no order: a tone moiré safety net (auto dot-phase against
+neighbouring tones + a print check that names offenders), a publisher/
+printer profile on the work driving trim/bleed/safety/lpi/export together,
+a fill tool that measures gap and fringe itself instead of seven numeric
+options, "make brush from selection" with generated variation, instances
+(place one drawing on many pages, edit once), one-gesture screentone
+application, perspective rulers that explain themselves plus a fisheye
+curvature slider, and print-finishing presets.
 
 ## Explicitly out of scope
 

@@ -151,6 +151,44 @@ fn actions_path() -> Option<PathBuf> {
     Some(std::env::current_exe().ok()?.parent()?.join("actions.json"))
 }
 
+/// Starter actions for a fresh install (no actions.json yet) — the owner's
+/// own CSP macros, translated (TOP-15 #12: "we can just have a default auto
+/// action for this"). A step the recipe only sometimes wants ships with its
+/// checkbox OFF; deleting or rewriting them is fine, they never come back
+/// once the file exists.
+pub fn default_actions() -> Vec<Action> {
+    let on = |step: ActionStep| StepRow { step, on: true };
+    let off = |step: ActionStep| StepRow { step, on: false };
+    vec![
+        Action {
+            name: "Create SFX layer".into(),
+            steps: vec![
+                on(ActionStep::NewRasterLayer),
+                on(ActionStep::Rename("SFX".into())),
+                // White 3 px — the legible-over-art edge.
+                on(ActionStep::Edge(Some(mn_core::EdgeParams::default()))),
+                off(ActionStep::LayerColour(Some([0x2a, 0x6f, 0xf4]))),
+            ],
+        },
+        Action {
+            name: "Create tone layer".into(),
+            steps: vec![
+                on(ActionStep::NewRasterLayer),
+                on(ActionStep::Rename("Tone".into())),
+                on(ActionStep::Tone(Some(mn_core::ToneParams::default()))),
+            ],
+        },
+        Action {
+            name: "Create blue rough layer".into(),
+            steps: vec![
+                on(ActionStep::NewRasterLayer),
+                on(ActionStep::Rename("Rough".into())),
+                on(ActionStep::LayerColour(Some([0x2a, 0x6f, 0xf4]))),
+            ],
+        },
+    ]
+}
+
 impl App {
     pub fn actions_load(&mut self) {
         // Unit tests share one exe directory and run in parallel: a real
@@ -161,6 +199,12 @@ impl App {
         }
         let Some(p) = actions_path() else { return };
         let Ok(text) = std::fs::read_to_string(p) else {
+            // First run: seed the palette with the starter macros so the
+            // tab demonstrates itself. Not saved until something changes,
+            // so a user who deletes actions.json to reset gets them back.
+            if self.actions.is_empty() {
+                self.actions = default_actions();
+            }
             return;
         };
         if let Ok(list) = serde_json::from_str::<Vec<Action>>(&text) {
@@ -355,5 +399,29 @@ mod tests {
         );
         dispatch(&mut app, AppCmd::AddLayer);
         assert_eq!(app.actions[0].steps.len(), 2, "stopped means stopped");
+    }
+
+    /// The starter macros a fresh install ships with: every one runnable
+    /// as-is (a name, at least one ENABLED step) and every one starting
+    /// from a new layer so replay never scribbles on existing art.
+    #[test]
+    fn default_actions_are_runnable_and_start_on_a_new_layer() {
+        let defaults = super::default_actions();
+        assert!(!defaults.is_empty());
+        for a in &defaults {
+            assert!(!a.name.trim().is_empty());
+            assert!(a.steps.iter().any(|r| r.on), "{}: nothing enabled", a.name);
+            assert_eq!(
+                a.steps.first().map(|r| &r.step),
+                Some(&ActionStep::NewRasterLayer),
+                "{}: must begin on its own fresh layer",
+                a.name
+            );
+            for r in &a.steps {
+                if let ActionStep::Rename(n) = &r.step {
+                    assert!(!n.trim().is_empty(), "{}: empty rename", a.name);
+                }
+            }
+        }
     }
 }
