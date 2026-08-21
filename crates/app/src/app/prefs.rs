@@ -86,6 +86,10 @@ pub struct Prefs {
     /// default — and any name this build does not know both resolve to the
     /// first preset, which is exactly today's behaviour.
     pub new_preset: String,
+    /// The Layers palette's command-icon size, px, 14..=32 (owner
+    /// 2026-08-21: "a bit bigger by default, and a setting"). The toggle
+    /// strip above the list derives from it at 0.8×.
+    pub palette_icon_px: f32,
     /// `k=v` lines this build does not recognise, kept so saving here does
     /// not delete a newer build's settings.
     unknown: Vec<String>,
@@ -106,11 +110,15 @@ impl Default for Prefs {
             recent_depth: RECENT_DEPTH,
             text_size_pt: TEXT_SIZE_PT,
             new_preset: String::new(),
+            palette_icon_px: PALETTE_ICON_PX,
             unknown: Vec::new(),
             dirty: false,
         }
     }
 }
+
+/// Default Layers-palette command-icon size, px.
+pub const PALETTE_ICON_PX: f32 = 20.0;
 
 /// Clamp that also catches NaN and infinity — `f32::clamp` passes NaN
 /// straight through, and a NaN fit margin is a canvas that never appears.
@@ -167,7 +175,7 @@ impl Prefs {
     /// wrote that this one does not understand, verbatim.
     fn to_body(&self) -> String {
         let mut body = format!(
-            "autosave_min={}\nautosave_every_op={}\nundo_depth={}\nmouse_smooth_px={}\nnew_canvas_w={}\nnew_canvas_h={}\nfit_margin={}\nwheel_step={}\nrotate_step_deg={}\nrecent_depth={}\ntext_size_pt={}\nnew_preset={}\n",
+            "autosave_min={}\nautosave_every_op={}\nundo_depth={}\nmouse_smooth_px={}\nnew_canvas_w={}\nnew_canvas_h={}\nfit_margin={}\nwheel_step={}\nrotate_step_deg={}\nrecent_depth={}\ntext_size_pt={}\nnew_preset={}\npalette_icon_px={}\n",
             self.autosave_min,
             u8::from(self.autosave_every_op),
             self.undo_depth,
@@ -180,6 +188,7 @@ impl Prefs {
             self.recent_depth,
             self.text_size_pt,
             self.new_preset.replace('\n', ""),
+            self.palette_icon_px,
         );
         for line in &self.unknown {
             body.push_str(line);
@@ -216,6 +225,7 @@ impl Prefs {
             "recent_depth" => self.recent_depth = v.parse().unwrap_or(self.recent_depth),
             "text_size_pt" => self.text_size_pt = v.parse().unwrap_or(self.text_size_pt),
             "new_preset" => self.new_preset = v.to_owned(),
+            "palette_icon_px" => self.palette_icon_px = v.parse().unwrap_or(self.palette_icon_px),
             // A key we do not know is a key from a NEWER build. Keep the
             // line so the next save writes it back out instead of eating it.
             _ if !k.is_empty() => self.unknown.push(line.to_owned()),
@@ -232,6 +242,7 @@ impl Prefs {
             self.autosave_min = self.autosave_min.clamp(5, 60);
         }
         self.undo_depth = self.undo_depth.clamp(50, 5000);
+        self.palette_icon_px = finite(self.palette_icon_px, PALETTE_ICON_PX, 14.0, 32.0);
         self.mouse_smooth_px = finite(
             self.mouse_smooth_px,
             MOUSE_SMOOTH_FLOOR_PX,

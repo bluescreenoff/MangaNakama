@@ -32,10 +32,16 @@ struct DabG {
     tex_v: i32,
     // Dab-anchored stamp rotation (#10 amendment 2), CPU-precomputed
     // sin/cos — GPU trig intrinsics are orders coarser than libm and broke
-    // the <=1 parity bar. 17 scalars = 68 bytes, matching Rust's `GpuDab`
-    // exactly; the array stride must agree or dabs[1..] read misaligned.
+    // the <=1 parity bar.
     tex_sn: f32,
     tex_cs: f32,
+    // Colorize / Posterize stamp opacities, fix15, and the posterize level
+    // count (1..=128, C-clamped). 20 scalars = 80 bytes, matching Rust's
+    // `GpuDab` exactly; the array stride must agree or dabs[1..] read
+    // misaligned.
+    opa_colorize: u32,
+    opa_posterize: u32,
+    poster_num: u32,
 };
 
 struct TileUni {
@@ -66,6 +72,15 @@ struct TileUni {
 @group(0) @binding(5) var tex: texture_2d<u32>;
 
 const FIX15: u32 = 32768u;
+
+// BT.601 luma of a straight fix15 triple, as brushmodes.c's LUMA macro:
+// float products of the fix15-scaled coefficients; the caller divides by
+// 32768 and truncates, exactly like the C's int conversions.
+fn luma(r: i32, g: i32, b: i32) -> f32 {
+    return f32(r) * (0.2126 * 32768.0)
+        + f32(g) * (0.7152 * 32768.0)
+        + f32(b) * (0.0722 * 32768.0);
+}
 
 // calculate_r_sample: squared (unnormalized) distance from the dab centre,
 // aspect-stretched, rotated.
@@ -305,6 +320,68 @@ fn main(
                 rgba.x = (opa_a * d.color_r + opa_b * rgba.x) / FIX15;
                 rgba.y = (opa_a * d.color_g + opa_b * rgba.y) / FIX15;
                 rgba.z = (opa_a * d.color_b + opa_b * rgba.z) / FIX15;
+            }
+
+            // --- Colorize (draw_dab_pixels_BlendMode_Color): de-premult,
+            // set the pixel's luminance-preserving hue/sat from the brush
+            // colour (set_rgb16_lum_from_rgb16 — float LUMA products,
+            // truncating i32 divisions, BT.601 coeffs), re-premult, blend
+            // rgb only. Alpha untouched. The clip divisions are guarded
+            // against the all-equal degenerate case, like the CPU mirror.
+            if (d.opa_colorize > 0u) {
+                let a = rgba.w;
+                var sr = 0u; var sg = 0u; var sb = 0u;
+                if (a != 0u) {
+                    sr = FIX15 * rgba.x / a;
+                    sg = FIX15 * rgba.y / a;
+                    sb = FIX15 * rgba.z / a;
+                }
+                let botlum = i32(luma(i32(sr), i32(sg), i32(sb)) / 32768.0);
+                let toplum = i32(
+                    luma(i32(d.color_r), i32(d.color_g), i32(d.color_b)) / 32768.0);
+                let diff = botlum - toplum;
+                var r = i32(d.color_r) + diff;
+                var g = i32(d.color_g) + diff;
+                var b = i32(d.color_b) + diff;
+                let lum = i32(luma(r, g, b) / 32768.0);
+                let cmin = min(r, min(g, b));
+                let cmax = max(r, max(g, b));
+                if (cmin < 0 && lum != cmin) {
+                    r = lum + ((r - lum) * lum) / (lum - cmin);
+                    g = lum + ((g - lum) * lum) / (lum - cmin);
+                    b = lum + ((b - lum) * lum) / (lum - cmin);
+                }
+                if (cmax > 32768 && cmax != lum) {
+                    r = lum + ((r - lum) * (32768 - lum)) / (cmax - lum);
+                    g = lum + ((g - lum) * (32768 - lum)) / (cmax - lum);
+                    b = lum + ((b - lum) * (32768 - lum)) / (cmax - lum);
+                }
+                let pr = u32(r) * a / FIX15;
+                let pg = u32(g) * a / FIX15;
+                let pb = u32(b) * a / FIX15;
+                let opa_a = mask * d.opa_colorize / FIX15;
+                let opa_b = FIX15 - opa_a;
+                rgba.x = (opa_a * pr + opa_b * rgba.x) / FIX15;
+                rgba.y = (opa_a * pg + opa_b * rgba.y) / FIX15;
+                rgba.z = (opa_a * pb + opa_b * rgba.z) / FIX15;
+            }
+
+            // --- Posterize (draw_dab_pixels_BlendMode_Posterize): quantize
+            // the premultiplied rgb to poster_num levels (ROUND = trunc of
+            // x + 0.5, then all-integer), blend at the stamp opacity.
+            if (d.opa_posterize > 0u) {
+                let n = d.poster_num;
+                let fr = f32(rgba.x) / 32768.0;
+                let fg = f32(rgba.y) / 32768.0;
+                let fb = f32(rgba.z) / 32768.0;
+                let pr = 32768u * u32(fr * f32(n) + 0.5) / n;
+                let pg = 32768u * u32(fg * f32(n) + 0.5) / n;
+                let pb = 32768u * u32(fb * f32(n) + 0.5) / n;
+                let opa_a = mask * d.opa_posterize / FIX15;
+                let opa_b = FIX15 - opa_a;
+                rgba.x = (opa_a * pr + opa_b * rgba.x) / FIX15;
+                rgba.y = (opa_a * pg + opa_b * rgba.y) / FIX15;
+                rgba.z = (opa_a * pb + opa_b * rgba.z) / FIX15;
             }
 
             px[i] = rgba;

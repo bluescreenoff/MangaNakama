@@ -42,7 +42,7 @@ use std::collections::HashMap;
 use mn_core::{Document, Paper, TILE_SIZE, TileIdx};
 
 mod dabs;
-pub use dabs::dab_tiles;
+pub use dabs::{WASH_LAYER_KEY, dab_tiles};
 
 /// Canvas texture format. Non-sRGB so `render_offscreen` readback is exact.
 const CANVAS_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;

@@ -65,6 +65,61 @@ impl ActionStep {
         }
     }
 
+    /// One of every kind, with the defaults a hand-added step starts from —
+    /// the "＋ step" picker's menu, in palette order. Adding a variant to
+    /// `ActionStep` without adding it here hides it from the editor, which
+    /// is what the `every_kind_is_offered_by_the_picker` test guards.
+    pub fn kinds() -> Vec<ActionStep> {
+        vec![
+            ActionStep::NewRasterLayer,
+            ActionStep::NewVectorLayer,
+            ActionStep::NewFolder,
+            ActionStep::NewFrameFolder,
+            ActionStep::Rename("Layer".into()),
+            ActionStep::LayerColour(Some([0x2a, 0x6f, 0xf4])),
+            ActionStep::SubColour(Some([0xf4, 0x6f, 0x2a])),
+            ActionStep::Edge(Some(mn_core::EdgeParams::default())),
+            ActionStep::Tone(Some(mn_core::ToneParams::default())),
+            ActionStep::SelectAbove,
+            ActionStep::SelectBelow,
+            ActionStep::GaussianBlur(4.0),
+        ]
+    }
+
+    /// Does this step carry anything to edit? Parameterless steps (new
+    /// layer, select above/below) get no inline editor, so the palette
+    /// doesn't offer a click that opens an empty box.
+    pub fn has_params(&self) -> bool {
+        matches!(
+            self,
+            ActionStep::Rename(_)
+                | ActionStep::LayerColour(_)
+                | ActionStep::SubColour(_)
+                | ActionStep::Edge(_)
+                | ActionStep::Tone(_)
+                | ActionStep::GaussianBlur(_)
+        )
+    }
+
+    /// The picker's menu label: the label of the step at its defaults, minus
+    /// the parameter readout ("Rename…" not "Rename to \"Layer\"").
+    pub fn kind_label(&self) -> &'static str {
+        match self {
+            ActionStep::NewRasterLayer => "New raster layer",
+            ActionStep::NewVectorLayer => "New vector layer",
+            ActionStep::NewFolder => "New folder",
+            ActionStep::NewFrameFolder => "New frame folder",
+            ActionStep::Rename(_) => "Rename…",
+            ActionStep::LayerColour(_) => "Layer colour…",
+            ActionStep::SubColour(_) => "Sub colour…",
+            ActionStep::Edge(_) => "Border effect…",
+            ActionStep::Tone(_) => "Screentone…",
+            ActionStep::SelectAbove => "Select layer above",
+            ActionStep::SelectBelow => "Select layer below",
+            ActionStep::GaussianBlur(_) => "Gaussian blur…",
+        }
+    }
+
     /// Lower to the command it replays as. `active` is read at replay time,
     /// per step — a New-layer step moves it, and the next step follows.
     fn lower(&self, active: usize) -> AppCmd {
@@ -129,6 +184,54 @@ fn on_default() -> bool {
 pub struct Action {
     pub name: String,
     pub steps: Vec<StepRow>,
+}
+
+/// The step-list editing verbs. Pure `Vec` moves, no document contact — the
+/// palette (`ui::actions`) is the only caller, and every one of them is
+/// followed by `actions_save`. Slots are clamped rather than panicking: the
+/// UI computes them from pointer positions and a drag that lands one row
+/// past the end must nudge the step to the end, not take the app down.
+impl Action {
+    /// Insert `step` at slot `at` (`steps.len()` = append), switched on.
+    pub fn insert_step(&mut self, at: usize, step: ActionStep) {
+        let at = at.min(self.steps.len());
+        self.steps.insert(at, StepRow { step, on: true });
+    }
+
+    pub fn remove_step(&mut self, at: usize) {
+        if at < self.steps.len() {
+            self.steps.remove(at);
+        }
+    }
+
+    /// Copy step `at` in directly below itself — the row the user just
+    /// tuned is the row they want two of.
+    pub fn duplicate_step(&mut self, at: usize) {
+        if let Some(row) = self.steps.get(at).cloned() {
+            self.steps.insert(at + 1, row);
+        }
+    }
+
+    /// Move step `from` into gap `to`, where gaps are counted BEFORE the
+    /// removal — the layers-palette drop-slot convention, so the drop line
+    /// the user saw is where the step lands. Returns whether anything moved.
+    pub fn move_step(&mut self, from: usize, to: usize) -> bool {
+        if from >= self.steps.len() || to == from || to == from + 1 {
+            return false;
+        }
+        let row = self.steps.remove(from);
+        let to = if to > from { to - 1 } else { to };
+        self.steps.insert(to.min(self.steps.len()), row);
+        true
+    }
+
+    /// A copy under its own name, for the palette's duplicate button.
+    pub fn duplicated(&self) -> Action {
+        Action {
+            name: format!("{} copy", self.name),
+            steps: self.steps.clone(),
+        }
+    }
 }
 
 /// User-global storage, its own file on purpose: `ui.txt` is the file the
@@ -377,6 +480,121 @@ mod tests {
         );
         dispatch(&mut app, AppCmd::AddLayer);
         assert_eq!(app.actions[0].steps.len(), 2, "stopped means stopped");
+    }
+
+    /// Step names, for readable assertions on the editing verbs.
+    fn names(a: &Action) -> Vec<String> {
+        a.steps.iter().map(|r| r.step.label()).collect()
+    }
+
+    fn three() -> Action {
+        action(
+            vec![
+                (ActionStep::NewRasterLayer, true),
+                (ActionStep::Rename("A".into()), true),
+                (ActionStep::SelectBelow, false),
+            ],
+            "Edit me",
+        )
+    }
+
+    #[test]
+    fn insert_puts_the_step_at_the_slot_and_switches_it_on() {
+        let mut a = three();
+        a.insert_step(1, ActionStep::NewFolder);
+        assert_eq!(names(&a)[1], "New folder");
+        assert_eq!(a.steps.len(), 4);
+        assert!(a.steps[1].on, "a hand-added step starts enabled");
+        // Past the end appends instead of panicking.
+        a.insert_step(99, ActionStep::SelectAbove);
+        assert_eq!(names(&a).last().unwrap(), "Select layer above");
+        assert_eq!(a.steps.len(), 5);
+    }
+
+    #[test]
+    fn remove_and_duplicate_hit_the_right_row() {
+        let mut a = three();
+        a.duplicate_step(1);
+        assert_eq!(
+            names(&a),
+            vec![
+                "New raster layer",
+                "Rename to \"A\"",
+                "Rename to \"A\"",
+                "Select layer below"
+            ],
+            "the copy sits directly below its original"
+        );
+        a.remove_step(0);
+        assert_eq!(a.steps.len(), 3);
+        assert_eq!(names(&a)[0], "Rename to \"A\"");
+        // Out-of-range verbs are no-ops, not panics.
+        a.remove_step(9);
+        a.duplicate_step(9);
+        assert_eq!(a.steps.len(), 3);
+    }
+
+    #[test]
+    fn duplicate_step_carries_the_checkbox() {
+        let mut a = three();
+        a.duplicate_step(2); // the OFF row
+        assert!(!a.steps[3].on, "a disabled step duplicates disabled");
+    }
+
+    /// Drop slots are counted before the removal (the layers-palette
+    /// convention), so the line the user saw is where the step lands.
+    #[test]
+    fn move_step_uses_pre_removal_drop_slots() {
+        let mut a = three();
+        assert!(a.move_step(0, 3), "first row to the end");
+        assert_eq!(
+            names(&a),
+            vec!["Rename to \"A\"", "Select layer below", "New raster layer"]
+        );
+        assert!(a.move_step(2, 0), "last row to the top");
+        assert_eq!(
+            names(&a),
+            vec!["New raster layer", "Rename to \"A\"", "Select layer below"]
+        );
+        // Both no-op slots: onto itself, and into the gap just below itself.
+        assert!(!a.move_step(1, 1));
+        assert!(!a.move_step(1, 2));
+        assert!(!a.move_step(9, 0), "out-of-range source moves nothing");
+        assert_eq!(names(&a), names(&three()), "no-ops left the order alone");
+    }
+
+    #[test]
+    fn duplicated_action_copies_the_steps_under_a_new_name() {
+        let a = three();
+        let b = a.duplicated();
+        assert_eq!(b.name, "Edit me copy");
+        assert_eq!(b.steps, a.steps);
+    }
+
+    /// The picker offers EVERY variant: a step kind missing from `kinds()`
+    /// is unreachable by hand, which is the whole point of the editor.
+    #[test]
+    fn every_kind_is_offered_by_the_picker() {
+        let kinds = ActionStep::kinds();
+        // One entry per variant, compared by kind label so the parameter
+        // defaults are free to change.
+        let mut labels: Vec<&str> = kinds.iter().map(|k| k.kind_label()).collect();
+        labels.sort_unstable();
+        labels.dedup();
+        assert_eq!(labels.len(), kinds.len(), "no kind listed twice");
+        assert_eq!(kinds.len(), 12, "one entry per ActionStep variant");
+        // Parameterized kinds carry usable defaults (an editor opens on
+        // them; a `None` default would open on nothing).
+        for k in &kinds {
+            match k {
+                ActionStep::Rename(n) => assert!(!n.is_empty()),
+                ActionStep::LayerColour(c) | ActionStep::SubColour(c) => assert!(c.is_some()),
+                ActionStep::Edge(e) => assert!(e.is_some()),
+                ActionStep::Tone(t) => assert!(t.is_some()),
+                ActionStep::GaussianBlur(s) => assert!(*s > 0.0),
+                _ => assert!(!k.has_params(), "{}: unlisted parameters", k.label()),
+            }
+        }
     }
 
     /// The starter macros a fresh install ships with: every one runnable

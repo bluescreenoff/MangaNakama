@@ -14,6 +14,15 @@ use std::path::PathBuf;
 pub struct UiLayout {
     pub left_w: f32,
     pub right_w: f32,
+    /// The left / right palette column is folded away to a thin strip with an
+    /// expand chevron (`ui.rs`). **Default false (expanded)** and only a
+    /// literal `1` collapses — the `guides_hidden` rule: an older build's
+    /// ui.txt, an absent key and junk must never hide a working artist's
+    /// palettes. `left_w`/`right_w` keep the EXPANDED width while collapsed
+    /// (`note_widths` refuses to overwrite them), or the column would come
+    /// back 18pt wide forever after a restart.
+    pub left_collapsed: bool,
+    pub right_collapsed: bool,
     pub dock_left: String,
     pub dock_right: String,
     /// Tool Property sections hidden from the compact palette, comma-joined
@@ -59,7 +68,11 @@ pub struct UiLayout {
     /// Quick Access pins (UI-050), labels joined with U+001F.
     pub quick_pins: String,
     /// Named workspaces (UI-060): one JSON line, [[name, dock_left,
-    /// dock_right, left_w, right_w, prop_hidden], ...].
+    /// dock_right, left_w, right_w, prop_hidden, left_collapsed,
+    /// right_collapsed], ...]. The entries are VARIABLE-LENGTH (they were a
+    /// fixed 6 until the column-collapse round): every read is index-guarded
+    /// so a workspace saved by an older build still applies, and a shorter
+    /// entry just means "this build's newer fields keep their defaults".
     pub workspaces: String,
     /// The current workspace's NAME (UI-061's checkmark), or "".
     pub workspace_current: String,
@@ -134,6 +147,8 @@ impl Default for UiLayout {
         Self {
             left_w: 186.0,
             right_w: 208.0,
+            left_collapsed: false,
+            right_collapsed: false,
             dock_left: String::new(),
             dock_right: String::new(),
             prop_hidden: String::new(),
@@ -218,10 +233,35 @@ impl WinGeom {
 }
 
 impl UiLayout {
+    /// A COLLAPSED column reports the width of its 18pt strip, which must not
+    /// become the persisted column width — restore it and the column comes
+    /// back as a strip that no longer has a body to expand into. The stored
+    /// (expanded) width wins for a collapsed side; only a live column may
+    /// move its own number.
     pub fn note_widths(&mut self, left: f32, right: f32) {
+        let left = if self.left_collapsed {
+            self.left_w
+        } else {
+            left
+        };
+        let right = if self.right_collapsed {
+            self.right_w
+        } else {
+            right
+        };
         if (left - self.left_w).abs() > 0.5 || (right - self.right_w).abs() > 0.5 {
             self.left_w = left;
             self.right_w = right;
+            self.dirty = true;
+        }
+    }
+
+    /// The palette columns' collapse switches. Saved only on change, like the
+    /// other view toggles above.
+    pub fn note_collapsed(&mut self, left: bool, right: bool) {
+        if self.left_collapsed != left || self.right_collapsed != right {
+            self.left_collapsed = left;
+            self.right_collapsed = right;
             self.dirty = true;
         }
     }
@@ -384,9 +424,11 @@ impl UiLayout {
     /// `from_body` completes.
     pub(super) fn to_body(&self) -> String {
         format!(
-            "left_w={:.0}\nright_w={:.0}\ndock_left={}\ndock_right={}\nprop_hidden={}\nwin={}\n{}recent_fonts={}\nmaterial_folders={}\nmaterial_uses={}\nquick_pins={}\nworkspaces={}\nworkspace_current={}\ntouch_gestures={}\ncolor_history={}\nauto_swatch={}\nreader_page={}\nguides_hidden={}\ntest_stroke_hidden={}\ngradients={}\nsub_tool_size_px={}\nreferences={}\n",
+            "left_w={:.0}\nright_w={:.0}\nleft_collapsed={}\nright_collapsed={}\ndock_left={}\ndock_right={}\nprop_hidden={}\nwin={}\n{}recent_fonts={}\nmaterial_folders={}\nmaterial_uses={}\nquick_pins={}\nworkspaces={}\nworkspace_current={}\ntouch_gestures={}\ncolor_history={}\nauto_swatch={}\nreader_page={}\nguides_hidden={}\ntest_stroke_hidden={}\ngradients={}\nsub_tool_size_px={}\nreferences={}\n",
             self.left_w,
             self.right_w,
+            self.left_collapsed as u8,
+            self.right_collapsed as u8,
             self.dock_left,
             self.dock_right,
             self.prop_hidden,
@@ -430,6 +472,10 @@ impl UiLayout {
         match k.trim() {
             "left_w" => self.left_w = v.trim().parse().unwrap_or(self.left_w),
             "right_w" => self.right_w = v.trim().parse().unwrap_or(self.right_w),
+            // Only `1` collapses a palette column — the `guides_hidden` rule:
+            // an absent key (every older ui.txt) and junk leave it expanded.
+            "left_collapsed" => self.left_collapsed = v.trim() == "1",
+            "right_collapsed" => self.right_collapsed = v.trim() == "1",
             // One line each — JSON without newlines (serde_json compact).
             "dock_left" if !line.contains('\n') => self.dock_left = v.to_owned(),
             "dock_right" if !line.contains('\n') => self.dock_right = v.to_owned(),
@@ -709,6 +755,66 @@ mod tests {
         assert!(junk.references.is_empty());
         junk.apply_kv("left_w=200");
         assert!(junk.references.is_empty());
+    }
+
+    /// The palette columns' collapse switches round-trip through the real
+    /// ui.txt body, degrade towards SHOWN like `guides_hidden`, and — the
+    /// half that actually bites — a collapsed column's 18pt strip width may
+    /// never be persisted as the column width.
+    ///
+    /// Failed against a `note_widths` without the collapsed guard: `ui.rs`
+    /// hands it the width the panel was laid out at, so one collapsed frame
+    /// wrote `left_w=18`, and the column came back a permanent sliver with an
+    /// expand chevron that expanded to nothing.
+    #[test]
+    fn column_collapse_roundtrips_and_never_persists_the_strip_width() {
+        let mut me = UiLayout::default();
+        assert!(!me.left_collapsed && !me.right_collapsed, "default: shown");
+        let (lw, rw) = (me.left_w, me.right_w);
+
+        me.note_collapsed(true, false);
+        assert!(me.dirty && me.left_collapsed && !me.right_collapsed);
+
+        // The laid-out strip width must NOT become the stored column width.
+        me.note_widths(18.0, rw);
+        assert!((me.left_w - lw).abs() < 0.5, "collapsed width was persisted");
+        // The live column beside it still moves freely.
+        me.note_widths(18.0, 260.0);
+        assert!((me.left_w - lw).abs() < 0.5 && (me.right_w - 260.0).abs() < 0.5);
+
+        let body = me.to_body();
+        assert!(body.contains("\nleft_collapsed=1\n"), "{body}");
+        assert!(body.contains("\nright_collapsed=0\n"), "{body}");
+        assert!(body.contains(&format!("left_w={lw:.0}\n")), "{body}");
+
+        let back = UiLayout::from_body(&body);
+        assert!(back.left_collapsed && !back.right_collapsed);
+        assert!((back.left_w - lw).abs() < 0.5, "the expanded width survived");
+        assert!(!back.dirty, "a fresh load is not a pending save");
+
+        // An unchanged switch must not re-dirty a clean layout.
+        let mut back = back;
+        back.note_collapsed(true, false);
+        assert!(!back.dirty);
+        // Expanding again lets the width move.
+        back.note_collapsed(false, false);
+        back.note_widths(200.0, 260.0);
+        assert!((back.left_w - 200.0).abs() < 0.5);
+
+        // An older build's ui.txt has neither key, and junk degrades to shown.
+        let mut junk = UiLayout::default();
+        for line in [
+            "left_w=200",
+            "left_collapsed=0",
+            "left_collapsed=yes",
+            "right_collapsed=",
+        ] {
+            junk.apply_kv(line);
+            assert!(
+                !junk.left_collapsed && !junk.right_collapsed,
+                "{line} must not fold a palette column away"
+            );
+        }
     }
 
     #[test]

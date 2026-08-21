@@ -187,6 +187,19 @@ with the images, and a folder the bank has never seen is already tagged
 the first time you add it. A rewrite keeps lines it does not understand,
 and keeps entries naming files that are not in the folder right now —
 so a rescan, or a drive that was not mounted, does not eat them.</div>
+<div class="quirk"><b>Some materials place LIVE, not as pixels.</b> The
+bank holds two kinds of thing. A bitmap material (a tone, a texture, a
+scan) pastes as the move/scale float you already know. A <i>generator</i>
+material — the shipped <i>focus-lines</i> and <i>speed-lines</i>, marked
+<b>(live)</b> on the cell — places an effect-line layer that keeps its
+parameters: the Object tool grabs its focus point, radii, angle and
+density afterwards, and <b>Layer ▸ Edit effect lines</b> re-runs it. It is
+a <code>.gen.json</code> file in the folder, with a same-stem PNG beside
+it as the picture on the cell. Focus lines converge where you clicked;
+everything else comes from the material, because a material is reusable
+and a position is not. <span class="why">Registering a generated layer
+writes that <code>.gen.json</code> too, so a set of lines you tuned once
+comes back out of the bank still editable instead of flattened.</span></div>
 <div class="quirk"><b>A folder import carries the tags of the files it
 copied, and only those.</b> A file the copy skipped because its name was
 already taken contributes nothing, and whatever the destination already

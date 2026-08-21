@@ -23,15 +23,15 @@ use std::collections::BTreeSet;
 /// fix15 colour) precomputed on the CPU so the shader stays dumb integer
 /// math.
 ///
-/// **68 bytes** — 8 × f32 + 7 × u32 + i32 × 2 (texture crawl), no pad
-/// (storage-buffer stride aligns to 4, so 68 is legal on both sides)
+/// **80 bytes** — 8 × f32 + 10 × u32 + i32 × 2 (texture crawl), no pad
+/// (storage-buffer stride aligns to 4, so 80 is legal on both sides)
 /// — and WGSL's `DabG` must agree to the byte or the array stride desyncs
 /// and every dab after the first in a flush reads garbage. Round 28 lost
-/// real time to exactly that (56 vs 64); the doc comment here previously
-/// claimed 80, which is why the number is now spelled out with its
-/// arithmetic. The two i32 slots were the first two pad u32s before #0.1 —
-/// same layout, now carrying the per-dab texture scroll; #10 amendment 2
-/// appended the stamp sin/cos pair.
+/// real time to exactly that (56 vs 64), which is why the number is
+/// spelled out with its arithmetic. The two i32 slots were the first two
+/// pad u32s before #0.1 — same layout, now carrying the per-dab texture
+/// scroll; #10 amendment 2 appended the stamp sin/cos pair; the P4
+/// colorize/posterize port appended its three u32s.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct GpuDab {
@@ -56,14 +56,24 @@ struct GpuDab {
     /// the <=1 parity bar at rotated angles.
     tex_sn: f32,
     tex_cs: f32,
+    /// Colorize / Posterize stamp opacities, fix15 (the P4 port):
+    ///   opa_colorize  = colorize  * opaque * 32768
+    ///   opa_posterize = posterize * opaque * 32768
+    /// and the posterize level count (already clamped 1..=128 by the C).
+    opa_colorize: u32,
+    opa_posterize: u32,
+    poster_num: u32,
 }
 
 impl GpuDab {
     fn from(p: &mn_core::dab::DabParams) -> Self {
         // The C dispatch (process_op) for the paint<1 branch — paint>0 dabs
         // never reach the GPU (MyBrush::gpu_ready routes them CPU-side).
-        let normal = (1.0 - p.lock_alpha) * p.opaque * (1.0 - p.paint);
-        let lock = p.lock_alpha * p.opaque * (1.0 - p.paint);
+        // `op->normal` folds in (1-colorize)(1-posterize); the LockAlpha
+        // stamp opacity carries those factors too (brushmodes dispatch).
+        let cp = (1.0 - p.colorize) * (1.0 - p.posterize);
+        let normal = (1.0 - p.lock_alpha) * cp * p.opaque * (1.0 - p.paint);
+        let lock = p.lock_alpha * p.opaque * cp * (1.0 - p.paint);
         let f15 = |v: f32| (v.clamp(0.0, 1.0) * 32768.0) as u32;
         Self {
             x: p.x,
@@ -85,6 +95,9 @@ impl GpuDab {
             tex_v: p.tex_off[1],
             tex_sn: (p.tex_angle / 360.0 * 2.0 * std::f32::consts::PI).sin(),
             tex_cs: (p.tex_angle / 360.0 * 2.0 * std::f32::consts::PI).cos(),
+            opa_colorize: f15(p.colorize * p.opaque),
+            opa_posterize: f15(p.posterize * p.opaque),
+            poster_num: p.posterize_num.max(1) as u32,
         }
     }
 }
@@ -178,8 +191,11 @@ pub(crate) struct DabStroke {
     pub touched: BTreeSet<TileIdx>,
 }
 
-/// Tile-cache layer key for the wash buffer — no document layer can own it.
-pub(crate) const WASH_LAYER_KEY: usize = usize::MAX;
+/// Tile-cache layer key for the wash buffer — no document layer can own
+/// it. Public since the P4 wash+smudge round: the app's smudge oracle
+/// passes it as the layer so `readback_dab_tile` serves the IN-FLIGHT
+/// wash accumulation, which is what the CPU path's sampler reads too.
+pub const WASH_LAYER_KEY: usize = usize::MAX;
 
 impl DabGpu {
     pub(super) fn new(device: &wgpu::Device) -> Self {

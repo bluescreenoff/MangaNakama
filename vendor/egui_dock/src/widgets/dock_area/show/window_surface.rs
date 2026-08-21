@@ -1,5 +1,5 @@
 use egui::{
-    Align, Color32, CornerRadius, CursorIcon, Frame, Layout, Rect, Response, RichText, Sense,
+    Align, Color32, CornerRadius, CursorIcon, Frame, Id, Layout, Rect, Response, RichText, Sense,
     Shape, Stroke, Ui, UiBuilder, Vec2, WidgetText, vec2,
 };
 
@@ -8,6 +8,15 @@ use crate::{
     dock_area::{state::State, tab_removal::TabRemoval},
     utils::{fade_visuals, rect_set_size_centered},
 };
+
+/// MN-PATCH #14 (MangaNakama): the [`egui::Area`] id a window surface is shown
+/// under. Was inlined in `show_window_surface`; it is a function now because
+/// the drag handler in `show/mod.rs` has to read the window's CURRENT rect out
+/// of egui's memory under exactly this id — two spellings of it would drift
+/// silently (the window would simply never move).
+pub(super) fn window_area_id(surf_index: SurfaceIndex) -> Id {
+    format!("window {surf_index:?}").into()
+}
 
 impl<Tab> DockArea<'_, Tab> {
     pub(super) fn show_window_surface(
@@ -19,7 +28,7 @@ impl<Tab> DockArea<'_, Tab> {
         fade_style: Option<(&Style, f32, SurfaceIndex)>,
     ) {
         // Construct egui window
-        let id = format!("window {surf_index:?}").into();
+        let id = window_area_id(surf_index);
         let bounds = self.window_bounds.unwrap();
         let open = true;
         let window = self

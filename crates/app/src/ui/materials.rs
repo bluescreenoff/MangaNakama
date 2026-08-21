@@ -212,10 +212,13 @@ fn material_cell(ui: &mut egui::Ui, app: &mut App, i: usize) {
     // Lazy thumbnail: decoded once on first display, cached by path. The
     // name-only button renders the frame the decode lands on.
     let thumb = app.material_thumbs.get(&path).cloned();
+    // A generator material reads as different because it BEHAVES
+    // differently: it places editable effect lines, not pixels.
+    let live = if item.is_generator() { " (live)" } else { "" };
     let label = if uses > 0 {
-        format!("{}\n×{uses}", item.name)
+        format!("{}{live}\n×{uses}", item.name)
     } else {
-        item.name.clone()
+        format!("{}{live}", item.name)
     };
     let btn = match &thumb {
         Some(t) => egui::Button::image_and_text(
@@ -224,17 +227,21 @@ fn material_cell(ui: &mut egui::Ui, app: &mut App, i: usize) {
         ),
         None => egui::Button::new(egui::RichText::new(label).small()),
     };
-    let hover = if item.tags.is_empty() {
-        format!("{} — click to paste, right-click to tag", item.name)
+    let what = if item.is_generator() {
+        "click to place LIVE effect lines (the Object tool re-aims them)"
     } else {
-        format!(
-            "{}\n{}\nclick to paste, right-click to tag",
-            item.name, item.tags
-        )
+        "click to paste"
+    };
+    let hover = if item.tags.is_empty() {
+        format!("{} — {what}, right-click to tag", item.name)
+    } else {
+        format!("{}\n{}\n{what}, right-click to tag", item.name, item.tags)
     };
     let resp = ui.add(btn).on_hover_text(hover);
     if thumb.is_none() && ui.is_rect_visible(resp.rect) {
-        if let Some(t) = load_thumb(app, &path) {
+        // A generator material's picture is the PNG beside its spec; the
+        // cache still keys on the material's own path.
+        if let Some(t) = load_thumb(app, &item.thumb_path()) {
             app.material_thumbs.insert(path.clone(), t);
         }
     }

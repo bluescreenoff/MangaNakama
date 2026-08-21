@@ -25,6 +25,13 @@ pub struct DabParams {
     pub lock_alpha: f32,
     /// Spectral paint weight (the `get_color` path); Normal mode is 0.
     pub paint: f32,
+    /// Colorize stamp weight (`draw_dab_pixels_BlendMode_Color`); 0 = off.
+    pub colorize: f32,
+    /// Posterize stamp weight (`_BlendMode_Posterize`); 0 = off.
+    pub posterize: f32,
+    /// Posterize level count, already `CLAMP(ROUND(num*100), 1, 128)` by
+    /// the C — the divisor the stamp quantizes with.
+    pub posterize_num: u16,
     /// Texture-tip scroll offset THIS dab sees, in mask px — `(int)` of the
     /// brush's crawl accumulator, captured at record time exactly as the C's
     /// `render_dab_mask` would cast it. `[0, 0]` when no texture is active

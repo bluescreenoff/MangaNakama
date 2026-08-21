@@ -690,8 +690,10 @@ pub(crate) fn build_filter(app: &App) -> Option<LayerFilter> {
 
 // --- layers -------------------------------------------------------------
 
-/// CSP label-colour cycle for the layer rail (colours from the owner's
-/// reference screenshot). The Label command icon steps through, then off.
+/// CSP's standard palette-colour set for the layer rail (colours from the
+/// owner's reference screenshot). Offered as swatches in the colour popup
+/// beside a full picker (owner 2026-08-21: no click chain, the wheel is
+/// right there).
 const LABEL_COLORS: [[u8; 3]; 6] = [
     [0x58, 0x6b, 0xf0], // blue
     [0xe5, 0x4b, 0x4b], // red
@@ -706,10 +708,25 @@ const LABEL_COLORS: [[u8; 3]; 6] = [
 // 2026-08-21: "first do exactly what clip studio does").
 const LAYER_ROW_H: f32 = 44.0;
 
-/// The active row's fill. CSP paints the editing row a saturated blue that
-/// is unmissable in a 60-layer stack; `theme::SEL_ROW` (kept for the
-/// multi-selection) was the "which row is lit?" squint the owner reported.
-const SEL_ACTIVE: egui::Color32 = egui::Color32::from_rgb(0x2f, 0x5e, 0x99);
+/// Folder rows run THINNER than layer rows — CSP does this and the owner
+/// called it out: a folder is a heading, not content, and the shorter row
+/// makes the stack's structure readable at a glance.
+const FOLDER_ROW_H: f32 = 34.0;
+
+/// The status column between the colour rail and the tree gutter: the
+/// reference / draft marks live HERE, in their own fixed slot (CSP gives
+/// layer status its own column; the owner asked for the same instead of
+/// the old right-edge badges).
+const FLAG_COL_W: f32 = 16.0;
+
+/// The active row's fill. CSP paints the editing row an unmissable blue;
+/// the audit round toned ours from the original #2f5e99 glare down to
+/// CSP's own weight — the 1px lighter edges (below) keep it unmissable in
+/// a 60-layer stack without out-shouting the thumbnails.
+const SEL_ACTIVE: egui::Color32 = egui::Color32::from_rgb(0x3c, 0x47, 0x59);
+
+/// The 1px top/bottom edge lines on the active row.
+const SEL_EDGE: egui::Color32 = egui::Color32::from_rgb(0x5a, 0x6b, 0x86);
 
 /// The per-type marker a palette row carries beside its thumbnail, CSP's
 /// layer-type glyph. `None` = a plain raster layer: the common case stays
@@ -801,8 +818,11 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
         });
     }
 
-    // Two command-icon rows, CSP's layout.
-    let s = 16.0;
+    // Toggle strip + ONE command row, CSP's layout. Sizes ride the
+    // `palette_icon_px` preference (owner 2026-08-21: bigger by default,
+    // adjustable in Preferences ▸ Interface).
+    let cmd_s = app.prefs.palette_icon_px;
+    let s = (cmd_s * 0.8).max(14.0);
     let (a_clip, a_lock, a_lock_alpha, a_reference, a_draft) = app
         .doc
         .layers
@@ -810,18 +830,12 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
         .map(|l| (l.clip, l.lock, l.lock_alpha, l.reference, l.draft))
         .unwrap_or((false, false, false, false, false));
     ui.horizontal(|ui| {
-        let label_tip = "Palette colour — cycles through CSP's set, then off";
+        let label_tip = "Palette colour — swatches + picker (also: click a row's status cell)";
         if icon_btn(ui, Icon::Label, s, false, true, label_tip).clicked() {
-            let cur = app.doc.layers.get(active).and_then(|l| l.label);
-            let next = match cur {
-                None => Some(LABEL_COLORS[0]),
-                Some(c) => LABEL_COLORS
-                    .iter()
-                    .position(|x| *x == c)
-                    .and_then(|i| LABEL_COLORS.get(i + 1))
-                    .copied(),
+            app.layer_colour_pick = match app.layer_colour_pick {
+                Some(_) => None,
+                None => Some(active),
             };
-            app.push_cmd(AppCmd::SetLayerLabel(active, next));
         }
         if icon_btn(ui, Icon::Clip, s, a_clip, true, "Clip to layer below").clicked() {
             app.push_cmd(AppCmd::SetLayerClip(active, !a_clip));
@@ -849,15 +863,17 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
         }
     });
     ui.horizontal(|ui| {
-        if icon_btn(ui, Icon::Plus, s, false, true, "New layer").clicked() {
+        // Every "make one" button wears its subject + a corner plus (owner
+        // 2026-08-21: the bare + said nothing about what it made).
+        if icon_btn(ui, Icon::NewLayer, cmd_s, false, true, "New layer").clicked() {
             app.push_cmd(AppCmd::AddLayer);
         }
-        // Same command as Layer ▸ New vector layer, and the same glyph the
+        // Same command as Layer ▸ New vector layer, and the Vector glyph the
         // resulting row carries.
         if icon_btn(
             ui,
-            Icon::Vector,
-            s,
+            Icon::NewVector,
+            cmd_s,
             false,
             true,
             "New vector layer — strokes record as editable geometry",
@@ -866,19 +882,28 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
         {
             app.push_cmd(AppCmd::AddVectorLayer);
         }
-        if icon_btn(ui, Icon::Frame, s, false, true, "New frame border folder").clicked() {
+        if icon_btn(
+            ui,
+            Icon::NewFrameFolder,
+            cmd_s,
+            false,
+            true,
+            "New frame border folder",
+        )
+        .clicked()
+        {
             app.push_cmd(AppCmd::NewFrameLayer);
         }
-        if icon_btn(ui, Icon::Folder, s, false, true, "New folder").clicked() {
+        if icon_btn(ui, Icon::NewFolder, cmd_s, false, true, "New folder").clicked() {
             app.push_cmd(AppCmd::AddFolder);
         }
-        if icon_btn(ui, Icon::Duplicate, s, false, true, "Duplicate layer").clicked() {
+        if icon_btn(ui, Icon::Duplicate, cmd_s, false, true, "Duplicate layer").clicked() {
             app.push_cmd(AppCmd::DuplicateLayer);
         }
         if icon_btn(
             ui,
             Icon::MergeDown,
-            s,
+            cmd_s,
             false,
             true,
             "Merge with layer below (Ctrl+E)",
@@ -888,7 +913,7 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
             app.push_cmd(AppCmd::MergeDown);
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if icon_btn(ui, Icon::Trash, s, false, true, "Delete layer").clicked() {
+            if icon_btn(ui, Icon::Trash, cmd_s, false, true, "Delete layer").clicked() {
                 app.push_cmd(AppCmd::RemoveLayer);
             }
         });
@@ -1057,12 +1082,30 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
         // pen (below) still marks only the active row, like CSP.
         let multi = selected || app.doc.layer_multi.contains(&i);
 
-        // Inline rename replaces the row with a text edit.
+        // Folder rows run thinner than layer rows (CSP; owner 2026-08-21).
+        let row_h = if row.folder { FOLDER_ROW_H } else { LAYER_ROW_H };
+
+        // Inline rename keeps the row's full height and puts the field on
+        // the name line — the old branch let the TextEdit allocate its own
+        // ~20 px and the row visibly collapsed (owner bug 2026-08-21).
+        // Escape cancels; Enter or clicking away commits.
         if matches!(&app.renaming, Some((ri, _)) if *ri == i) {
+            let (rrect, _) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width(), row_h),
+                egui::Sense::hover(),
+            );
+            if ui.input(|inp| inp.key_pressed(egui::Key::Escape)) {
+                app.renaming = None;
+                continue;
+            }
             let Some((_, text)) = &mut app.renaming else {
                 unreachable!()
             };
-            let resp = ui.text_edit_singleline(text);
+            let field = egui::Rect::from_center_size(
+                rrect.center(),
+                egui::vec2(rrect.width() - 12.0, 22.0),
+            );
+            let resp = ui.put(field, egui::TextEdit::singleline(text));
             let done = resp.lost_focus() || ui.input(|inp| inp.key_pressed(egui::Key::Enter));
             if done {
                 let (_, text) = app.renaming.take().unwrap();
@@ -1081,7 +1124,7 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
         } else {
             egui::Sense::click_and_drag()
         };
-        let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, LAYER_ROW_H), sense);
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, row_h), sense);
         let cy = rect.center().y;
 
         // CSP rail: two full-height cells — eye | editing pen — both FILLED
@@ -1093,10 +1136,20 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
             egui::pos2(eye_cell.right(), rect.top()),
             egui::pos2(eye_cell.right() + 20.0, rect.bottom()),
         );
-        let pen_col = pen_cell.right();
+        // The status column: reference / draft marks in their own fixed
+        // slot (owner 2026-08-21, matching CSP's per-layer status column)
+        // instead of the old right-edge badges.
+        let flag_cell = egui::Rect::from_min_max(
+            egui::pos2(pen_cell.right(), rect.top()),
+            egui::pos2(pen_cell.right() + FLAG_COL_W, rect.bottom()),
+        );
+        let pen_col = flag_cell.right();
         let eye = ui
             .interact(eye_cell, resp.id.with("eye"), egui::Sense::click())
             .on_hover_text("show/hide — Alt+click solos this layer");
+        let colour_cell = ui
+            .interact(pen_cell, resp.id.with("colour"), egui::Sense::click())
+            .on_hover_text("layer colour…");
         // Discoverability (r102 audit): the row's two power gestures had
         // no surface — hover carries them now.
         let resp = resp.on_hover_text(
@@ -1105,12 +1158,26 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
         );
 
         let p = ui.painter();
+        // The highlight starts AFTER the rail/status/indent gutter (audit:
+        // flooding the empty status column read as two meaningless blue
+        // bars; CSP keeps the whole left gutter dark on the selected row).
+        let fill_rect = egui::Rect::from_min_max(egui::pos2(pen_col, rect.top()), rect.max);
         if selected {
-            p.rect_filled(rect, 0.0, SEL_ACTIVE);
+            p.rect_filled(fill_rect, 0.0, SEL_ACTIVE);
+            p.hline(
+                fill_rect.x_range(),
+                rect.top() + 0.5,
+                egui::Stroke::new(1.0, SEL_EDGE),
+            );
+            p.hline(
+                fill_rect.x_range(),
+                rect.bottom() - 0.5,
+                egui::Stroke::new(1.0, SEL_EDGE),
+            );
         } else if multi {
-            p.rect_filled(rect, 0.0, theme::SEL_ROW);
+            p.rect_filled(fill_rect, 0.0, theme::SEL_ROW);
         } else if resp.hovered() {
-            p.rect_filled(rect, 0.0, theme::HOVER);
+            p.rect_filled(fill_rect, 0.0, theme::HOVER);
         }
         // The rail cells paint over the row fill. With a palette colour the
         // eye cell takes the dimmed shade and the pen cell the full one
@@ -1134,8 +1201,64 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
         };
         p.rect_filled(eye_cell, 0.0, cell_a);
         p.rect_filled(pen_cell, 0.0, cell_b);
-        for x in [eye_cell.left(), eye_cell.right(), pen_cell.right()] {
+        for x in [
+            eye_cell.left(),
+            eye_cell.right(),
+            pen_cell.right(),
+            flag_cell.right(),
+        ] {
             p.vline(x, rect.y_range(), egui::Stroke::new(1.0, theme::BORDER));
+        }
+        // Status column: an empty stroked box on every layer row (the
+        // affordance CSP draws — the cell is clickable), filled by the
+        // reference mark (accent — it changes tool behaviour) above the
+        // draft mark; one alone centres.
+        if !row.reference && !row.draft {
+            let br = egui::Rect::from_center_size(
+                egui::pos2(flag_cell.center().x, cy),
+                egui::vec2(9.0, 9.0),
+            );
+            p.rect_stroke(
+                br,
+                1.0,
+                egui::Stroke::new(1.0, egui::Color32::from_rgb(0x4a, 0x4a, 0x50)),
+                egui::StrokeKind::Inside,
+            );
+        }
+        if row.reference || row.draft {
+            let fs = egui::vec2(12.0, 12.0);
+            let cx = flag_cell.center().x;
+            match (row.reference, row.draft) {
+                (true, true) => {
+                    let up = egui::pos2(cx, cy - 7.0);
+                    let dn = egui::pos2(cx, cy + 7.0);
+                    icons::paint(
+                        p,
+                        egui::Rect::from_center_size(up, fs),
+                        Icon::Reference,
+                        theme::ACCENT,
+                    );
+                    icons::paint(
+                        p,
+                        egui::Rect::from_center_size(dn, fs),
+                        Icon::Draft,
+                        theme::TEXT_WEAK,
+                    );
+                }
+                (true, false) => icons::paint(
+                    p,
+                    egui::Rect::from_center_size(egui::pos2(cx, cy), fs),
+                    Icon::Reference,
+                    theme::ACCENT,
+                ),
+                (false, true) => icons::paint(
+                    p,
+                    egui::Rect::from_center_size(egui::pos2(cx, cy), fs),
+                    Icon::Draft,
+                    theme::TEXT_WEAK,
+                ),
+                (false, false) => unreachable!(),
+            }
         }
         let eye_r = egui::Rect::from_center_size(
             egui::pos2(eye_cell.center().x, cy),
@@ -1151,13 +1274,25 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
                 rail_icon.gamma_multiply(0.4)
             },
         );
-        // Editing-target pen on the active row (CSP's second rail column).
+        // Editing-target pen on the active row; a plain CHECK on rows that
+        // are multi-selected but not the target (CSP's status column split:
+        // the pen row is where ink lands, checked rows merely ride along).
         if selected {
             let pr = egui::Rect::from_center_size(
                 egui::pos2(pen_cell.center().x, cy),
                 egui::vec2(13.0, 13.0),
             );
             icons::paint(p, pr, Icon::Pen, rail_icon);
+        } else if multi {
+            let c = egui::pos2(pen_cell.center().x, cy);
+            p.line(
+                vec![
+                    egui::pos2(c.x - 4.5, c.y + 0.5),
+                    egui::pos2(c.x - 1.5, c.y + 3.5),
+                    egui::pos2(c.x + 4.5, c.y - 3.5),
+                ],
+                egui::Stroke::new(1.8, rail_icon),
+            );
         }
 
         // Indent nested rows; folders get a disclosure triangle in the gutter.
@@ -1170,82 +1305,90 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
         }
         let mut disclose: Option<egui::Rect> = None;
         if row.folder {
+            // A thin chevron, tucked close to the folder glyph (audit: the
+            // filled 13px triangle was too heavy and sat too far away).
             let dr = egui::Rect::from_center_size(
-                egui::pos2(pen_col + 8.0 + indent, cy),
-                egui::vec2(13.0, 13.0),
+                egui::pos2(pen_col + 7.0 + indent, cy),
+                egui::vec2(12.0, 12.0),
             );
             let c = dr.center();
-            let tri = if row.open {
+            let ch = egui::Color32::from_rgb(0x9a, 0x9a, 0x9a);
+            let stroke = egui::Stroke::new(1.5, if selected { theme::TEXT_STRONG } else { ch });
+            let pts = if row.open {
                 vec![
                     egui::pos2(c.x - 4.0, c.y - 2.0),
+                    egui::pos2(c.x, c.y + 2.5),
                     egui::pos2(c.x + 4.0, c.y - 2.0),
-                    egui::pos2(c.x, c.y + 3.5),
                 ]
             } else {
                 vec![
                     egui::pos2(c.x - 2.0, c.y - 4.0),
-                    egui::pos2(c.x + 3.5, c.y),
+                    egui::pos2(c.x + 2.5, c.y),
                     egui::pos2(c.x - 2.0, c.y + 4.0),
                 ]
             };
-            p.add(egui::Shape::convex_polygon(
-                tri,
+            p.line(pts, stroke);
+            disclose = Some(dr);
+        }
+        let thumb_left = pen_col + 7.0 + indent + if row.folder { 12.0 } else { 0.0 };
+
+        // Thumbnail slot, 32 px wide. Layer rows: the content thumb on a
+        // checker well (CSP-size — after the colour rail, the second thing
+        // that tells rows apart at a glance). FOLDER rows carry a BIG
+        // folder glyph instead — no content composite, no transparency
+        // checker, no border box (owner 2026-08-21, CSP's look): frame
+        // folders wear their own panelled-folder icon, plain folders flip
+        // open/closed with the disclosure state.
+        let thumb_h = if row.folder { 26.0 } else { 32.0 };
+        let tr = egui::Rect::from_min_size(
+            egui::pos2(thumb_left, cy - thumb_h * 0.5),
+            egui::vec2(32.0, thumb_h),
+        );
+        if row.folder {
+            let icon = if row.is_frame {
+                Icon::FrameFolder
+            } else if row.open {
+                Icon::FolderOpen
+            } else {
+                Icon::Folder
+            };
+            let ir = egui::Rect::from_center_size(tr.center(), egui::Vec2::splat(22.0));
+            icons::paint(
+                p,
+                ir,
+                icon,
                 if selected {
                     theme::TEXT_STRONG
                 } else {
-                    theme::TEXT_WEAK
+                    theme::TEXT
                 },
-                egui::Stroke::NONE,
-            ));
-            disclose = Some(dr);
+            );
+        } else {
+            let thumb = app
+                .layer_thumbs
+                .get(i)
+                .and_then(|o| o.as_ref())
+                .map(|(_, t)| t.clone());
+            match &thumb {
+                Some(t) => {
+                    p.image(
+                        t.id(),
+                        tr,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        egui::Color32::WHITE,
+                    );
+                }
+                None => {
+                    p.rect_filled(tr, 2.0, theme::FIELD);
+                }
+            }
+            p.rect_stroke(
+                tr,
+                2.0,
+                egui::Stroke::new(1.0, theme::BORDER),
+                egui::StrokeKind::Inside,
+            );
         }
-        let thumb_left = pen_col + 7.0 + indent + if row.folder { 14.0 } else { 0.0 };
-
-        // Thumbnail on a checker well, 32 px (CSP-size — after the colour
-        // rail, the second thing that tells rows apart at a glance); a plain
-        // folder shows the folder glyph until its composite generates.
-        let tr = egui::Rect::from_min_size(
-            egui::pos2(thumb_left, cy - 16.0),
-            egui::vec2(32.0, 32.0),
-        );
-        let thumb = app
-            .layer_thumbs
-            .get(i)
-            .and_then(|o| o.as_ref())
-            .map(|(_, t)| t.clone());
-        match &thumb {
-            Some(t) => {
-                p.image(
-                    t.id(),
-                    tr,
-                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                    egui::Color32::WHITE,
-                );
-            }
-            None if row.folder => {
-                // Fallback until the composite thumbnail generates (1/frame).
-                p.rect_filled(tr, 2.0, theme::FIELD);
-                icons::paint(
-                    p,
-                    tr.shrink(5.0),
-                    Icon::Folder,
-                    if selected {
-                        theme::TEXT_STRONG
-                    } else {
-                        theme::TEXT
-                    },
-                );
-            }
-            None => {
-                p.rect_filled(tr, 2.0, theme::FIELD);
-            }
-        }
-        p.rect_stroke(
-            tr,
-            2.0,
-            egui::Stroke::new(1.0, theme::BORDER),
-            egui::StrokeKind::Inside,
-        );
         // Clip marker: CSP's red bar down the left edge of the thumbnail.
         // A DANGLING flag (set, but no valid base below — the compositor
         // ignores it) dims to grey so "why is this suddenly unclipped"
@@ -1269,11 +1412,16 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
         // "85.0 LPI" on a toned row) small on top, the NAME big underneath,
         // instead of a name and a far-away right-aligned meta sharing one
         // cramped line. The type glyph leads the meta line (CSP's slot).
-        let y_meta = rect.top() + 12.0;
-        let y_name = rect.bottom() - 14.0;
+        let (y_meta, y_name) = if row.folder {
+            // The thinner folder row keeps both lines, tighter.
+            (rect.top() + 9.0, rect.bottom() - 11.0)
+        } else {
+            (rect.top() + 12.0, rect.bottom() - 14.0)
+        };
         let text_x = tr.right() + 8.0;
 
-        // Right-edge flags on the meta line, CSP order: lock / draft / ref.
+        // Right-edge flag on the meta line: the locks only — reference and
+        // draft moved into the status column on the left.
         let mut fx = rect.right() - 11.0;
         if row.lock || row.lock_alpha {
             let lr = egui::Rect::from_center_size(egui::pos2(fx, y_meta), egui::vec2(12.0, 12.0));
@@ -1289,19 +1437,11 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
             );
             fx -= 13.0;
         }
-        if row.draft {
-            let dr = egui::Rect::from_center_size(egui::pos2(fx, y_meta), egui::vec2(12.0, 12.0));
-            icons::paint(p, dr, Icon::Draft, theme::TEXT_WEAK);
-            fx -= 13.0;
-        }
-        if row.reference {
-            let rr = egui::Rect::from_center_size(egui::pos2(fx, y_meta), egui::vec2(12.0, 12.0));
-            icons::paint(p, rr, Icon::Reference, theme::TEXT_WEAK);
-            fx -= 13.0;
-        }
 
         let mut meta_x = text_x;
-        if let Some(icon) = row.glyph {
+        // Folders carry their glyph as the big thumbnail-slot icon; only
+        // non-folder kinds still mark the meta line.
+        if let Some(icon) = row.glyph.filter(|_| !row.folder) {
             let fr = egui::Rect::from_center_size(
                 egui::pos2(meta_x + 6.0, y_meta),
                 egui::vec2(12.0, 12.0),
@@ -1318,10 +1458,22 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
             );
             meta_x = fr.right() + 4.0;
         }
+        // A narrow column shortens the blend name to its initial rather
+        // than ellipsizing every single row (audit: "100 % No…" repeated
+        // down the stack reads as a rendering bug).
+        let narrow = rect.width() < 215.0;
+        let bname = |b: Blend| -> String {
+            let full = blend_name(b);
+            if narrow {
+                full.chars().next().unwrap_or('N').to_string()
+            } else {
+                full.to_owned()
+            }
+        };
         let meta = match row.tone_lpi {
             Some(lpi) if row.blend == Blend::Normal => format!("{lpi:.1} LPI"),
-            Some(lpi) => format!("{lpi:.1} LPI · {}", blend_name(row.blend)),
-            None => format!("{:.0} % {}", row.opacity * 100.0, blend_name(row.blend)),
+            Some(lpi) => format!("{lpi:.1} LPI · {}", bname(row.blend)),
+            None => format!("{:.0} % {}", row.opacity * 100.0, bname(row.blend)),
         };
         let meta_col = if selected { theme::TEXT } else { theme::TEXT_WEAK };
         let mut mjob = egui::text::LayoutJob::simple(
@@ -1457,6 +1609,9 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
             ui.interact(dr, resp.id.with("fold"), egui::Sense::click())
                 .clicked()
         });
+        if colour_cell.clicked() {
+            app.layer_colour_pick = Some(i);
+        }
         if eye.clicked() {
             if ui.input(|i| i.modifiers.alt) {
                 // RF-001's promise (the hover said so since r102; the
@@ -1608,6 +1763,67 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
 
     if let Some((from, slot, depth)) = drop {
         app.push_cmd(AppCmd::MoveLayer { from, slot, depth });
+    }
+
+    // The layer-colour popup: CSP's standard swatches PLUS the full picker
+    // right in the window — no second click to reach the wheel (owner
+    // 2026-08-21). Opened from a row's status cell or the Label button.
+    if let Some(ci) = app.layer_colour_pick {
+        if ci >= app.doc.layers.len() {
+            app.layer_colour_pick = None;
+        } else {
+            let mut open = true;
+            let name = app.doc.layers[ci].name.clone();
+            egui::Window::new(format!("Layer colour — {name}"))
+                .id(egui::Id::new("mn.layercolour"))
+                .collapsible(false)
+                .resizable(false)
+                .open(&mut open)
+                .show(ui.ctx(), |ui| {
+                    let cur = app.doc.layers[ci].label;
+                    ui.horizontal(|ui| {
+                        for c in LABEL_COLORS {
+                            let (r, resp) = ui
+                                .allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::click());
+                            ui.painter().rect_filled(
+                                r,
+                                3.0,
+                                egui::Color32::from_rgb(c[0], c[1], c[2]),
+                            );
+                            if cur == Some(c) {
+                                ui.painter().rect_stroke(
+                                    r,
+                                    3.0,
+                                    egui::Stroke::new(2.0, theme::TEXT_STRONG),
+                                    egui::StrokeKind::Inside,
+                                );
+                            }
+                            if resp.clicked() {
+                                app.push_cmd(AppCmd::SetLayerLabel(ci, Some(c)));
+                            }
+                        }
+                        if ui.button("Off").clicked() {
+                            app.push_cmd(AppCmd::SetLayerLabel(ci, None));
+                        }
+                    });
+                    ui.add_space(4.0);
+                    let base = cur.unwrap_or(LABEL_COLORS[0]);
+                    let mut c32 = egui::Color32::from_rgb(base[0], base[1], base[2]);
+                    if egui::color_picker::color_picker_color32(
+                        ui,
+                        &mut c32,
+                        egui::color_picker::Alpha::Opaque,
+                    ) {
+                        app.push_cmd(AppCmd::SetLayerLabel(
+                            ci,
+                            Some([c32.r(), c32.g(), c32.b()]),
+                        ));
+                    }
+                });
+            if !open {
+                app.layer_colour_pick = None;
+            }
+        }
     }
 }
 

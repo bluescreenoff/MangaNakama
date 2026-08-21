@@ -86,12 +86,16 @@ Roughly in order. None of this is promised by a date. The queue is fed by
 research into what Clip Studio's own tutorials and forums confess is hard —
 every multi-step official recipe is a feature opportunity.
 
-1. **GPU dabs, the last exclusions.** Wash, texture and smudge brushes ride
-   the GPU path now, a benchmark harness exists (`--bench-dabs`), and the
-   path turns itself on per machine from a measured verdict — a one-shot
-   background benchmark decides, never a blanket default. Still CPU-only:
-   smudge combined with wash (the sampler would have to read the in-flight
-   wash buffer) and the spectral-paint / colorize / posterize presets.
+1. **GPU dabs, the last exclusions.** Wash, texture, smudge, colorize and
+   posterize brushes ride the GPU path now, a benchmark harness exists
+   (`--bench-dabs`), and the path turns itself on per machine from a
+   measured verdict — a one-shot background benchmark decides, never a
+   blanket default. Still CPU-only, each with its measured reason: smudge
+   combined with wash (the sampler sees the stroke's own paint per DAB on
+   the CPU — pure self-feedback — and a batched GPU path drifts visibly;
+   the attempt and the numbers are recorded in the code) and the
+   spectral-paint presets (the pigment-mixing math is float-heavy and
+   needs its own parity tolerance before it is worth porting).
 2. **Brushes and materials without ceremony.** Lasso marks on the canvas
    and "make brush" / "make material" from them; tune with a live test
    stroke; edit and organise in place instead of a register-material tour.

@@ -602,25 +602,10 @@ pub(crate) fn sec_text_workstyle(ui: &mut egui::Ui, app: &mut App) {
                 for n in names {
                     let picked = current.as_deref() == Some(n.as_str());
                     if ui.selectable_label(picked, &n).clicked() && !picked {
-                        if let Some((li, ti)) = target {
-                            app.push_cmd(crate::cmd::AppCmd::TextStyleAssign {
-                                layer: li,
-                                item: ti,
-                                name: Some(n.clone()),
-                            });
-                        }
-                        // Either way the style becomes the new-text default.
-                        if let Some(s) =
-                            app.doc.text_styles.iter().find(|s| s.name == n).cloned()
-                        {
-                            if !s.font.is_empty() {
-                                app.text_font = s.font.clone();
-                            }
-                            app.text_size_pt = s.size_pt;
-                            app.text_letter_pt = s.letter_spacing_pt;
-                            app.text_line = s.line_spacing;
-                            app.text_style_new = Some(n.clone());
-                        }
+                        // Assign to the selected text AND become the
+                        // new-text default — both halves live in the one
+                        // command, which the Ctrl+K palette runs too.
+                        app.push_cmd(crate::cmd::AppCmd::TextStylePick(n.clone()));
                     }
                 }
                 ui.separator();

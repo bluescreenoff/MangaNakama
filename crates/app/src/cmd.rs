@@ -1676,6 +1676,16 @@ pub enum AppCmd {
     /// Help ▸ Manual: open docs/manual (shipped beside the exe) in the
     /// default browser.
     OpenManual,
+    /// One manual TOPIC by file name (`"layers.html"`), for the command
+    /// palette's `?` rows — same folder, same browser, one page in.
+    OpenManualPage(&'static str),
+    /// Apply a registered workspace by name (the Workspace menu's rows).
+    WorkspaceApply(String),
+    /// Pick a named work style: assign it to the selected text item if there
+    /// is one, and make it the new-text default either way. The Tool
+    /// Property picker and the command palette both run THIS, so the two
+    /// cannot drift into meaning different things by "pick a style".
+    TextStylePick(String),
     /// Help ▸ Diagnostics: the F1 HUD's menu twin.
     ToggleHud,
     // --- selection + fill ---------------------------------------------------
@@ -2081,6 +2091,56 @@ fn resync_rulers(app: &mut App, before: &mn_core::Rulers) {
     app.mark_dirty();
 }
 
+/// The generator's NEW-LAYER half: render `spec`, add the layer that
+/// CARRIES it, ink it, and wrap both records into ONE undo press. Returns
+/// the layer's name, or `None` when the spec rendered nothing (the caller
+/// says so — nothing is added).
+///
+/// Shared by the dialog's Generate and by the Materials bank's generator
+/// materials, which is the point: a `.gen.json` material places the same
+/// live, Object-tool-editable layer, never a decoded bitmap.
+fn genlines_new_layer(app: &mut App, spec: mn_core::genlines::GenLinesSpec) -> Option<&'static str> {
+    let tiles = spec.render(app.doc.size);
+    if tiles.is_empty() {
+        return None;
+    }
+    let name = if spec.focus {
+        "Focus lines"
+    } else {
+        "Speed lines"
+    };
+    app.doc.add_layer(name);
+    app.doc.layers[app.doc.active].genlines = Some(spec);
+    app.doc.begin_op();
+    app.doc.set_op_label("Generate lines");
+    let active = app.doc.active;
+    for (idx, tile) in tiles {
+        app.doc.layers[active].set_tile(idx, Some(tile));
+    }
+    app.doc.end_op();
+    // One gesture, one press: the structural New-layer record and
+    // the pixel op wrap together (structural ops record instead of
+    // clearing since 2026-08-21).
+    app.doc.wrap_recent("Generate lines", 2);
+    app.mark_dirty();
+    Some(name)
+}
+
+/// Where a focus-line generator material converges: the pointer when it is
+/// over the canvas (the same paste-to-position gesture an image material
+/// gets), the document centre otherwise — a degenerate view (headless, or
+/// a shell that has not laid out) must not aim off-canvas.
+fn genlines_aim_point(app: &App) -> (f32, f32) {
+    let p = app.last_pointer;
+    if !app.shell.owns_pointer(p.0, p.1) {
+        let c = app.viewport.to_canvas(p.0 as f32, p.1 as f32);
+        if c.0 >= 0.0 && c.1 >= 0.0 && c.0 < app.doc.size.0 as f32 && c.1 < app.doc.size.1 as f32 {
+            return c;
+        }
+    }
+    (app.doc.size.0 as f32 * 0.5, app.doc.size.1 as f32 * 0.5)
+}
+
 pub fn dispatch(app: &mut App, cmd: AppCmd) {
     // FB-039: the last-frame delete confirmation is one-shot — any other
     // command disarms it.
@@ -2430,55 +2490,10 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 }
                 return;
             }
-            let size = app.doc.size;
-            let tiles = if focus {
-                mn_core::genlines::render_focus(
-                    &mn_core::FocusLinesParams {
-                        center: [a, b],
-                        r_in: c,
-                        r_out: d,
-                        count: count.max(1),
-                        width,
-                        angle_jitter: jitter,
-                        width_jitter: jitter,
-                        length_jitter: jitter,
-                        seed,
-                    },
-                    size,
-                )
-            } else {
-                mn_core::genlines::render_speed(
-                    &mn_core::SpeedLinesParams {
-                        angle_deg: a,
-                        count: count.max(1),
-                        len_min: b,
-                        len_max: c,
-                        width,
-                        seed,
-                    },
-                    size,
-                )
-            };
-            if tiles.is_empty() {
-                app.set_status("generator produced nothing — widen the parameters");
-                return;
+            match genlines_new_layer(app, spec) {
+                Some(name) => app.set_status(format!("{name} generated — {count} lines")),
+                None => app.set_status("generator produced nothing — widen the parameters"),
             }
-            let name = if focus { "Focus lines" } else { "Speed lines" };
-            app.doc.add_layer(name);
-            app.doc.layers[app.doc.active].genlines = Some(spec);
-            app.doc.begin_op();
-            app.doc.set_op_label("Generate lines");
-            let active = app.doc.active;
-            for (idx, tile) in tiles {
-                app.doc.layers[active].set_tile(idx, Some(tile));
-            }
-            app.doc.end_op();
-            // One gesture, one press: the structural New-layer record and
-            // the pixel op wrap together (structural ops record instead of
-            // clearing since 2026-08-21).
-            app.doc.wrap_recent("Generate lines", 2);
-            app.set_status(format!("{name} generated — {count} lines"));
-            app.mark_dirty();
         }
         AppCmd::HistoryTo { keep } => {
             app.commit_text_edit();
@@ -4333,6 +4348,27 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             app.mark_dirty();
         }
         AppCmd::PasteMaterial { path, tile } => {
+            // A GENERATOR material (`<name>.gen.json`) places LIVE: a new
+            // layer carrying the spec, with Object-tool handles from the
+            // first click. No bitmap is decoded on this path — the whole
+            // point is that the placed lines stay re-aimable. Focus lines
+            // converge where you clicked; the rest is what the material
+            // stores (a material is reusable, a position is not).
+            if let Some(mut spec) = crate::app::materials::read_gen_spec(&path) {
+                if spec.focus {
+                    (spec.a, spec.b) = genlines_aim_point(app);
+                }
+                app.material_note_use(&path);
+                match genlines_new_layer(app, spec) {
+                    Some(name) => app.set_status(format!(
+                        "{name} placed live — the Object tool edits the handles"
+                    )),
+                    None => app.set_status(
+                        "that generator material produced nothing on this canvas — Layer ▸ Edit effect lines to widen it",
+                    ),
+                }
+                return;
+            }
             // Same paste-to-position rule as Ctrl+V (owner HIGH): a tone
             // dropped into its panel is the same gesture. The tiling
             // variant stays canvas-wide by design — no aiming there.
@@ -5791,6 +5827,49 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 "manual not found — docs/manual/ lives beside the exe (manual/index.html)",
             ),
         },
+        AppCmd::OpenManualPage(file) => match manual_page_path(file) {
+            Some(p) => unsafe { crate::win32::shell_open(&p) },
+            None => app.set_status(format!("manual page not found — manual/{file}")),
+        },
+        AppCmd::WorkspaceApply(name) => {
+            if app.workspace_apply(&name) {
+                app.set_status(format!("workspace: {name}"));
+            } else {
+                app.set_status(format!("no workspace named \"{name}\""));
+            }
+            app.mark_dirty();
+        }
+        AppCmd::TextStylePick(name) => {
+            // No early return: dispatch does bookkeeping after the match
+            // (pages palette, clip report, action recording) that every
+            // command owes it.
+            match app.doc.text_styles.iter().find(|s| s.name == name).cloned() {
+                None => app.set_status(format!("no work style named \"{name}\"")),
+                Some(style) => {
+                    // The selected text item follows the style; the recorded
+                    // step is the assignment's own, so this stays one press.
+                    if let Some((layer, item)) = crate::text_edit::property_target(app) {
+                        dispatch(
+                            app,
+                            AppCmd::TextStyleAssign {
+                                layer,
+                                item,
+                                name: Some(name.clone()),
+                            },
+                        );
+                    }
+                    // Either way it becomes what the NEXT text box is typed in.
+                    if !style.font.is_empty() {
+                        app.text_font = style.font.clone();
+                    }
+                    app.text_size_pt = style.size_pt;
+                    app.text_letter_pt = style.letter_spacing_pt;
+                    app.text_line = style.line_spacing;
+                    app.text_style_new = Some(name);
+                    app.mark_dirty();
+                }
+            }
+        }
 
         // The Sub Tool list's rows, as one command. The tool switch goes
         // through `SetTool` and the two modes that have their own commands
@@ -6462,6 +6541,15 @@ pub(crate) fn manual_path() -> Option<std::path::PathBuf> {
     }
     let dev = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/manual/index.html");
     dev.exists().then_some(dev)
+}
+
+/// One manual TOPIC, beside the index — whichever of the two folders above
+/// actually exists, so the palette's `?` rows follow the manual home rather
+/// than guessing a second time. A missing file says so instead of handing
+/// the shell a path that opens nothing.
+pub(crate) fn manual_page_path(file: &str) -> Option<std::path::PathBuf> {
+    let page = manual_path()?.with_file_name(file);
+    page.exists().then_some(page)
 }
 
 /// docs/CLIPPING-SCENARIOS.md 5b: the status line speaks when an edit

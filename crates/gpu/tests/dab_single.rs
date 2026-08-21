@@ -39,6 +39,9 @@ fn make(x: f32, y: f32, r: f32) -> DabParams {
         angle: 0.0,
         lock_alpha: 0.0,
         paint: 0.0,
+        colorize: 0.0,
+        posterize: 0.0,
+        posterize_num: 1,
         tex_off: [0, 0],
         tex_angle: 0.0,
     }

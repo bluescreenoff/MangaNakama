@@ -982,6 +982,110 @@ fn gpu_dab_parity_wash() {
     println!("[wash-parity] worst channel {worst_ch} ulp, worst alpha rel {worst_rel:.4}");
 }
 
+/// P4 — the last wash exclusion, wash + smudge on the GPU: ATTEMPTED and
+/// measured, kept ignored as the re-entry point. The wiring exists (the
+/// oracle serves the in-flight wash sentinel with per-sample dispatch)
+/// and dab STREAMS matched position-for-position, but the C's sampler
+/// sees every dab up to the current one (`get_color_internal` processes
+/// the pending op queue before reading) while a batched GPU path shows
+/// only dabs up to the last flush. Wash smudging is pure self-feedback,
+/// so that intra-batch gap compounded to ~6400 ulp here. Un-ignore after
+/// building per-dab visibility that is not a per-dab round trip; see
+/// `MyBrush::gpu_ready`.
+#[ignore = "wash+smudge routes CPU by design — intra-batch sampler visibility; see gpu_ready"]
+#[test]
+fn gpu_dab_parity_wash_smudge() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    if !renderer.gpu_dabs_supported() {
+        println!("[test] SKIP: rgba16uint storage unsupported");
+        return;
+    }
+    let mut app = App::new(renderer, (600, 400), 1.0);
+
+    // A curved, pressure-varying stroke so the smudge state actually
+    // evolves (later dabs sample earlier dabs' wet paint).
+    let stroke = |app: &mut App, x0: f32| {
+        app.begin_stroke(PointerKind::Mouse);
+        let batch: Vec<PenSample> = (0..30)
+            .map(|i| PenSample {
+                x: x0 + i as f32 * 4.0,
+                y: 200.0 + 24.0 * (i as f32 * 0.3).sin(),
+                pressure: 0.4 + 0.5 * (i as f32 * 0.17).sin().abs(),
+                tilt_x: 0.0,
+                tilt_y: 0.0,
+                t_ms: i as f64 * 8.0,
+            })
+            .collect();
+        app.push_batch(&batch);
+        app.end_stroke();
+    };
+
+    // Fresh engine per stroke (carryover rule — see gpu_dab_parity_wash),
+    // with the smudge knob set BEFORE the engine wraps the brush.
+    let fresh_engine = |app: &mut App| {
+        let i = app
+            .selected_preset
+            .expect("a preset must be selected for the fresh-engine swap");
+        let p = app.presets[i].1.clone();
+        let mut b = mn_brush::MyBrush::load(&p).expect("preset reload must succeed");
+        b.set_smudge(0.55);
+        *app.engine_mut() = Engine::new(EngineKind::My(Box::new(b)));
+        crate::cmd::dispatch(app, crate::cmd::AppCmd::SetWash(true));
+    };
+
+    app.gpu_dabs = false;
+    fresh_engine(&mut app);
+    stroke(&mut app, 100.0);
+    let gpu_layer = app.doc.add_layer("gpu");
+    app.doc.set_active(gpu_layer);
+    app.gpu_dabs = true;
+    fresh_engine(&mut app);
+    stroke(&mut app, 100.0);
+    assert!(
+        app.dab_path_last.starts_with("gpu"),
+        "the wash+smudge stroke silently left the GPU path: {}",
+        app.dab_path_last
+    );
+
+    let collect = |li: usize| -> std::collections::BTreeMap<TileIdx, Vec<u16>> {
+        app.doc.layers[li]
+            .tiles()
+            .map(|(i, t)| (i, t.data().to_vec()))
+            .collect()
+    };
+    let (cpu, gpu) = (collect(0), collect(gpu_layer));
+    assert!(!cpu.is_empty(), "the CPU wash+smudge stroke painted nothing");
+    assert_eq!(
+        cpu.keys().collect::<Vec<_>>(),
+        gpu.keys().collect::<Vec<_>>(),
+        "the two paths inked different tiles"
+    );
+    let mut worst_ch: u32 = 0;
+    let mut worst_rel: f64 = 0.0;
+    for (k, c) in &cpu {
+        let g = &gpu[k];
+        let (ca, ga): (u64, u64) = (
+            c.chunks_exact(4).map(|p| p[3] as u64).sum(),
+            g.chunks_exact(4).map(|p| p[3] as u64).sum(),
+        );
+        let rel = (ca as i64 - ga as i64).unsigned_abs() as f64 / ca.max(1) as f64;
+        worst_rel = worst_rel.max(rel);
+        for (pc, pg) in c.chunks_exact(4).zip(g.chunks_exact(4)) {
+            for ch in 0..4 {
+                worst_ch = worst_ch.max(pc[ch].abs_diff(pg[ch]) as u32);
+            }
+        }
+        assert!(worst_ch <= 491, "tile {k:?}: channel drift {worst_ch} ulp");
+    }
+    assert!(
+        worst_rel < 0.05,
+        "per-tile alpha drift {worst_rel:.3} (a blind sampler lands far past this)"
+    );
+    println!("[wash-smudge-parity] worst channel {worst_ch} ulp, worst alpha rel {worst_rel:.4}");
+}
+
 /// #0.1 part 3, smudge parity END TO END: the same blending stroke over
 /// the same pre-existing ink, CPU path (the C's get_color samples the
 /// live CPU tiles) vs GPU path (per-sample dispatch + the tile oracle
@@ -1856,6 +1960,90 @@ fn material_paste_size_modes_and_layer_order() {
             .contains(&app.doc.active),
         "still inside the folder (the seal still clips it)"
     );
+}
+
+/// A GENERATOR material places the effect lines themselves, not a picture
+/// of them: the shipped `focus-lines.gen.json` makes a layer that carries
+/// its spec (so the Object tool has handles immediately), converging where
+/// the click landed — and the whole placement is ONE undo press, the same
+/// invariant the generator dialog holds.
+#[test]
+fn generator_material_places_live_effect_lines_in_one_undo_press() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    let mat_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/materials");
+    app.material_folders[0] = mat_dir;
+    app.materials_scan();
+
+    let focus = app
+        .materials
+        .iter()
+        .find(|m| m.name == "focus-lines")
+        .expect("the focus-lines generator ships");
+    assert!(focus.is_generator(), "it scans as a generator, not a bitmap");
+    assert_eq!(
+        focus.thumb_path().file_name().unwrap(),
+        "focus-lines.png",
+        "the shipped PNG is its thumbnail"
+    );
+    assert!(
+        !app.materials.iter().any(|m| m.name == "speed-lines" && !m.is_generator()),
+        "the shipped effect-line PNGs must not also scan as bitmap materials"
+    );
+    let path = focus.path.clone();
+
+    let layers_before = app.doc.layers.len();
+    let steps_before = app.doc.undo_len();
+    app.viewport = mn_gpu::Viewport::default(); // canvas == client
+    app.last_pointer = (220, 140);
+    crate::cmd::dispatch(
+        &mut app,
+        crate::cmd::AppCmd::PasteMaterial {
+            path: path.clone(),
+            tile: false,
+        },
+    );
+
+    assert!(
+        app.transform_drag.is_none(),
+        "a generator places a layer, never a bitmap float"
+    );
+    assert_eq!(app.doc.layers.len(), layers_before + 1);
+    let spec = app
+        .doc
+        .active_layer()
+        .genlines
+        .expect("the placed layer carries its spec — the Object tool edits it");
+    assert!(spec.focus);
+    assert_eq!(
+        (spec.a, spec.b),
+        (220.0, 140.0),
+        "focus lines converge where the click landed"
+    );
+    let ink: u64 = app
+        .doc
+        .active_layer()
+        .tiles()
+        .map(|(_, t)| t.alpha_sum())
+        .sum();
+    assert!(ink > 0, "and the lines are actually inked");
+    assert_eq!(
+        app.material_uses.get(&path.display().to_string()),
+        Some(&1),
+        "placing counts a use like any other material"
+    );
+
+    // One placement, one press (the layer add and the ink wrapped).
+    assert_eq!(
+        app.doc.undo_len(),
+        steps_before + 1,
+        "labels: {:?}",
+        app.doc.undo_labels()
+    );
+    assert!(app.doc.undo());
+    assert_eq!(app.doc.layers.len(), layers_before, "the layer went away");
 }
 
 /// RF-001 (owner spec): reference flags are a SET — toggles are
@@ -3895,10 +4083,65 @@ fn workspaces_register_apply_reload_delete() {
     assert_eq!(app.workspaces.len(), 1);
     assert_eq!(app.workspace_current, "", "current cleared on delete");
     // Persistence shape: the JSON line parses back.
-    let ws: Vec<[String; 6]> =
+    let ws: Vec<Vec<String>> =
         serde_json::from_str(&serde_json::to_string(&app.workspaces).unwrap()).unwrap();
     assert_eq!(ws.len(), 1);
     assert_eq!(ws[0][0], "inking");
+}
+
+/// A workspace entry is VARIABLE-LENGTH. It was a fixed six fields until the
+/// column-collapse round added two; a six-element line written by any earlier
+/// build must still load and apply, and applying it must restore both columns
+/// EXPANDED (the state it was registered in) rather than panicking on `e[6]`
+/// or silently dropping every saved workspace.
+///
+/// Failed against the old code twice over: `Vec<[String; 6]>` makes serde
+/// REJECT the eight-field line this build writes — one round trip through
+/// ui.txt and every workspace was gone, with `unwrap_or_default()` swallowing
+/// the error — and a bare `e[6]` panics on the old six-field one.
+#[test]
+fn workspace_entries_migrate_from_the_old_six_field_shape() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+
+    // Exactly what an older build wrote: six fields, no collapse flags.
+    let old = r#"[["rough","","","240","260","Anti-aliasing"]]"#;
+    app.workspaces = serde_json::from_str(old).expect("an old line must still parse");
+    assert_eq!(app.workspaces[0].len(), 6);
+
+    app.layout.left_collapsed = true;
+    app.layout.right_collapsed = true;
+    assert!(app.workspace_apply("rough"), "the old entry still applies");
+    assert!((app.layout.left_w - 240.0).abs() < 0.5);
+    assert!((app.layout.right_w - 260.0).abs() < 0.5);
+    assert_eq!(app.layout.prop_hidden, "Anti-aliasing");
+    assert!(
+        !app.layout.left_collapsed && !app.layout.right_collapsed,
+        "a pre-collapse workspace restores both columns expanded"
+    );
+
+    // Re-registering under this build grows the entry, and the flags survive
+    // a full JSON round trip (what `ui.txt` actually carries).
+    app.layout.left_collapsed = true;
+    app.workspace_register("rough");
+    assert_eq!(app.workspaces.len(), 1, "re-register overwrites in place");
+    assert_eq!(app.workspaces[0].len(), 8);
+    let line = serde_json::to_string(&app.workspaces).unwrap();
+    app.workspaces = serde_json::from_str(&line).expect("the new line parses back");
+    app.layout.left_collapsed = false;
+    app.layout.right_collapsed = true;
+    assert!(app.workspace_apply("rough"));
+    assert!(app.layout.left_collapsed, "left was registered collapsed");
+    assert!(!app.layout.right_collapsed, "right was registered expanded");
+
+    // A truncated / hand-mangled entry must degrade, never panic.
+    app.workspaces = vec![vec!["stub".to_string()]];
+    assert!(app.workspace_apply("stub"));
+    assert!(!app.layout.left_collapsed && !app.layout.right_collapsed);
+    app.workspace_delete("stub");
+    assert!(app.workspaces.is_empty());
 }
 
 /// EL-002: brightness → opacity — white turns transparent, black

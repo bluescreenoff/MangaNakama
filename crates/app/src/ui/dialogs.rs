@@ -818,6 +818,22 @@ pub(super) fn prefs_window(ctx: &egui::Context, app: &mut App) {
                         )
                         .changed();
                     ui.end_row();
+
+                    ui.label("Layers palette icons");
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut p.palette_icon_px)
+                                .range(14.0..=32.0)
+                                .speed(0.25)
+                                .fixed_decimals(0)
+                                .suffix(" px"),
+                        )
+                        .on_hover_text(
+                            "size of the Layers palette's command buttons; \
+                             the toggle strip scales with it",
+                        )
+                        .changed();
+                    ui.end_row();
                 });
             ui.weak("New canvas and preset apply to the next document you create.");
 

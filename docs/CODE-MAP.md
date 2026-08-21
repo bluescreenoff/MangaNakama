@@ -265,6 +265,27 @@ The recurring failure shapes, in order of how often they have shipped:
   right now (the owner's own tags must outlive a rescan or an unmounted
   drive). Clearing the last tag deletes the file, so "cleared" and "never
   tagged" are the same folder on disk.
+- A material folder holds TWO kinds of material (`app/materials.rs`,
+  `MaterialKind`): images, and generator materials — a `<stem>.gen.json`
+  holding a serialized `GenLinesSpec`, whose same-stem PNG is only its
+  thumbnail and must never scan as a second material. `PasteMaterial`
+  routes a generator through `genlines_new_layer` in `cmd.rs` (never a
+  bitmap decode), so the placed layer carries `Layer.genlines` and the
+  Object tool edits it from the first click; that helper is also the
+  dialog's Generate path, and it owns the `wrap_recent("Generate lines",
+  2)` that keeps one placement at ONE undo press.
+- A palette column can be COLLAPSED to an 18pt strip (`ui.rs`,
+  `left_collapsed=` / `right_collapsed=`). Whatever writes a column's width
+  down must skip a collapsed side — `UiLayout::note_widths` and the resize
+  handles both do — or the strip's width becomes the stored column width and
+  the column is a permanent sliver after the next launch. Collapsing also
+  hides that column's torn-off FLOATING palettes: egui_dock only draws window
+  surfaces from `DockArea::show_inside`, which a collapsed column skips.
+- A workspace entry (`app/workspaces.rs`) is a VARIABLE-LENGTH `Vec<String>`,
+  never a fixed-size array, and every field is read through `ws_field`. A
+  `[String; N]` makes serde reject the whole line the day the entry grows —
+  and the parse is an `unwrap_or_default()`, so every saved workspace would
+  vanish without a word. New fields go on the END only.
 
 ## Tests and process
 

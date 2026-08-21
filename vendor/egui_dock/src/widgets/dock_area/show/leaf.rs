@@ -463,7 +463,16 @@ impl<Tab> DockArea<'_, Tab> {
                 let response =
                     tabs_ui.interact(response.rect, id.with("dragged"), Sense::click_and_drag());
 
-                if let Some(delta) = self.try_initiate_tab_drag(tabs_ui, state, path, tab_index) {
+                let drag_delta = self.try_initiate_tab_drag(tabs_ui, state, path, tab_index);
+                // MN-PATCH #14 (MangaNakama): while the drag is MOVING a
+                // floating window (show/mod.rs), the whole window already
+                // follows the pointer — offsetting the tab ghost by the same
+                // accumulated delta on top would carry it away at twice the
+                // speed. The payload is still published every frame, so the
+                // move keeps running; only the ghost transform is skipped.
+                if let Some(delta) = drag_delta
+                    && !state.float_move
+                {
                     tabs_ui
                         .ctx()
                         .transform_layer_shapes(layer_id, TSTransform::new(delta, 1.0));

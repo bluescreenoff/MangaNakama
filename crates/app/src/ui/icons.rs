@@ -104,6 +104,37 @@ pub enum Icon {
     Tone,
     /// The paper under the stack (PA-001): a sheet with a folded corner.
     Paper,
+    /// An OPEN layer folder (the palette rows' disclosure state — CSP
+    /// draws open and closed folders differently and the owner asked for
+    /// the same).
+    FolderOpen,
+    /// Frame border folder: a folder wearing panel divisions — the special
+    /// icon CSP gives koma folders in the layer list.
+    FrameFolder,
+    /// New raster layer: a sheet with a corner plus. The bare `Plus` said
+    /// nothing about WHAT it made (owner 2026-08-21); every palette
+    /// "make one" button now wears its subject.
+    NewLayer,
+    /// New vector layer: the recorded-curve sheet with a corner plus.
+    NewVector,
+    /// New folder, corner plus.
+    NewFolder,
+    /// New frame border folder, corner plus.
+    NewFrameFolder,
+    /// Auto Actions: run the stored sequence (a play triangle).
+    Play,
+    /// Auto Actions: arm recording (a filled dot).
+    Record,
+    /// Auto Actions: stop recording (a filled square).
+    Stop,
+    /// Drag handle: two columns of grip dots — "this row moves".
+    Grip,
+    /// Palette-column collapse (`ui.rs`): a chevron pointing at the screen
+    /// edge the column folds towards, or back at the canvas once it is
+    /// folded away. Geometry, not `<`/`>` — the bundled fonts have no
+    /// pictographs and the owner's rule is no raw ascii glyphs in the UI.
+    ChevronLeft,
+    ChevronRight,
 }
 
 /// Paint `icon` to fill `r` (which should be square-ish), in `color`.
@@ -296,24 +327,33 @@ pub fn paint(p: &Painter, r: Rect, icon: Icon, color: Color32) {
             ));
         }
         Icon::Label => {
-            // Two offset colour chips.
+            // A colour chip with a dropdown nub — the palette-colour
+            // CONTROL, matching CSP's (audit: the old two offset chips
+            // read as "duplicate").
+            p.rect_filled(rect(r, 0.08, 0.18, 0.64, 0.74), 1.0, color);
+            p.add(Shape::convex_polygon(
+                poly(r, &[(0.72, 0.38), (0.96, 0.38), (0.84, 0.56)]),
+                color,
+                Stroke::NONE,
+            ));
+        }
+        Icon::Clip => {
+            // Clip to the layer below: a small inset layer hooking DOWN
+            // into the full-width base (audit: the bent arrow read as a
+            // set-square).
             p.rect_stroke(
-                rect(r, 0.36, 0.36, 0.88, 0.88),
+                rect(r, 0.36, 0.08, 0.90, 0.36),
                 1.0,
                 thin,
                 egui::StrokeKind::Inside,
             );
-            p.rect_filled(rect(r, 0.12, 0.12, 0.64, 0.64), 1.0, color);
-        }
-        Icon::Clip => {
-            // Bent arrow pointing at the layer below (CSP clip glyph, simplified).
-            p.line(poly(r, &[(0.30, 0.14), (0.30, 0.62), (0.72, 0.62)]), line);
+            p.line(poly(r, &[(0.20, 0.22), (0.20, 0.56)]), line);
             p.add(Shape::convex_polygon(
-                poly(r, &[(0.86, 0.62), (0.66, 0.48), (0.66, 0.76)]),
+                poly(r, &[(0.20, 0.70), (0.09, 0.52), (0.31, 0.52)]),
                 color,
                 Stroke::NONE,
             ));
-            p.line(poly(r, &[(0.14, 0.86), (0.86, 0.86)]), thin);
+            p.rect_filled(rect(r, 0.08, 0.76, 0.92, 0.92), 1.0, color);
         }
         Icon::Lock => {
             p.rect_filled(rect(r, 0.22, 0.48, 0.78, 0.90), 1.0, color);
@@ -327,21 +367,22 @@ pub fn paint(p: &Painter, r: Rect, icon: Icon, color: Color32) {
             p.line(arc, line);
         }
         Icon::LockAlpha => {
-            // Transparency checker (two opposing squares) + a small padlock.
+            // ONE big transparency checker + a padlock over its corner
+            // (audit: two 5px checker blobs were mush at toggle size).
             p.rect_stroke(
-                rect(r, 0.08, 0.08, 0.66, 0.66),
-                1.0,
+                rect(r, 0.06, 0.06, 0.64, 0.64),
+                0.0,
                 thin,
                 egui::StrokeKind::Inside,
             );
-            p.rect_filled(rect(r, 0.08, 0.08, 0.37, 0.37), 0.0, color);
-            p.rect_filled(rect(r, 0.37, 0.37, 0.66, 0.66), 0.0, color);
-            p.rect_filled(rect(r, 0.52, 0.64, 0.94, 0.94), 1.0, color);
+            p.rect_filled(rect(r, 0.06, 0.06, 0.35, 0.35), 0.0, color);
+            p.rect_filled(rect(r, 0.35, 0.35, 0.64, 0.64), 0.0, color);
+            p.rect_filled(rect(r, 0.50, 0.64, 0.96, 0.96), 1.0, color);
             let n = 8;
             let arc: Vec<Pos2> = (0..=n)
                 .map(|i| {
                     let a = std::f32::consts::PI * (1.0 + i as f32 / n as f32);
-                    pt(r, 0.73 + 0.13 * a.cos(), 0.64 + 0.17 * a.sin())
+                    pt(r, 0.73 + 0.14 * a.cos(), 0.64 + 0.18 * a.sin())
                 })
                 .collect();
             p.line(arc, thin);
@@ -353,6 +394,103 @@ pub fn paint(p: &Painter, r: Rect, icon: Icon, color: Color32) {
                 Stroke::NONE,
             ));
             p.rect_filled(rect(r, 0.10, 0.34, 0.90, 0.80), 1.0, color);
+        }
+        Icon::FolderOpen => {
+            // Tab + a hint of the back panel, with the front flap tilted
+            // open — the classic "this folder is expanded" silhouette.
+            p.add(Shape::convex_polygon(
+                poly(r, &[(0.08, 0.22), (0.36, 0.22), (0.44, 0.33), (0.08, 0.33)]),
+                color,
+                Stroke::NONE,
+            ));
+            p.line(poly(r, &[(0.08, 0.33), (0.08, 0.78), (0.20, 0.78)]), thin);
+            p.add(Shape::convex_polygon(
+                poly(r, &[(0.22, 0.44), (0.94, 0.44), (0.80, 0.80), (0.08, 0.80)]),
+                color,
+                Stroke::NONE,
+            ));
+        }
+        Icon::FrameFolder => {
+            // A folder whose front is a panelled page: filled tab, outlined
+            // body, koma divisions inside — unmistakably "the panel folder".
+            p.add(Shape::convex_polygon(
+                poly(r, &[(0.10, 0.18), (0.40, 0.18), (0.48, 0.29), (0.10, 0.29)]),
+                color,
+                Stroke::NONE,
+            ));
+            p.rect_stroke(
+                rect(r, 0.10, 0.29, 0.90, 0.84),
+                0.0,
+                line,
+                egui::StrokeKind::Inside,
+            );
+            p.line(poly(r, &[(0.10, 0.56), (0.90, 0.56)]), thin);
+            p.line(poly(r, &[(0.53, 0.29), (0.53, 0.56)]), thin);
+        }
+        Icon::NewLayer => {
+            // A sheet with two content lines; the corner plus says "make one".
+            p.rect_stroke(
+                rect(r, 0.10, 0.08, 0.70, 0.76),
+                1.0,
+                thin,
+                egui::StrokeKind::Inside,
+            );
+            p.line(poly(r, &[(0.20, 0.30), (0.60, 0.30)]), thin);
+            p.line(poly(r, &[(0.20, 0.46), (0.60, 0.46)]), thin);
+            p.line(poly(r, &[(0.80, 0.60), (0.80, 0.98)]), line);
+            p.line(poly(r, &[(0.61, 0.79), (0.99, 0.79)]), line);
+        }
+        Icon::NewVector => {
+            // A bare S-curve with square node handles + the corner plus
+            // (audit: inside a bounding box the mark was illegible; the
+            // curve IS the subject).
+            let pts: Vec<Pos2> = (0..=14)
+                .map(|i| {
+                    let t = i as f32 / 14.0;
+                    let u = 1.0 - t;
+                    let x = u * u * 0.10 + 2.0 * u * t * 0.42 + t * t * 0.68;
+                    let y = u * u * 0.70 + 2.0 * u * t * 0.02 + t * t * 0.52;
+                    pt(r, x, y)
+                })
+                .collect();
+            p.add(Shape::line(pts, line));
+            for (x, y) in [(0.10, 0.70), (0.68, 0.52)] {
+                p.rect_filled(
+                    Rect::from_center_size(pt(r, x, y), Vec2::splat(w * 0.18)),
+                    0.0,
+                    color,
+                );
+            }
+            p.line(poly(r, &[(0.80, 0.60), (0.80, 0.98)]), line);
+            p.line(poly(r, &[(0.61, 0.79), (0.99, 0.79)]), line);
+        }
+        Icon::NewFolder => {
+            // Square-shouldered tab (audit: the slanted tab rounded to a
+            // lump at button size).
+            p.rect_filled(rect(r, 0.06, 0.18, 0.38, 0.30), 0.5, color);
+            p.rect_filled(rect(r, 0.06, 0.28, 0.74, 0.72), 0.5, color);
+            p.line(poly(r, &[(0.80, 0.60), (0.80, 0.98)]), line);
+            p.line(poly(r, &[(0.61, 0.79), (0.99, 0.79)]), line);
+        }
+        Icon::NewFrameFolder => {
+            // The panelled FOLDER (the frame-folder row glyph, shrunk) +
+            // corner plus — the plain panelled page shared its silhouette
+            // with New-layer (audit).
+            p.add(Shape::convex_polygon(
+                poly(r, &[(0.06, 0.12), (0.30, 0.12), (0.37, 0.22), (0.06, 0.22)]),
+                color,
+                Stroke::NONE,
+            ));
+            p.rect_stroke(
+                rect(r, 0.06, 0.22, 0.74, 0.76),
+                0.0,
+                thin,
+                egui::StrokeKind::Inside,
+            );
+            p.line(poly(r, &[(0.06, 0.50), (0.74, 0.50)]), thin);
+            p.line(poly(r, &[(0.42, 0.22), (0.42, 0.50)]), thin);
+            p.line(poly(r, &[(0.80, 0.60), (0.80, 0.98)]), line);
+            p.line(poly(r, &[(0.61, 0.79), (0.99, 0.79)]), line);
         }
         Icon::MergeDown => {
             p.line(poly(r, &[(0.50, 0.10), (0.50, 0.52)]), line);
@@ -456,7 +594,7 @@ pub fn paint(p: &Painter, r: Rect, icon: Icon, color: Color32) {
             };
             p.line(lid(true), thin);
             p.line(lid(false), thin);
-            p.circle_filled(pt(r, 0.50, 0.50), w * 0.15, color);
+            p.circle_filled(pt(r, 0.50, 0.50), w * 0.17, color);
             if icon == Icon::EyeOff {
                 p.line(poly(r, &[(0.10, 0.88), (0.90, 0.12)]), line);
             }
@@ -595,33 +733,36 @@ pub fn paint(p: &Painter, r: Rect, icon: Icon, color: Color32) {
             );
         }
         Icon::Reference => {
-            // A framed picture (mountains in a frame) — the reference layer.
-            p.rect_stroke(
-                rect(r, 0.10, 0.20, 0.90, 0.80),
-                1.0,
-                thin,
-                egui::StrokeKind::Inside,
-            );
-            p.line(poly(r, &[(0.18, 0.70), (0.38, 0.48), (0.52, 0.62)]), thin);
-            p.line(poly(r, &[(0.46, 0.56), (0.62, 0.38), (0.82, 0.62)]), thin);
+            // CSP's beacon/lighthouse: tapered tower, lamp, two rays —
+            // unique silhouette (audit: the framed picture read as
+            // "image", not "reference").
+            p.add(Shape::convex_polygon(
+                poly(r, &[(0.42, 0.36), (0.58, 0.36), (0.68, 0.92), (0.32, 0.92)]),
+                color,
+                Stroke::NONE,
+            ));
+            p.rect_filled(rect(r, 0.38, 0.16, 0.62, 0.34), 1.0, color);
+            p.line(poly(r, &[(0.30, 0.22), (0.12, 0.12)]), thin);
+            p.line(poly(r, &[(0.70, 0.22), (0.88, 0.12)]), thin);
         }
         Icon::Draft => {
-            // CSP's draft marker: a layer box with a red diagonal cross.
+            // A pencil over a lined page — 下書き. (Audit: the old red
+            // diagonal cross read as "delete", and was the only red in
+            // the palette, on a benign toggle.)
             p.rect_stroke(
-                rect(r, 0.16, 0.20, 0.84, 0.80),
+                rect(r, 0.08, 0.12, 0.62, 0.88),
                 1.0,
                 thin,
                 egui::StrokeKind::Inside,
             );
-            let red = Color32::from_rgb(0xe5, 0x4b, 0x4b);
-            p.line(
-                poly(r, &[(0.24, 0.28), (0.76, 0.72)]),
-                Stroke::new(w * 0.13, red),
-            );
-            p.line(
-                poly(r, &[(0.76, 0.28), (0.24, 0.72)]),
-                Stroke::new(w * 0.13, red),
-            );
+            p.line(poly(r, &[(0.18, 0.34), (0.50, 0.34)]), thin);
+            p.line(poly(r, &[(0.18, 0.50), (0.44, 0.50)]), thin);
+            p.line(poly(r, &[(0.52, 0.76), (0.90, 0.26)]), line);
+            p.add(Shape::convex_polygon(
+                poly(r, &[(0.42, 0.90), (0.58, 0.83), (0.48, 0.70)]),
+                color,
+                Stroke::NONE,
+            ));
         }
         Icon::Figure => {
             // A ruled diagonal with endpoint grips.
@@ -721,6 +862,32 @@ pub fn paint(p: &Painter, r: Rect, icon: Icon, color: Color32) {
                 thin,
             ));
             p.line(poly(r, &[(0.62, 0.10), (0.62, 0.30), (0.82, 0.30)]), thin);
+        }
+        Icon::Play => {
+            p.add(Shape::convex_polygon(
+                poly(r, &[(0.24, 0.12), (0.86, 0.50), (0.24, 0.88)]),
+                color,
+                Stroke::NONE,
+            ));
+        }
+        Icon::Record => {
+            p.circle_filled(pt(r, 0.5, 0.5), w * 0.34, color);
+        }
+        Icon::Stop => {
+            p.rect_filled(rect(r, 0.20, 0.20, 0.80, 0.80), 1.0, color);
+        }
+        Icon::Grip => {
+            for x in [0.34, 0.66] {
+                for y in [0.22, 0.44, 0.66, 0.88] {
+                    p.circle_filled(pt(r, x, y), w * 0.075, color);
+                }
+            }
+        }
+        Icon::ChevronLeft => {
+            p.line(poly(r, &[(0.62, 0.16), (0.32, 0.50), (0.62, 0.84)]), line);
+        }
+        Icon::ChevronRight => {
+            p.line(poly(r, &[(0.38, 0.16), (0.68, 0.50), (0.38, 0.84)]), line);
         }
     }
 }

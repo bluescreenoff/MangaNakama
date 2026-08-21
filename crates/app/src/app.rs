@@ -287,8 +287,17 @@ pub struct App {
     /// The window handle (0 in tests — fullscreen is state-only then).
     /// Set by main right after construction.
     pub hwnd: isize,
-    /// TRIAGE 146 v1: named workspaces ([[name, dl, dr, lw, rw, ph]]).
-    pub workspaces: Vec<[String; 6]>,
+    /// TRIAGE 146 v1: named workspaces
+    /// ([[name, dl, dr, lw, rw, ph, lcol, rcol]]).
+    ///
+    /// A `Vec<String>` per entry, NOT a fixed-size array: the entry was six
+    /// fields until the column-collapse round, and `[String; 6]` makes serde
+    /// REJECT the whole line the moment it grows or shrinks — every saved
+    /// workspace would vanish on the version that added a field, silently
+    /// (the parse falls back to `default()`). `workspaces.rs` reads every
+    /// field through `Self::ws_field`, so short (older) entries simply keep
+    /// this build's defaults for what they do not carry.
+    pub workspaces: Vec<Vec<String>>,
     pub workspace_current: String,
     pub workspace_open: bool,
     pub workspace_draft: String,
@@ -310,6 +319,11 @@ pub struct App {
     pub action_running: bool,
     /// Inline rename in the Auto Actions palette (index, draft).
     pub action_renaming: Option<(usize, String)>,
+    /// The "＋ step" picker: (action index, slot the pick inserts at).
+    /// Runtime-only — a half-open menu is not worth persisting.
+    pub action_picker: Option<(usize, usize)>,
+    /// Which step has its inline parameter editor open (action, step).
+    pub action_step_edit: Option<(usize, usize)>,
     pub comp_last_state: Vec<bool>,
     pub comp_name_draft: String,
     /// LC-006: layers added after a snapshot default to visible.
@@ -351,6 +365,11 @@ pub struct App {
     pub cmdpal_query: String,
     pub cmdpal_sel: usize,
     pub cmdpal_recent: Vec<String>,
+    /// The overlay's rows, gathered when it OPENS (`ui::quick`): the index
+    /// is thousands of rows with a material bank in it, and every
+    /// index-keyed row (layer, page, action) must be as fresh as the press
+    /// that summoned it. Empty while the overlay is closed.
+    pub cmdpal_entries: Vec<crate::ui::quick::Entry>,
     /// PM-046: the find/replace row state.
     pub story_find: String,
     pub story_repl: String,
@@ -506,6 +525,10 @@ pub struct App {
     pub layer_thumbs: Vec<Option<(u64, egui::TextureHandle)>>,
     /// Inline layer rename in progress: (index, edit buffer).
     pub renaming: Option<(usize, String)>,
+    /// The Layers palette's colour popup: `Some(row)` = the swatch/picker
+    /// window is open for that row (owner 2026-08-21: set a layer's label
+    /// colour with the picker right there, no click chain).
+    pub layer_colour_pick: Option<usize>,
     /// PA-001: the Layers palette's Paper row is the highlighted one. The
     /// paper is NOT a layer, so this is a palette highlight beside
     /// `doc.active` rather than a second active-layer authority — nothing
@@ -1135,6 +1158,8 @@ impl App {
             action_recording: None,
             action_running: false,
             action_renaming: None,
+            action_picker: None,
+            action_step_edit: None,
             comp_last_state: Vec::new(),
             comp_name_draft: String::new(),
             comp_added_visible: true,
@@ -1167,6 +1192,7 @@ impl App {
             cmdpal_query: String::new(),
             cmdpal_sel: 0,
             cmdpal_recent: Vec::new(),
+            cmdpal_entries: Vec::new(),
             story_open: false,
             story_docs: Vec::new(),
             story_bufs: Vec::new(),
@@ -1234,6 +1260,7 @@ impl App {
             hex_edit: String::new(),
             layer_thumbs: Vec::new(),
             renaming: None,
+            layer_colour_pick: None,
             paper_selected: false,
             saved_revision: 0,
             pages_dirty: false,
@@ -2400,28 +2427,35 @@ impl App {
         if gpu_path {
             let wash = self.brush.inner().inner().wash();
             // Smudge needs the sampler fed from the GPU tile cache: the
-            // stroke's layer for the oracle, and per-sample dispatch so the
-            // sampler's visibility granularity equals the CPU path's
-            // end_atomic. Wash+smudge never reaches here (gpu_ready gate).
+            // stroke's layer for the oracle, and per-sample dispatch. A
+            // WASH stroke's sampler would read the in-flight wash buffer
+            // (WASH_LAYER_KEY) — the wiring below is ready, but
+            // `gpu_ready` still routes wash+smudge CPU: the C sampler has
+            // PER-DAB visibility of the stroke's own paint and a batched
+            // GPU path measurably drifts (see MyBrush::gpu_ready).
             let smudge = self.brush.inner().inner().smudge();
             if wash {
                 self.renderer.begin_wash_dab_stroke();
             } else {
-                let layer = self.doc.active;
-                self.renderer.begin_dab_stroke(layer);
-                if smudge {
-                    let rptr: *mut mn_gpu::Renderer = &mut self.renderer;
-                    let ctx = Box::into_raw(Box::new((rptr, layer))) as *mut core::ffi::c_void;
-                    self.dab_smudge_ctx = Some(ctx);
-                    mn_brush::set_tile_oracle(Some((smudge_tile_oracle, ctx)));
-                }
+                self.renderer.begin_dab_stroke(self.doc.active);
+            }
+            if smudge {
+                let key = if wash {
+                    mn_gpu::WASH_LAYER_KEY
+                } else {
+                    self.doc.active
+                };
+                let rptr: *mut mn_gpu::Renderer = &mut self.renderer;
+                let ctx = Box::into_raw(Box::new((rptr, key))) as *mut core::ffi::c_void;
+                self.dab_smudge_ctx = Some(ctx);
+                mn_brush::set_tile_oracle(Some((smudge_tile_oracle, ctx)));
             }
             self.dab_stroke = Some(DabStrokeApp {
                 all_dabs: Vec::new(),
                 hard: self.brush.inner().inner().hard_dab_main(),
                 flushes: 0,
                 wash,
-                smudge: smudge && !wash,
+                smudge,
             });
             self.dab_path_last = "gpu".into();
             self.diag.dab_gpu_strokes += 1;
@@ -2514,12 +2548,22 @@ impl App {
                     let dabs = self.brush.inner_mut().inner_mut().drain_dab_records();
                     if !dabs.is_empty() {
                         let hard = self.dab_stroke.as_ref().map(|s| s.hard).unwrap_or(false);
+                        let wash = self.dab_stroke.as_ref().map(|s| s.wash).unwrap_or(false);
                         let tex = self
                             .brush
                             .inner()
                             .inner()
                             .texture_flush();
-                        self.renderer.flush_dabs(&self.doc, &dabs, hard, tex);
+                        if wash {
+                            // Wash+smudge (P4): per-sample dispatch into the
+                            // wash sentinel, so the oracle's readback shows
+                            // the sampler every prior dab of this stroke.
+                            if let Some(buf) = self.brush.inner().inner().wash_buffer() {
+                                self.renderer.flush_wash_dabs(buf, &dabs, hard, tex);
+                            }
+                        } else {
+                            self.renderer.flush_dabs(&self.doc, &dabs, hard, tex);
+                        }
                         if let Some(st) = &mut self.dab_stroke {
                             st.all_dabs.extend(dabs);
                             st.flushes += 1;

@@ -305,6 +305,89 @@ fn gpu_dab_parity_eraser_over_ink() {
     check(canary_ok, max);
 }
 
+/// Colorize (P4 port): the brush hue/sat replace the canvas pixel's,
+/// keeping its luma — over a mid-colour base so the de-premult, SetLum and
+/// ClipColor integer paths all run.
+#[test]
+fn gpu_dab_parity_colorize_over_ink() {
+    let _g = gpu_guard();
+    let Some(mut renderer) = renderer() else {
+        return;
+    };
+    if !renderer.gpu_dabs_supported() {
+        println!("[test] SKIP: rgba16uint storage unsupported");
+        return;
+    }
+    let paint = |doc: &mut Document| {
+        let tile = doc.layers[0].tile_mut(TileIdx::new(1, 1));
+        for px in tile.data_mut().chunks_exact_mut(4) {
+            px[0] = 20000;
+            px[1] = 15000;
+            px[2] = 10000;
+            px[3] = 32768;
+        }
+    };
+    let colorized = |mut b: MyBrush| -> MyBrush {
+        b.set_colorize(1.0);
+        b.set_color_rgb([0.9, 0.2, 0.4]);
+        b
+    };
+    let mut ref_doc = Document::default();
+    paint(&mut ref_doc);
+    run_stock(colorized(pen()), &mut ref_doc);
+    assert_inked(&ref_doc);
+
+    let mut gpu_doc = Document::default();
+    paint(&mut gpu_doc);
+    let (canary_ok, _) = run_gpu(colorized(pen()), &mut gpu_doc, &mut renderer, false);
+
+    let (max, over) = max_diff(&ref_doc, &gpu_doc);
+    println!("[test] colorize parity: max channel diff {max}, over 1: {over}");
+    check(canary_ok, max);
+}
+
+/// Posterize (P4 port): canvas rgb quantized to the level count, blended at
+/// the stamp opacity — over a gradient-ish base so several quantization
+/// buckets are hit.
+#[test]
+fn gpu_dab_parity_posterize_over_ink() {
+    let _g = gpu_guard();
+    let Some(mut renderer) = renderer() else {
+        return;
+    };
+    if !renderer.gpu_dabs_supported() {
+        println!("[test] SKIP: rgba16uint storage unsupported");
+        return;
+    }
+    let paint = |doc: &mut Document| {
+        let tile = doc.layers[0].tile_mut(TileIdx::new(1, 1));
+        for (i, px) in tile.data_mut().chunks_exact_mut(4).enumerate() {
+            let v = ((i % 64) * 512) as u16;
+            px[0] = v;
+            px[1] = 32768 - v;
+            px[2] = v / 2 + 8000;
+            px[3] = 32768;
+        }
+    };
+    let posterized = |mut b: MyBrush| -> MyBrush {
+        // .myb scale: the C computes CLAMP(ROUND(0.05 * 100), 1, 128) = 5.
+        b.set_posterize(1.0, 0.05);
+        b
+    };
+    let mut ref_doc = Document::default();
+    paint(&mut ref_doc);
+    run_stock(posterized(pen()), &mut ref_doc);
+    assert_inked(&ref_doc);
+
+    let mut gpu_doc = Document::default();
+    paint(&mut gpu_doc);
+    let (canary_ok, _) = run_gpu(posterized(pen()), &mut gpu_doc, &mut renderer, false);
+
+    let (max, over) = max_diff(&ref_doc, &gpu_doc);
+    println!("[test] posterize parity: max channel diff {max}, over 1: {over}");
+    check(canary_ok, max);
+}
+
 #[test]
 fn gpu_dab_parity_hard_stamp() {
     let _g = gpu_guard();
@@ -489,6 +572,9 @@ fn anchored_stamp_mask_is_the_coverage() {
         angle: 0.0,
         lock_alpha: 0.0,
         paint: 0.0,
+        colorize: 0.0,
+        posterize: 0.0,
+        posterize_num: 1,
         tex_off: [0, 0],
         tex_angle: 0.0,
     };

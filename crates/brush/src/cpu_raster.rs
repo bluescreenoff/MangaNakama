@@ -198,6 +198,40 @@ fn mask_of(
     (opa * 32768.0) as u32
 }
 
+/// `set_rgb16_lum_from_rgb16` (brushmodes.c): set the bottom triple's
+/// luminance to the top's (BT.601 coeffs), then ClipColor per the PDF
+/// blend-modes addendum. Straight (non-premult) fix15 in and out. The C
+/// mixes float LUMA products with truncating integer divisions — mirrored
+/// exactly; the two clip divisions are guarded against the degenerate
+/// all-equal case (0/0 in the C is unreachable for real pixel values, but
+/// Rust would panic where C shrugs).
+fn set_lum(topr: i32, topg: i32, topb: i32, botr: i32, botg: i32, botb: i32) -> (i32, i32, i32) {
+    const RC: f32 = 0.2126 * 32768.0;
+    const GC: f32 = 0.7152 * 32768.0;
+    const BC: f32 = 0.0722 * 32768.0;
+    let luma = |r: i32, g: i32, b: i32| -> f32 { r as f32 * RC + g as f32 * GC + b as f32 * BC };
+    let botlum = (luma(botr, botg, botb) / 32768.0) as i32;
+    let toplum = (luma(topr, topg, topb) / 32768.0) as i32;
+    let diff = botlum - toplum;
+    let mut r = topr + diff;
+    let mut g = topg + diff;
+    let mut b = topb + diff;
+    let lum = (luma(r, g, b) / 32768.0) as i32;
+    let cmin = r.min(g).min(b);
+    let cmax = r.max(g).max(b);
+    if cmin < 0 && lum != cmin {
+        r = lum + ((r - lum) * lum) / (lum - cmin);
+        g = lum + ((g - lum) * lum) / (lum - cmin);
+        b = lum + ((b - lum) * lum) / (lum - cmin);
+    }
+    if cmax > 32768 && cmax != lum {
+        r = lum + ((r - lum) * (32768 - lum)) / (cmax - lum);
+        g = lum + ((g - lum) * (32768 - lum)) / (cmax - lum);
+        b = lum + ((b - lum) * (32768 - lum)) / (cmax - lum);
+    }
+    (r, g, b)
+}
+
 /// Stamp a dab list onto one layer's tiles — the repair path's pixel writer.
 /// Call inside the stroke's open undo op: `tile_mut` snapshots pre-images,
 /// exactly as the vendored rasterizer's would have.
@@ -215,12 +249,18 @@ pub fn rasterize_dabs(
     for d in dabs {
         // The C dispatch's precomputed opacities (process_op, paint<1 arm —
         // paint>0 dabs never take the GPU path, so (1-paint) is 1 there, but
-        // the formula stays faithful).
-        let normal = (1.0 - d.lock_alpha) * d.opaque * (1.0 - d.paint);
-        let lock = d.lock_alpha * d.opaque * (1.0 - d.paint);
+        // the formula stays faithful). `op->normal` in the C is scaled by
+        // (1-lock_alpha)(1-colorize)(1-posterize); the LockAlpha stamp's
+        // opacity carries the (1-colorize)(1-posterize) factors too.
+        let cp = (1.0 - d.colorize) * (1.0 - d.posterize);
+        let normal = (1.0 - d.lock_alpha) * cp * d.opaque * (1.0 - d.paint);
+        let lock = d.lock_alpha * d.opaque * cp * (1.0 - d.paint);
         let f15 = |v: f32| (v.clamp(0.0, 1.0) * 32768.0) as u32;
         let opa_normal = f15(normal);
         let opa_lock = f15(lock);
+        let opa_colorize = f15(d.colorize * d.opaque);
+        let opa_posterize = f15(d.posterize * d.opaque);
+        let poster_n = d.posterize_num.max(1) as u32;
         let color_a = f15(d.alpha);
 
         let stamp = texture.is_some_and(|(_, _, a)| a);
@@ -294,6 +334,54 @@ pub fn rasterize_dabs(
                         px[0] = ((opa_a * d.color[0] as u32 + opa_b * px[0] as u32) / 32768) as u16;
                         px[1] = ((opa_a * d.color[1] as u32 + opa_b * px[1] as u32) / 32768) as u16;
                         px[2] = ((opa_a * d.color[2] as u32 + opa_b * px[2] as u32) / 32768) as u16;
+                    }
+
+                    // draw_dab_pixels_BlendMode_Color: de-premult, set the
+                    // canvas pixel's hue/sat to the brush colour keeping its
+                    // luma (PDF "Color" mode, BT.601 coeffs), re-premult,
+                    // blend rgb only. Alpha untouched. Exact C integer math
+                    // (i32 divisions truncate toward zero, like C's).
+                    if opa_colorize > 0 {
+                        let a = px[3] as u32;
+                        let (mut r, mut g, mut b) = (0u32, 0u32, 0u32);
+                        if a != 0 {
+                            r = 32768 * px[0] as u32 / a;
+                            g = 32768 * px[1] as u32 / a;
+                            b = 32768 * px[2] as u32 / a;
+                        }
+                        let (r2, g2, b2) = set_lum(
+                            d.color[0] as i32,
+                            d.color[1] as i32,
+                            d.color[2] as i32,
+                            r as i32,
+                            g as i32,
+                            b as i32,
+                        );
+                        let r = r2 as u32 * a / 32768;
+                        let g = g2 as u32 * a / 32768;
+                        let b = b2 as u32 * a / 32768;
+                        let opa_a = mask * opa_colorize / 32768;
+                        let opa_b = 32768 - opa_a;
+                        px[0] = ((opa_a * r + opa_b * px[0] as u32) / 32768) as u16;
+                        px[1] = ((opa_a * g + opa_b * px[1] as u32) / 32768) as u16;
+                        px[2] = ((opa_a * b + opa_b * px[2] as u32) / 32768) as u16;
+                    }
+
+                    // draw_dab_pixels_BlendMode_Posterize: quantize the
+                    // canvas rgb (premult, as the C does) to posterize_num
+                    // levels, blend at the stamp's opacity. ROUND is the C's
+                    // (int)(x + 0.5); the rest is integer.
+                    if opa_posterize > 0 {
+                        let post = |v: u16| -> u32 {
+                            let f = v as f32 / 32768.0;
+                            32768 * ((f * poster_n as f32 + 0.5) as u32) / poster_n
+                        };
+                        let (pr, pg, pb) = (post(px[0]), post(px[1]), post(px[2]));
+                        let opa_a = mask * opa_posterize / 32768;
+                        let opa_b = 32768 - opa_a;
+                        px[0] = ((opa_a * pr + opa_b * px[0] as u32) / 32768) as u16;
+                        px[1] = ((opa_a * pg + opa_b * px[1] as u32) / 32768) as u16;
+                        px[2] = ((opa_a * pb + opa_b * px[2] as u32) / 32768) as u16;
                     }
                 }
             }

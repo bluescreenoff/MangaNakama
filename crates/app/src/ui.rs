@@ -11,7 +11,9 @@ mod comps;
 mod history;
 pub mod icons;
 pub mod preview;
-mod quick;
+/// Public because `App` parks the command palette's gathered rows
+/// (`quick::Entry`) between frames.
+pub mod quick;
 pub mod refs;
 pub mod theme;
 
@@ -86,24 +88,29 @@ pub fn build(ui: &mut egui::Ui, app: &mut App) {
 
     // Tab hides every palette for a clean drawing view (CSP behaviour).
     if !app.panels_hidden {
+        // A COLLAPSED column is a thin strip carrying only the expand
+        // chevron; the canvas takes the rest, since it sizes itself from
+        // whatever rect the panels leave (`available_rect_before_wrap`).
+        let lw = column_width(app.layout.left_w, app.layout.left_collapsed);
+        let rw = column_width(app.layout.right_w, app.layout.right_collapsed);
         // The column widths are OURS, not egui's panel-resize machinery: egui's
         // separator highlights the edge white on hover and only flips the
         // cursor inside a razor-thin band (owner report 2026-08-16 — CSP shows
         // the cursor and nothing else). The panels are fixed-size; the handles
         // below each edge do the dragging with a generous grab band.
         let lp = egui::Panel::left("mn.left")
-            .exact_size(app.layout.left_w)
+            .exact_size(lw)
             .resizable(false)
             .show_separator_line(false)
             .frame(chrome_frame(egui::Margin::same(2)))
-            .show(ui, |ui| column(ui, app, true));
+            .show(ui, |ui| palette_column(ui, app, true));
 
         let rp = egui::Panel::right("mn.side")
-            .exact_size(app.layout.right_w)
+            .exact_size(rw)
             .resizable(false)
             .show_separator_line(false)
             .frame(chrome_frame(egui::Margin::same(2)))
-            .show(ui, |ui| column(ui, app, false));
+            .show(ui, |ui| palette_column(ui, app, false));
 
         // Document tab strip, spanning only the canvas area (built after the
         // side panels, so it inherits the shrunken rect).
@@ -156,6 +163,68 @@ pub fn build(ui: &mut egui::Ui, app: &mut App) {
     app.prefs.save_if_dirty();
 }
 
+/// A collapsed palette column: just wide enough for the expand chevron.
+const STRIP_W: f32 = 18.0;
+/// The slim header strip that carries a column's collapse chevron.
+const COLUMN_HEADER_H: f32 = 14.0;
+
+/// The width a palette column is actually laid out at.
+fn column_width(stored: f32, collapsed: bool) -> f32 {
+    if collapsed { STRIP_W } else { stored }
+}
+
+/// One palette column: a slim header with the collapse chevron, then the dock
+/// column itself — or, collapsed, the chevron alone in an 18pt strip.
+///
+/// KNOWN LIMIT: a column's torn-off FLOATING palettes are windows of that
+/// column's own `DockState`, and egui_dock only draws them from
+/// `DockArea::show_inside`. Collapsing a column therefore hides its floating
+/// palettes too, until it is expanded again. Nothing is lost (the dock state
+/// is untouched), but it is a surprise worth knowing about.
+fn palette_column(ui: &mut egui::Ui, app: &mut App, left: bool) {
+    let collapsed = if left {
+        app.layout.left_collapsed
+    } else {
+        app.layout.right_collapsed
+    };
+    // The chevron points at the screen edge the column folds towards, and
+    // back at the canvas once it is folded away.
+    let icon = if left != collapsed {
+        icons::Icon::ChevronLeft
+    } else {
+        icons::Icon::ChevronRight
+    };
+    let tip = if collapsed {
+        "Show this palette column"
+    } else {
+        "Collapse this palette column"
+    };
+    // Docked against the canvas-side edge, where the user's eye already is.
+    let layout = if left {
+        egui::Layout::right_to_left(egui::Align::Center)
+    } else {
+        egui::Layout::left_to_right(egui::Align::Center)
+    };
+    let toggled = ui
+        .allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), COLUMN_HEADER_H),
+            layout,
+            |ui| widgets::icon_btn(ui, icon, COLUMN_HEADER_H, false, true, tip).clicked(),
+        )
+        .inner;
+    if toggled {
+        let (l, r) = (app.layout.left_collapsed, app.layout.right_collapsed);
+        if left {
+            app.layout.note_collapsed(!l, r);
+        } else {
+            app.layout.note_collapsed(l, !r);
+        }
+    }
+    if !collapsed {
+        column(ui, app, left);
+    }
+}
+
 /// Grab half-band (points) along the column edges, and the width limits the
 /// drag respects. CSP's edge zones are easy to hit with a pen; egui's
 /// `resize_grab_radius_side` default (4pt) is not.
@@ -170,31 +239,37 @@ const COL_MAX: f32 = 420.0;
 /// egui separator turned the edge white; the owner called it overboard).
 fn column_handles(ui: &mut egui::Ui, app: &mut App, left: egui::Rect, right: egui::Rect) {
     let win_w = right.right() - left.left();
-    // Never let the two columns swallow the canvas.
+    // Never let the two columns swallow the canvas. A collapsed column costs
+    // the strip, not its stored width.
     let canvas_min = 120.0;
     let left_max = (COL_MAX)
-        .min(win_w - app.layout.right_w - canvas_min)
+        .min(win_w - column_width(app.layout.right_w, app.layout.right_collapsed) - canvas_min)
         .max(LEFT_MIN);
     let right_max = (COL_MAX)
-        .min(win_w - app.layout.left_w - canvas_min)
+        .min(win_w - column_width(app.layout.left_w, app.layout.left_collapsed) - canvas_min)
         .max(RIGHT_MIN);
 
+    // A collapsed column keeps its seam line but grows NO resize handle: the
+    // drag would write the 18pt strip's width into `left_w`/`right_w`, and
+    // the column would come back as a strip on the next launch.
     let x = left.right();
-    let band = egui::Rect::from_x_y_ranges(
-        egui::Rangef::new(x - EDGE_BAND, x + EDGE_BAND),
-        egui::Rangef::new(left.top(), left.bottom()),
-    );
-    let r = ui.interact(
-        band,
-        egui::Id::new("mn.resize.left"),
-        egui::Sense::click_and_drag(),
-    );
-    if r.dragged() {
-        if let Some(pt) = r.interact_pointer_pos() {
-            app.layout.left_w = (pt.x - left.left()).clamp(LEFT_MIN, left_max);
+    if !app.layout.left_collapsed {
+        let band = egui::Rect::from_x_y_ranges(
+            egui::Rangef::new(x - EDGE_BAND, x + EDGE_BAND),
+            egui::Rangef::new(left.top(), left.bottom()),
+        );
+        let r = ui.interact(
+            band,
+            egui::Id::new("mn.resize.left"),
+            egui::Sense::click_and_drag(),
+        );
+        if r.dragged() {
+            if let Some(pt) = r.interact_pointer_pos() {
+                app.layout.left_w = (pt.x - left.left()).clamp(LEFT_MIN, left_max);
+            }
         }
+        r.on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
     }
-    r.on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
     ui.painter().vline(
         x,
         egui::Rangef::new(left.top(), left.bottom()),
@@ -202,21 +277,23 @@ fn column_handles(ui: &mut egui::Ui, app: &mut App, left: egui::Rect, right: egu
     );
 
     let x = right.left();
-    let band = egui::Rect::from_x_y_ranges(
-        egui::Rangef::new(x - EDGE_BAND, x + EDGE_BAND),
-        egui::Rangef::new(right.top(), right.bottom()),
-    );
-    let r = ui.interact(
-        band,
-        egui::Id::new("mn.resize.right"),
-        egui::Sense::click_and_drag(),
-    );
-    if r.dragged() {
-        if let Some(pt) = r.interact_pointer_pos() {
-            app.layout.right_w = (right.right() - pt.x).clamp(RIGHT_MIN, right_max);
+    if !app.layout.right_collapsed {
+        let band = egui::Rect::from_x_y_ranges(
+            egui::Rangef::new(x - EDGE_BAND, x + EDGE_BAND),
+            egui::Rangef::new(right.top(), right.bottom()),
+        );
+        let r = ui.interact(
+            band,
+            egui::Id::new("mn.resize.right"),
+            egui::Sense::click_and_drag(),
+        );
+        if r.dragged() {
+            if let Some(pt) = r.interact_pointer_pos() {
+                app.layout.right_w = (right.right() - pt.x).clamp(RIGHT_MIN, right_max);
+            }
         }
+        r.on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
     }
-    r.on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
     ui.painter().vline(
         x,
         egui::Rangef::new(right.top(), right.bottom()),

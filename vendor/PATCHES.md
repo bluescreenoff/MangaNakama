@@ -207,6 +207,44 @@ the window's own close). CSP shows the × on the active tab only; the
 hover-reveal keeps background tabs directly closable. At rest exactly one ×
 per strip — the active tab's.
 
+### 14. Dragging a floating window's tab strip MOVES the window (`show/mod.rs`, `show/leaf.rs`, `show/window_surface.rs`, `state.rs`, 2026-08-21)
+
+**What:** a tab drag whose SOURCE surface is a window (not the main surface)
+now drives that window's existing `WindowState` — position += the frame's
+pointer delta, payload kept alive, `reset_drag()` on release — instead of
+falling through to patch #3's tear-off. Pieces:
+
+- `float_drag_moves_window` (show/mod.rs) decides per frame. It returns
+  `false` — i.e. upstream behaviour — for a main-surface drag, for a hover
+  over another surface (re-docking the float into a column), for a hover over
+  a DIFFERENT node of the same window, and for a tab-strip hover on its own
+  leaf when that leaf has more than one tab (a reorder). Everything else,
+  including "the pointer is over nothing at all", moves the window.
+- `drag_move_window` re-reads the window's CURRENT rect from egui memory each
+  frame (`Memory::area_rect`) rather than accumulating: `create_window`'s
+  `constrain_to(window_bounds)` clamps a fast drag at the screen edge, and an
+  accumulator would keep running past the clamp and leave the window stuck
+  until the pointer came all the way back. The id it reads under is now
+  `window_surface::window_area_id`, extracted from `show_window_surface` so
+  the two spellings cannot drift (they would drift silently — the window
+  would simply never move).
+- `State::float_move` (state.rs) tells the leaf renderer to skip the drag
+  ghost's `transform_layer_shapes`: the whole window already follows the
+  pointer, so offsetting the tab by the same accumulated delta on top carried
+  it away at twice the speed. Cleared by `reset_drag`.
+
+**Why:** the app floats palettes as `Surface::Window` entries with
+`title_bar(false)` and `fill_tab_bar = true`, so the tab strip IS the
+window's title bar — grabbing it must feel like grabbing a title bar. It
+didn't: every such drag ended in patch #3's no-hover fallback
+(`TabDestination::Window` → `detach_tab`), which builds a BRAND NEW surface at
+the pointer with a reset position and size while `move_tab`/`detach_tab`
+collect the old one. The owner screenshotted the result on 2026-08-21 — a tab
+torn out of its own window, the window's geometry gone.
+
+**Upstream-relevant:** arguably yes for any host that turns the window title
+bar off; the `owner`-id plumbing it sits beside is ours.
+
 ## vendor/libmypaint — round 25 (2026-08-16): Krita-inspired dab modes
 
 ### 8. Hard stamp dabs (`mypaint-tiled-surface.c`)
@@ -332,6 +370,12 @@ the GPU path the same ordered dab list the CPU consumes, per tile. Rust side:
 mirrors the C's `floor(floor(x ± r_fringe) / 64)` with `div_euclid`.
 
 **Upstream-relevant:** no (a downstream acceleration seam).
+
+**Amendment (P4 colorize/posterize port, 2026-08-21):** the tap gained
+three trailing args — `op->colorize`, `op->posterize`, `op->posterize_num`
+(the latter already `CLAMP(ROUND(num*100), 1, 128)` by `process_op`) — so
+the recorded `DabParams` can drive the GPU Color/Posterize stamps. Only the
+spectral `paint` mode still routes CPU-side via `exotic`.
 
 ### 12. View-aware legacy stroke entry (`mypaint-brush.c` + `mypaint-brush.h`, round 31)
 

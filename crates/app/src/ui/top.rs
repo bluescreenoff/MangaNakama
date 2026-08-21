@@ -625,7 +625,12 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
             ui.separator();
             let mut apply = None;
             let mut delete = None;
-            let names: Vec<String> = app.workspaces.iter().map(|e| e[0].clone()).collect();
+            // Index-guarded: a workspace entry is variable-length (app.rs).
+            let names: Vec<String> = app
+                .workspaces
+                .iter()
+                .filter_map(|e| e.first().cloned())
+                .collect();
             for n in names {
                 ui.horizontal(|ui| {
                     let mark = if app.workspace_current == n {

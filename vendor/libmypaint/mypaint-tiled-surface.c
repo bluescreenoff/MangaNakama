@@ -69,7 +69,9 @@ void mnc_record_dab(float x, float y, float radius,
                     float opaque, float hardness,
                     float aspect_ratio, float angle,
                     float lock_alpha, float paint,
-                    float tex_angle);
+                    float tex_angle,
+                    float colorize, float posterize,
+                    float posterize_num);
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -767,7 +769,10 @@ gboolean draw_dab_internal (
                        (unsigned short)op->color_r, (unsigned short)op->color_g,
                        (unsigned short)op->color_b, op->color_a,
                        op->opaque, op->hardness, op->aspect_ratio, op->angle,
-                       op->lock_alpha, op->paint, op->tex_angle);
+                       op->lock_alpha, op->paint, op->tex_angle,
+                       /* mnc (GPU colorize/posterize port): op->posterize_num
+                        * is already CLAMP(ROUND(num*100), 1, 128) here. */
+                       op->colorize, op->posterize, op->posterize_num);
         if (mn_rec == 2) {
             /* BYPASS: nothing is rasterized on this path; the bbox stays
              * honest for the day the GPU fills it in. */

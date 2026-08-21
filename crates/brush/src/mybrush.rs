@@ -409,13 +409,16 @@ impl MyBrush {
                 continue;
             };
 
-            // GPU-dabs routing (docs/design/GPU-DABS.md §8): the modes the P1
+            // GPU-dabs routing (docs/design/GPU-DABS.md §8): the modes the
             // compute shader does not port stay on the CPU path. Detected at
             // load so `gpu_ready` is a cheap field read at stroke start.
             // `smudge` is NOT here since #0.1 part 3: its dabs are ordinary
             // (the canvas sample happens engine-side, before the record), and
             // the app serves the sampler through the GPU tile oracle.
-            if matches!(setting_name.as_str(), "paint" | "colorize" | "posterize") {
+            // `colorize`/`posterize` left this list in the P4 round — their
+            // stamps are ported (dab.wgsl + cpu_raster mirror); only the
+            // spectral `paint` mode remains CPU-bound.
+            if setting_name.as_str() == "paint" {
                 let base = body
                     .get("base_value")
                     .and_then(Value::as_f64)
@@ -937,6 +940,33 @@ impl MyBrush {
         };
     }
 
+    /// Smudge weight — the test harness's knob (presets set it at load).
+    /// Sets BOTH the engine setting and the routing flag the app reads.
+    pub fn set_smudge(&mut self, v: f32) {
+        unsafe {
+            ffi::mypaint_brush_set_base_value(self.brush, setting::SMUDGE, v.clamp(0.0, 1.0))
+        };
+        self.smudge = v > 0.0;
+    }
+
+    /// Colorize stamp weight (`BlendMode_Color`, GPU-ported in the P4
+    /// round): 0 = off. Load-time `exotic` detection is unaffected — this
+    /// is the test harness's knob.
+    pub fn set_colorize(&mut self, v: f32) {
+        unsafe {
+            ffi::mypaint_brush_set_base_value(self.brush, setting::COLORIZE, v.clamp(0.0, 1.0))
+        };
+    }
+
+    /// Posterize stamp weight + level knob (the .myb `posterize_num` scale
+    /// the C multiplies by 100 and clamps 1..=128). Same P4 test knob.
+    pub fn set_posterize(&mut self, v: f32, num: f32) {
+        unsafe {
+            ffi::mypaint_brush_set_base_value(self.brush, setting::POSTERIZE, v.clamp(0.0, 1.0));
+            ffi::mypaint_brush_set_base_value(self.brush, setting::POSTERIZE_NUM, num);
+        };
+    }
+
     /// Krita-style hard stamp dabs (vendor/PATCHES.md): exact anti-aliased
     /// discs instead of the gaussian hardness falloff — the crisp ink edge
     /// CSP pens have. Off (the default) keeps stock behaviour pixel-for-pixel.
@@ -1199,6 +1229,20 @@ impl MyBrush {
     /// sentinel wash buffer, not the layer — deferred with the twins-wash
     /// case), spectral paint, colorize, posterize.
     pub fn gpu_ready(&self) -> bool {
+        // wash+smudge stays CPU — MEASURED, not assumed (P4 attempt,
+        // 2026-08-21): the C's `get_color` PROCESSES THE PENDING OP QUEUE
+        // before sampling (get_color_internal → process_tile_internal), so
+        // the CPU sampler sees every dab up to the current one, per dab.
+        // A batched GPU path can only show dabs up to the last flush; for
+        // plain smudge that gap is invisible (the sampler mostly reads
+        // pre-existing ink), but a wash stroke's sampler reads ONLY the
+        // stroke's own accumulation — pure self-feedback — and the
+        // intra-batch gap compounded to ~19% channel drift on the parity
+        // harness (`gpu_dab_parity_wash_smudge`, kept #[ignore]d as the
+        // re-entry point). Per-dab round trips are the design doc's
+        // non-starter, so the honest answer is CPU. The app-side wiring
+        // (wash-key oracle + per-sample wash flush) is in place and
+        // correct for the day a cheaper visibility trick exists.
         !self.exotic && !(self.wash && self.smudge)
     }
 
@@ -1695,6 +1739,9 @@ pub extern "C" fn mnc_record_dab(
     lock_alpha: f32,
     paint: f32,
     tex_angle: f32,
+    colorize: f32,
+    posterize: f32,
+    posterize_num: f32,
 ) {
     let p = RECORD_BUF.with(|c| c.get()) as *mut DabRecord;
     if p.is_null() {
@@ -1721,6 +1768,10 @@ pub extern "C" fn mnc_record_dab(
             angle,
             lock_alpha,
             paint,
+            colorize,
+            posterize,
+            // Already CLAMP(ROUND(num*100), 1, 128) on the C side.
+            posterize_num: posterize_num as u16,
             tex_off,
             tex_angle,
         });

@@ -10,6 +10,22 @@
 <nav class="top"><a href="index.html">← manual</a></nav>
 <h1>Layers &amp; masks</h1>
 
+<h2>Reading the palette</h2>
+<div class="quirk"><b>Rows carry their type.</b> Folder rows run thinner
+than layer rows and wear a big folder glyph instead of a content
+thumbnail — closed, open, and the panelled variant for frame border
+folders are three different icons. The column between the colour rail and
+the tree shows a layer's status: the reference mark (blue) and the draft
+mark live there, not on the right edge. In the rail itself, the pen marks
+the row your brush writes to and a check marks rows that are merely
+selected. A renaming row keeps its height, and <kbd>Esc</kbd> cancels the
+rename.</div>
+<div class="quirk"><b>Layer colour is one click.</b> Click a row's status
+cell (or the label button above the list) and the colour window opens
+with the standard swatches AND the full picker — no second click to
+reach the wheel. The size of the command buttons above the list is a
+preference (Preferences ▸ Canvas &amp; view ▸ "Layers palette icons").</div>
+
 <h2>Selecting more than one row</h2>
 <div class="quirk"><b><kbd>Ctrl</kbd>+click a row adds or removes it;
 <kbd>Shift</kbd>+click takes the range from the active row.</b> A plain
@@ -128,14 +144,20 @@ DOWN, before the first dab.</span></div>
 
 <h2>Auto Actions</h2>
 <div class="quirk"><b>The Auto Actions tab records layer commands and
-replays them as one press.</b> ＋ action, then ● on it, then work the
-Layers palette: new layer/folder/frame folder, rename, border effect,
-layer colour, sub colour, screentone, Gaussian blur, and select
-above/below all land as steps. ■ stops. ▶ replays the sequence on
-whatever layer is active; each step has a checkbox, so a stored
-sequence can run with parts switched off. Actions live in
+replays them as one press.</b> ＋ action, then the record dot on it, then
+work the Layers palette: new layer/folder/frame folder, rename, border
+effect, layer colour, sub colour, screentone, Gaussian blur, and select
+above/below all land as steps. The square stops; play replays the
+sequence on whatever layer is active; each step has a checkbox, so a
+stored sequence can run with parts switched off. Actions live in
 <code>actions.json</code> beside the executable — deleting
 <code>ui.txt</code> to fix a dock layout does not touch them.</div>
+<div class="quirk"><b>Sequences are editable by hand, not just
+recorded.</b> "＋ step" adds any step kind at any position; clicking a
+parameterized step opens its inline editor (rename text, colours,
+border width, tone, blur σ); steps drag to reorder by their grip,
+duplicate, and delete; whole actions duplicate too. Recording is just
+the fast way to draft a sequence — the editor is how you fix one.</div>
 <div class="quirk"><b>One run, one undo press.</b> A run stacks one
 step named after the action on TOP of your history, and everything
 before it stays undoable — creating layers and folders included, since

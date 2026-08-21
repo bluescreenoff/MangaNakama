@@ -265,6 +265,47 @@ const PALETTE_ROWS: usize = 10;
 /// How many labels the session remembers for the empty-query ordering.
 const PALETTE_RECENTS: usize = 12;
 
+/// What KIND of thing a row is. Only the sigil filter reads it (`>` for
+/// commands, `@` for layers…), so a new row kind that nothing narrows can
+/// share an existing kind — but a kind the user can name deserves its own.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Kind {
+    /// Menu commands, sub tools, brushes, actions, settings — everything
+    /// that DOES something rather than naming a thing in the document.
+    Command,
+    Layer,
+    Material,
+    Page,
+    Manual,
+}
+
+/// The VSCode-style prefixes, in the order the hint line prints them. Each
+/// narrows the list to one kind; the rest of the query then searches inside
+/// it, and a bare sigil ("@" alone) lists that kind whole.
+pub const SIGILS: [(char, Kind, &str); 5] = [
+    ('>', Kind::Command, "commands"),
+    ('@', Kind::Layer, "layers"),
+    ('#', Kind::Material, "materials"),
+    (':', Kind::Page, "page 12"),
+    ('?', Kind::Manual, "manual"),
+];
+
+/// The manual's topics (docs/manual/*.html, shipped beside the exe). Kept
+/// here as titles rather than parsed out of the HTML: the palette must be
+/// searchable with no files on disk, and a missing page says so when it is
+/// opened (`cmd::manual_page_path`) instead of vanishing from the search.
+const MANUAL_TOPICS: [(&str, &str); 9] = [
+    ("Manual — start here", "index.html"),
+    ("Comic — pages, spreads, panels", "comic.html"),
+    ("Drawing & selections", "drawing.html"),
+    ("Files & diagnostics", "files.html"),
+    ("Keys — every shortcut", "keys.html"),
+    ("Layers & masks", "layers.html"),
+    ("Pages & reading order", "pages.html"),
+    ("Rulers & perspective", "rulers.html"),
+    ("Text & objects", "text.html"),
+];
+
 /// One runnable row: what it is called, where it lives (weak text on the
 /// right) and the command it pushes. Brush rows carry `SelectBrush` — the
 /// very command the Sub Tool list pushes, so a pick made here and a pick
@@ -272,56 +313,145 @@ const PALETTE_RECENTS: usize = 12;
 #[derive(Clone)]
 pub struct Entry {
     pub label: String,
-    pub path: &'static str,
+    /// Where it lives — the weak right-hand text, and half the haystack.
+    /// A `String` because material rows name their own folder.
+    pub path: String,
+    pub kind: Kind,
     pub cmd: AppCmd,
 }
 
-/// Everything the palette can run: `command_index()` first, then one row per
-/// brush preset, then the rest of the Sub Tool list, the user's own auto
-/// actions, the Preferences sections and the palettes the Workspace menu
-/// reopens. Taking the presets and action names as arguments rather than
-/// reading `App` is what makes the whole search testable.
+impl Entry {
+    fn new(label: impl Into<String>, path: impl Into<String>, kind: Kind, cmd: AppCmd) -> Entry {
+        Entry {
+            label: label.into(),
+            path: path.into(),
+            kind,
+            cmd,
+        }
+    }
+}
+
+/// Everything the rows are built FROM, borrowed from `App` at open time. A
+/// struct rather than eight arguments: the palette keeps growing, and each
+/// new kind should cost one field and one `chain`, not a new signature at
+/// every call site. Pure input ⇒ the whole index stays testable with no App.
+#[derive(Default)]
+pub struct PaletteInput<'a> {
+    pub presets: &'a [(String, PathBuf)],
+    pub actions: &'a [String],
+    /// (name, folder label, file, tile) — the Materials palette's own click.
+    pub materials: &'a [(String, String, PathBuf, bool)],
+    /// The current page's layers, in document order (the index IS the row).
+    pub layers: &'a [String],
+    pub pages: usize,
+    pub recent_files: &'a [PathBuf],
+    pub styles: &'a [String],
+    pub workspaces: &'a [String],
+}
+
+/// Everything the palette can run. `command_index()` first, then the things
+/// that only exist in THIS document or THIS install: brushes, sub tools,
+/// actions, settings, palettes, materials, layers, pages, recent files, work
+/// styles, manual topics and saved workspaces.
 ///
-/// Half of what anyone hunts for is not a menu item: it is a sub tool, an
-/// action he recorded last week, or the palette he closed by accident.
-pub fn palette_entries(presets: &[(String, PathBuf)], actions: &[String]) -> Vec<Entry> {
+/// Half of what anyone hunts for is not a menu item — it is a layer he named
+/// twenty minutes ago, a tone in the bank, or the page he was on before.
+/// Everything index-keyed (layers, pages, actions, materials) is rebuilt
+/// each time the overlay OPENS, so a row can never point at a slot that has
+/// since moved.
+pub fn palette_entries(input: &PaletteInput) -> Vec<Entry> {
+    let cmd_row = |label: &str, path: &'static str, cmd: AppCmd| {
+        Entry::new(label.to_owned(), path, Kind::Command, cmd)
+    };
     command_index()
         .into_iter()
-        .map(|(label, path, cmd)| Entry {
-            label: label.to_owned(),
-            path,
-            cmd,
-        })
-        .chain(presets.iter().map(|(name, p)| Entry {
-            label: name.clone(),
-            path: "Sub Tool ▸ Brush",
-            cmd: AppCmd::SelectBrush(p.clone()),
-        }))
+        .map(|(label, path, cmd)| cmd_row(label, path, cmd))
+        .chain(
+            input.presets.iter().map(|(name, p)| {
+                cmd_row(name, "Sub Tool ▸ Brush", AppCmd::SelectBrush(p.clone()))
+            }),
+        )
         // Every non-brush sub tool, switching the TOOL as well as the mode —
         // picking "Lasso" from the palette must leave you holding the
         // Selection tool, exactly as clicking that row does.
-        .chain(SubTool::ALL.iter().map(|&s| Entry {
-            label: s.label().to_owned(),
-            path: s.path(),
-            cmd: AppCmd::SetSubTool(s),
+        .chain(
+            SubTool::ALL
+                .iter()
+                .map(|&s| cmd_row(s.label(), s.path(), AppCmd::SetSubTool(s))),
+        )
+        .chain(
+            input
+                .actions
+                .iter()
+                .enumerate()
+                .map(|(i, name)| cmd_row(name, "Auto Action", AppCmd::ActionRun(i))),
+        )
+        .chain(
+            PREF_SECTIONS
+                .iter()
+                .map(|&s| cmd_row(s, "Preferences", AppCmd::OpenPrefs(Some(s)))),
+        )
+        .chain(super::dock::ALL.iter().map(|&p| {
+            cmd_row(
+                &format!("{} palette", p.title()),
+                "Workspace ▸ Palette",
+                AppCmd::PaletteOpen(p),
+            )
         }))
-        // Auto actions are index-keyed (`ActionRun`), so these rows are built
-        // fresh from the list every time the overlay opens — a renamed or
-        // deleted action must never leave a row pointing at its old slot.
-        .chain(actions.iter().enumerate().map(|(i, name)| Entry {
-            label: name.clone(),
-            path: "Auto Action",
-            cmd: AppCmd::ActionRun(i),
+        .chain(input.workspaces.iter().map(|n| {
+            cmd_row(
+                n,
+                "Workspace ▸ Saved",
+                AppCmd::WorkspaceApply(n.clone()),
+            )
         }))
-        .chain(PREF_SECTIONS.iter().map(|&s| Entry {
-            label: s.to_owned(),
-            path: "Preferences",
-            cmd: AppCmd::OpenPrefs(Some(s)),
+        // The material bank, on the Materials palette's own click command —
+        // including its Tile checkbox, so the two paths paste the same way.
+        .chain(input.materials.iter().map(|(name, folder, path, tile)| {
+            Entry::new(
+                name.clone(),
+                format!("Material ▸ {folder}"),
+                Kind::Material,
+                AppCmd::PasteMaterial {
+                    path: path.clone(),
+                    tile: *tile,
+                },
+            )
         }))
-        .chain(super::dock::ALL.iter().map(|&p| Entry {
-            label: format!("{} palette", p.title()),
-            path: "Workspace",
-            cmd: AppCmd::PaletteOpen(p),
+        .chain(input.layers.iter().enumerate().map(|(i, name)| {
+            Entry::new(name.clone(), "Layer", Kind::Layer, AppCmd::SelectLayer(i))
+        }))
+        // Pages are 1-based everywhere the user can see them.
+        .chain((1..=input.pages).map(|n| {
+            Entry::new(
+                format!("Page {n}"),
+                "Pages",
+                Kind::Page,
+                AppCmd::PageGotoApply(n),
+            )
+        }))
+        .chain(input.recent_files.iter().map(|p| {
+            let name = p
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| p.display().to_string());
+            Entry::new(
+                name,
+                "File ▸ Recent",
+                Kind::Command,
+                AppCmd::OpenOraPath(p.clone()),
+            )
+        }))
+        .chain(input.styles.iter().map(|n| {
+            cmd_row(n, "Text style", AppCmd::TextStylePick(n.clone()))
+        }))
+        .chain(MANUAL_TOPICS.iter().map(|&(title, file)| {
+            Entry::new(
+                title,
+                "Help ▸ Manual",
+                Kind::Manual,
+                AppCmd::OpenManualPage(file),
+            )
         }))
         .collect()
 }
@@ -354,22 +484,74 @@ fn palette_score(e: &Entry, q: &str) -> Option<u32> {
     None
 }
 
+/// The prefix hint the overlay prints under an empty query, built FROM the
+/// table the filter reads — a hint that can disagree with the behaviour is
+/// worse than none.
+fn sigil_hint() -> String {
+    SIGILS
+        .iter()
+        .map(|(c, _, what)| format!("{c} {what}"))
+        .collect::<Vec<_>>()
+        .join("    ")
+}
+
+/// A leading sigil and the query behind it. `">"` alone is a filter with an
+/// empty query — the whole kind, which is what VSCode does and what makes
+/// the prefixes discoverable: press one, see what is in there.
+fn split_sigil(q: &str) -> (Option<Kind>, &str) {
+    let mut chars = q.chars();
+    match chars.next() {
+        Some(c) => match SIGILS.iter().find(|(s, _, _)| *s == c) {
+            Some(&(_, kind, _)) => (Some(kind), chars.as_str().trim_start()),
+            None => (None, q),
+        },
+        None => (None, q),
+    }
+}
+
+/// `:12` is a page JUMP, not a search: the digits are matched against the
+/// page number itself, exact first, then the numbers that start with them
+/// (`:1` offers 1, 10, 11…). Anything non-numeric after the colon falls
+/// back to the ordinary text search over "Page 12".
+fn page_score(label: &str, q: &str) -> Option<u32> {
+    let n = label.strip_prefix("page ")?;
+    if n == q {
+        Some(0)
+    } else if n.starts_with(q) {
+        Some(1)
+    } else {
+        None
+    }
+}
+
 /// The palette's whole search, as a pure function: indices into `entries`,
-/// best first, at most `limit`. An EMPTY query is not "no results" — it is
-/// the recents list, most recent first, then the index's own order, which is
-/// what makes Ctrl+K, Enter a repeat of the last thing you did.
+/// best first, at most `limit`. Two things are not plain text search. An
+/// EMPTY query is the recents list, most recent first, then the index's own
+/// order — that is what makes Ctrl+K, Enter a repeat of the last thing you
+/// did. And a leading SIGIL narrows to one kind before any scoring happens,
+/// so `@` is the layer list of this page and `:7` is page 7.
 pub fn palette_filter(
     entries: &[Entry],
     query: &str,
     recents: &[String],
     limit: usize,
 ) -> Vec<usize> {
-    let q = query.trim().to_lowercase();
+    let trimmed = query.trim();
+    let (kind, rest) = split_sigil(trimmed);
+    let q = rest.trim().to_lowercase();
+    let numeric_page = kind == Some(Kind::Page)
+        && !q.is_empty()
+        && q.chars().all(|c| c.is_ascii_digit());
     let mut hits: Vec<(u32, usize, usize)> = entries
         .iter()
         .enumerate()
         .filter_map(|(i, e)| {
-            let score = if q.is_empty() {
+            if kind.is_some_and(|k| k != e.kind) {
+                return None;
+            }
+            let score = if numeric_page {
+                page_score(&e.label.to_lowercase(), &q)?
+            } else if q.is_empty() {
                 0
             } else {
                 palette_score(e, &q)?
@@ -385,11 +567,47 @@ pub fn palette_filter(
     hits.into_iter().take(limit).map(|(_, _, i)| i).collect()
 }
 
+/// Gather the whole index from `App`. ONCE PER OPEN, not per keystroke:
+/// with the material bank and a 200-layer page in it this is thousands of
+/// rows, and rebuilding it under the typing would put an allocation storm
+/// between a key and its letter. It is also the freshness rule — every
+/// index-keyed row (layer, page, action, material) is only as old as this
+/// press of Ctrl+K.
+fn gather_entries(app: &App) -> Vec<Entry> {
+    let actions: Vec<String> = app.actions.iter().map(|a| a.name.clone()).collect();
+    let materials: Vec<(String, String, PathBuf, bool)> = app
+        .materials
+        .iter()
+        .map(|m| {
+            let folder = app
+                .material_folder_names
+                .get(m.folder)
+                .cloned()
+                .unwrap_or_else(|| "Materials".to_owned());
+            (m.name.clone(), folder, m.path.clone(), app.material_tile)
+        })
+        .collect();
+    let layers: Vec<String> = app.doc.layers.iter().map(|l| l.name.clone()).collect();
+    let styles: Vec<String> = app.doc.text_styles.iter().map(|s| s.name.clone()).collect();
+    let workspaces: Vec<String> = app.workspaces.iter().map(|e| e[0].clone()).collect();
+    palette_entries(&PaletteInput {
+        presets: &app.presets,
+        actions: &actions,
+        materials: &materials,
+        layers: &layers,
+        pages: app.pages.len(),
+        recent_files: &app.recent,
+        styles: &styles,
+        workspaces: &workspaces,
+    })
+}
+
 /// Summon the overlay (Ctrl+K, and the docked palette's header button).
 pub fn open_command_palette(app: &mut App) {
     app.cmdpal_open = true;
     app.cmdpal_query.clear();
     app.cmdpal_sel = 0;
+    app.cmdpal_entries = gather_entries(app);
     app.mark_dirty();
 }
 
@@ -397,6 +615,8 @@ fn close_command_palette(app: &mut App) {
     app.cmdpal_open = false;
     app.cmdpal_query.clear();
     app.cmdpal_sel = 0;
+    // The bank can be thousands of rows; nothing needs them while closed.
+    app.cmdpal_entries = Vec::new();
     app.mark_dirty();
 }
 
@@ -423,8 +643,10 @@ pub fn command_palette(ctx: &egui::Context, app: &mut App) {
         return;
     }
 
-    let action_names: Vec<String> = app.actions.iter().map(|a| a.name.clone()).collect();
-    let entries = palette_entries(&app.presets, &action_names);
+    // Gathered at open (`gather_entries`) and borrowed out for the frame:
+    // the drawing closure needs `&mut app` for the query field. Put back
+    // below, before anything that can close the overlay.
+    let entries = std::mem::take(&mut app.cmdpal_entries);
     let hits = palette_filter(
         &entries,
         &app.cmdpal_query,
@@ -464,7 +686,7 @@ pub fn command_palette(ctx: &egui::Context, app: &mut App) {
                     ui.set_width(width);
                     let resp = ui.add(
                         egui::TextEdit::singleline(&mut app.cmdpal_query)
-                            .hint_text("Run a command or pick a brush…")
+                            .hint_text("Search everything — command, brush, layer, page, material…")
                             .desired_width(f32::INFINITY),
                     );
                     // Focus on open — and back again if a click let it go,
@@ -485,9 +707,16 @@ pub fn command_palette(ctx: &egui::Context, app: &mut App) {
                         }
                     }
                     ui.add_space(4.0);
+                    // The sigils are only discoverable if something says
+                    // them, and the empty query is the one moment there is
+                    // room — once he is typing, the rows are the answer.
+                    if app.cmdpal_query.trim().is_empty() {
+                        ui.weak(sigil_hint());
+                    }
                     ui.weak("↑ ↓ move   Enter run   Esc close   —   Ctrl+K opens this");
                 });
         });
+    app.cmdpal_entries = entries;
 
     if let Some(e) = run {
         app.cmdpal_recent.retain(|l| *l != e.label);
@@ -524,7 +753,7 @@ fn palette_row(ui: &mut egui::Ui, e: &Entry, selected: bool) -> egui::Response {
     p.text(
         egui::pos2(rect.right() - 6.0, rect.center().y),
         egui::Align2::RIGHT_CENTER,
-        e.path,
+        &e.path,
         egui::FontId::proportional(10.5),
         theme::TEXT_WEAK,
     );
@@ -610,8 +839,48 @@ mod tests {
         vec!["Tone a flat".to_owned(), "Panel setup".to_owned()]
     }
 
+    /// A document's worth of everything else, so the whole index can be
+    /// built with no App: two materials in two folders, three layers, four
+    /// pages, a recent file, a work style and a saved workspace.
+    fn fake_materials() -> Vec<(String, String, PathBuf, bool)> {
+        vec![
+            (
+                "Dots 10%".to_owned(),
+                "Tones".to_owned(),
+                PathBuf::from("mat/dots10.png"),
+                false,
+            ),
+            (
+                "Brick wall".to_owned(),
+                "Backgrounds".to_owned(),
+                PathBuf::from("mat/brick.png"),
+                false,
+            ),
+        ]
+    }
+
     fn all_entries() -> Vec<Entry> {
-        palette_entries(&fake_presets(), &fake_actions())
+        let presets = fake_presets();
+        let actions = fake_actions();
+        let materials = fake_materials();
+        let layers = [
+            "Rough".to_owned(),
+            "Ink".to_owned(),
+            "Tone 60L".to_owned(),
+        ];
+        let recent = [PathBuf::from(r"C:\work\ch03.mnc")];
+        let styles = ["Dialogue".to_owned(), "Thought".to_owned()];
+        let workspaces = ["Inking".to_owned()];
+        palette_entries(&PaletteInput {
+            presets: &presets,
+            actions: &actions,
+            materials: &materials,
+            layers: &layers,
+            pages: 4,
+            recent_files: &recent,
+            styles: &styles,
+            workspaces: &workspaces,
+        })
     }
 
     fn labels(entries: &[Entry], hits: &[usize]) -> Vec<String> {
@@ -677,9 +946,12 @@ mod tests {
             .expect("the second action");
         assert!(matches!(second.cmd, AppCmd::ActionRun(1)), "{:?}", second.cmd);
         // No actions recorded: no rows, and nothing else changes.
-        let bare = palette_entries(&fake_presets(), &[]);
+        let presets = fake_presets();
+        let bare = palette_entries(&PaletteInput {
+            presets: &presets,
+            ..PaletteInput::default()
+        });
         assert!(bare.iter().all(|e| e.path != "Auto Action"));
-        assert_eq!(bare.len() + 2, entries.len());
     }
 
     /// Settings and palettes: each Preferences section opens the window ON
@@ -710,7 +982,7 @@ mod tests {
                 .iter()
                 .find(|e| e.label == want)
                 .unwrap_or_else(|| panic!("{want} has no row"));
-            assert_eq!(row.path, "Workspace");
+            assert_eq!(row.path, "Workspace ▸ Palette");
             match row.cmd {
                 AppCmd::PaletteOpen(q) => assert_eq!(q, p, "the row reopens ITS palette"),
                 ref other => panic!("{want} must push PaletteOpen, not {other:?}"),
@@ -720,14 +992,176 @@ mod tests {
         assert_eq!(hist, vec!["History palette".to_owned()]);
     }
 
+    /// Round 2: the rows that describe THIS document or THIS install —
+    /// materials, layers, pages, recent files, work styles, manual topics
+    /// and saved workspaces. Each one carries the command its own palette
+    /// or menu already runs; a second door that means something slightly
+    /// different is the bug this whole file exists to avoid.
+    #[test]
+    fn palette_entries_carry_the_document_and_the_install() {
+        let entries = all_entries();
+        let row = |label: &str| {
+            entries
+                .iter()
+                .find(|e| e.label == label)
+                .unwrap_or_else(|| panic!("no row labelled {label}"))
+                .clone()
+        };
+
+        let dots = row("Dots 10%");
+        assert_eq!(dots.path, "Material ▸ Tones", "the folder names the row");
+        assert_eq!(dots.kind, Kind::Material);
+        match &dots.cmd {
+            AppCmd::PasteMaterial { path, tile } => {
+                assert_eq!(path, &PathBuf::from("mat/dots10.png"));
+                assert!(!tile, "the bank's own Tile checkbox rides along");
+            }
+            other => panic!("a material row must paste, not {other:?}"),
+        }
+
+        let ink = row("Ink");
+        assert_eq!((ink.path.as_str(), ink.kind), ("Layer", Kind::Layer));
+        assert!(matches!(ink.cmd, AppCmd::SelectLayer(1)), "{:?}", ink.cmd);
+
+        let p3 = row("Page 3");
+        assert_eq!((p3.path.as_str(), p3.kind), ("Pages", Kind::Page));
+        assert!(
+            matches!(p3.cmd, AppCmd::PageGotoApply(3)),
+            "pages are 1-based where the user can see them ({:?})",
+            p3.cmd
+        );
+        assert!(
+            !entries.iter().any(|e| e.label == "Page 5"),
+            "four pages means four rows"
+        );
+
+        let recent = row("ch03.mnc");
+        assert_eq!(recent.path, "File ▸ Recent");
+        assert!(
+            matches!(&recent.cmd, AppCmd::OpenOraPath(p) if p.ends_with("ch03.mnc")),
+            "{:?}",
+            recent.cmd
+        );
+
+        let style = row("Dialogue");
+        assert_eq!(style.path, "Text style");
+        assert!(
+            matches!(&style.cmd, AppCmd::TextStylePick(n) if n == "Dialogue"),
+            "{:?}",
+            style.cmd
+        );
+
+        let ws = row("Inking");
+        assert_eq!(ws.path, "Workspace ▸ Saved");
+        assert!(matches!(&ws.cmd, AppCmd::WorkspaceApply(n) if n == "Inking"));
+
+        // Every manual topic is a row, and each names a page that exists in
+        // the repository's docs/manual — a title with no file behind it is
+        // a row that opens nothing.
+        for (title, file) in MANUAL_TOPICS {
+            let m = row(title);
+            assert_eq!((m.path.as_str(), m.kind), ("Help ▸ Manual", Kind::Manual));
+            assert!(matches!(m.cmd, AppCmd::OpenManualPage(f) if f == file));
+            let on_disk =
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/manual/");
+            assert!(
+                on_disk.join(file).exists(),
+                "{file} is missing from docs/manual"
+            );
+        }
+    }
+
+    /// The VSCode prefixes. A sigil narrows to ONE kind before any scoring,
+    /// a bare sigil is that kind whole (which is how you discover what is in
+    /// there), and `:12` is a page jump rather than a text search.
+    #[test]
+    fn sigils_narrow_the_search_by_kind() {
+        let entries = all_entries();
+        // "@" alone = this page's layers, in document order.
+        let layers = labels(&entries, &palette_filter(&entries, "@", &[], 20));
+        assert_eq!(
+            layers,
+            vec!["Rough".to_owned(), "Ink".to_owned(), "Tone 60L".to_owned()]
+        );
+        // …and searching inside the kind still works.
+        assert_eq!(
+            labels(&entries, &palette_filter(&entries, "@ton", &[], 20)),
+            vec!["Tone 60L".to_owned()]
+        );
+        // "#" is the material bank only — "brick" as a plain query could
+        // also reach a brush or a command; behind the sigil it cannot.
+        let mats = labels(&entries, &palette_filter(&entries, "#", &[], 20));
+        assert_eq!(mats.len(), 2, "{mats:?}");
+        assert!(
+            palette_filter(&entries, "#lasso", &[], 20).is_empty(),
+            "a sub tool is not a material, whatever it is called"
+        );
+        // ">" is commands, and a layer named "Ink" must not answer it.
+        let cmds = labels(&entries, &palette_filter(&entries, ">ink", &[], 20));
+        assert!(!cmds.contains(&"Ink".to_owned()), "{cmds:?}");
+        assert!(
+            cmds.iter().all(|l| entries
+                .iter()
+                .any(|e| e.label == *l && e.kind == Kind::Command)),
+            "{cmds:?}"
+        );
+        // "?" is the manual.
+        let help = labels(&entries, &palette_filter(&entries, "?keys", &[], 5));
+        assert_eq!(help, vec!["Keys — every shortcut".to_owned()]);
+        // A sigil-less query still searches everything.
+        let both = labels(&entries, &palette_filter(&entries, "ink", &[], 20));
+        assert!(both.contains(&"Ink".to_owned()), "{both:?}");
+        assert!(both.contains(&"Rough ink".to_owned()), "{both:?}");
+        // The hint line is built from the table the filter reads.
+        let hint = sigil_hint();
+        for (c, _, what) in SIGILS {
+            assert!(hint.contains(c) && hint.contains(what), "{hint}");
+        }
+    }
+
+    /// `:N` is a jump: the digits match the page NUMBER, exact first, then
+    /// the numbers that start with them — the same thing VSCode's `:12`
+    /// does with a line, and nothing like a fuzzy search over "Page 12".
+    #[test]
+    fn the_colon_form_jumps_to_a_page() {
+        let many: Vec<String> = Vec::new();
+        let entries = palette_entries(&PaletteInput {
+            pages: 14,
+            layers: &["Page smudge".to_owned()],
+            actions: &many,
+            ..PaletteInput::default()
+        });
+        assert_eq!(
+            labels(&entries, &palette_filter(&entries, ":3", &[], 10)),
+            vec!["Page 3".to_owned()],
+            "one page has a 3 in it"
+        );
+        // ":1" leads with page 1, then 10..14 — the prefix ladder.
+        let ones = labels(&entries, &palette_filter(&entries, ":1", &[], 10));
+        assert_eq!(ones.first().map(String::as_str), Some("Page 1"), "{ones:?}");
+        assert_eq!(ones.len(), 6, "1, 10, 11, 12, 13, 14 ({ones:?})");
+        // A layer whose name contains "page" is not a page jump.
+        assert!(!ones.contains(&"Page smudge".to_owned()));
+        // ":" alone is the page list; a non-number after it is a text
+        // search inside the page rows, which finds nothing useful but must
+        // not panic or leak other kinds.
+        assert_eq!(
+            palette_filter(&entries, ":", &[], 20).len(),
+            14,
+            "a bare colon lists the pages"
+        );
+        assert!(palette_filter(&entries, ":smudge", &[], 20).is_empty());
+        // Out of range says nothing rather than jumping somewhere near.
+        assert!(palette_filter(&entries, ":99", &[], 10).is_empty());
+    }
+
     /// Brushes are half the reason the overlay exists: they must be in the
     /// searchable set, findable by name, and run the SAME command the Sub
     /// Tool list pushes — a second brush-picking path would be a second
     /// place to keep in step.
     #[test]
     fn palette_entries_carry_the_brush_presets() {
-        let presets = fake_presets();
-        let entries = palette_entries(&presets, &fake_actions());
+        let entries = all_entries();
         assert!(
             entries.len() > command_index().len(),
             "the presets are appended, not replacing the commands"

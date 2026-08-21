@@ -275,11 +275,34 @@ pub unsafe extern "C" fn mn_brush_tile_request_start(
                 .map(|(f, ctx)| f(ctx, tx, ty, &mut st.scratch))
                 .unwrap_or(false)
         });
-        if !served {
+        if served {
+            // SMUDGE-UNDER-WASH on the GPU path (P4): the oracle's tile is
+            // the IN-FLIGHT wash buffer; with a composite base bound the
+            // sampler must still see buffer OVER layer — the ink the user
+            // sees — same as the CPU branch below. Same premul-over math
+            // as `composite_into`, with the oracle's scratch as the over.
+            let base_ptr = st.composite_base;
+            if !base_ptr.is_null() {
+                let base = unsafe { &*base_ptr };
+                if let Some(u) = if on_canvas {
+                    base.active_layer().tile(idx)
+                } else {
+                    None
+                } {
+                    for (d, b) in st.scratch.chunks_exact_mut(4).zip(u.data().chunks_exact(4)) {
+                        let sa = d[3] as u32;
+                        for c in 0..4 {
+                            d[c] = (d[c] as u32 + b[c] as u32 * (32768 - sa) / 32768) as u16;
+                        }
+                    }
+                }
+            }
+            return st.scratch.as_mut_ptr();
+        }
+        {
             // SMUDGE-UNDER-WASH (TODO #6): with a composite base set, the
             // sampler sees buffer OVER layer — the ink the user sees — not
-            // the blank wash buffer alone. (The GPU oracle above already
-            // covers the BYPASS case.)
+            // the blank wash buffer alone.
             let base_ptr = st.composite_base;
             if !base_ptr.is_null() {
                 let base = unsafe { &*base_ptr };

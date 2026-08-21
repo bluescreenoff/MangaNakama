@@ -73,7 +73,13 @@ impl<Tab> DockArea<'_, Tab> {
 
         match (drag_data, owns_drag) {
             (Some(source), true) => {
-                if let Some(hover) = hover_data {
+                // MN-PATCH #14 (MangaNakama, 2026-08-21): a tab drag that
+                // STARTED in a floating window surface moves the WINDOW,
+                // unless the pointer is over a drop target that means
+                // something (see `float_drag_moves_window`).
+                if self.float_drag_moves_window(&source, hover_data.as_ref()) {
+                    self.drag_move_window(ui, &mut state, source.src.surface_address());
+                } else if let Some(hover) = hover_data {
                     let style = self.style.as_ref().unwrap();
                     state.set_drag_and_drop(source, hover, ui.ctx(), style);
                     let tab_dst = self.show_drag_drop_overlay(ui, &mut state, tab_viewer);
@@ -229,6 +235,77 @@ impl<Tab> DockArea<'_, Tab> {
         }
 
         state.store(ui.ctx(), self.id);
+    }
+
+    /// MN-PATCH #14 (MangaNakama, 2026-08-21): should this in-flight tab drag
+    /// MOVE its floating window instead of dragging the tab out of it?
+    ///
+    /// The app floats palettes as `Surface::Window` entries with `title_bar`
+    /// off and `fill_tab_bar` on, so the tab strip IS the window's title bar —
+    /// grabbing it has to feel like grabbing a title bar. Before this patch
+    /// every such drag ended in MN-PATCH #3's no-hover fallback
+    /// (`TabDestination::Window`), which runs `detach_tab`: a BRAND NEW
+    /// surface at the pointer with a reset position and size, while the old
+    /// one was collected — the owner screenshotted the result (2026-08-21).
+    ///
+    /// Drops that still mean something keep their old behaviour, so this
+    /// returns `false` for them:
+    /// * the drag started on the main surface (an ordinary dock drag / the
+    ///   tear-off this patch does not touch),
+    /// * the pointer is over a leaf of ANOTHER surface — re-docking a float
+    ///   into a column, or into a different float,
+    /// * the pointer is over a DIFFERENT node of the same window (an
+    ///   intra-window re-dock),
+    /// * the pointer is on its own leaf's tab strip and that leaf has more
+    ///   than one tab — a reorder.
+    fn float_drag_moves_window(
+        &self,
+        drag: &super::drag_and_drop::DragData,
+        hover: Option<&super::drag_and_drop::HoverData>,
+    ) -> bool {
+        let TreeComponent::Tab(src) = drag.src else {
+            return false;
+        };
+        if src.surface.is_main() {
+            return false;
+        }
+        let Some(hover) = hover else {
+            // Over the canvas, another column, nothing: pure window move.
+            return true;
+        };
+        let (dst_surface, dst_node) = hover.dst.node_address();
+        if dst_surface != src.surface {
+            return false;
+        }
+        match dst_node {
+            Some(node) if node != src.node => false,
+            _ => !(hover.tab.is_some() && self.dock_state[src.node_path()].tabs_count() > 1),
+        }
+    }
+
+    /// MN-PATCH #14: drive the EXISTING window surface by the pointer delta.
+    ///
+    /// The position is re-read from egui every frame rather than accumulated,
+    /// because `WindowState::create_window` constrains the window to
+    /// `window_bounds`: a fast drag past the edge is clamped, and an
+    /// accumulator would keep running past the clamp and leave the window
+    /// stuck until the pointer came all the way back.
+    fn drag_move_window(&mut self, ui: &Ui, state: &mut State, surface: SurfaceIndex) {
+        state.float_move = true;
+        // No drop overlay, no window fade: this drag is not going anywhere.
+        state.dnd = None;
+        state.window_fade = None;
+        let delta = ui.input(|i| i.pointer.delta());
+        if delta == Vec2::ZERO {
+            return;
+        }
+        let id = window_surface::window_area_id(surface);
+        let Some(rect) = ui.ctx().memory(|mem| mem.area_rect(id)) else {
+            return;
+        };
+        if let Some(window_state) = self.dock_state.get_window_state_mut(surface) {
+            window_state.set_position(rect.min + delta);
+        }
     }
 
     /// Returns some when windows are fading, and what surface index is being hovered over

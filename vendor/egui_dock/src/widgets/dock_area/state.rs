@@ -9,17 +9,17 @@ pub(super) struct State {
     pub last_hover_pos: Option<Pos2>,
     pub dnd: Option<DragDropState>,
     pub window_fade: Option<(f64, SurfaceIndex)>,
+    /// MN-PATCH #14 (MangaNakama): this frame's tab drag is MOVING a floating
+    /// window rather than dragging the tab out of it, so the tab must render
+    /// where it sits (the window already follows the pointer — transforming
+    /// the drag ghost by the same delta on top of that doubles it).
+    pub float_move: bool,
 }
 
 impl State {
     #[inline(always)]
     pub(super) fn load(ctx: &Context, id: Id) -> Self {
-        ctx.data_mut(|d| d.get_temp(id)).unwrap_or(Self {
-            drag_start: None,
-            last_hover_pos: None,
-            dnd: None,
-            window_fade: None,
-        })
+        ctx.data_mut(|d| d.get_temp(id)).unwrap_or_default()
     }
 
     #[inline(always)]
@@ -31,6 +31,8 @@ impl State {
         self.dnd = None;
         self.window_fade = None;
         self.drag_start = None;
+        // MN-PATCH #14: a window move ends with the drag that drove it.
+        self.float_move = false;
     }
 
     pub(super) fn set_drag_and_drop(

@@ -16,6 +16,8 @@
 
 use std::path::{Path, PathBuf};
 
+use mn_core::genlines::GenLinesSpec;
+
 use super::App;
 
 /// One scanned material. Display name = file stem; the full path is the
@@ -31,6 +33,119 @@ pub struct MaterialItem {
     /// (`"screentone, dots, 10%"`). Empty = untagged, which is what every
     /// material was before this existed.
     pub tags: String,
+    /// What a click PLACES — a bitmap float, or a live generator layer.
+    pub kind: MaterialKind,
+}
+
+/// A material's two flavours. Bitmaps are the original bank (paste as the
+/// move/scale float); a generator material places the thing itself — a
+/// layer carrying its [`GenLinesSpec`], editable with the Object tool from
+/// the first click instead of baked pixels nobody can re-aim.
+#[derive(Clone, Debug, PartialEq)]
+pub enum MaterialKind {
+    Image,
+    GenLines(GenLinesSpec),
+}
+
+/// A generator material's file suffix. `focus-lines.gen.json` IS the
+/// material (a serialized [`GenLinesSpec`]); a `focus-lines.png` beside it
+/// is only that material's THUMBNAIL, never a second material.
+pub const GEN_SUFFIX: &str = ".gen.json";
+
+impl MaterialItem {
+    pub fn is_generator(&self) -> bool {
+        matches!(self.kind, MaterialKind::GenLines(_))
+    }
+
+    /// Where the palette cell's picture comes from: the same-stem PNG for
+    /// a generator material, the image itself for a bitmap. A generator
+    /// with no PNG beside it simply shows as a name (the decode fails, as
+    /// it always has for an unreadable image).
+    pub fn thumb_path(&self) -> PathBuf {
+        match self.kind {
+            MaterialKind::Image => self.path.clone(),
+            MaterialKind::GenLines(_) => self.path.with_file_name(format!("{}.png", self.name)),
+        }
+    }
+}
+
+/// `focus-lines.gen.json` → `focus-lines`; anything else → `None`.
+pub fn gen_material_stem(path: &Path) -> Option<String> {
+    let n = path.file_name()?.to_str()?;
+    // The lowercased copy is byte-for-byte the same length, so the split
+    // below can never land inside a multi-byte character.
+    n.to_ascii_lowercase()
+        .ends_with(GEN_SUFFIX)
+        .then(|| n[..n.len() - GEN_SUFFIX.len()].to_owned())
+}
+
+/// The spec a generator material carries. `None` when the path is not a
+/// generator material at all, or when the file cannot be read or parsed —
+/// a corrupt sidecar is not a material, and must not become an empty one.
+pub fn read_gen_spec(path: &Path) -> Option<GenLinesSpec> {
+    gen_material_stem(path)?;
+    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+}
+
+/// Write `<stem>.gen.json` into `dir`, returning the path on success.
+pub fn write_gen_spec(dir: &Path, stem: &str, spec: &GenLinesSpec) -> Option<PathBuf> {
+    let p = dir.join(format!("{stem}{GEN_SUFFIX}"));
+    let text = serde_json::to_string_pretty(spec).ok()?;
+    std::fs::write(&p, text).ok()?;
+    Some(p)
+}
+
+/// One folder's materials in display order. Free-standing so the scan can
+/// be exercised against a temp folder without an App (and a GPU).
+pub fn materials_scan_folder(folder: &Path, fi: usize) -> Vec<MaterialItem> {
+    let Ok(rd) = std::fs::read_dir(folder) else {
+        return Vec::new();
+    };
+    // One sidecar read per FOLDER, not per file. The sidecar is the
+    // only home of a tag, so a rescan re-reads it rather than
+    // remembering: tags on materials the owner adds by hand survive
+    // every rescan, restart and folder re-add.
+    let side = MaterialTags::load(folder);
+    let paths: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+    // Generator stems first: a `<stem>.png` beside a `<stem>.gen.json` is
+    // that generator's thumbnail, so it must not scan as its own material.
+    let gen_stems: std::collections::HashSet<String> = paths
+        .iter()
+        .filter_map(|p| gen_material_stem(p).map(|s| s.to_lowercase()))
+        .collect();
+    let mut items: Vec<MaterialItem> = paths
+        .iter()
+        .filter_map(|p| {
+            let (name, kind) = match gen_material_stem(p) {
+                Some(stem) => (stem, MaterialKind::GenLines(read_gen_spec(p)?)),
+                None => {
+                    let ext = p
+                        .extension()
+                        .and_then(|x| x.to_str())
+                        .map(|x| x.to_ascii_lowercase())
+                        .unwrap_or_default();
+                    if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp") {
+                        return None;
+                    }
+                    let name = p.file_stem()?.to_string_lossy().into_owned();
+                    if gen_stems.contains(&name.to_lowercase()) {
+                        return None;
+                    }
+                    (name, MaterialKind::Image)
+                }
+            };
+            let tags = side.get(&p.file_name()?.to_string_lossy()).to_owned();
+            Some(MaterialItem {
+                name,
+                path: p.clone(),
+                folder: fi,
+                tags,
+                kind,
+            })
+        })
+        .collect();
+    items.sort_by(|a, b| a.name.cmp(&b.name));
+    items
 }
 
 impl App {
@@ -62,38 +177,7 @@ impl App {
     pub fn materials_scan(&mut self) {
         let mut out = Vec::new();
         for (fi, folder) in self.material_folders.iter().enumerate() {
-            let Ok(rd) = std::fs::read_dir(folder) else {
-                continue;
-            };
-            // One sidecar read per FOLDER, not per file. The sidecar is the
-            // only home of a tag, so a rescan re-reads it rather than
-            // remembering: tags on materials the owner adds by hand survive
-            // every rescan, restart and folder re-add.
-            let side = MaterialTags::load(folder);
-            let mut items: Vec<MaterialItem> = rd
-                .flatten()
-                .filter_map(|e| {
-                    let p = e.path();
-                    let ext = p
-                        .extension()
-                        .and_then(|x| x.to_str())
-                        .map(|x| x.to_ascii_lowercase())
-                        .unwrap_or_default();
-                    if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp") {
-                        return None;
-                    }
-                    let name = p.file_stem()?.to_string_lossy().into_owned();
-                    let tags = side.get(&p.file_name()?.to_string_lossy()).to_owned();
-                    Some(MaterialItem {
-                        name,
-                        path: p,
-                        folder: fi,
-                        tags,
-                    })
-                })
-                .collect();
-            items.sort_by(|a, b| a.name.cmp(&b.name));
-            out.extend(items);
+            out.extend(materials_scan_folder(folder, fi));
         }
         self.materials = out;
         // Folder names for the palette's grouping labels.
@@ -315,7 +399,21 @@ impl App {
     /// selection-scoped (no selection = the whole layer's ink), exported
     /// as a straight-alpha PNG into the registered folder, name taken
     /// from the layer. Vector/balloon/text type-follows is part 2.
+    ///
+    /// A layer that was GENERATED (effect lines) registers as a generator
+    /// material instead: the PNG becomes its thumbnail and a `.gen.json`
+    /// beside it carries the spec, so a tuned effect-line layer comes back
+    /// out of the bank live rather than as flattened ink.
     pub fn material_register_layer(&mut self) -> Option<(PathBuf, String)> {
+        let dir = self.registered_material_folder();
+        let out = self.material_register_layer_into(dir)?;
+        self.materials_scan();
+        Some(out)
+    }
+
+    /// The write half, target-directory injected so tests stay out of the
+    /// real bank (the same split `pattern_save_material` uses).
+    fn material_register_layer_into(&mut self, dir: PathBuf) -> Option<(PathBuf, String)> {
         let l = self.doc.active_layer();
         if l.folder || l.is_vector() {
             return None;
@@ -367,17 +465,27 @@ impl App {
         } else {
             base
         };
-        let dir = self.registered_material_folder();
+        // A generated layer registers LIVE — the spec is the material, the
+        // PNG only its thumbnail, so both names have to be free.
+        let spec = self.doc.active_layer().genlines;
+        let taken = |dir: &Path, stem: &str| {
+            dir.join(format!("{stem}.png")).exists()
+                || (spec.is_some() && dir.join(format!("{stem}{GEN_SUFFIX}")).exists())
+        };
         let mut stem = base.clone();
-        let mut path = dir.join(format!("{stem}.png"));
         let mut n = 1;
-        while path.exists() {
+        while taken(&dir, &stem) {
             n += 1;
             stem = format!("{base}-{n}");
-            path = dir.join(format!("{stem}.png"));
         }
+        let path = dir.join(format!("{stem}.png"));
         image::save_buffer(&path, img.as_raw(), w, h, image::ExtendedColorType::Rgba8).ok()?;
-        self.materials_scan();
+        // The generator sidecar is the material's identity, so it — not the
+        // thumbnail — is what the caller reports.
+        let path = match spec {
+            Some(s) => write_gen_spec(&dir, &stem, &s).unwrap_or(path),
+            None => path,
+        };
         Some((path, stem))
     }
 
@@ -395,8 +503,8 @@ impl App {
     }
 }
 
-/// The file half of the import: copy every image file from `src` into
-/// `dst`, keeping existing names. Returns the names actually copied —
+/// The file half of the import: copy every material file from `src` into
+/// `dst` — images and generator sidecars — keeping existing names. Returns the names actually copied —
 /// which, by that no-clobber rule, are exactly the ones that are NEW in
 /// `dst`.
 fn material_import_files(src: &Path, dst: &Path) -> Vec<String> {
@@ -411,7 +519,12 @@ fn material_import_files(src: &Path, dst: &Path) -> Vec<String> {
             .and_then(|x| x.to_str())
             .map(|x| x.to_ascii_lowercase())
             .unwrap_or_default();
-        if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp") {
+        // Generator sidecars ride along with the images: importing a
+        // folder that holds them and leaving the specs behind would turn
+        // live materials into their own thumbnails.
+        if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp")
+            && gen_material_stem(&p).is_none()
+        {
             continue;
         }
         let Some(name) = p.file_name() else { continue };
@@ -460,6 +573,21 @@ mod tests {
             path: PathBuf::from(format!("C:/m/{name}.png")),
             folder: 0,
             tags: tags.to_owned(),
+            kind: MaterialKind::Image,
+        }
+    }
+
+    fn spec() -> GenLinesSpec {
+        GenLinesSpec {
+            focus: true,
+            a: 300.0,
+            b: 200.0,
+            c: 60.0,
+            d: 400.0,
+            count: 48,
+            width: 4.0,
+            jitter: 0.3,
+            seed: 9,
         }
     }
 
@@ -575,12 +703,29 @@ mod tests {
         let (src, dst) = import_dirs("carries");
         std::fs::write(src.join("tone.png"), "tone-bytes").unwrap();
         std::fs::write(src.join("notes.txt"), "not an image").unwrap();
+        // A generator sidecar is a material too — leaving it behind would
+        // import a live material as its own thumbnail.
+        write_gen_spec(&src, "focus", &spec()).unwrap();
         std::fs::write(src.join(TAGS_FILE), "tone.png=screentone, dots\n").unwrap();
 
         let copied = material_import_files(&src, &dst);
         material_import_tags(&src, &dst, &copied);
 
-        assert_eq!(copied, vec!["tone.png".to_owned()], "images only");
+        let mut got = copied.clone();
+        got.sort(); // read_dir order is the filesystem's business
+        assert_eq!(
+            got,
+            vec![format!("focus{GEN_SUFFIX}"), "tone.png".to_owned()],
+            "materials only — never the notes file"
+        );
+        assert_eq!(
+            materials_scan_folder(&dst, 0)
+                .iter()
+                .find(|m| m.name == "focus")
+                .map(|m| m.kind.clone()),
+            Some(MaterialKind::GenLines(spec())),
+            "the generator arrives live"
+        );
         assert!(dst.join("tone.png").exists());
         let side = MaterialTags::load(&dst);
         assert_eq!(side.get("tone.png"), "screentone, dots");
@@ -662,5 +807,105 @@ mod tests {
             "the source's comments describe the source: {out}"
         );
         let _ = std::fs::remove_dir_all(src.parent().unwrap());
+    }
+
+    // --- generator materials (the bank places effect lines LIVE) ---------
+
+    fn gen_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("mn-genmat-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The scan's half of the contract: `<stem>.gen.json` IS the material,
+    /// the same-stem PNG is only its thumbnail (never a second material),
+    /// and a sidecar that will not parse is no material at all.
+    #[test]
+    fn scan_reads_a_gen_json_as_a_generator_with_its_png_as_the_thumbnail() {
+        let dir = gen_dir("scan");
+        write_gen_spec(&dir, "focus-lines", &spec()).expect("sidecar written");
+        // The scan never decodes an image, so these bytes only prove which
+        // file the bank pointed at.
+        std::fs::write(dir.join("focus-lines.png"), "thumbnail-bytes").unwrap();
+        std::fs::write(dir.join("tone.png"), "tone-bytes").unwrap();
+        std::fs::write(dir.join("broken.gen.json"), "{ not json").unwrap();
+        std::fs::write(dir.join(TAGS_FILE), "focus-lines.gen.json=effect, action\n").unwrap();
+
+        let items = materials_scan_folder(&dir, 3);
+        let names: Vec<&str> = items.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["focus-lines", "tone"],
+            "one generator, one bitmap — and nothing from the unreadable sidecar"
+        );
+        let g = &items[0];
+        assert!(g.is_generator());
+        assert_eq!(g.kind, MaterialKind::GenLines(spec()));
+        assert_eq!(g.path, dir.join(format!("focus-lines{GEN_SUFFIX}")));
+        assert_eq!(g.thumb_path(), dir.join("focus-lines.png"));
+        assert_eq!(g.folder, 3);
+        assert_eq!(g.tags, "effect, action", "tags key on the sidecar's name");
+        assert_eq!(items[1].kind, MaterialKind::Image);
+        assert_eq!(items[1].thumb_path(), items[1].path, "a bitmap is its own thumb");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The round trip that makes generator materials worth having: a tuned
+    /// effect-line layer registers as a LIVE material (spec + thumbnail),
+    /// while an ordinary raster layer registers exactly as it always did.
+    #[test]
+    fn registering_a_generated_layer_writes_the_gen_sidecar() {
+        let Some(r) = crate::app::headless_renderer() else {
+            return;
+        };
+        let mut app = App::new(r, (600, 400), 1.0);
+        let dir = gen_dir("register");
+
+        let li = app.doc.add_layer("Focus lines");
+        let s = spec();
+        app.doc.layers[li].genlines = Some(s);
+        assert!(app.doc.regen_genlines(li, s), "the layer has ink to lift");
+
+        let (p, stem) = app
+            .material_register_layer_into(dir.clone())
+            .expect("a generated layer registers");
+        assert_eq!(stem, "Focus_lines");
+        assert_eq!(
+            p,
+            dir.join(format!("Focus_lines{GEN_SUFFIX}")),
+            "the spec is the material's identity, not the PNG"
+        );
+        assert!(
+            dir.join("Focus_lines.png").exists(),
+            "the PNG stays, as the thumbnail"
+        );
+        let items = materials_scan_folder(&dir, 0);
+        assert_eq!(items.len(), 1, "one material, not two: {items:?}");
+        assert_eq!(
+            items[0].kind,
+            MaterialKind::GenLines(s),
+            "the parameters came back out of the bank"
+        );
+
+        // An ordinary raster layer is untouched by any of this.
+        const W: u16 = mn_core::FIX15_ONE as u16;
+        app.doc.add_layer("plain");
+        app.doc.begin_op();
+        app.doc
+            .active_layer_mut()
+            .tile_mut(mn_core::TileIdx::new(0, 0))
+            .set_pixel(3, 4, [W, W, W, W]);
+        app.doc.end_op();
+        let (p2, stem2) = app
+            .material_register_layer_into(dir.clone())
+            .expect("a raster layer registers");
+        assert_eq!(stem2, "plain");
+        assert_eq!(p2, dir.join("plain.png"));
+        assert!(
+            !dir.join(format!("plain{GEN_SUFFIX}")).exists(),
+            "no spec, no sidecar"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
