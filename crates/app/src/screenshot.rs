@@ -27,6 +27,9 @@ pub fn run(
     shot_framefocus: bool,
     shot_tone: bool,
     shot_dock: bool,
+    // --shot-hero: a README-grade shot — diagnostics window closed,
+    // content only. Everything else about the frame is the real app.
+    shot_hero: bool,
     gpu_dabs: bool,
 ) -> Result<(), String> {
     let (w, h) = size;
@@ -43,8 +46,9 @@ pub fn run(
         "[app] gpu-dabs: requested={gpu_dabs} enabled={}",
         app.gpu_dabs
     );
-    // Everything the shot is meant to prove renders, including the HUD.
-    app.hud_open = true;
+    // Everything the shot is meant to prove renders, including the HUD —
+    // except a hero shot, whose audience is a README reader, not an agent.
+    app.hud_open = !shot_hero;
     // Round 7/10: a frame border FOLDER cut into three panels — proves the
     // koma raster (white gutter + borders), the folder rows (header + White +
     // draw layer) and Layer Property. The strokes go in AFTER it exists so
@@ -331,7 +335,22 @@ pub fn run(
         }
     }
 
-    let img = capture(&mut app, w, h)?;
+    if shot_hero {
+        // Hero content: strokes feed through the viewport round trip
+        // (to_screen → push_batch → to_canvas), so they land in doc space
+        // whatever the current zoom; the page FIT happens inside capture,
+        // once the dock has laid the canvas pane out.
+        hero_extras(&mut app);
+        // A frozen coaching line ("tone layer — paint grey/black ink…")
+        // reads as noise under a README title.
+        app.set_status(String::new());
+    }
+    // The derived tone rasters normally refresh at the head of App::render;
+    // this harness never runs it, so a tone layer added above would shoot
+    // as an invisible no-op without this.
+    app.refresh_tones();
+
+    let img = capture(&mut app, w, h, shot_hero)?;
 
     if shot_transform {
         // E2E commit proof: the dragged (non-identity) transform commits as
@@ -361,6 +380,74 @@ const TILE: i32 = 128;
 /// compositing path is exercised). Coordinates are CANVAS space; they go
 /// through `viewport.to_screen` because `push_batch` converts screen→canvas
 /// itself (the live WM_POINTER path hands it client-space history batches).
+/// Hero-shot content pass: a tapered speed-line burst in the lower half of
+/// the page, then the one-gesture Tone tool over the upper panel — so the
+/// README shows a page that reads as manga (ink + screentone), all through
+/// the same real command/stroke paths as everything else in this harness.
+fn hero_extras(app: &mut App) {
+    app.engine_mut().set_color([0.05, 0.05, 0.08]);
+    let vp = app.viewport;
+    // Focus lines: from an outer arc toward a focal point in the lower
+    // panel, stopping short of it, tapering to nothing — the manga read.
+    // A full focus-line FIELD around the lower panel's centre, every line
+    // clipped to a conservative interior box so nothing crosses the panel
+    // border (the one thing a manga reader spots instantly), dense enough
+    // to read as a field rather than countable strokes.
+    let (cx, cy) = (1024.0f32, 1450.0f32);
+    let (bx0, by0, bx1, by1) = (240.0f32, 1080.0f32, 1810.0f32, 1850.0f32);
+    for i in 0..34 {
+        let a = i as f32 * (std::f32::consts::TAU / 34.0) + (i as f32 * 1.7).sin() * 0.04;
+        let (dx, dy) = (a.sin(), a.cos());
+        // Where the ray from the focal point exits the interior box.
+        let tx = if dx > 0.0 {
+            (bx1 - cx) / dx
+        } else if dx < 0.0 {
+            (bx0 - cx) / dx
+        } else {
+            f32::INFINITY
+        };
+        let ty = if dy > 0.0 {
+            (by1 - cy) / dy
+        } else if dy < 0.0 {
+            (by0 - cy) / dy
+        } else {
+            f32::INFINITY
+        };
+        let r0 = (tx.min(ty) - 10.0).max(180.0);
+        let r1 = 150.0 + (i as f32 * 3.1).cos() * 30.0;
+        let (x0, y0) = (cx + dx * r0, cy + dy * r0);
+        let (x1, y1) = (cx + dx * r1, cy + dy * r1);
+        app.begin_stroke(PointerKind::Mouse);
+        let batch: Vec<PenSample> = (0..40)
+            .map(|k| {
+                let t = k as f32 / 39.0;
+                let (x, y) = vp.to_screen(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t);
+                PenSample {
+                    x,
+                    y,
+                    pressure: (0.4 * (1.0 - t)).max(0.02),
+                    tilt_x: 0.0,
+                    tilt_y: 0.0,
+                    t_ms: k as f64 * 4.0,
+                }
+            })
+            .collect();
+        for chunk in batch.chunks(9) {
+            app.push_batch(chunk);
+            app.flush_gpu_dabs();
+        }
+        app.end_stroke();
+    }
+    // Screentone over the upper panel: the one-gesture Tone tool, flooding
+    // from an empty spot of the panel — the balloon is CLOSED, so the tone
+    // wraps around it, the classic look. Coarse and light on purpose: the
+    // dots must SURVIVE the fitted ~40% zoom (a fine 60 LPI screen at 35%
+    // reads as flat grey, and 100% coverage reads as a black fill).
+    app.tone_opts.density = 0.35;
+    app.tone_opts.tone.lpi = 27.5;
+    crate::cmd::dispatch(app, crate::cmd::AppCmd::ToneRegion(180.0, 780.0));
+}
+
 fn demo_strokes(app: &mut App) {
     app.engine_mut().set_color([0.05, 0.05, 0.08]);
     let vp = app.viewport;
@@ -936,18 +1023,20 @@ fn hash_file(p: &std::path::Path) -> u64 {
     h
 }
 
-fn capture(app: &mut App, w: u32, h: u32) -> Result<image::RgbaImage, String> {
-    // 1. the canvas, through the compositor's own offscreen path — using the
-    // app's real viewport so the egui overlay (shadow, guides) lines up.
-    let vp = app.viewport;
-    let mut canvas = app.renderer.render_offscreen_vp(&app.doc, &vp, w, h);
-    // Debug: the pure composited present, before the egui overlay — splits
-    // "canvas/mip divergence" from "HUD/overlay text differs by design".
-    if std::env::var("MN_DUMP_PRESENT").is_ok() {
-        let _ = canvas.save("present-dump.png");
-    }
-
-    // 2. the UI, painted into a transparent texture of the same size.
+fn capture(
+    app: &mut App,
+    w: u32,
+    h: u32,
+    // Fit the page to the canvas pane once the dock has laid it out (hero
+    // shots) — done INSIDE the pass loop because a pass run outside this
+    // pipeline would drop its texture deltas and poison the painter.
+    fit_after_layout: bool,
+) -> Result<image::RgbaImage, String> {
+    // The UI, painted into a transparent texture of the same size. The
+    // CANVAS renders AFTER these passes (docking 2): the canvas rect — and
+    // with it any deferred fit — is only known once the dock tree has laid
+    // the canvas pane out, so a canvas rendered first used a viewport the
+    // first pass was about to move.
     // Cloned handles (wgpu's are refcounted): the UI closure needs `&mut app`,
     // so a borrow of `app.renderer` may not be alive across it.
     let device = app.renderer.device().clone();
@@ -976,9 +1065,16 @@ fn capture(app: &mut App, w: u32, h: u32) -> Result<image::RgbaImage, String> {
     // it in over ~0.2 s. A live app repaints through that (egui asks for it via
     // `repaint_delay`); a one-frame screenshot would catch a ghost. The extra
     // quick passes let the budgeted brush previews (1/frame) fill in.
-    for pass in 0..16 {
+    // Hero shots run extra passes: brush previews trickle one per frame
+    // (ui::build resets the budget), and a strip with half its previews
+    // missing reads as broken in a README.
+    let passes = if fit_after_layout { 48 } else { 16 };
+    for pass in 0..passes {
         if pass > 0 && pass < 3 {
             std::thread::sleep(std::time::Duration::from_millis(150));
+        }
+        if pass == 3 && fit_after_layout {
+            app.fit_to_view();
         }
         let ctx = app.shell.ctx.clone();
         let raw = app.shell.begin((w, h));
@@ -1020,7 +1116,17 @@ fn capture(app: &mut App, w: u32, h: u32) -> Result<image::RgbaImage, String> {
         app.shell.free(&mut out.textures_delta);
     }
 
-    // 4. read back and composite (egui output is premultiplied).
+    // The canvas, through the compositor's own offscreen path — the app's
+    // now-settled viewport, so the egui overlay (shadow, guides) lines up.
+    let vp = app.viewport;
+    let mut canvas = app.renderer.render_offscreen_vp(&app.doc, &vp, w, h);
+    // Debug: the pure composited present, before the egui overlay — splits
+    // "canvas/mip divergence" from "HUD/overlay text differs by design".
+    if std::env::var("MN_DUMP_PRESENT").is_ok() {
+        let _ = canvas.save("present-dump.png");
+    }
+
+    // Read back and composite (egui output is premultiplied).
     let ui_px = read_rgba(device, queue, &target, w, h);
     let bgra = matches!(
         app.renderer.output_format(),

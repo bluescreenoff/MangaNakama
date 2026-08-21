@@ -125,6 +125,8 @@ struct Cli {
     shot_tone: bool,
     /// --screenshot extra: tear Layers off as a floating dock window.
     shot_dock: bool,
+    /// --screenshot extra: README-grade shot — no diagnostics window.
+    shot_hero: bool,
     /// --e2e-workfolder: drive the whole work-folder storage story through
     /// the real command path (no window, no screenshot) and print verdicts.
     e2e_workfolder: bool,
@@ -154,6 +156,7 @@ fn parse_cli() -> Cli {
         shot_framefocus: false,
         shot_tone: false,
         shot_dock: false,
+        shot_hero: false,
         e2e_workfolder: false,
         bench_dabs: false,
         bench_verdict: false,
@@ -171,6 +174,7 @@ fn parse_cli() -> Cli {
             "--shot-framefocus" => cli.shot_framefocus = true,
             "--shot-tone" => cli.shot_tone = true,
             "--shot-dock" => cli.shot_dock = true,
+            "--shot-hero" => cli.shot_hero = true,
             "--e2e-workfolder" => cli.e2e_workfolder = true,
             "--bench-dabs" => cli.bench_dabs = true,
             "--bench-verdict" => cli.bench_verdict = true,
@@ -233,6 +237,7 @@ fn main() {
             cli.shot_framefocus,
             cli.shot_tone,
             cli.shot_dock,
+            cli.shot_hero,
             cli.gpu_dabs,
         ) {
             Ok(()) => std::process::exit(0),

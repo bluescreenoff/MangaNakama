@@ -1,5 +1,7 @@
 # MangaNakama
 
+![MangaNakama — panels, screentone, balloons and vertical Japanese text on a manga page](docs/screenshot.png)
+
 A free, GPU-first manga drawing app for Windows: inking, panels, screentone,
 balloons, vertical Japanese text, multi-page chapters, and a built-in reader
 so you can read your own chapter the way a reader will. Local files, no

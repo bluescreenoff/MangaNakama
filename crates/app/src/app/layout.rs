@@ -687,7 +687,7 @@ mod tests {
 
         let paths: Vec<String> = [
             r#"D:\refs\hands, feet\a "quote".png"#,
-            r"C:\Users\Max\参考\手.png",
+            r"C:\Users\artist\参考\手.png",
             "/mnt/share/ref\nnewline.png",
         ]
         .map(str::to_string)
