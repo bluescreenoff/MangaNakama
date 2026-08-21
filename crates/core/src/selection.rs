@@ -38,6 +38,14 @@ pub struct Selection {
     /// Additional closed loops (a mask-built selection can have holes and
     /// islands). Display only, like `outline`.
     pub extra_outlines: Vec<Vec<(f32, f32)>>,
+    /// The launcher's per-selection escape hatch: when true, freehand
+    /// strokes may land OUTSIDE the ants (patching a lineart gap without
+    /// dropping a carefully built selection). Only the stroke path
+    /// ([`Document::mask_stroke_to_selection`]) honors it — commands
+    /// (fill, delete, paste, filters, gradient) always clamp. Every newly
+    /// built selection starts false; boolean combines and grow/shrink/blur
+    /// rebuild from scratch, which IS the intended reset.
+    pub draw_outside: bool,
 }
 
 /// Boundary loops of a painted mask field (the live preview for a
@@ -140,6 +148,7 @@ impl Selection {
             tiles: HashMap::new(),
             outline: pts.to_vec(),
             extra_outlines: Vec::new(),
+            draw_outside: false,
         };
         if pts.len() < 3 {
             return sel;
@@ -767,6 +776,19 @@ impl Document {
         }
     }
 
+    /// The freehand-stroke clamp: exactly [`Document::mask_op_to_selection`],
+    /// except it steps aside when the selection's `draw_outside` toggle is on
+    /// (the launcher's escape hatch). ONLY brush/eraser strokes route through
+    /// here — every command path (fill, delete, paste, filters, gradient)
+    /// keeps calling `mask_op_to_selection` directly, so "Fill" can never
+    /// flood past the ants no matter what the toggle says.
+    pub fn mask_stroke_to_selection(&mut self) {
+        if self.selection.as_ref().is_some_and(|s| s.draw_outside) {
+            return;
+        }
+        self.mask_op_to_selection();
+    }
+
     /// Move the selected pixels of the active layer by whole pixels, inside an
     /// undo op, and translate the selection with them. The uncovered area goes
     /// transparent; the moved pixels composite source-over at the destination.
@@ -1062,6 +1084,64 @@ mod tests {
             l.tile(TileIdx::new(2, 2)).unwrap().pixel(5, 5)[3],
             0,
             "outside wiped"
+        );
+    }
+
+    /// The launcher toggle: with `draw_outside` on, the STROKE clamp steps
+    /// aside and outside ink survives — while the command clamp
+    /// (`mask_op_to_selection`) still confines regardless of the toggle.
+    #[test]
+    fn draw_outside_toggle_frees_strokes_but_not_commands() {
+        let mut doc = Document::new(256, 256);
+        let mut sel = Selection::from_rect(&doc, 0.0, 0.0, 64.0, 64.0);
+        sel.draw_outside = true;
+        doc.selection = Some(sel);
+        doc.begin_op();
+        doc.active_layer_mut()
+            .tile_mut(TileIdx::new(2, 2))
+            .set_pixel(5, 5, [F1, 0, 0, F1]);
+        doc.mask_stroke_to_selection();
+        doc.end_op();
+        assert_eq!(
+            doc.active_layer()
+                .tile(TileIdx::new(2, 2))
+                .unwrap()
+                .pixel(5, 5)[3],
+            F1,
+            "toggle on: the stroke clamp lets outside ink stand"
+        );
+
+        // The command clamp ignores the toggle outright.
+        doc.begin_op();
+        doc.active_layer_mut()
+            .tile_mut(TileIdx::new(3, 3))
+            .set_pixel(5, 5, [F1, 0, 0, F1]);
+        doc.mask_op_to_selection();
+        doc.end_op();
+        assert_eq!(
+            doc.active_layer()
+                .tile(TileIdx::new(3, 3))
+                .unwrap()
+                .pixel(5, 5)[3],
+            0,
+            "commands still confine to the selection"
+        );
+    }
+
+    /// Every freshly built selection starts clamped — a boolean combine
+    /// rebuilds from scratch, so the toggle does not leak into the next
+    /// selection.
+    #[test]
+    fn draw_outside_resets_on_new_and_combined_selections() {
+        let doc = Document::new(256, 256);
+        let mut a = Selection::from_rect(&doc, 10.0, 10.0, 50.0, 50.0);
+        assert!(!a.draw_outside, "fresh selection starts clamped");
+        a.draw_outside = true;
+        let b = Selection::from_rect(&doc, 60.0, 60.0, 90.0, 90.0);
+        let joined = a.combine(&b, &doc, SelectionOp::Add);
+        assert!(
+            !joined.draw_outside,
+            "combining builds a new selection, back to clamped"
         );
     }
 

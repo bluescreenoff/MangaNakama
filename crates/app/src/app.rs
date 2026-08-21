@@ -2606,7 +2606,7 @@ impl App {
         // and the selection mask must clamp them before the op closes.
         self.brush.end(&mut self.doc);
         self.finish_gpu_dab_stroke();
-        self.doc.mask_op_to_selection();
+        self.doc.mask_stroke_to_selection();
         // Transparent-pixel lock clamps ONCE at stroke end (not per batch —
         // the attenuation would compound; see Document::mask_op_to_alpha).
         if self

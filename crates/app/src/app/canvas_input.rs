@@ -457,7 +457,7 @@ impl App {
                 }
                 self.begin_stroke(kind);
                 self.push_batch(batch);
-                self.doc.mask_op_to_selection();
+                self.doc.mask_stroke_to_selection();
             }
             Tool::Fill => {
                 if self.guard_frame_layer() {
@@ -1644,7 +1644,7 @@ impl App {
         }
         if self.drawing() {
             self.push_batch(batch);
-            self.doc.mask_op_to_selection();
+            self.doc.mask_stroke_to_selection();
             return;
         }
         let (cx, cy) = self.viewport.to_canvas(x, y);

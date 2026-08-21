@@ -83,6 +83,9 @@ pub enum Icon {
     SelCopy,
     /// Selection launcher: paste the clipboard as a float.
     SelPaste,
+    /// Selection launcher: allow drawing outside the selection (a stroke
+    /// escaping the selection box).
+    SelDrawOutside,
     /// Layer flags: reference layer (what fill/wand refer to).
     Reference,
     /// Layer flags: draft layer (red-X, CSP 下書き).
@@ -657,6 +660,22 @@ pub fn paint(p: &Painter, r: Rect, icon: Icon, color: Color32) {
             // X just outside the box's top-right corner.
             p.line(poly(r, &[(0.76, 0.12), (0.94, 0.30)]), thin);
             p.line(poly(r, &[(0.94, 0.12), (0.76, 0.30)]), thin);
+        }
+        Icon::SelDrawOutside => {
+            // Selection box with a pen stroke crossing its border: the
+            // stroke starts inside, escapes past the top-right edge, and
+            // ends in a nib dot outside.
+            p.rect_stroke(
+                rect(r, 0.12, 0.30, 0.68, 0.88),
+                1.0,
+                thin,
+                egui::StrokeKind::Inside,
+            );
+            p.line(
+                poly(r, &[(0.24, 0.76), (0.50, 0.56), (0.86, 0.20)]),
+                line,
+            );
+            p.circle_filled(pt(r, 0.86, 0.20), w * 0.09, color);
         }
         Icon::SelTransform => {
             p.rect_stroke(

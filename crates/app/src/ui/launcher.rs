@@ -40,7 +40,7 @@ pub(super) fn selection_launcher(ui: &mut egui::Ui, app: &mut App, canvas: egui:
         return;
     }
     // Anchor just under the selection's top-left, clamped into the canvas.
-    let bar_w = 13.0 * 24.0 + 34.0 + 12.0;
+    let bar_w = 14.0 * 24.0 + 34.0 + 12.0;
     let mut pos = egui::pos2(x0, (y1 + 6.0).min(canvas.bottom() - 30.0));
     pos.x = pos
         .x
@@ -102,6 +102,30 @@ pub(super) fn selection_launcher(ui: &mut egui::Ui, app: &mut App, canvas: egui:
                         .clicked()
                         {
                             app.push_cmd(AppCmd::SelectInvert);
+                        }
+                        // Per-selection escape hatch: freehand strokes may
+                        // land outside the ants (patch a lineart gap without
+                        // rebuilding the selection). Commands still clamp;
+                        // a NEW selection always starts clamped again.
+                        let outside = app
+                            .doc
+                            .selection
+                            .as_ref()
+                            .is_some_and(|s| s.draw_outside);
+                        let tip = if outside {
+                            "Drawing outside the selection: ALLOWED (strokes only; click to clamp again)"
+                        } else {
+                            "Allow drawing outside the selection (strokes only, this selection only)"
+                        };
+                        if icon_btn(ui, Icon::SelDrawOutside, b, outside, true, tip).clicked() {
+                            if let Some(s) = app.doc.selection.as_mut() {
+                                s.draw_outside = !outside;
+                            }
+                            app.set_status(if !outside {
+                                "strokes may now draw outside the selection"
+                            } else {
+                                "strokes clamp to the selection again"
+                            });
                         }
                         if icon_btn(ui, Icon::SelExpand, b, false, true, "Expand selection")
                             .clicked()
