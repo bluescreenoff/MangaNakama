@@ -10,6 +10,30 @@ use crate::cmd::AppCmd;
 
 // --- top bar ------------------------------------------------------------
 
+/// A top-level menu-bar button with the platform-standard hover behaviour:
+/// once any menu in the bar is open, sliding onto a sibling opens it without
+/// another click. egui 0.36 only does this for submenus — top-level
+/// `MenuButton`s toggle purely on click, so the bar remembers its members'
+/// popup ids (one frame of lag, invisible to a hover check) and switches.
+fn bar_menu(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
+    let resp = ui.menu_button(title, add).response;
+    let id = egui::Popup::default_response_id(&resp);
+    let ctx = resp.ctx.clone();
+    let sibs_id = egui::Id::new("mn.menubar.popups");
+    let mut sibs: Vec<egui::Id> = ctx.data(|d| d.get_temp(sibs_id).unwrap_or_default());
+    if resp.hovered()
+        && !egui::Popup::is_id_open(&ctx, id)
+        && sibs.iter().any(|&s| s != id && egui::Popup::is_id_open(&ctx, s))
+    {
+        // open_popup is exclusive: opening this one closes the sibling.
+        egui::Popup::open_id(&ctx, id);
+    }
+    if !sibs.contains(&id) {
+        sibs.push(id);
+        ctx.data_mut(|d| d.insert_temp(sibs_id, sibs));
+    }
+}
+
 pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
     egui::MenuBar::new().ui(ui, |ui| {
         // The custom title bar (the native caption is removed via
@@ -30,7 +54,7 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
             app.caption_cmd = Some(CaptionCmd::ToggleMax);
         }
 
-        ui.menu_button("File", |ui| {
+        bar_menu(ui, "File", |ui| {
             if item(ui, "New…", "Ctrl+N") {
                 app.push_cmd(AppCmd::NewDoc);
                 ui.close();
@@ -110,7 +134,7 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 ui.close();
             }
         });
-        ui.menu_button("Edit", |ui| {
+        bar_menu(ui, "Edit", |ui| {
             if item(ui, "Undo", "Ctrl+Z") {
                 app.push_cmd(AppCmd::Undo);
                 ui.close();
@@ -192,7 +216,7 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 ui.close();
             }
         });
-        ui.menu_button("Selection", |ui| {
+        bar_menu(ui, "Selection", |ui| {
             if item(ui, "Select all", "Ctrl+A") {
                 app.push_cmd(AppCmd::SelectAll);
                 ui.close();
@@ -210,7 +234,7 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 ui.close();
             }
         });
-        ui.menu_button("Layer", |ui| {
+        bar_menu(ui, "Layer", |ui| {
             if item(ui, "New layer", "") {
                 app.push_cmd(AppCmd::AddLayer);
                 ui.close();
@@ -492,7 +516,7 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
         // TRIAGE 101/102 — the blur family. Deliberately one small
         // self-contained block: the tonal-correction filters land in this same
         // menu and the two bodies just concatenate.
-        ui.menu_button("Filter", |ui| {
+        bar_menu(ui, "Filter", |ui| {
             ui.menu_button("Blur", |ui| {
                 // FL-010: the two no-dialog one-shots.
                 if item(ui, "Blur", "") {
@@ -541,7 +565,7 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
         // corrections. Each is one undo step across the selected layers,
         // clipped to the selection when there is one; the parameterised
         // ones open one shared dialog with a live canvas preview.
-        ui.menu_button("Correction", |ui| {
+        bar_menu(ui, "Correction", |ui| {
             // TC-002/003 lead, as in CSP: the two corrections that shape a
             // scan before anything else touches it.
             if item(ui, "Levels…", "") {
@@ -575,53 +599,68 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 ui.close();
             }
         });
-        ui.menu_button("Window", |ui| {
-            ui.menu_button("Workspace", |ui| {
-                let mut apply = None;
-                let mut delete = None;
-                let names: Vec<String> = app.workspaces.iter().map(|e| e[0].clone()).collect();
-                for n in names {
-                    ui.horizontal(|ui| {
-                        let mark = if app.workspace_current == n {
-                            "✓ "
-                        } else {
-                            "   "
-                        };
-                        if ui.button(format!("{mark}{n}")).clicked() {
-                            apply = Some(n.clone());
-                        }
-                        if ui.small_button("✕").clicked() {
-                            delete = Some(n);
-                        }
-                    });
-                }
-                if app.workspaces.is_empty() {
-                    ui.weak("(none registered)");
-                }
-                ui.separator();
-                if item(ui, "Register Workspace…", "") {
-                    app.workspace_open = true;
+        // "Workspace" replaces the old Window menu (owner rename 2026-08-21):
+        // one flat menu — palette toggles, layout reset, and the registered
+        // workspaces — no submenu hunting for either half.
+        bar_menu(ui, "Workspace", |ui| {
+            ui.weak("closed palettes reopen in the right column");
+            for p in crate::ui::dock::ALL {
+                let open = crate::ui::dock::is_open(app, p);
+                if ui.checkbox(&mut open.clone(), p.title()).changed() && !open {
+                    crate::ui::dock::reopen(app, p);
                     ui.close();
                 }
-                if item(ui, "Reload workspace", "") {
-                    if !app.workspace_reload() {
-                        app.set_status("no current workspace to reload");
+            }
+            let mut all_default = false;
+            if ui.checkbox(&mut all_default, "Reset layout").changed() {
+                app.dock_left = crate::ui::dock::default_left();
+                app.dock_right = crate::ui::dock::default_right();
+                ui.close();
+            }
+            ui.separator();
+            let mut apply = None;
+            let mut delete = None;
+            let names: Vec<String> = app.workspaces.iter().map(|e| e[0].clone()).collect();
+            for n in names {
+                ui.horizontal(|ui| {
+                    let mark = if app.workspace_current == n {
+                        "✓ "
+                    } else {
+                        "   "
+                    };
+                    if ui.button(format!("{mark}{n}")).clicked() {
+                        apply = Some(n.clone());
                     }
-                    ui.close();
-                }
-                if let Some(n) = apply {
-                    if app.workspace_apply(&n) {
-                        app.set_status(format!("workspace: {n}"));
+                    if ui.small_button("✕").clicked() {
+                        delete = Some(n);
                     }
+                });
+            }
+            if app.workspaces.is_empty() {
+                ui.weak("(no workspaces registered)");
+            }
+            if item(ui, "Register Workspace…", "") {
+                app.workspace_open = true;
+                ui.close();
+            }
+            if item(ui, "Reload workspace", "") {
+                if !app.workspace_reload() {
+                    app.set_status("no current workspace to reload");
                 }
-                if let Some(n) = delete {
-                    app.workspace_delete(&n);
+                ui.close();
+            }
+            if let Some(n) = apply {
+                if app.workspace_apply(&n) {
+                    app.set_status(format!("workspace: {n}"));
                 }
-            });
+            }
+            if let Some(n) = delete {
+                app.workspace_delete(&n);
+            }
         });
         // "Manga" — the owner's rename (his screenshot's CSP menu is
         // Story; Manga reads better here and holds the reader).
-        ui.menu_button("Manga", |ui| {
+        bar_menu(ui, "Manga", |ui| {
             if item(ui, "Reader — read the chapter", "") {
                 app.push_cmd(AppCmd::ReaderOpen);
                 ui.close();
@@ -699,7 +738,7 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 ui.close();
             }
         });
-        ui.menu_button("View", |ui| {
+        bar_menu(ui, "View", |ui| {
             if item(ui, "Fit to window", "Ctrl+0") {
                 app.push_cmd(AppCmd::ZoomFit);
                 ui.close();
@@ -927,32 +966,13 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 ui.close();
             }
             ui.separator();
-            ui.menu_button("Palettes", |ui| {
-                ui.weak("closed tabs reopen in the right column");
-                ui.separator();
-                for p in crate::ui::dock::ALL {
-                    let open = crate::ui::dock::is_open(app, p);
-                    if ui.checkbox(&mut open.clone(), p.title()).changed() && !open {
-                        crate::ui::dock::reopen(app, p);
-                        ui.close();
-                    }
-                }
-                ui.separator();
-                let mut all_default = false;
-                if ui.checkbox(&mut all_default, "Reset layout").changed() {
-                    app.dock_left = crate::ui::dock::default_left();
-                    app.dock_right = crate::ui::dock::default_right();
-                    ui.close();
-                }
-            });
-            ui.separator();
             paper_menu(ui, app);
         });
         // Help — LAST, where every app puts it (the owner missed it mid-bar).
         // The manual's door (MANUAL-PLAN: ships offline beside the exe and
         // opens from here; F1 stays the diagnostics HUD), and the feedback
         // window (GitHub issues + the dev's email).
-        ui.menu_button("Help", |ui| {
+        bar_menu(ui, "Help", |ui| {
             if item(
                 ui,
                 "Manual — the quirks, not a feature tour",

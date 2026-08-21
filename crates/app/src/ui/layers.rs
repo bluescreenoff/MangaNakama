@@ -665,7 +665,15 @@ const LABEL_COLORS: [[u8; 3]; 6] = [
     [0x8a, 0x2f, 0x2f], // dark red
 ];
 
-const LAYER_ROW_H: f32 = 34.0;
+// CSP's stack is two text lines tall: "100 % Normal" over the name. The
+// extra height is what buys the palette its legibility (owner order
+// 2026-08-21: "first do exactly what clip studio does").
+const LAYER_ROW_H: f32 = 44.0;
+
+/// The active row's fill. CSP paints the editing row a saturated blue that
+/// is unmissable in a 60-layer stack; `theme::SEL_ROW` (kept for the
+/// multi-selection) was the "which row is lit?" squint the owner reported.
+const SEL_ACTIVE: egui::Color32 = egui::Color32::from_rgb(0x2f, 0x5e, 0x99);
 
 /// The per-type marker a palette row carries beside its thumbnail, CSP's
 /// layer-type glyph. `None` = a plain raster layer: the common case stays
@@ -895,6 +903,9 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
         is_frame: bool,
         /// The layer-type marker (`row_glyph`); `None` = plain raster.
         glyph: Option<Icon>,
+        /// A toned row's screen frequency: the meta line reads "85.0 LPI"
+        /// where a plain row reads "100 % Normal" (CSP's tone rows).
+        tone_lpi: Option<f32>,
         depth: u8,
         folder: bool,
         open: bool,
@@ -925,6 +936,13 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
             strip: app.doc.palette_colour(i),
             is_frame: l.is_frame(),
             glyph: row_glyph(l),
+            tone_lpi: l
+                .tone
+                .map(|t| t.lpi)
+                .or(match &l.kind {
+                    LayerKind::Fill(FillKind::Tone { tone, .. }) => Some(tone.lpi),
+                    _ => None,
+                }),
             depth: l.depth,
             folder: l.folder,
             open: l.open,
@@ -1030,19 +1048,18 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
         let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, LAYER_ROW_H), sense);
         let cy = rect.center().y;
 
-        // Rail geometry: eye column, label-colour strip, editing-pen column.
-        let eye_col = rect.left() + 20.0;
-        let strip_r = egui::Rect::from_min_max(
-            egui::pos2(eye_col, rect.top()),
-            egui::pos2(eye_col + 6.0, rect.bottom()),
+        // CSP rail: two full-height cells — eye | editing pen — both FILLED
+        // with the layer's palette colour, so a coloured stack reads as
+        // solid blocks down the left edge and an uncoloured one stays dark.
+        let eye_cell =
+            egui::Rect::from_min_max(rect.min, egui::pos2(rect.left() + 22.0, rect.bottom()));
+        let pen_cell = egui::Rect::from_min_max(
+            egui::pos2(eye_cell.right(), rect.top()),
+            egui::pos2(eye_cell.right() + 20.0, rect.bottom()),
         );
-        let pen_col = strip_r.right() + 16.0;
-        let eye_r = egui::Rect::from_center_size(
-            egui::pos2(rect.left() + 10.0, cy),
-            egui::vec2(15.0, 15.0),
-        );
+        let pen_col = pen_cell.right();
         let eye = ui
-            .interact(eye_r, resp.id.with("eye"), egui::Sense::click())
+            .interact(eye_cell, resp.id.with("eye"), egui::Sense::click())
             .on_hover_text("show/hide — Alt+click solos this layer");
         // Discoverability (r102 audit): the row's two power gestures had
         // no surface — hover carries them now.
@@ -1052,48 +1069,60 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
         );
 
         let p = ui.painter();
-        if multi {
-            p.rect_filled(rect, 2.0, theme::SEL_ROW);
+        if selected {
+            p.rect_filled(rect, 0.0, SEL_ACTIVE);
+        } else if multi {
+            p.rect_filled(rect, 0.0, theme::SEL_ROW);
         } else if resp.hovered() {
-            p.rect_filled(rect, 2.0, theme::HOVER);
+            p.rect_filled(rect, 0.0, theme::HOVER);
         }
+        // The rail cells paint over the row fill. With a palette colour the
+        // eye cell takes the dimmed shade and the pen cell the full one
+        // (CSP's pair); rail icons flip dark when the colour is light.
+        let (cell_a, cell_b, rail_icon) = match row.strip {
+            Some([r, g, b]) => {
+                let dim = egui::Color32::from_rgb(
+                    (r as f32 * 0.72) as u8,
+                    (g as f32 * 0.72) as u8,
+                    (b as f32 * 0.72) as u8,
+                );
+                let lum = 0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32;
+                let ic = if lum > 140.0 {
+                    egui::Color32::from_rgb(0x16, 0x16, 0x18)
+                } else {
+                    theme::TEXT_STRONG
+                };
+                (dim, egui::Color32::from_rgb(r, g, b), ic)
+            }
+            None => (theme::FIELD, theme::PANEL, theme::TEXT),
+        };
+        p.rect_filled(eye_cell, 0.0, cell_a);
+        p.rect_filled(pen_cell, 0.0, cell_b);
+        for x in [eye_cell.left(), eye_cell.right(), pen_cell.right()] {
+            p.vline(x, rect.y_range(), egui::Stroke::new(1.0, theme::BORDER));
+        }
+        let eye_r = egui::Rect::from_center_size(
+            egui::pos2(eye_cell.center().x, cy),
+            egui::vec2(15.0, 15.0),
+        );
         icons::paint(
             p,
             eye_r.shrink(1.5),
             if row.visible { Icon::Eye } else { Icon::EyeOff },
             if row.visible {
-                theme::TEXT
+                rail_icon
             } else {
-                theme::TEXT_WEAK
+                rail_icon.gamma_multiply(0.4)
             },
-        );
-        // Label strip fills the row height, CSP-style; hairlines seam the rail.
-        if let Some([r, g, b]) = row.strip {
-            p.rect_filled(strip_r, 0.0, egui::Color32::from_rgb(r, g, b));
-        }
-        p.vline(
-            strip_r.left(),
-            rect.y_range(),
-            egui::Stroke::new(1.0, theme::BORDER),
-        );
-        p.vline(
-            strip_r.right(),
-            rect.y_range(),
-            egui::Stroke::new(1.0, theme::BORDER),
         );
         // Editing-target pen on the active row (CSP's second rail column).
         if selected {
             let pr = egui::Rect::from_center_size(
-                egui::pos2(strip_r.right() + 8.0, cy),
-                egui::vec2(12.0, 12.0),
+                egui::pos2(pen_cell.center().x, cy),
+                egui::vec2(13.0, 13.0),
             );
-            icons::paint(p, pr, Icon::Pen, theme::TEXT);
+            icons::paint(p, pr, Icon::Pen, rail_icon);
         }
-        p.vline(
-            pen_col,
-            rect.y_range(),
-            egui::Stroke::new(1.0, theme::BORDER),
-        );
 
         // Indent nested rows; folders get a disclosure triangle in the gutter.
         // Nested rows also carry CSP's tree guide lines — one vertical under
@@ -1134,10 +1163,15 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
             ));
             disclose = Some(dr);
         }
-        let thumb_x = pen_col + 17.0 + indent + if row.folder { 14.0 } else { 0.0 };
+        let thumb_left = pen_col + 7.0 + indent + if row.folder { 14.0 } else { 0.0 };
 
-        // Thumbnail on a checker well; a plain folder shows the folder glyph.
-        let tr = egui::Rect::from_center_size(egui::pos2(thumb_x, cy), egui::vec2(26.0, 26.0));
+        // Thumbnail on a checker well, 32 px (CSP-size — after the colour
+        // rail, the second thing that tells rows apart at a glance); a plain
+        // folder shows the folder glyph until its composite generates.
+        let tr = egui::Rect::from_min_size(
+            egui::pos2(thumb_left, cy - 16.0),
+            egui::vec2(32.0, 32.0),
+        );
         let thumb = app
             .layer_thumbs
             .get(i)
@@ -1195,82 +1229,18 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
             );
         }
 
-        // The layer-type marker sits between the thumbnail and the name
-        // (CSP's position): koma for frames, bubble for balloons, dots for a
-        // tone, a curve for a vector layer, and so on — see `row_glyph`.
-        let mut text_x = tr.right() + 7.0;
-        if let Some(icon) = row.glyph {
-            let fr =
-                egui::Rect::from_center_size(egui::pos2(text_x + 6.0, cy), egui::vec2(13.0, 13.0));
-            icons::paint(
-                p,
-                fr,
-                icon,
-                if selected {
-                    theme::TEXT_STRONG
-                } else {
-                    theme::TEXT_WEAK
-                },
-            );
-            text_x = fr.right() + 5.0;
-        }
+        // Two text lines, CSP's layout: the meta ("100 % Normal" — or
+        // "85.0 LPI" on a toned row) small on top, the NAME big underneath,
+        // instead of a name and a far-away right-aligned meta sharing one
+        // cramped line. The type glyph leads the meta line (CSP's slot).
+        let y_meta = rect.top() + 12.0;
+        let y_name = rect.bottom() - 14.0;
+        let text_x = tr.right() + 8.0;
 
-        // Name on the row's centre line; blend + opacity right-aligned at
-        // the row end (CSP EX), leaving room for the flag + lock icons.
-        // A draft row's name dims (CSP greys the 下書き layer).
-        // Narrow columns: the name ELLIPSIZES (never wraps over the row) and
-        // the meta drops out first when there isn't room for both — CSP
-        // keeps the name legible and sacrifices the secondary text.
-        let trailing_icons =
-            (row.lock || row.lock_alpha) as u8 + row.draft as u8 + row.reference as u8;
-        let rail_right = rect.right() - 30.0 - trailing_icons as f32 * 13.0;
-        let meta = format!("{} {:.0} %", blend_name(row.blend), row.opacity * 100.0);
-        let meta_font = egui::FontId::proportional(9.5);
-        let meta_w = ui
-            .fonts_mut(|f| f.layout_no_wrap(meta.clone(), meta_font.clone(), theme::TEXT_WEAK))
-            .size()
-            .x;
-        let show_meta = rail_right - meta_w - 8.0 >= text_x + 18.0;
-        let name_right = if show_meta {
-            rail_right - meta_w - 8.0
-        } else {
-            rail_right
-        };
-        let name_w = (name_right - text_x).max(14.0);
-        let name_color = if row.draft {
-            theme::TEXT_WEAK
-        } else if selected {
-            theme::TEXT_STRONG
-        } else {
-            theme::TEXT
-        };
-        let mut job = egui::text::LayoutJob::simple(
-            row.name.clone(),
-            egui::FontId::proportional(11.5),
-            name_color,
-            f32::INFINITY,
-        );
-        job.wrap = egui::text::TextWrapping::truncate_at_width(name_w);
-        let name_galley = ui.fonts_mut(|f| f.layout_job(job));
-        p.galley(
-            egui::pos2(text_x, cy - name_galley.size().y * 0.5),
-            name_galley,
-            name_color,
-        );
-        if show_meta {
-            let meta_x = rect.right() - 6.0 - trailing_icons as f32 * 13.0;
-            p.text(
-                egui::pos2(meta_x, cy),
-                egui::Align2::RIGHT_CENTER,
-                meta,
-                meta_font,
-                theme::TEXT_WEAK,
-            );
-        }
-        // Right-edge flags, CSP order: lock / draft (red X) / reference.
+        // Right-edge flags on the meta line, CSP order: lock / draft / ref.
         let mut fx = rect.right() - 11.0;
         if row.lock || row.lock_alpha {
-            let lr = egui::Rect::from_center_size(egui::pos2(fx, cy), egui::vec2(12.0, 12.0));
+            let lr = egui::Rect::from_center_size(egui::pos2(fx, y_meta), egui::vec2(12.0, 12.0));
             icons::paint(
                 p,
                 lr,
@@ -1284,25 +1254,70 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
             fx -= 13.0;
         }
         if row.draft {
-            let dr = egui::Rect::from_center_size(egui::pos2(fx, cy), egui::vec2(12.0, 12.0));
+            let dr = egui::Rect::from_center_size(egui::pos2(fx, y_meta), egui::vec2(12.0, 12.0));
             icons::paint(p, dr, Icon::Draft, theme::TEXT_WEAK);
             fx -= 13.0;
         }
         if row.reference {
-            let rr = egui::Rect::from_center_size(egui::pos2(fx, cy), egui::vec2(12.0, 12.0));
+            let rr = egui::Rect::from_center_size(egui::pos2(fx, y_meta), egui::vec2(12.0, 12.0));
             icons::paint(p, rr, Icon::Reference, theme::TEXT_WEAK);
+            fx -= 13.0;
         }
+
+        let mut meta_x = text_x;
+        if let Some(icon) = row.glyph {
+            let fr = egui::Rect::from_center_size(
+                egui::pos2(meta_x + 6.0, y_meta),
+                egui::vec2(12.0, 12.0),
+            );
+            icons::paint(
+                p,
+                fr,
+                icon,
+                if selected {
+                    theme::TEXT_STRONG
+                } else {
+                    theme::TEXT_WEAK
+                },
+            );
+            meta_x = fr.right() + 4.0;
+        }
+        let meta = match row.tone_lpi {
+            Some(lpi) if row.blend == Blend::Normal => format!("{lpi:.1} LPI"),
+            Some(lpi) => format!("{lpi:.1} LPI · {}", blend_name(row.blend)),
+            None => format!("{:.0} % {}", row.opacity * 100.0, blend_name(row.blend)),
+        };
+        let meta_col = if selected { theme::TEXT } else { theme::TEXT_WEAK };
+        let mut mjob = egui::text::LayoutJob::simple(
+            meta,
+            egui::FontId::proportional(10.0),
+            meta_col,
+            f32::INFINITY,
+        );
+        mjob.wrap = egui::text::TextWrapping::truncate_at_width((fx + 5.0 - meta_x).max(10.0));
+        let mgalley = ui.fonts_mut(|f| f.layout_job(mjob));
+        p.galley(
+            egui::pos2(meta_x, y_meta - mgalley.size().y * 0.5),
+            mgalley,
+            meta_col,
+        );
+
         // Panel reading order (owner top item 2026-08-18): a numbered
         // badge on frame folders — the COMPUTED position (renumbering
         // only touches default `Frame N` names, so a hand-named folder
         // still shows its number here). "?" = ambiguous layout; the dot
         // marker = manually pinned. Right-click for the pin actions.
+        // It rides the name line's right edge; the name ellipsizes first.
+        let mut name_right = rect.right() - 8.0;
         if row.folder
             && row.is_frame
             && let Some((pos, amb, pinned)) = app.frame_pos(i)
         {
-            let bx = fx - 16.0;
-            let br = egui::Rect::from_center_size(egui::pos2(bx, cy), egui::vec2(16.0, 13.0));
+            let br = egui::Rect::from_center_size(
+                egui::pos2(rect.right() - 14.0, y_name),
+                egui::vec2(16.0, 13.0),
+            );
+            name_right = br.left() - 6.0;
             let bg = if amb {
                 egui::Color32::from_rgb(196, 158, 46)
             } else if pinned {
@@ -1373,6 +1388,29 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
                 }
             });
         }
+
+        // The name line. A draft row's name dims (CSP greys the 下書き
+        // layer); narrow columns ELLIPSIZE the name, never wrap it.
+        let name_color = if row.draft {
+            theme::TEXT_WEAK
+        } else if selected {
+            theme::TEXT_STRONG
+        } else {
+            theme::TEXT
+        };
+        let mut job = egui::text::LayoutJob::simple(
+            row.name.clone(),
+            egui::FontId::proportional(12.5),
+            name_color,
+            f32::INFINITY,
+        );
+        job.wrap = egui::text::TextWrapping::truncate_at_width((name_right - text_x).max(14.0));
+        let name_galley = ui.fonts_mut(|f| f.layout_job(job));
+        p.galley(
+            egui::pos2(text_x, y_name - name_galley.size().y * 0.5),
+            name_galley,
+            name_color,
+        );
         p.hline(
             rect.x_range(),
             rect.bottom(),
@@ -1470,33 +1508,31 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
         let cy = rect.center().y;
         let p = ui.painter();
         if selected {
-            p.rect_filled(rect, 2.0, theme::SEL_ROW);
+            p.rect_filled(rect, 0.0, SEL_ACTIVE);
         } else if resp.hovered() {
             p.rect_filled(rect, 2.0, theme::HOVER);
         }
+        // Same rail geometry as a layer row: eye cell | pen cell | content.
+        let eye_cell =
+            egui::Rect::from_min_max(rect.min, egui::pos2(rect.left() + 22.0, rect.bottom()));
+        let pen_cell = egui::Rect::from_min_max(
+            egui::pos2(eye_cell.right(), rect.top()),
+            egui::pos2(eye_cell.right() + 20.0, rect.bottom()),
+        );
+        p.rect_filled(eye_cell, 0.0, theme::FIELD);
+        p.rect_filled(pen_cell, 0.0, theme::PANEL);
+        for x in [eye_cell.left(), eye_cell.right(), pen_cell.right()] {
+            p.vline(x, rect.y_range(), egui::Stroke::new(1.0, theme::BORDER));
+        }
         let eye_r = egui::Rect::from_center_size(
-            egui::pos2(rect.left() + 10.0, cy),
+            egui::pos2(eye_cell.center().x, cy),
             egui::vec2(15.0, 15.0),
         );
         icons::paint(p, eye_r.shrink(1.5), Icon::Eye, theme::TEXT_WEAK);
-        let eye_col = rect.left() + 20.0;
-        p.vline(
-            eye_col,
-            rect.y_range(),
-            egui::Stroke::new(1.0, theme::BORDER),
+        let tr = egui::Rect::from_min_size(
+            egui::pos2(pen_cell.right() + 7.0, cy - 16.0),
+            egui::vec2(32.0, 32.0),
         );
-        p.vline(
-            eye_col + 6.0,
-            rect.y_range(),
-            egui::Stroke::new(1.0, theme::BORDER),
-        );
-        p.vline(
-            eye_col + 22.0,
-            rect.y_range(),
-            egui::Stroke::new(1.0, theme::BORDER),
-        );
-        let tr =
-            egui::Rect::from_center_size(egui::pos2(eye_col + 39.0, cy), egui::vec2(26.0, 26.0));
         // The swatch is the paper's ACTUAL colour, so a cream page reads
         // cream here too.
         p.rect_filled(tr, 2.0, egui::Color32::from_rgb(pr, pg, pb));
@@ -1511,15 +1547,25 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
         } else {
             theme::TEXT_WEAK
         };
-        // Same glyph slot as a layer row: the sheet marks the ground.
-        let gr =
-            egui::Rect::from_center_size(egui::pos2(tr.right() + 13.0, cy), egui::vec2(13.0, 13.0));
-        icons::paint(p, gr, Icon::Paper, text_col);
+        // Two lines like a layer row: the sheet glyph + role on top, the
+        // name underneath.
+        let gr = egui::Rect::from_center_size(
+            egui::pos2(tr.right() + 14.0, rect.top() + 12.0),
+            egui::vec2(12.0, 12.0),
+        );
+        icons::paint(p, gr, Icon::Paper, theme::TEXT_WEAK);
         p.text(
-            egui::pos2(gr.right() + 5.0, cy),
+            egui::pos2(gr.right() + 4.0, rect.top() + 12.0),
+            egui::Align2::LEFT_CENTER,
+            "the page's ground",
+            egui::FontId::proportional(10.0),
+            theme::TEXT_WEAK,
+        );
+        p.text(
+            egui::pos2(tr.right() + 8.0, rect.bottom() - 14.0),
             egui::Align2::LEFT_CENTER,
             "Paper",
-            egui::FontId::proportional(11.5),
+            egui::FontId::proportional(12.5),
             text_col,
         );
     }
@@ -1529,7 +1575,7 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
     }
 }
 
-/// Rebuild stale per-layer thumbnails (26x26, sampled over a checkerboard so
+/// Rebuild stale per-layer thumbnails (32x32, sampled over a checkerboard so
 /// transparency reads CSP-style).
 fn refresh_layer_thumbs(ctx: &egui::Context, app: &mut App) {
     let n = app.doc.layers.len();
@@ -1562,8 +1608,8 @@ fn refresh_layer_thumbs(ctx: &egui::Context, app: &mut App) {
 }
 
 fn layer_thumb_image(doc: &mn_core::Document, li: usize) -> egui::ColorImage {
-    const TW: usize = 26;
-    const TH: usize = 26;
+    const TW: usize = 32;
+    const TH: usize = 32;
     let (w, h) = doc.size;
     let layer = &doc.layers[li];
     // A folder shows its visible children composited (CSP folder thumbs);
