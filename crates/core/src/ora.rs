@@ -277,6 +277,7 @@ pub fn save_to_with<W: Write + Seek>(
             reference: layer.reference,
             draft: layer.draft,
             through: layer.folder && layer.through,
+            escape: !layer.folder && layer.escape_frame,
             // Screen params ride as private JSON; the PNG above stays the
             // painted SOURCE ink (our loader re-derives the halftone from it).
             tone: layer.tone.and_then(|t| serde_json::to_string(&t).ok()),
@@ -352,6 +353,8 @@ struct LayerEntry {
     reference: bool,
     draft: bool,
     through: bool,
+    /// FB-overflow: art bursts out of the panel (`mnc-escape`).
+    escape: bool,
     /// TRIAGE 138 p2: the mask PNG's zip path (+ None = unmasked).
     mask_src: Option<String>,
     /// Vector inking: the stroke-record sidecar's zip path
@@ -494,6 +497,9 @@ fn stack_xml(
         }
         if e.through {
             extra.push_str(" mnc-through=\"1\"");
+        }
+        if e.escape {
+            extra.push_str(" mnc-escape=\"1\"");
         }
         if let Some(ss) = &e.strokes_src {
             extra.push_str(&format!(" mnc-strokes=\"{}\"", ss));
@@ -661,6 +667,7 @@ pub fn load_from<R: Read + Seek>(source: R) -> Result<Document, OraError> {
         layer.reference = e.reference;
         layer.draft = e.draft;
         layer.through = layer.folder && e.through;
+        layer.escape_frame = !layer.folder && e.escape;
         layer.tone = e.tone;
         // A folder can carry no border effect (`Document::set_edge` refuses
         // one) — a hand-edited or future file must not sneak one in.
@@ -951,6 +958,8 @@ struct ParsedLayer {
     strokes_src: Option<String>,
     mask_enabled: bool,
     mask_unlinked: bool,
+    /// FB-overflow (`mnc-escape`): art bursts out of the panel.
+    escape: bool,
     /// Audit H2/M1: the cropped mask image's pixel origin, and the exact
     /// tile set it carries (None = legacy file → old load semantics).
     mask_org: Option<(i32, i32)>,
@@ -1100,6 +1109,7 @@ fn parse_stack_xml(
                         reference: get("mnc-reference").is_some(),
                         draft: get("mnc-draft").is_some(),
                         through: get("mnc-through").is_some(),
+                        escape: false,
                         tone: get("mnc-tone").and_then(|j| serde_json::from_str(j).ok()),
                         edge: get("mnc-edge").and_then(|j| serde_json::from_str(j).ok()),
                         fill: get("mnc-fill").and_then(|j| serde_json::from_str(j).ok()),
@@ -1150,6 +1160,7 @@ fn parse_stack_xml(
                     reference: get("mnc-reference").is_some(),
                     draft: get("mnc-draft").is_some(),
                     through: get("mnc-through").is_some(),
+                    escape: get("mnc-escape").is_some(),
                     tone: get("mnc-tone").and_then(|j| serde_json::from_str(j).ok()),
                     edge: get("mnc-edge").and_then(|j| serde_json::from_str(j).ok()),
                     fill: get("mnc-fill").and_then(|j| serde_json::from_str(j).ok()),
@@ -1605,6 +1616,27 @@ mod tests {
             back.effective_drafts().iter().filter(|d| **d).count(),
             doc.effective_drafts().iter().filter(|d| **d).count(),
             "draft flags (folder included) survived"
+        );
+    }
+
+    /// FB-overflow rides the file (`mnc-escape`), non-folder rows only.
+    #[test]
+    fn escape_flag_roundtrips() {
+        let mut doc = Document::new(96, 96);
+        let hi = doc.add_frame_folder(
+            "F",
+            crate::frame::FrameSet::single_rect([8.0, 8.0, 88.0, 88.0], 2.0),
+        );
+        let draw = hi - 1;
+        assert!(doc.set_layer_escape(draw, true));
+        let back = roundtrip(&doc);
+        assert!(
+            back.layers[draw].escape_frame,
+            "escape survived the round trip"
+        );
+        assert!(
+            back.layers.iter().filter(|l| l.escape_frame).count() == 1,
+            "and only where it was set"
         );
     }
 

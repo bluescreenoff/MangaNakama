@@ -28,6 +28,20 @@ The badge on each frame folder recomputes from the page's geometry
 page. Rename a folder and the name is yours — the badge keeps carrying
 the number.</div>
 
+<h2>Art bursting out of a panel</h2>
+Select a layer inside a frame folder and tick <i>Burst out of the
+panel</i> in Layer Property ▸ Layer settings. That one layer draws
+outside the panel mask and OVER the frame's border ink — the classic
+overflow shot — while everything else in the folder stays clipped. The
+layer keeps living inside the folder (it moves, hides and locks with
+the panel), the frame stays fully editable, and unticking puts the art
+back inside. In Clip Studio this takes a stack of white-fill layers and
+a hand-made mask, or rasterizing the frame folder for good.
+<div class="quirk"><b>The bursting layer ignores the folder's opacity
+and blend.</b> It composites as if it sat just above the frame folder,
+so a 50% folder dims the panel but not the burst. Want the burst dimmed
+too? Set the layer's own opacity.</div>
+
 <h2>Crop marks and margins</h2>
 <p>The bleed, trim, inner border and publisher safety margins come from
 the page's comic settings and are drawn over the canvas. <b>View ▸ Crop

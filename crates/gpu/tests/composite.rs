@@ -492,6 +492,51 @@ fn cpu_matches_gpu_with_frame_folder_mask_and_clip() {
     assert_agrees(&mut r, &doc, "frame folder at 50%");
 }
 
+/// FB-overflow: an escaped child re-seats above its frame folder header on
+/// BOTH compositors (the shared `composite_order` walk) — outside the panel
+/// mask, over the border ink, immune to the folder's opacity, and back to
+/// clipped when the flag drops.
+#[test]
+fn cpu_matches_gpu_with_an_escaped_frame_child() {
+    let _serial = gpu_guard();
+    let Some(mut r) = renderer() else { return };
+
+    let mut doc = Document::new(128, 128);
+    for ty in 0..2 {
+        for tx in 0..2 {
+            fill(&mut doc, 0, TileIdx::new(tx, ty), [0.9, 0.2, 0.2, 1.0]);
+        }
+    }
+    let fs = mn_core::FrameSet::single_rect([24.0, 24.0, 104.0, 104.0], 5.0);
+    let hi = doc.add_frame_folder("F", fs);
+    let draw = hi - 1;
+    for ty in 0..2 {
+        for tx in 0..2 {
+            fill_ramp(&mut doc, draw, TileIdx::new(tx, ty), [0.2, 0.7, 0.3]);
+        }
+    }
+    // A second child bursts out — half-alpha, so the escapee exercises the
+    // ordinary blend path at its new seat, not just an opaque overwrite.
+    let bi = doc
+        .add_layer_in_folder(doc.layers.len() - 1, "burst")
+        .unwrap();
+    for tx in 0..2 {
+        fill(&mut doc, bi, TileIdx::new(tx, 0), [0.2, 0.3, 0.9, 0.6]);
+    }
+    assert!(doc.set_layer_escape(bi, true));
+    assert_agrees(&mut r, &doc, "escaped frame child");
+
+    // Folder opacity scales the sealed group only — the escapee left it.
+    let hdr = doc.layers.len() - 1;
+    doc.set_layer_opacity(hdr, 0.5);
+    r.invalidate();
+    assert_agrees(&mut r, &doc, "escaped child + folder at 50%");
+
+    assert!(doc.set_layer_escape(bi, false));
+    r.invalidate();
+    assert_agrees(&mut r, &doc, "escape removed: clipped shape again");
+}
+
 /// docs/CLIPPING-SCENARIOS.md 2a, clip-to-folder: the CPU captures the
 /// group alpha at the folder's close, the GPU copies the group texture
 /// into the clip-base capture — the two must agree, including the

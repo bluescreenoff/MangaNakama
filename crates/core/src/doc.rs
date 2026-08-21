@@ -323,6 +323,12 @@ pub struct Layer {
     /// Clip to the layer below (CSP クリッピング): this layer only shows where
     /// the nearest non-clip layer below it (same depth) has alpha.
     pub clip: bool,
+    /// FB-overflow ("art bursts out of the panel"): a non-folder layer
+    /// inside a sealed frame folder re-seats, for compositing only, just
+    /// ABOVE its frame folder header — outside the panel mask and over the
+    /// border ink — while still living inside the folder for organisation.
+    /// Meaningless (and ignored) anywhere else. See `composite_order`.
+    pub escape_frame: bool,
     /// Edit lock: strokes/fill/clear refuse. Presentation still composites.
     pub lock: bool,
     /// Layer mask (TRIAGE 138 v1): None = unmasked. Runtime-only until
@@ -407,6 +413,7 @@ impl Layer {
             through: false,
             open: true,
             clip: false,
+            escape_frame: false,
             lock: false,
             mask: None,
             mask_linked: true,
@@ -3725,6 +3732,78 @@ impl Document {
         l.draft = on;
         self.touch();
         true
+    }
+
+    /// FB-overflow: refuses folders (re-seating a whole group is a v2) and
+    /// layers with no frame folder above them (the flag would be a lie).
+    pub fn set_layer_escape(&mut self, index: usize, on: bool) -> bool {
+        let ok = self
+            .layers
+            .get(index)
+            .is_some_and(|l| !l.folder && (!on || self.enclosing_frame_folder(index).is_some()));
+        if !ok {
+            return false;
+        }
+        self.layers[index].escape_frame = on;
+        self.touch();
+        true
+    }
+
+    /// The nearest frame folder ABOVE `index` (never `index` itself).
+    pub fn enclosing_frame_folder(&self, index: usize) -> Option<usize> {
+        let mut i = index;
+        while let Some(f) = self.enclosing_folder(i) {
+            if self.layers[f].is_frame() {
+                return Some(f);
+            }
+            i = f;
+        }
+        None
+    }
+
+    /// The order both compositors walk the stack in, each entry with its
+    /// EFFECTIVE depth. Identity except FB-overflow: a non-folder layer with
+    /// `escape_frame` inside a SEALED frame folder re-seats immediately
+    /// after that folder's header, at the header's own depth — so its ink
+    /// lands in the accumulator the group was just blended into, above the
+    /// panel mask and the border ink. Escapees keep their stack order. A
+    /// through frame folder never clips, so its escapees stay in place.
+    ///
+    /// Both compositors (export.rs and gpu) MUST walk this, not
+    /// `self.layers` — a disagreement here is a CPU/GPU parity break.
+    pub fn composite_order(&self) -> Vec<(usize, u8)> {
+        let mut order: Vec<(usize, u8)> = Vec::with_capacity(self.layers.len());
+        let mut pending: Vec<(usize, usize, u8)> = Vec::new(); // (frame hdr, layer, depth)
+        for (li, l) in self.layers.iter().enumerate() {
+            if !l.folder && l.escape_frame {
+                if let Some(ff) = self.enclosing_frame_folder(li) {
+                    if !self.layers[ff].through {
+                        pending.push((ff, li, self.layers[ff].depth));
+                        continue;
+                    }
+                }
+            }
+            order.push((li, l.depth));
+            if l.folder {
+                // Children walk before their header; everything stashed for
+                // this header bursts out right after it closes.
+                let mut k = 0;
+                while k < pending.len() {
+                    if pending[k].0 == li {
+                        let (_, e, d) = pending.remove(k);
+                        order.push((e, d));
+                    } else {
+                        k += 1;
+                    }
+                }
+            }
+        }
+        // Unreachable orphans (a stale flag outrunning a structure edit):
+        // walk them in place rather than dropping their art.
+        for (_, e, d) in pending {
+            order.push((e, d));
+        }
+        order
     }
 
     /// Per-layer draft state with ancestor folders folded in — a draft

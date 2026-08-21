@@ -349,6 +349,22 @@ pub(super) fn layer_property(ui: &mut egui::Ui, app: &mut App) {
         app.push_cmd(AppCmd::SetLayerDraft(i, draft));
     }
 
+    // FB-overflow: only offered where it means something — a non-folder
+    // layer living inside a frame folder.
+    if !app.doc.layers[i].folder && app.doc.enclosing_frame_folder(i).is_some() {
+        let mut esc = app.doc.layers[i].escape_frame;
+        if ui
+            .checkbox(&mut esc, "Burst out of the panel")
+            .on_hover_text(
+                "this layer draws OVER the frame border and outside the panel mask — \
+                 the art overflows, the panel stays editable, the layer stays in its folder",
+            )
+            .changed()
+        {
+            app.push_cmd(AppCmd::SetLayerEscape(i, esc));
+        }
+    }
+
     // LP-016 Layer colour: draw black, DISPLAY as the chosen colour (the
     // draft/two-tone workflow — non-destructive; pixels stay black).
     let cur = app.doc.layers.get(i).and_then(|l| l.layer_colour);

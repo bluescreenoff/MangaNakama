@@ -171,6 +171,13 @@ The recurring failure shapes, in order of how often they have shipped:
   alpha.** Blend operators are defined on premultiplied values exactly
   as the fixed-function states compute them — an operator that is only
   correct for straight color diverges on translucent sources.
+- **Both compositors walk `Document::composite_order()`, never
+  `doc.layers` directly.** The order is identity except FB-overflow
+  ("Burst out of the panel"): an escaped child re-seats just above its
+  frame folder header at the header's depth. A new walk that iterates
+  the raw layer list re-clips escaped art on one path only — a parity
+  break that only shows on pages using the feature
+  (`cpu_matches_gpu_with_an_escaped_frame_child`).
 - The laptop's 2020 Intel DX12 driver randomly drops one draw per
   rebuild frame. This is NOT a regression; agreement tests auto-verify
   on WARP, and the dab path has a canary counter + CPU-replay repair.

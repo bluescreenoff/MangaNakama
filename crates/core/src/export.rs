@@ -312,6 +312,7 @@ fn composite_size(
     let mut accs: Vec<Vec<Rgba>> = (0..=max_depth + 1)
         .map(|_| vec![[0.0f32; 4]; TILE_PIXELS])
         .collect();
+    let order = doc.composite_order();
 
     let t = TILE_SIZE as i32;
     let tx0 = ox.div_euclid(t);
@@ -336,11 +337,15 @@ fn composite_size(
             }
             folder_alpha.clear();
             if touched {
-                for (li, (layer, vis)) in doc.layers.iter().zip(&eff).enumerate() {
-                    if !*vis {
+                // FB-overflow: escaped layers re-seat above their frame
+                // folder header — `order` is the shared walk, `ed` the
+                // effective depth (the header's own, for an escapee).
+                for &(li, ed) in &order {
+                    let layer = &doc.layers[li];
+                    if !eff[li] {
                         continue;
                     }
-                    let d = layer.depth as usize;
+                    let d = ed as usize;
                     // LF-002 Through: a through-folder's children collapse
                     // onto the folder's own effective accumulator.
                     let cd = collapse[d];
@@ -890,6 +895,65 @@ mod tests {
         doc.set_layer_visible(hi, false);
         let img = composite(&doc, Background::White);
         assert_eq!(img.get_pixel(64, 32).0, [255, 0, 0, 255]);
+    }
+
+    /// FB-overflow: the escape flag re-seats a child above its frame
+    /// folder — outside the panel mask AND over the border ink — and
+    /// turning it off restores the clip exactly.
+    #[test]
+    fn escaped_layer_bursts_out_of_the_panel_and_over_the_border() {
+        use crate::frame::FrameSet;
+        let mut doc = Document::new(128, 128);
+        let fs = FrameSet::single_rect([32.0, 32.0, 96.0, 96.0], 4.0);
+        let hi = doc.add_frame_folder("F", fs);
+        let draw = hi - 1;
+        for ty in 0..2 {
+            for tx in 0..2 {
+                fill_tile(&mut doc, draw, TileIdx::new(tx, ty), [0.0, 1.0, 0.0, 1.0]);
+            }
+        }
+
+        let img = composite(&doc, Background::White);
+        assert_eq!(
+            img.get_pixel(8, 8).0,
+            [255, 255, 255, 255],
+            "clipped: nothing outside the panel"
+        );
+        let border = img.get_pixel(64, 32).0;
+        assert!(
+            border[0] < 40 && border[1] < 40,
+            "border ink on top while clipped: {border:?}"
+        );
+
+        assert!(doc.set_layer_escape(draw, true));
+        let img = composite(&doc, Background::White);
+        assert_eq!(
+            img.get_pixel(8, 8).0,
+            [0, 255, 0, 255],
+            "escaped: bursts outside the panel"
+        );
+        assert_eq!(
+            img.get_pixel(64, 32).0,
+            [0, 255, 0, 255],
+            "escaped: drawn over the border ink"
+        );
+
+        assert!(doc.set_layer_escape(draw, false));
+        let img = composite(&doc, Background::White);
+        assert_eq!(
+            img.get_pixel(8, 8).0,
+            [255, 255, 255, 255],
+            "flag off: the clip is back"
+        );
+
+        // The flag refuses where it would lie: folders, and layers with no
+        // frame folder above them.
+        assert!(!doc.set_layer_escape(hi, true), "folders refuse");
+        let mut flat = Document::new(64, 64);
+        assert!(
+            !flat.set_layer_escape(0, true),
+            "no frame folder above: refuse"
+        );
     }
 
     #[test]

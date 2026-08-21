@@ -2433,11 +2433,15 @@ impl Renderer {
             open_pass!(Target::Canvas);
         }
 
-        for (li, layer) in doc.layers.iter().enumerate() {
+        // FB-overflow: the SHARED walk — escaped layers re-seat above their
+        // frame folder header at the header's depth. Disagreeing with the
+        // CPU compositor here is a parity break.
+        for (li, ed) in doc.composite_order() {
+            let layer = &doc.layers[li];
             if !vis[li] {
                 continue;
             }
-            let d = layer.depth as usize;
+            let d = ed as usize;
             // LF-002 Through: same collapse mapping as core's composite —
             // a through-folder's children draw into the folder's own
             // effective target (as if loose); normal folders seal.

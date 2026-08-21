@@ -1406,6 +1406,9 @@ pub enum AppCmd {
     RulerClear,
     /// Mark as a draft layer (excluded from fill refs + export).
     SetLayerDraft(usize, bool),
+    /// FB-overflow: art bursts out of the panel — the layer composites
+    /// above its frame folder's mask and border ink.
+    SetLayerEscape(usize, bool),
     /// Part 3 (RL-031): the special-ruler snap veto (parallel/concentric/
     /// guide/symmetric). The master `RulerSnapToggle` still gates all.
     RulerSpecialSnapToggle,
@@ -4901,6 +4904,16 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                     "draft layer: shown on screen, skipped by fill refs and export"
                 } else {
                     "draft flag removed"
+                });
+                app.mark_dirty();
+            }
+        }
+        AppCmd::SetLayerEscape(i, v) => {
+            if app.doc.set_layer_escape(i, v) {
+                app.set_status(if v {
+                    "bursts out of the panel: drawn over the frame border, outside the mask"
+                } else {
+                    "back inside the panel"
                 });
                 app.mark_dirty();
             }
