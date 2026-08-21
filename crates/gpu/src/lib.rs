@@ -639,6 +639,10 @@ pub struct Renderer {
     /// Coverage multiply (`dst *= src.a`) into a group — frame-folder masks
     /// and clip-to-below bases. Group target only.
     mask_pipeline: wgpu::RenderPipeline,
+    /// Coverage multiply sourced from the CLIP-BASE capture texture instead
+    /// of a tile (clip-to-folder: the base is a canvas-sized group alpha,
+    /// not a layer's tiles). Group target only, like `mask_pipeline`.
+    mask_base_pipeline: wgpu::RenderPipeline,
     /// Blit an isolation buffer onto the canvas / an outer group, one per
     /// blend mode per target family.
     blit_pipelines: [wgpu::RenderPipeline; 5],
@@ -654,6 +658,13 @@ pub struct Renderer {
     /// Isolation buffers by level (1-based; index 0 unused). Canvas-sized,
     /// recreated with the canvas.
     groups: Vec<GroupTex>,
+    /// Clip-to-folder base capture: a folder that serves as a clip base has
+    /// its finished group (frame mask applied, before opacity/blend) copied
+    /// here at close, because the member's own scratch reuses the folder's
+    /// level and would clear it. One texture suffices — clip-run members sit
+    /// directly above their folder, so captures never overlap. Canvas-sized,
+    /// recreated with the canvas; `None` until a folder base first appears.
+    clip_base: Option<GroupTex>,
     instance_buf: wgpu::Buffer,
     instance_cap: usize,
 
@@ -1159,6 +1170,11 @@ impl Renderer {
             make_blit_pipeline("mn.blit.g.add", blend_add, GROUP_FORMAT),
             make_blit_pipeline("mn.blit.g.subtract", blend_subtract, GROUP_FORMAT),
         ];
+        // Clip-to-folder: coverage multiply like `mask_pipeline`, but the
+        // source is the canvas-sized clip-base capture (group.wgsl sampling,
+        // instance opacity 1), not a tile. Clip scratches are groups, so one
+        // GROUP_FORMAT flavour is enough.
+        let mask_base_pipeline = make_blit_pipeline("mn.mask.base", blend_mask, GROUP_FORMAT);
 
         // Blend part 2 — the shader compositor pass. The mode value rides
         // the instance pad (shader location 3); the destination arrives as a
@@ -1493,6 +1509,7 @@ impl Renderer {
             tile_pipelines,
             tile_pipelines_group,
             mask_pipeline,
+            mask_base_pipeline,
             blit_pipelines,
             blit_pipelines_group,
             blit_bgl,
@@ -1501,6 +1518,7 @@ impl Renderer {
             tile_uniform_bg,
             dummy_tile_bg,
             groups: Vec::new(),
+            clip_base: None,
             instance_buf,
             instance_cap,
             present_pipeline,
@@ -2204,6 +2222,21 @@ impl Renderer {
             .max()
             .unwrap_or(1);
         self.ensure_groups(doc, max_level);
+        // Clip-to-folder: which folder headers serve as a clip base this
+        // frame (visibility does not matter here — a hidden folder base
+        // still needs the zero-coverage path below to agree with the CPU).
+        let folder_base: Vec<bool> = {
+            let mut fb = vec![false; doc.layers.len()];
+            for b in bases.iter().flatten() {
+                if doc.layers[*b].folder {
+                    fb[*b] = true;
+                }
+            }
+            fb
+        };
+        if folder_base.iter().any(|&b| b) {
+            self.ensure_clip_base(doc);
+        }
         // LF-002 Through: real depth → effective target depth, the same
         // collapse core's composite computes. A through-folder maps its
         // child depth onto its own effective depth (children blend as if
@@ -2229,6 +2262,10 @@ impl Renderer {
         enum Target {
             Canvas,
             Group(usize),
+            /// The clip-to-folder capture texture — only ever the target of a
+            /// clear-only pass (an empty folder base zeroes it; a live one is
+            /// filled by `capture_base`'s encoder copy instead).
+            ClipBase,
         }
         #[derive(Clone, Copy)]
         enum DrawKind {
@@ -2239,6 +2276,9 @@ impl Renderer {
             /// Coverage multiply: dst *= alpha of this tile (`None` = the
             /// zero-initialised dummy — zero coverage).
             Mask(Option<TileKey>),
+            /// Coverage multiply from the canvas-sized clip-base capture
+            /// (clip-to-folder: the base alpha is a whole group, not tiles).
+            MaskBase,
             /// Blend group `level` onto this target.
             Blit(usize),
         }
@@ -2256,6 +2296,11 @@ impl Renderer {
             /// destination and a pass cannot read its own target. Snapshot
             /// passes never merge with neighbours.
             snapshot: bool,
+            /// Clip-to-folder: copy group `level` into the clip-base capture
+            /// before this pass begins (same encoder-op timing as
+            /// `snapshot`). Set on an empty pass pushed at the folder's
+            /// close, while the group still holds the finished content.
+            capture_base: Option<usize>,
         }
 
         let mut passes: Vec<Pass> = Vec::new();
@@ -2285,6 +2330,7 @@ impl Renderer {
                     && match t {
                         Target::Canvas => true,
                         Target::Group(l) => !needs_clear[l],
+                        Target::ClipBase => false,
                     };
                 if !reuse {
                     let clear = match t {
@@ -2301,11 +2347,18 @@ impl Renderer {
                             needs_clear[l] = false;
                             c
                         }
+                        Target::ClipBase => Some(TRANSPARENT),
                     };
                     if t == Target::Canvas {
                         first_canvas = false;
                     }
-                    passes.push(Pass { target: t, clear, draws: Vec::new(), snapshot: false });
+                    passes.push(Pass {
+                        target: t,
+                        clear,
+                        draws: Vec::new(),
+                        snapshot: false,
+                        capture_base: None,
+                    });
                 }
                 passes.last_mut().unwrap()
             }};
@@ -2334,6 +2387,7 @@ impl Renderer {
                             needs_clear[l] = false;
                             c
                         }
+                        Target::ClipBase => Some(TRANSPARENT),
                     };
                     if t == Target::Canvas {
                         first_canvas = false;
@@ -2343,6 +2397,7 @@ impl Renderer {
                         clear,
                         draws: Vec::new(),
                         snapshot: true,
+                        capture_base: None,
                     });
                 }
                 passes.last_mut().unwrap()
@@ -2440,6 +2495,20 @@ impl Renderer {
                             });
                         }
                     }
+                    // Clip-to-folder: capture the finished group (frame mask
+                    // applied, before opacity/blend — the raw-display-alpha
+                    // rule layer bases follow) before anything reuses or
+                    // clears this level. The copy runs before the pass that
+                    // carries it; the pass itself may absorb the blit draws.
+                    if folder_base[li] {
+                        passes.push(Pass {
+                            target: target_of(cd),
+                            clear: None,
+                            draws: Vec::new(),
+                            snapshot: false,
+                            capture_base: Some(lvl),
+                        });
+                    }
                     if layer.opacity > 0.0 {
                         let slot = blend_slot(layer.blend);
                         let pass = if slot >= BLEND2_BASE {
@@ -2468,6 +2537,18 @@ impl Renderer {
                     }
                     needs_clear[lvl] = true;
                     drew_into[lvl] = false;
+                } else if folder_base[li] {
+                    // Nothing drew into the group, so there is nothing to
+                    // copy — and the group texture may hold stale content
+                    // (it is cleared lazily). An empty folder base means
+                    // zero ink: zero the capture with a clear-only pass.
+                    passes.push(Pass {
+                        target: Target::ClipBase,
+                        clear: Some(TRANSPARENT),
+                        draws: Vec::new(),
+                        snapshot: false,
+                        capture_base: None,
+                    });
                 }
                 // The header's own raster (frame border ink), Normal blend.
                 if layer.opacity > 0.0 && layer.tile_count() > 0 {
@@ -2534,12 +2615,25 @@ impl Renderer {
                         });
                     }
                     for idx in &touched {
-                        let key = (base, *idx, false);
-                        let bind = self.tiles.contains_key(&key).then_some(key);
+                        // Clip-to-folder: a folder base masks from the
+                        // canvas-sized capture; a hidden folder never
+                        // composited its children, so its ink is zero
+                        // coverage (the dummy tile), matching the CPU walk
+                        // which skips hidden folders entirely.
+                        let kind = if doc.layers[base].folder {
+                            if vis[base] {
+                                DrawKind::MaskBase
+                            } else {
+                                DrawKind::Mask(None)
+                            }
+                        } else {
+                            let key = (base, *idx, false);
+                            DrawKind::Mask(self.tiles.contains_key(&key).then_some(key))
+                        };
                         pass.draws.push(Draw {
                             instance: instances.len() as u32,
                             blend: 0,
-                            kind: DrawKind::Mask(bind),
+                            kind,
                         });
                         instances.push(QuadInstance {
                             tint: crate::TINT_NONE,
@@ -2645,6 +2739,7 @@ impl Renderer {
                 let t = match p.target {
                     Target::Canvas => "canvas".to_string(),
                     Target::Group(l) => format!("group{l}"),
+                    Target::ClipBase => "clipbase".to_string(),
                 };
                 eprintln!(
                     "[gpu]   pass {i}: {t} clear={} draws={}",
@@ -2659,6 +2754,31 @@ impl Renderer {
                 label: Some("mn.canvas"),
             });
         for pass in &passes {
+            // Clip-to-folder: capture the named group into the clip-base
+            // texture before this pass (same encoder-op timing as the
+            // snapshot copy below — queue order guarantees the copy sees
+            // every prior pass, i.e. the finished group).
+            if let (Some(lvl), Some(cb)) = (pass.capture_base, &self.clip_base) {
+                enc.copy_texture_to_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &self.groups[lvl - 1].texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &cb.texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::Extent3d {
+                        width: doc.size.0.max(1),
+                        height: doc.size.1.max(1),
+                        depth_or_array_layers: 1,
+                    },
+                );
+            }
             // Blend part 2: snapshot the destination before a shader-composite
             // pass (copies are encoder ops — legal between passes, never in
             // one). Queue order guarantees the copy sees every prior pass.
@@ -2669,6 +2789,8 @@ impl Renderer {
                 let src = match pass.target {
                     Target::Canvas => &self.canvas.as_ref().unwrap().texture,
                     Target::Group(l) => &self.groups[l - 1].texture,
+                    // Clear-only target; never a snapshot pass.
+                    Target::ClipBase => unreachable!("clip-base pass is never blend2"),
                 };
                 enc.copy_texture_to_texture(
                     wgpu::TexelCopyTextureInfo {
@@ -2693,6 +2815,14 @@ impl Renderer {
             let view = match pass.target {
                 Target::Canvas => &canvas_view,
                 Target::Group(l) => &self.groups[l - 1].view,
+                Target::ClipBase => {
+                    // Guaranteed by ensure_clip_base before the script built
+                    // any ClipBase pass; skip defensively if it ever isn't.
+                    match &self.clip_base {
+                        Some(cb) => &cb.view,
+                        None => continue,
+                    }
+                }
             };
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("mn.canvas.pass"),
@@ -2783,6 +2913,15 @@ impl Renderer {
                             Some(cached) => rp.set_bind_group(1, &cached.bind_group, &[]),
                             None => rp.set_bind_group(1, &self.dummy_tile_bg, &[]),
                         }
+                    }
+                    DrawKind::MaskBase => {
+                        // ensure_clip_base ran before the script emitted this.
+                        let Some(cb) = &self.clip_base else {
+                            eprintln!("[gpu] MISSING clip-base capture");
+                            continue;
+                        };
+                        rp.set_pipeline(&self.mask_base_pipeline);
+                        rp.set_bind_group(1, &cb.blit_bg, &[]);
                     }
                     DrawKind::Blit(level) if d.blend >= BLEND2_BASE => {
                         let Some((_, snap_view)) = &self.snap else {
@@ -3003,7 +3142,56 @@ impl Renderer {
         // Isolation buffers are canvas-sized; rebuild them lazily at the new
         // size.
         self.groups.clear();
+        self.clip_base = None;
         self.canvas_dirty_all = true;
+    }
+
+    /// Make sure the clip-to-folder base capture exists at the canvas size.
+    /// Called only when the frame actually has a folder serving as a clip
+    /// base, so documents without the feature never pay for the texture.
+    fn ensure_clip_base(&mut self, doc: &Document) {
+        if self.clip_base.is_some() {
+            return;
+        }
+        let size = (doc.size.0.max(1), doc.size.1.max(1));
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("mn.clipbase"),
+            size: wgpu::Extent3d {
+                width: size.0,
+                height: size.1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: GROUP_FORMAT,
+            // COPY_DST for the group capture; RENDER_ATTACHMENT for the
+            // zero-clear pass an empty folder base needs.
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let blit_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("mn.clipbase.bg"),
+            layout: &self.blit_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        });
+        self.clip_base = Some(GroupTex {
+            texture,
+            view,
+            blit_bg,
+        });
     }
 
     fn ensure_instance_capacity(&mut self, needed: usize) {

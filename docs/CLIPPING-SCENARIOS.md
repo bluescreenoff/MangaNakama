@@ -45,18 +45,21 @@ insert at the folder top respectively.
 ## 2. Folders around clip structure
 
 **2a. Wrap the base (or base + siblings) in a folder while a clipped layer
-sits above.** ❌ → roadmap: **clip to a folder**.
-Layer A clips to B; the owner groups B and C into a folder so A should clip
-to their combined ink. Today the folder header breaks the chain — A's flag
-silently ignores and A pops to full visibility. CSP's own answer (folder
-becomes the clip target) is the right one, and CSP's *actual* behaviour on
-a related edit — the new folder springing into clipped mode itself — is the
-annoyance the owner named ("when is that ever useful?"). Ours can never do
-that (folders refuse the flag); what is missing is folder-as-base in both
-compositors (CPU export walk + GPU canvas walk agree per tile, so this is
-a parity feature, not a palette tweak).
-Until then, at minimum the app should *say* "clip above lost its base"
-instead of changing the picture silently — see 5b.
+sits above.** ✅ — **clip to a folder** shipped.
+Layer A clips to B; the owner groups B and C into a folder and A now clips
+to their combined ink: a sealed folder header at the same depth is a valid
+clip base (`clip_bases`). The base alpha is the group's composite AFTER the
+frame mask (panel coverage is part of a frame folder's ink) and BEFORE the
+folder's opacity/blend — the same raw-alpha rule layer bases follow — so
+turning the folder's opacity down does not thin the clipped layer. A
+THROUGH folder has no isolated composite and still breaks the chain; a
+hidden folder is zero ink (the clipped layer vanishes — unlike a hidden
+*layer* base, whose raw tiles still exist). CSP's annoyance — the new
+folder springing into clipped mode itself — remains impossible here
+(folders refuse the flag). Pinned by `clip_above_a_folder_resolves_to_the_
+folder` (bases), `clip_layer_over_a_folder_clips_to_the_group_ink` (CPU
+pixels) and `cpu_matches_gpu_with_clip_to_folder` (GPU parity, including
+the empty-group and hidden-folder zero cases).
 
 **2b. Drag a clipped MEMBER into a folder.** 🟡
 The member leaves the run; inside the folder its flag re-resolves against
@@ -84,9 +87,12 @@ below it (or ignores). This is CSP behaviour and is *usually* wanted
 eye-testing says this surprises more than it helps, the alternative is
 clearing the flag on any drag that changes the base — owner's call.
 
-**3d. Merge down a clipped layer onto its base.** 🟡 — the ink is baked
-through the clip (merge composites what you saw). Verify: result looks
-identical to before the merge.
+**3d. Merge down a clipped layer onto its base.** ✅ — it **refuses**.
+`merge_down` bails on a clipped upper layer because "a clipped layer's raw
+pixels are not what it shows": merging copies the layer's own tiles, so the
+part the clip was hiding would come back as ink. Nothing is baked and
+nothing is lost — unclip first if you want the merge. Pinned by
+`alpha_lock_masks_the_open_op_and_locks_guard_merge` (mn-core).
 
 **3e. Duplicate a clipped layer.** 🟡 — the duplicate carries the flag and
 sits inside the run, so it joins it. That is the wanted outcome (duplicate
@@ -100,14 +106,20 @@ meaning automatically. Verify while eye-testing 1–3.
 
 ## 5. Feedback the app owes the user
 
-**5a. A clipped layer whose flag is being IGNORED (no valid base)** shows no
-differently in the palette today. ❌ — the row should show the clip mark in
-a "dangling" state (dimmed / warning tint) so scenario 2a/3a states are
-visible at a glance.
+**5a. A clipped layer whose flag is being IGNORED (no valid base)** ✅ —
+the palette row's clip bar dims from red to grey (`theme::TEXT_WEAK`) when
+the flag has no base under it, so scenario 2a/3a states read at a glance.
+The dangling test is `clip && !folder && clip_bases[i].is_none()`, recomputed
+per frame in `ui::layers`.
 
-**5b. A structure edit that silences or re-bases someone's clip** should say
-so in the status line ("Tone A: clip has no base here"). ❌ — cheap, high
-value; pairs with 5a.
+**5b. A structure edit that silences or re-attaches someone's clip** ✅ —
+the status line says so: `"Shade": clip lost its base here — the flag is
+ignored (grey mark)` / `"Shade": clip re-attached to what sits below`.
+`cmd::dispatch` snapshots which clipped layers are dangling before every
+command and compares after, keyed by NAME (indices shift under exactly
+these edits; a name absent on either side never reports, so renames and
+deletions stay quiet). Pinned by
+`a_structure_edit_that_silences_a_clip_reports_it`.
 
 ## Out of scope (decided)
 

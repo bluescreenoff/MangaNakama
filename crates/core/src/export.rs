@@ -274,6 +274,22 @@ fn composite_size(
         }
     }
     let bases = doc.clip_bases();
+    // Clip-to-folder: folder headers serving as a clip base, and the group
+    // alpha captured for the CURRENT tile at each such folder's close (the
+    // accumulator is consumed there). Captured after the frame mask — panel
+    // coverage is part of a frame folder's ink — and before opacity/blend,
+    // the raw-display-alpha rule layer bases follow. A hidden folder never
+    // captures (its children are not walked): a missing entry = zero ink.
+    let folder_base: Vec<bool> = {
+        let mut fb = vec![false; doc.layers.len()];
+        for b in bases.iter().flatten() {
+            if doc.layers[*b].folder {
+                fb[*b] = true;
+            }
+        }
+        fb
+    };
+    let mut folder_alpha: std::collections::HashMap<usize, Vec<f32>> = Default::default();
     let max_depth = doc
         .layers
         .iter()
@@ -318,6 +334,7 @@ fn composite_size(
             for a in accs.iter_mut().skip(1) {
                 a.fill([0.0; 4]);
             }
+            folder_alpha.clear();
             if touched {
                 for (li, (layer, vis)) in doc.layers.iter().zip(&eff).enumerate() {
                     if !*vis {
@@ -363,6 +380,12 @@ fn composite_size(
                                 }
                             }
                         }
+                        // 1½. Clip-to-folder: someone above clips to this
+                        // group — its alpha dies at step 3, so capture now.
+                        if folder_base[li] {
+                            folder_alpha
+                                .insert(li, accs[lvl].iter().map(|p| p[3]).collect());
+                        }
                         // 2. Blend the isolated group, then the border ink.
                         if layer.opacity > 0.0 {
                             let (group, target) = split_two(&mut accs, lvl, cd);
@@ -399,7 +422,15 @@ fn composite_size(
                     let Some(tile) = layer.display_tile(idx) else {
                         continue;
                     };
-                    let base_tile = bases[li].and_then(|b| doc.layers[b].display_tile(idx));
+                    // Clip-to-folder: a folder base's alpha comes from the
+                    // capture above, never from the header's own raster
+                    // (that is only the border ink).
+                    let base_folder = bases[li].filter(|&b| doc.layers[b].folder);
+                    let base_alpha = base_folder.and_then(|b| folder_alpha.get(&b));
+                    let base_tile = match base_folder {
+                        Some(_) => None,
+                        None => bases[li].and_then(|b| doc.layers[b].display_tile(idx)),
+                    };
                     let clipped = bases[li].is_some();
                     let data = tile.data();
                     let tint = layer.layer_colour;
@@ -441,9 +472,12 @@ fn composite_size(
                             }
                         }
                         if clipped {
-                            let m = base_tile
-                                .map(|bt| bt.data()[o + 3] as f32 / 32768.0)
-                                .unwrap_or(0.0);
+                            let m = match base_alpha {
+                                Some(fa) => fa[i],
+                                None => base_tile
+                                    .map(|bt| bt.data()[o + 3] as f32 / 32768.0)
+                                    .unwrap_or(0.0),
+                            };
                             for c in src.iter_mut() {
                                 *c *= m;
                             }
@@ -875,6 +909,53 @@ mod tests {
         assert_eq!(img.get_pixel(10, 10).0, [191, 64, 128, 255]);
         // Off the base: the clip layer contributes nothing.
         assert_eq!(img.get_pixel(80, 10).0, [255, 255, 255, 255]);
+    }
+
+    /// docs/CLIPPING-SCENARIOS.md 2a: a layer clipped to a FOLDER shows
+    /// only over the group's combined ink, at the group's raw alpha — the
+    /// header's opacity does not fold into the base (the same raw-alpha
+    /// rule layer bases follow), and a hidden folder is zero ink.
+    #[test]
+    fn clip_layer_over_a_folder_clips_to_the_group_ink() {
+        let mut doc = Document::new(128, 64);
+        // Group ink: opaque green on the LEFT tile only, inside folder F.
+        let hi = doc.add_folder_above(0, "F");
+        let inside = doc.add_layer_in_folder(hi, "in").unwrap();
+        fill_tile(&mut doc, inside, TileIdx::new(0, 0), [0.0, 1.0, 0.0, 1.0]);
+        let hi = hi + 1; // the child inserted below shifted the header up
+        // The clipped layer above the folder: red across both tiles.
+        let top = doc.add_layer_above(hi, "Shade");
+        doc.set_layer_clip(top, true);
+        for tx in 0..2 {
+            fill_tile(&mut doc, top, TileIdx::new(tx, 0), [1.0, 0.0, 0.0, 1.0]);
+        }
+
+        let img = composite(&doc, Background::White);
+        assert_eq!(img.get_pixel(10, 10).0, [255, 0, 0, 255], "over group ink");
+        assert_eq!(
+            img.get_pixel(80, 10).0,
+            [255, 255, 255, 255],
+            "off the group ink the clip layer contributes nothing"
+        );
+
+        // The capture happens before the folder's opacity/blend: turning the
+        // folder down does not thin the clipped layer.
+        doc.layers[hi].opacity = 0.25;
+        let img = composite(&doc, Background::White);
+        assert_eq!(
+            img.get_pixel(10, 10).0,
+            [255, 0, 0, 255],
+            "base alpha is the group's RAW alpha"
+        );
+
+        // A hidden folder never composites its children: zero base ink.
+        doc.set_layer_visible(hi, false);
+        let img = composite(&doc, Background::White);
+        assert_eq!(
+            img.get_pixel(10, 10).0,
+            [255, 255, 255, 255],
+            "hidden folder = the clip has nothing to sit on"
+        );
     }
 
     #[test]

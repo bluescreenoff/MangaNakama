@@ -1214,6 +1214,33 @@ mod tests {
         assert_eq!(reloaded.comps[0].vis, vec![false, true]);
     }
 
+    /// docs/CLIPPING-SCENARIOS.md: the clip flag persists as one
+    /// `mnc-clip="1"` attr and must come back. Nothing pinned the round
+    /// trip before, and losing it fails SILENTLY — a reopened file just
+    /// shows the clipped layer at full visibility, no error anywhere.
+    #[test]
+    fn clip_flag_round_trips_through_ora() {
+        let mut doc = crate::doc::Document::new(128, 128);
+        doc.add_layer("Tone");
+        assert!(doc.set_layer_clip(1, true));
+        let mut buf = std::io::Cursor::new(Vec::new());
+        save_to(&doc, &mut buf).unwrap();
+        {
+            let mut z = zip::ZipArchive::new(std::io::Cursor::new(buf.get_ref().clone())).unwrap();
+            let mut s = String::new();
+            std::io::Read::read_to_string(&mut z.by_name("stack.xml").unwrap(), &mut s).unwrap();
+            assert_eq!(
+                s.matches("mnc-clip=\"1\"").count(),
+                1,
+                "exactly the clipped layer carries the attr: {s}"
+            );
+        }
+        let reloaded = load_from(std::io::Cursor::new(buf.into_inner())).unwrap();
+        assert_eq!(reloaded.layers.len(), 2);
+        assert!(reloaded.layers[1].clip, "the clipped layer stayed clipped");
+        assert!(!reloaded.layers[0].clip, "its base stayed unclipped");
+    }
+
     /// TRIAGE 138 p2: a masked layer round-trips through ORA — the mask
     /// still hides the same half, the enabled flag survives, and an
     /// unmasked save stays old-shape (no mnc-mask attr). Audit H2 re-point:

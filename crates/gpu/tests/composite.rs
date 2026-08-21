@@ -492,6 +492,65 @@ fn cpu_matches_gpu_with_frame_folder_mask_and_clip() {
     assert_agrees(&mut r, &doc, "frame folder at 50%");
 }
 
+/// docs/CLIPPING-SCENARIOS.md 2a, clip-to-folder: the CPU captures the
+/// group alpha at the folder's close, the GPU copies the group texture
+/// into the clip-base capture — the two must agree, including the
+/// pre-opacity capture point and the hidden/empty-folder zero cases.
+#[test]
+fn cpu_matches_gpu_with_clip_to_folder() {
+    let _serial = gpu_guard();
+    let Some(mut r) = renderer() else { return };
+
+    // [base, child (depth 1), header, shade (clip)] — group ink on the
+    // left column only; the shade layer spans all four tiles.
+    let mut doc = Document::new(128, 128);
+    fill(&mut doc, 0, TileIdx::new(0, 0), [0.9, 0.6, 0.1, 1.0]);
+    fill(&mut doc, 0, TileIdx::new(1, 1), [0.2, 0.2, 0.8, 1.0]);
+    doc.add_layer("child");
+    doc.layers[1].depth = 1;
+    fill(&mut doc, 1, TileIdx::new(0, 0), [0.1, 0.3, 0.9, 0.8]);
+    fill_ramp(&mut doc, 1, TileIdx::new(0, 1), [0.3, 0.8, 0.4]);
+    let mut folder = mn_core::Layer::new("F");
+    folder.folder = true;
+    doc.layers.push(folder);
+    let mut shade = mn_core::Layer::new("shade");
+    shade.clip = true;
+    doc.layers.push(shade);
+    let si = doc.layers.len() - 1;
+    for ty in 0..2 {
+        for tx in 0..2 {
+            fill(&mut doc, si, TileIdx::new(tx, ty), [0.9, 0.2, 0.5, 0.8]);
+        }
+    }
+    assert_agrees(&mut r, &doc, "clip to folder");
+
+    // The capture happens BEFORE the folder's opacity is applied, on both
+    // paths — the clipped layer must not thin with the folder.
+    doc.set_layer_opacity(2, 0.5);
+    r.invalidate();
+    assert_agrees(&mut r, &doc, "clip to folder at 50%");
+
+    // A hidden folder composites no children: zero base ink on both paths.
+    doc.set_layer_visible(2, false);
+    r.invalidate();
+    assert_agrees(&mut r, &doc, "clip to hidden folder");
+
+    // Visible folder, hidden child: the group is EMPTY (the GPU takes the
+    // clear-only capture path, the CPU captures a zeroed accumulator).
+    doc.set_layer_visible(2, true);
+    doc.set_layer_opacity(2, 1.0);
+    doc.set_layer_visible(1, false);
+    r.invalidate();
+    assert_agrees(&mut r, &doc, "clip to empty group");
+
+    // A through folder has no isolated composite: the chain breaks and the
+    // shade layer draws unclipped, identically on both paths.
+    doc.set_layer_visible(1, true);
+    doc.layers[2].through = true;
+    r.invalidate();
+    assert_agrees(&mut r, &doc, "through folder breaks the chain");
+}
+
 #[test]
 fn incremental_redraw_matches_a_cold_render() {
     // The damage-driven path is the one that can rot: paint, render, paint

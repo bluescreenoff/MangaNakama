@@ -2209,9 +2209,12 @@ impl Document {
     }
 
     /// For each layer, the index of the layer its `clip` flag clips it to:
-    /// the nearest layer below at the same depth that is not itself clipped
-    /// and not a folder. `None` = not clipped (or no valid base — the flag is
-    /// then ignored, CSP-style).
+    /// the nearest layer below at the same depth that is not itself clipped —
+    /// a plain layer, or a FOLDER header (clip-to-folder, scenario 2a: the
+    /// group's combined ink is the base). A THROUGH folder has no isolated
+    /// composite to clip to, so it breaks the chain like no base at all.
+    /// `None` = not clipped (or no valid base — the flag is then ignored,
+    /// CSP-style).
     pub fn clip_bases(&self) -> Vec<Option<usize>> {
         let n = self.layers.len();
         let mut out = vec![None; n];
@@ -2224,7 +2227,13 @@ impl Document {
             while j > 0 {
                 j -= 1;
                 let b = &self.layers[j];
-                if b.depth != l.depth || b.folder {
+                if b.depth != l.depth {
+                    break;
+                }
+                if b.folder {
+                    if !b.through {
+                        out[i] = Some(j);
+                    }
                     break;
                 }
                 if !b.clip {
@@ -5278,6 +5287,29 @@ mod tests {
         // The bottom root layer has nothing below it at its depth.
         assert!(doc.set_layer_clip(0, true));
         assert_eq!(doc.clip_bases()[0], None, "no base -> flag ignored");
+    }
+
+    /// docs/CLIPPING-SCENARIOS.md 2a: a layer above a folder clips to the
+    /// folder's combined ink — the header is a valid base now, and a clip
+    /// run above it shares that base. A THROUGH folder has no isolated
+    /// composite to take an alpha from, so it still breaks the chain.
+    #[test]
+    fn clip_above_a_folder_resolves_to_the_folder() {
+        let mut doc = Document::new(64, 64);
+        let hi = doc.add_folder_above(0, "F");
+        doc.add_layer_in_folder(hi, "in").unwrap();
+        let hi = hi + 1; // the child inserted below shifted the header up
+        let top = doc.add_layer_above(hi, "Shade");
+        assert!(doc.set_layer_clip(top, true));
+        let above = doc.add_layer("Shade 2");
+        assert!(doc.set_layer_clip(above, true));
+        let bases = doc.clip_bases();
+        assert_eq!(bases[top], Some(hi), "folder header is the base");
+        assert_eq!(bases[above], Some(hi), "the run resolves through the member");
+        assert!(doc.set_folder_through(hi, true));
+        let bases = doc.clip_bases();
+        assert_eq!(bases[top], None, "a through folder breaks the chain");
+        assert_eq!(bases[above], None, "for the whole run");
     }
 
     /// docs/CLIPPING-SCENARIOS.md #1/#2: a new layer added from the base —
