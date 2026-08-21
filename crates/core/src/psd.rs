@@ -377,7 +377,13 @@ pub fn save_psd<W: Write>(doc: &Document, mut out: W) -> Result<(), PsdError> {
     out.write_all(&0u32.to_be_bytes()).map_err(e)?; // image resources
 
     // -- layer & mask info --
-    let mut layer_info = (count).to_be_bytes().to_vec();
+    // NEGATIVE count: the spec's "first alpha channel contains the
+    // transparency data for the merged result". The merged composite below
+    // is RGBA, and with a positive count that alpha is a SPARE channel (a
+    // stored selection) — Clip Studio imports spare channels as a stocked-
+    // selection row: unnamed, 50 %, green swatch, green-hues the canvas
+    // when enabled (the owner's ghost-layer report, 2026-08-21).
+    let mut layer_info = (-count).to_be_bytes().to_vec();
     layer_info.extend_from_slice(&records);
     layer_info.extend_from_slice(&channels);
     if layer_info.len() % 2 != 0 {
@@ -500,9 +506,13 @@ mod tests {
         let section_end = o + section_len;
         let layer_info_len = be32(o) as usize;
         o += 4;
-        let count = i16::from_be_bytes([buf[o], buf[o + 1]]);
+        let count_raw = i16::from_be_bytes([buf[o], buf[o + 1]]);
         o += 2;
+        // NEGATIVE: composite alpha = transparency, not a spare channel —
+        // a positive count here is the CSP stocked-selection ghost layer.
+        assert!(count_raw < 0, "layer count must declare merged transparency");
         // bottom layer, then the group divider, inner, header = 4 records.
+        let count = -count_raw;
         assert_eq!(count, 4);
         let mut chan_total = 0usize;
         let mut names = Vec::new();
