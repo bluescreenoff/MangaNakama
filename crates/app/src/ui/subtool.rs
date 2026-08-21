@@ -435,11 +435,19 @@ fn brush_sub_tools(ui: &mut egui::Ui, app: &mut App) {
                     continue;
                 }
                 group_caption(ui, group);
+                // Only the artist's own groups are editable: the shipped
+                // ones come back with the next build, so a rename there
+                // would not stick and a delete would not come back at all.
+                let owned = matches!(group, "Mine" | "Imported");
                 for (i, name, path) in rows {
                     let tex = ensure_preview(app, ui.ctx(), &path);
                     let selected = app.selected_preset == Some(i);
-                    if subtool_row(ui, selected, tex.as_ref(), &name).clicked() {
+                    let resp = subtool_row(ui, selected, tex.as_ref(), &name);
+                    if resp.clicked() {
                         clicked = Some(i);
+                    }
+                    if owned {
+                        organise_menu(&resp, app, &name, &path);
                     }
                 }
                 ui.add_space(4.0);
@@ -450,6 +458,62 @@ fn brush_sub_tools(ui: &mut egui::Ui, app: &mut App) {
         app.push_cmd(AppCmd::SelectBrush(p));
     }
 }
+/// The organise half of "brushes without ceremony": Rename / Duplicate /
+/// Delete on the preset row itself, since clicking the row already means
+/// "use this brush" and a properties pane for three verbs is the ceremony.
+/// Rename is an inline box — Enter (or the button) applies, Esc drops it.
+fn organise_menu(resp: &egui::Response, app: &mut App, name: &str, path: &PathBuf) {
+    resp.context_menu(|ui| {
+        ui.set_min_width(170.0);
+        // Seed (or re-seed) from the name on disk, so the box can never
+        // carry one brush's half-typed name onto the next one.
+        let buf = app
+            .brush_rename_edit
+            .get_or_insert_with(|| (path.clone(), name.to_owned()));
+        if buf.0 != *path {
+            *buf = (path.clone(), name.to_owned());
+        }
+        let edit = ui.add(
+            egui::TextEdit::singleline(&mut buf.1)
+                .hint_text("brush name")
+                .desired_width(160.0),
+        );
+        let entered = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        if entered || ui.button("Rename").clicked() {
+            let name = std::mem::take(&mut buf.1);
+            app.brush_rename_edit = None;
+            app.push_cmd(AppCmd::RenameBrush {
+                path: path.clone(),
+                name,
+            });
+            ui.close();
+            return;
+        }
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            app.brush_rename_edit = None;
+            ui.close();
+            return;
+        }
+        ui.separator();
+        if ui
+            .button("Duplicate")
+            .on_hover_text("a copy beside it to retune — the original stays as it is")
+            .clicked()
+        {
+            app.push_cmd(AppCmd::DuplicateBrush(path.clone()));
+            ui.close();
+        }
+        if ui
+            .button("Delete")
+            .on_hover_text("removes the .myb file — there is no undo for this")
+            .clicked()
+        {
+            app.push_cmd(AppCmd::DeleteBrush(path.clone()));
+            ui.close();
+        }
+    });
+}
+
 fn subtool_row(
     ui: &mut egui::Ui,
     selected: bool,

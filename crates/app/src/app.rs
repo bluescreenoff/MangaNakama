@@ -18,6 +18,7 @@ mod comps;
 mod diag;
 mod engine;
 mod frames;
+mod brush_manage;
 mod kpp_import;
 mod make_brush;
 mod sut_import;
@@ -821,6 +822,11 @@ pub struct App {
     /// (the CSP imports carry theirs, Japanese included).
     pub presets: Vec<(String, PathBuf)>,
     pub selected_preset: Option<usize>,
+    /// The preset whose Rename box is open in the Sub Tool list's
+    /// right-click menu, and the name being typed. Re-seeded whenever the
+    /// menu opens on a different preset, so a half-typed name can never land
+    /// on the next brush you right-click.
+    pub brush_rename_edit: Option<(PathBuf, String)>,
     /// Pen and Eraser keep SEPARATE sub tools (owner order): each remembers
     /// its own preset across tool switches.
     pub pen_preset: Option<usize>,
@@ -1398,6 +1404,7 @@ impl App {
             eraser_preset: None,
             presets,
             selected_preset,
+            brush_rename_edit: None,
             hud_open: false,
             feedback_open: false,
             doc_path: None,

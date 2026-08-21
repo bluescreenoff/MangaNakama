@@ -1563,6 +1563,20 @@ pub enum AppCmd {
     RulerSymmetricCount,
     // --- brush + colour ----------------------------------------------------
     SelectBrush(PathBuf),
+    /// ROADMAP "brushes without ceremony", organise half: retitle a preset
+    /// the artist owns. Edits the .myb's `"name"` only — the FILE name is
+    /// the identity `preset_key` stores per-sub-tool sizes under, so it must
+    /// not move.
+    RenameBrush {
+        path: PathBuf,
+        name: String,
+    },
+    /// Copy a preset to the next free `<prefix>-N.myb` beside it, sharing
+    /// the original's tip texture — the "start from this brush" gesture.
+    DuplicateBrush(PathBuf),
+    /// Remove a preset's .myb. The texture PNG stays (it can be shared) and
+    /// there is no undo, which is why the status line names what went.
+    DeleteBrush(PathBuf),
     /// The brush's dab DIAMETER in canvas px, absolute (`SIZE_PX_MIN`..
     /// `SIZE_PX_MAX`). RENAMED from `SetBrushSize`, which carried a 0.25..4
     /// multiplier — same shape of number, different meaning, so the old name
@@ -5343,6 +5357,11 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 Err(e) => app.set_error(format!("brush {} failed: {e}", p.display())),
             }
         }
+        // All three set their own status lines, and each re-checks that the
+        // path is a preset the artist owns before touching the disk.
+        AppCmd::RenameBrush { path, name } => app.rename_brush(path, name),
+        AppCmd::DuplicateBrush(p) => app.duplicate_brush(p),
+        AppCmd::DeleteBrush(p) => app.delete_brush(p),
         AppCmd::SetBrushSizePx(px) => {
             let px = if px.is_finite() { px } else { DEFAULT_SIZE_PX };
             app.props_current.size_px = px.clamp(SIZE_PX_MIN, SIZE_PX_MAX);
