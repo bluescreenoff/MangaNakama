@@ -580,6 +580,10 @@ pub struct DynaDab {
     prev_tip: Option<[f32; 2]>,
     carry: f32,
     last_t: f64,
+    /// Where the pen was at the last sample, and how hard — `end()` pins the
+    /// spring's target here while it settles.
+    last_pen: [f32; 2],
+    last_pressure: f32,
 }
 
 impl Default for DynaDab {
@@ -594,6 +598,8 @@ impl Default for DynaDab {
             prev_tip: None,
             carry: 0.0,
             last_t: 0.0,
+            last_pen: [0.0; 2],
+            last_pressure: 1.0,
         }
     }
 }
@@ -624,6 +630,34 @@ impl DynaDab {
             self.tip[0] += self.vel[0] * h;
             self.tip[1] += self.vel[1] * h;
         }
+    }
+
+    /// Stamp along the TIP path from `a` to the current tip with the standard
+    /// carry spacing.
+    fn ink_to_tip(&mut self, doc: &mut Document, a: [f32; 2], pressure: f32) {
+        let (dx, dy) = (self.tip[0] - a[0], self.tip[1] - a[1]);
+        let len = (dx * dx + dy * dy).sqrt();
+        if !len.is_finite() || len <= 0.0 {
+            return;
+        }
+        let mut d = self.carry;
+        let mut guard = 0usize;
+        while d <= len {
+            let t = d / len;
+            self.base.dab(
+                doc,
+                a[0] + dx * t,
+                a[1] + dy * t,
+                self.base.radius_for(pressure),
+                self.base.alpha_for(pressure),
+            );
+            d += (self.base.radius_for(pressure) * self.base.spacing).max(0.25);
+            guard += 1;
+            if guard > 100_000 {
+                break;
+            }
+        }
+        self.carry = d - len;
     }
 }
 
@@ -658,34 +692,40 @@ impl StrokeSink for DynaDab {
         // Stamp along the TIP path (not the pen path) with the standard
         // carry spacing.
         if let Some(a) = self.prev_tip {
-            let (dx, dy) = (self.tip[0] - a[0], self.tip[1] - a[1]);
-            let len = (dx * dx + dy * dy).sqrt();
-            if len.is_finite() {
-                let mut d = self.carry;
-                let mut guard = 0usize;
-                while d <= len {
-                    let t = d / len;
-                    let p = s.pressure;
-                    self.base.dab(
-                        doc,
-                        a[0] + dx * t,
-                        a[1] + dy * t,
-                        self.base.radius_for(p),
-                        self.base.alpha_for(p),
-                    );
-                    d += (self.base.radius_for(p) * self.base.spacing).max(0.25);
-                    guard += 1;
-                    if guard > 100_000 {
-                        break;
-                    }
-                }
-                self.carry = d - len;
-            }
+            self.ink_to_tip(doc, a, s.pressure);
         }
         self.prev_tip = Some(self.tip);
+        self.last_pen = [s.x, s.y];
+        self.last_pressure = s.pressure;
     }
 
     fn end(&mut self, doc: &mut Document) {
+        // CODE-MAP seam #4: the interior's rule holds at the boundary too.
+        // The tip TRAILS the pen by v·drag/k, so at lift it can still be
+        // 100+ px behind the last sample and the stroke would simply stop in
+        // mid-air. Settle the spring with its target pinned at that sample —
+        // exactly what a dwell would do — inking each settling step, so the
+        // line runs INTO the lift point. Mid-stroke feel is untouched.
+        if self.started {
+            let pen = self.last_pen;
+            let p = self.last_pressure;
+            // 1/120 s steps; the envelope decays as e^(-drag/2 · t), so the
+            // bound is generous headroom, not the expected cost (~0.9 s at
+            // the default k/drag), and a stiff-enough preset just stops early.
+            for _ in 0..600 {
+                let from = self.prev_tip.unwrap_or(self.tip);
+                self.integrate(pen, 1.0 / 120.0);
+                self.ink_to_tip(doc, from, p);
+                self.prev_tip = Some(self.tip);
+                let (dx, dy) = (pen[0] - self.tip[0], pen[1] - self.tip[1]);
+                let speed = (self.vel[0] * self.vel[0] + self.vel[1] * self.vel[1]).sqrt();
+                // Converged: within a fraction of a px AND no longer moving
+                // (an underdamped tip flies through the target at speed).
+                if (dx * dx + dy * dy).sqrt() < 0.25 && speed < 1.0 {
+                    break;
+                }
+            }
+        }
         self.started = false;
         self.prev_tip = None;
         self.carry = 0.0;
@@ -884,6 +924,44 @@ mod krita_engine_tests {
         assert!(
             alpha_at(&doc, 194, 64) > 0,
             "the tip caught up on the dwell"
+        );
+    }
+
+    /// CODE-MAP seam #4 (end conditions exempted from the interior's rule):
+    /// a pen that LIFTS mid-run gets no dwell, so the lagging tip used to
+    /// freeze wherever it happened to be and the stroke stopped in mid-air.
+    /// Measured against the pre-fix code: the pen lifted at x = 194 and the
+    /// rightmost ink sat at x = 94 — a 100 px shortfall (~112 px of tip lag,
+    /// less the 12 px nib radius). `end()` now settles the spring onto the
+    /// last sample, inking the trailing segments; the same run reaches
+    /// x = 208 (194 plus the nib).
+    #[test]
+    fn dyna_end_settles_onto_the_lift_point() {
+        let mut doc = Document::new(256, 128);
+        let mut d = DynaDab::default();
+        doc.begin_op();
+        d.begin(&mut doc);
+        // A fast horizontal run to x = 194, then the pen LIFTS — no dwell.
+        let mut t = 0.0f64;
+        for i in 0..30 {
+            d.sample(&mut doc, sample(20.0 + i as f32 * 6.0, 64.0, t));
+            t += 8.0;
+        }
+        d.end(&mut doc);
+        doc.end_op();
+
+        let mut rightmost = 0i32;
+        for x in (0..256).rev() {
+            if (48..=80).any(|y| alpha_at(&doc, x, y) > 0) {
+                rightmost = x;
+                break;
+            }
+        }
+        // The nib centre must land within a couple of px of the lift point;
+        // its own 12 px radius then carries the ink past it.
+        assert!(
+            rightmost >= 192,
+            "the stroke reaches the lift point (rightmost ink {rightmost}, pen lifted at 194)"
         );
     }
 }
