@@ -201,6 +201,24 @@ special command.</b> The Materials palette's register-layer button is
 already selection-scoped: with a selection up it registers just that
 part of the layer.</div>
 
+<h2>The Tone tool and the fill's auto mode</h2>
+<div class="quirk"><b>One click tones an enclosed region.</b> The Tone
+tool floods the area you click — same tolerance, gap closing and
+reference rules as the bucket — and lays a LIVE tone layer over exactly
+that region: parameters, not pixels, still editable later, one undo
+press for the whole gesture. No selection survives the click (removing
+the deselect step is the point); a selection you already had still
+clips. Each click makes its own tone layer.</div>
+<div class="quirk"><b>"Auto gap &amp; fringe" measures your line art —
+and says when it can't.</b> With the fill's auto box ticked, every click
+first measures how thick the surrounding strokes are (median of boundary
+samples) and derives Close gap (about one line width) and Area scaling
+(half a line width — any more would paint THROUGH the line) from that.
+The greyed rows show what it chose, the status line narrates it, and
+when nothing is measurable — blank paper, solid black walls — your
+manual numbers stand and the status says so; it never invents a value.
+It costs one extra region scan per click.</div>
+
 <h2>Materials and tiling patterns</h2>
 <div class="quirk"><b>Right-click a material cell to tag it; the one
 search box matches names AND tags.</b> There is no second field and no

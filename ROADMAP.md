@@ -71,7 +71,13 @@ mask, panel stays editable), and a plain folder's border effect doubles
 as "knock out behind" — the white mat under balloons and SFX, generated
 from the group's own ink and kept fresh automatically.
 
-**Manga.** Frame folders and panel division with automatic reading-order
+**Manga.** A Tone tool: one click on an enclosed region floods it (the
+fill tool's own region detection, gap closing included) and lays a live,
+editable tone layer over exactly that area — one gesture, one undo. The
+bucket fill can also measure the line art itself: an opt-in auto mode
+reads the stroke thickness at every click and derives its own gap-closing
+and paint-under-the-line fringe, showing the numbers it chose. Frame
+folders and panel division with automatic reading-order
 numbering plus an on-canvas reading-path overlay; balloons with editable
 splines and tails that can fit themselves to their lettering; screentone and
 live tone/gradient fill layers; a material bank (tones, speed lines, focus
@@ -93,7 +99,10 @@ edit-and-return round trip.
 
 **Files.** OpenRaster (`.ora`) as the native layered format, a single-file
 `.mnc` for a whole comic, full-resolution PNG export per page or for the whole
-chapter, layered PSD export for the studio hand-off (groups, all 27 blend
+chapter with print-finishing presets (600 dpi mono-bind, 350 dpi grayscale
+or colour, web — output dpi and colour mode in one pick, resampled first
+and thresholded last so a 1-bit file really is 1-bit, and never
+upsampled), layered PSD export for the studio hand-off (groups, all 27 blend
 modes, clipping, Japanese layer names), crash recovery and autosave.
 
 **Infrastructure.** 500+ tests. GPU tests run against the software adapter when
@@ -128,11 +137,9 @@ every multi-step official recipe is a feature opportunity.
 Further out, in no order: a tone moiré safety net (auto dot-phase against
 neighbouring tones + a print check that names offenders), a publisher/
 printer profile on the work driving trim/bleed/safety/lpi/export together,
-a fill tool that measures gap and fringe itself instead of seven numeric
-options, "make brush from selection" with generated variation, instances
-(place one drawing on many pages, edit once), one-gesture screentone
-application, perspective rulers that explain themselves plus a fisheye
-curvature slider, and print-finishing presets.
+"make brush from selection" with generated variation, instances
+(place one drawing on many pages, edit once), and perspective rulers that
+explain themselves plus a fisheye curvature slider.
 
 Very low priority, recorded so it is not re-proposed: fitting perspective
 rulers to an existing drawing's strokes. The fitting math is tractable;

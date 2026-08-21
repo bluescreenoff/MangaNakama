@@ -21,6 +21,18 @@ rendered pixels; vector layers export as ink. This is an EXPORT — the
 app never reads .psd back, and your working file stays
 <code>.ora</code>/<code>.mnc</code>.</div>
 
+<h2>Export finish (print presets)</h2>
+<div class="quirk"><b>Export never upsamples.</b> The Finish picker in
+Export All Pages bundles output dpi and colour mode (mono 1-bit /
+grayscale / full colour). Asking 600 dpi of a 350 dpi work exports at
+350 — the dialog says so before you pick a folder, because inventing
+detail to hit a printer's number is a lie in a file.</div>
+<div class="quirk"><b>Mono thresholds AFTER the resample.</b> A 1-bit
+finish taken before the downscale would be averaged straight back into
+grey by the filter; the order here is what makes the file genuinely
+two-tone. Editing any control flips the picker to Custom — a preset is
+a starting point, not a lock.</div>
+
 <h2>Where the log lives</h2>
 <div class="quirk"><b><code>manganakama.log</code>, beside the exe —
 or in <code>%LOCALAPPDATA%\MangaNakama\</code>.</b> One block is
