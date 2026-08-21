@@ -326,7 +326,10 @@ pub struct App {
     pub action_picker: Option<(usize, usize)>,
     /// Which step has its inline parameter editor open (action, step).
     pub action_step_edit: Option<(usize, usize)>,
-    pub comp_last_state: Vec<bool>,
+    /// LC-003: the presentation state captured just before the most recent
+    /// comp application, as an unnamed comp — the same shape it restores,
+    /// so it covers every property an apply can write, not just the eyes.
+    pub comp_last_state: Option<mn_core::doc::LayerComp>,
     pub comp_name_draft: String,
     /// LC-006: layers added after a snapshot default to visible.
     pub comp_added_visible: bool,
@@ -1172,7 +1175,7 @@ impl App {
             action_renaming: None,
             action_picker: None,
             action_step_edit: None,
-            comp_last_state: Vec::new(),
+            comp_last_state: None,
             comp_name_draft: String::new(),
             comp_added_visible: true,
             filter_draft: None,

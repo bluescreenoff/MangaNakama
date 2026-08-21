@@ -4263,6 +4263,111 @@ fn layer_comps_snapshot_apply_restore() {
     assert_eq!(app.comp_selected, Some(1));
 }
 
+/// A comp stores more than the eyes (ROADMAP: CSP's visibility-only comps
+/// defeat the people who use them). Capture → change → apply must bring
+/// opacity, blend and the LP-016/017 layer colour back with the
+/// visibility, and LC-003's pinned row must return ALL of it — a
+/// half-restore looks exactly like a comp that half-applied.
+#[test]
+fn layer_comps_carry_opacity_blend_and_layer_colour() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::AddLayer);
+    assert_eq!(app.doc.layers.len(), 2);
+
+    app.doc.layers[0].opacity = 0.4;
+    app.doc.layers[0].blend = mn_core::Blend::Multiply;
+    app.doc.layers[0].layer_colour = Some([9, 8, 7]);
+    app.doc.layers[0].layer_sub_colour = Some([1, 2, 3]);
+    app.doc.layers[1].visible = false;
+    app.comp_add("inked");
+
+    // Everything moves off the snapshot…
+    app.doc.layers[0].opacity = 1.0;
+    app.doc.layers[0].blend = mn_core::Blend::Screen;
+    app.doc.layers[0].layer_colour = None;
+    app.doc.layers[0].layer_sub_colour = None;
+    app.doc.layers[1].visible = true;
+
+    assert!(app.comp_apply(0));
+    assert_eq!(app.doc.layers[0].opacity, 0.4);
+    assert_eq!(app.doc.layers[0].blend, mn_core::Blend::Multiply);
+    assert_eq!(app.doc.layers[0].layer_colour, Some([9, 8, 7]));
+    assert_eq!(app.doc.layers[0].layer_sub_colour, Some([1, 2, 3]));
+    assert!(!app.doc.layers[1].visible);
+
+    // LC-003: the pinned row is the state the apply displaced, whole.
+    app.comp_restore_last();
+    assert_eq!(app.doc.layers[0].opacity, 1.0);
+    assert_eq!(app.doc.layers[0].blend, mn_core::Blend::Screen);
+    assert_eq!(app.doc.layers[0].layer_colour, None);
+    assert_eq!(app.doc.layers[0].layer_sub_colour, None);
+    assert!(app.doc.layers[1].visible);
+
+    // LC-005 overwrites with the current state, properties included.
+    app.doc.layers[0].blend = mn_core::Blend::Darken;
+    assert!(app.comp_save(0));
+    assert_eq!(app.doc.comps[0].name, "inked", "the row keeps its name");
+    assert_eq!(
+        app.doc.comps[0].blend.as_ref().map(|b| b[0].as_str()),
+        Some("svg:darken"),
+        "save re-captures the properties too"
+    );
+}
+
+/// One gesture, one undo press: applying a comp writes presentation
+/// fields across every layer, and undoing it takes the whole set back at
+/// once (a per-layer loop would cost N presses and a partial undo would
+/// leave the stack half-comped).
+#[test]
+fn applying_a_layer_comp_is_one_undo_press() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::AddLayer);
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::AddLayer);
+    for l in app.doc.layers.iter_mut() {
+        l.opacity = 0.2;
+        l.blend = mn_core::Blend::Multiply;
+        l.visible = false;
+        l.layer_colour = Some([5, 5, 5]);
+    }
+    app.comp_add("dim");
+    for l in app.doc.layers.iter_mut() {
+        l.opacity = 1.0;
+        l.blend = mn_core::Blend::Normal;
+        l.visible = true;
+        l.layer_colour = None;
+    }
+    let before: Vec<_> = app
+        .doc
+        .layers
+        .iter()
+        .map(|l| (l.visible, l.opacity, l.blend, l.layer_colour))
+        .collect();
+
+    let depth = app.doc.undo_len();
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::CompApply(0));
+    assert_eq!(
+        app.doc.undo_len(),
+        depth + 1,
+        "one step for the whole stack, not one per layer"
+    );
+    assert!(app.doc.layers.iter().all(|l| !l.visible));
+
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::Undo);
+    let after: Vec<_> = app
+        .doc
+        .layers
+        .iter()
+        .map(|l| (l.visible, l.opacity, l.blend, l.layer_colour))
+        .collect();
+    assert_eq!(after, before, "ONE press undid every property it wrote");
+}
+
 /// TRIAGE 140 v1: the effect-line generator — focus lines land on a
 /// NEW layer as one labelled op, and undo clears the ink.
 #[test]

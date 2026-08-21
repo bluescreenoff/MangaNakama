@@ -1,10 +1,12 @@
 //! Layer comps (TRIAGE 139, LC-001..009): named snapshots of the whole
-//! layer-visibility state, one tap to apply. The comps live ON THE
-//! DOCUMENT (`doc.comps`, persisted as `mnc-comps`) — the App keeps only
-//! selection UX state — so LC-008 (apply across every page, strict
+//! stack's PRESENTATION — the eyes plus opacity, blend and the LP-016/017
+//! layer colour (`mn_core::doc::LayerComp`, which owns the format rule for
+//! comps written by older builds) — one tap to apply. The comps live ON
+//! THE DOCUMENT (`doc.comps`, persisted as `mnc-comps`) — the App keeps
+//! only selection UX state — so LC-008 (apply across every page, strict
 //! structure match) and LC-009 (batch export, one image set per comp)
-//! ride the same store. LC-003's "Last document state" is the visibility
-//! snapshot taken just before the most recent comp APPLICATION.
+//! ride the same store. LC-003's "Last document state" is the same kind of
+//! snapshot, taken just before the most recent comp APPLICATION.
 
 use super::App;
 
@@ -14,11 +16,8 @@ impl App {
     /// mutation here touches the doc — without it, four comps set up and
     /// the app closed met no unsaved-changes prompt and were gone.
     pub fn comp_add(&mut self, name: &str) {
-        let vis: Vec<bool> = self.doc.layers.iter().map(|l| l.visible).collect();
-        self.doc.comps.push(mn_core::doc::LayerComp {
-            name: name.to_string(),
-            vis,
-        });
+        let c = mn_core::doc::LayerComp::capture(name, &self.doc.layers);
+        self.doc.comps.push(c);
         self.comp_selected = Some(self.doc.comps.len() - 1);
         self.doc.touch();
     }
@@ -28,26 +27,32 @@ impl App {
     /// whichever comp happened to be selected). Returns false on a bad
     /// index so the status line stays honest.
     pub fn comp_save(&mut self, i: usize) -> bool {
-        let vis: Vec<bool> = self.doc.layers.iter().map(|l| l.visible).collect();
-        let Some(c) = self.doc.comps.get_mut(i) else {
+        let Some(name) = self.doc.comps.get(i).map(|c| c.name.clone()) else {
             return false;
         };
-        c.vis = vis;
+        self.doc.comps[i] = mn_core::doc::LayerComp::capture(&name, &self.doc.layers);
         self.doc.touch();
         true
     }
 
     /// LC-002: apply a comp. The pre-application state is stashed for
     /// LC-003's pinned row. Returns false on a bad index.
+    ///
+    /// ONE undo press: the comp writes presentation fields across every
+    /// layer, so the pre-image is the whole stack — `record_structure` is
+    /// that door already (its swap also carries opacity/blend/colour, and
+    /// the Undo arm's `next_undo_is_structure` peek is what re-uploads the
+    /// GPU tiles). Applying the same comp twice still records twice, like
+    /// any other repeated gesture.
     pub fn comp_apply(&mut self, i: usize) -> bool {
-        let Some(c) = self.doc.comps.get(i) else {
+        let Some(c) = self.doc.comps.get(i).cloned() else {
             return false;
         };
-        let snap = c.vis.clone();
-        self.comp_last_state = self.doc.layers.iter().map(|l| l.visible).collect();
-        for (li, l) in self.doc.layers.iter_mut().enumerate() {
-            l.visible = snap.get(li).copied().unwrap_or(self.comp_added_visible);
-        }
+        let before = self.doc.layers.clone();
+        let active = self.doc.active;
+        self.doc.record_structure("Apply layer comp", before, active);
+        self.comp_last_state = Some(mn_core::doc::LayerComp::capture("", &self.doc.layers));
+        c.apply_to(&mut self.doc.layers, Some(self.comp_added_visible));
         self.comp_selected = Some(i);
         self.comp_multi.clear();
         self.doc.touch();
@@ -55,17 +60,18 @@ impl App {
         true
     }
 
-    /// LC-003: return to the state before the last comp application.
+    /// LC-003: return to the state before the last comp application. The
+    /// stash is a full capture, so this restores every property the apply
+    /// wrote — a visibility-only restore would leave the opacity/blend the
+    /// comp set behind, looking like the comp half-applied.
     pub fn comp_restore_last(&mut self) {
-        let snap = std::mem::take(&mut self.comp_last_state);
-        if snap.is_empty() {
+        let Some(snap) = self.comp_last_state.take() else {
             return;
-        }
-        for (li, l) in self.doc.layers.iter_mut().enumerate() {
-            if let Some(v) = snap.get(li) {
-                l.visible = *v;
-            }
-        }
+        };
+        // LC-006 has no say here (`None`): the pre-application state IS the
+        // truth for every layer that existed, and a layer added since keeps
+        // its own eye rather than taking a default.
+        snap.apply_to(&mut self.doc.layers, None);
         self.comp_selected = None;
         self.comp_multi.clear();
         self.doc.touch();

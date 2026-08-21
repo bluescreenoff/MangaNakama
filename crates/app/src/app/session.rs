@@ -222,7 +222,7 @@ impl App {
         self.preflight_page = 0;
         self.comp_selected = None;
         self.comp_multi.clear();
-        self.comp_last_state.clear();
+        self.comp_last_state = None;
 
         // THE READER caches by page index + rev, and independently-authored
         // works both count revs from 1 — so a carried texture map paints

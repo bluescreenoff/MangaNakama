@@ -1247,6 +1247,7 @@ mod tests {
         doc.comps.push(crate::doc::LayerComp {
             name: "no text".into(),
             vis: vec![false, true],
+            ..Default::default()
         });
         doc.add_layer("Layer 2");
         let mut buf = std::io::Cursor::new(Vec::new());
@@ -1261,6 +1262,95 @@ mod tests {
         assert_eq!(reloaded.comps.len(), 1);
         assert_eq!(reloaded.comps[0].name, "no text");
         assert_eq!(reloaded.comps[0].vis, vec![false, true]);
+    }
+
+    /// A comp stores more than the eyes: opacity, blend and the LP-016/017
+    /// layer colour survive the `mnc-comps` round trip and come back on
+    /// apply. Blend rides its ORA name, so the assertion is also the pin
+    /// that the two spellings agree.
+    #[test]
+    fn comps_round_trip_opacity_blend_and_layer_colour() {
+        let mut doc = crate::doc::Document::new(128, 128);
+        doc.add_layer("Layer 2");
+        doc.layers[0].opacity = 0.25;
+        doc.layers[0].blend = crate::doc::Blend::Multiply;
+        doc.layers[0].layer_colour = Some([10, 20, 30]);
+        doc.layers[0].layer_sub_colour = Some([200, 210, 220]);
+        doc.layers[1].visible = false;
+        let c = crate::doc::LayerComp::capture("inked", &doc.layers);
+        doc.comps.push(c);
+
+        let mut buf = std::io::Cursor::new(Vec::new());
+        save_to(&doc, &mut buf).unwrap();
+        let mut doc = load_from(std::io::Cursor::new(buf.into_inner())).unwrap();
+        assert_eq!(doc.layers.len(), 2);
+
+        // Move every recorded property off the snapshot, then apply.
+        for l in doc.layers.iter_mut() {
+            l.visible = true;
+            l.opacity = 1.0;
+            l.blend = crate::doc::Blend::Screen;
+            l.layer_colour = None;
+            l.layer_sub_colour = None;
+        }
+        let c = doc.comps[0].clone();
+        c.apply_to(&mut doc.layers, Some(true));
+        assert_eq!(c.name, "inked");
+        assert_eq!(doc.layers[0].opacity, 0.25);
+        assert_eq!(doc.layers[0].blend, crate::doc::Blend::Multiply);
+        assert_eq!(doc.layers[0].layer_colour, Some([10, 20, 30]));
+        assert_eq!(doc.layers[0].layer_sub_colour, Some([200, 210, 220]));
+        assert!(!doc.layers[1].visible, "the eyes still ride along");
+    }
+
+    /// BACKWARD COMPATIBILITY, the load-bearing half: a comp saved by a
+    /// build that only knew visibility has no opacity/blend/colour fields
+    /// at all, and applying it must touch NOTHING but the eyes. The old
+    /// serialized form is built by hand here on purpose — a capture from
+    /// today's code could never produce it.
+    #[test]
+    fn an_old_format_comp_applies_visibility_only() {
+        let old = r#"[{"name":"no text","vis":[false,true]}]"#;
+        let comps: Vec<crate::doc::LayerComp> = serde_json::from_str(old).unwrap();
+        assert_eq!(comps.len(), 1);
+        let c = &comps[0];
+        assert!(
+            c.opacity.is_none() && c.blend.is_none() && c.colour.is_none(),
+            "absent fields stay absent — a default Vec would read as 'recorded'"
+        );
+
+        let mut doc = crate::doc::Document::new(64, 64);
+        doc.add_layer("Layer 2");
+        for l in doc.layers.iter_mut() {
+            l.opacity = 0.5;
+            l.blend = crate::doc::Blend::Overlay;
+            l.layer_colour = Some([1, 2, 3]);
+            l.layer_sub_colour = Some([4, 5, 6]);
+        }
+        c.apply_to(&mut doc.layers, Some(true));
+        assert!(!doc.layers[0].visible, "the eyes are what it recorded");
+        assert!(doc.layers[1].visible);
+        for l in &doc.layers {
+            assert_eq!(l.opacity, 0.5, "opacity untouched, not reset to 1.0");
+            assert_eq!(l.blend, crate::doc::Blend::Overlay);
+            assert_eq!(l.layer_colour, Some([1, 2, 3]));
+            assert_eq!(l.layer_sub_colour, Some([4, 5, 6]));
+        }
+
+        // …and it still writes back readable to an old build: `vis` is
+        // always there, and a today-capture only ADDS keys.
+        let j = serde_json::to_string(&comps).unwrap();
+        assert!(j.contains("\"vis\""), "{j}");
+        assert!(!j.contains("opacity"), "absent stays absent on rewrite: {j}");
+        let fresh = crate::doc::LayerComp::capture("new", &doc.layers);
+        let j = serde_json::to_string(&fresh).unwrap();
+        assert!(
+            j.contains("\"vis\"")
+                && j.contains("opacity")
+                && j.contains("blend")
+                && j.contains("colour"),
+            "a new capture records everything: {j}"
+        );
     }
 
     /// docs/CLIPPING-SCENARIOS.md: the clip flag persists as one

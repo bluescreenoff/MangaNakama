@@ -1363,9 +1363,9 @@ pub enum AppCmd {
     MaskEdit,
     /// TRIAGE 139 v1: apply layer comp `i`.
     CompApply(usize),
-    /// LC-005: overwrite the selected comp with the current visibility.
-    /// Overwrite comp `i` (the row whose 💾 was clicked) with the current
-    /// visibility.
+    /// LC-005: overwrite comp `i` (the row whose 💾 was clicked) with the
+    /// layers' current presentation state — eyes, opacity, blend, layer
+    /// colour (`LayerComp::capture`).
     CompSave(usize),
     /// TRIAGE 140 v1: open the speed/focus line generator dialog.
     GenLines,
@@ -2446,7 +2446,7 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 && let Some(n) = name
             {
                 app.set_status(format!(
-                    "layer comp \"{n}\" overwritten with current visibility"
+                    "layer comp \"{n}\" overwritten with the layers' current state"
                 ));
             } else {
                 app.set_status("no comp at that row to overwrite");
@@ -4251,9 +4251,7 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 match mn_core::project::bytes_to_doc(b) {
                     Ok(mut d) => {
                         if d.layers.len() == c.vis.len() {
-                            for (l, v) in d.layers.iter_mut().zip(&c.vis) {
-                                l.visible = *v;
-                            }
+                            c.apply_to(&mut d.layers, None);
                             if let Ok(nb) = mn_core::project::doc_to_bytes(&d) {
                                 updated.push((pi, nb));
                                 ok += 1;
@@ -4286,9 +4284,7 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             // silently evaporated from the active page on the next save.
             // Apply it here too, same strict structure check.
             if app.doc.layers.len() == c.vis.len() {
-                for (l, v) in app.doc.layers.iter_mut().zip(&c.vis) {
-                    l.visible = *v;
-                }
+                c.apply_to(&mut app.doc.layers, None);
                 app.doc.touch();
                 app.mark_dirty();
             }
@@ -4337,9 +4333,7 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                         continue;
                     };
                     if d.layers.len() == c.vis.len() {
-                        for (l, v) in d.layers.iter_mut().zip(&c.vis) {
-                            l.visible = *v;
-                        }
+                        c.apply_to(&mut d.layers, None);
                     }
                     d.refresh_derived(dpi);
                     let img =

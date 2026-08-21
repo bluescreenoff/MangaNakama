@@ -20,9 +20,16 @@ pub fn comps_palette(ui: &mut egui::Ui, app: &mut App) {
         ui.text_edit_singleline(&mut app.comp_name_draft)
             .on_hover_text("the next comp's name");
     });
+    // The one line of UI the extended capture needs: a comp is no longer
+    // "the eyes", and nothing else on the palette says what it took.
+    ui.weak("records visibility, opacity, blend, layer colour")
+        .on_hover_text(
+            "applying a comp is one undo press; a comp saved by an older build still \
+             restores its eyes only",
+        );
     ui.separator();
     // LC-003: the pinned pre-comp state.
-    let can_last = !app.comp_last_state.is_empty();
+    let can_last = app.comp_last_state.is_some();
     let row = egui::RichText::new("Last document state").weak();
     if ui
         .add_enabled(can_last, egui::Button::new(row))
@@ -76,7 +83,7 @@ pub fn comps_palette(ui: &mut egui::Ui, app: &mut App) {
                 }
                 if ui
                     .small_button("💾")
-                    .on_hover_text("overwrite with current visibility")
+                    .on_hover_text("overwrite with the layers' current state")
                     .clicked()
                 {
                     app.push_cmd(AppCmd::CompSave(*i));

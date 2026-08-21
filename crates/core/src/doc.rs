@@ -1164,7 +1164,8 @@ pub struct Document {
     /// between `begin_op` and `end_op` ("Stroke", "Fill", …). Consumed
     /// by `end_op`; unset = "Edit".
     pub pending_op_label: Option<String>,
-    /// LC-001 layer comps (TRIAGE 139): named whole-visibility snapshots.
+    /// LC-001 layer comps (TRIAGE 139): named whole-stack presentation
+    /// snapshots (eyes, opacity, blend, layer colour — see [`LayerComp`]).
     /// Positional — comp.vis[i] maps to layers[i] — because the comp's
     /// daily use (text/no-text chapter versions) has IDENTICAL structure
     /// on every page; a length mismatch refuses on apply rather than
@@ -1222,12 +1223,89 @@ impl Default for Paper {
     }
 }
 
-/// One layer comp (TRIAGE 139, LC-001): every layer's visibility flag
-/// under a name.
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+/// One layer comp (TRIAGE 139, LC-001): a named snapshot of the layer
+/// PRESENTATION state — the eyes, plus opacity, blend and the LP-016/017
+/// layer colour. Every field is positional: index `i` is `layers[i]`.
+///
+/// **Persisted format (`mnc-comps`, serde JSON on the ORA image element).**
+/// `vis` is the v1 field and is always written. Every property added since
+/// rides an `Option<Vec<_>>` that is omitted when absent, and absent means
+/// *this comp does not touch that property* — never *reset it to the
+/// default*. A comp the owner saved before this round records only eyes,
+/// and applying it must still change only eyes; a plain `#[serde(default)]`
+/// `Vec` would read back empty, which `apply_to` cannot tell from "recorded
+/// nothing" — and the failure is silent, every layer's opacity snapping to
+/// 1.0 on a comp that never claimed to own opacity. New captures always
+/// fill all of them, so an omission only ever describes an old file, and an
+/// old build reading a new file still finds the `vis` it knows.
+/// Blend rides its ORA `composite-op` name (`Blend::ora_name`) rather than a
+/// second serde spelling of the enum: that mapping is already the file
+/// format's word and is round-trip tested, so the picker's variant order
+/// stays free to move.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LayerComp {
     pub name: String,
     pub vis: Vec<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opacity: Option<Vec<f32>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blend: Option<Vec<String>>,
+    /// LP-016 layer colour (the MAIN end of the two-tone ramp).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub colour: Option<Vec<Option<[u8; 3]>>>,
+    /// LP-017 SUB colour — the other end of the same ramp, so it travels
+    /// with the main one or the tint restores half-set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sub_colour: Option<Vec<Option<[u8; 3]>>>,
+}
+
+impl LayerComp {
+    /// Snapshot the stack under `name`. A new capture records EVERY
+    /// property (see the format note) — the `Option`s exist for files, not
+    /// for capture-time choices.
+    pub fn capture(name: &str, layers: &[Layer]) -> Self {
+        Self {
+            name: name.to_string(),
+            vis: layers.iter().map(|l| l.visible).collect(),
+            opacity: Some(layers.iter().map(|l| l.opacity).collect()),
+            blend: Some(
+                layers
+                    .iter()
+                    .map(|l| l.blend.ora_name().to_string())
+                    .collect(),
+            ),
+            colour: Some(layers.iter().map(|l| l.layer_colour).collect()),
+            sub_colour: Some(layers.iter().map(|l| l.layer_sub_colour).collect()),
+        }
+    }
+
+    /// Push the snapshot back onto `layers`. `added_visible` is LC-006's
+    /// default eye for a layer added AFTER the snapshot; `None` leaves such
+    /// a layer alone (LC-003's restore, where the pre-application state is
+    /// the truth and there is nothing to default). No other property has a
+    /// default — a layer past the recorded end keeps what it has, the same
+    /// rule as a property this comp never recorded.
+    pub fn apply_to(&self, layers: &mut [Layer], added_visible: Option<bool>) {
+        for (li, l) in layers.iter_mut().enumerate() {
+            match (self.vis.get(li), added_visible) {
+                (Some(v), _) => l.visible = *v,
+                (None, Some(v)) => l.visible = v,
+                (None, None) => {}
+            }
+            if let Some(o) = self.opacity.as_ref().and_then(|v| v.get(li)) {
+                l.opacity = *o;
+            }
+            if let Some(b) = self.blend.as_ref().and_then(|v| v.get(li)) {
+                l.blend = Blend::from_ora_name(b);
+            }
+            if let Some(c) = self.colour.as_ref().and_then(|v| v.get(li)) {
+                l.layer_colour = *c;
+            }
+            if let Some(c) = self.sub_colour.as_ref().and_then(|v| v.get(li)) {
+                l.layer_sub_colour = *c;
+            }
+        }
+    }
 }
 
 /// Shift a tile map by whole pixels, sub-tile accurate: each source tile
