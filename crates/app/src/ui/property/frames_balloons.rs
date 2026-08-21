@@ -10,7 +10,7 @@ pub(crate) fn sec_frame_tool(ui: &mut egui::Ui, app: &mut App) {
             let mut b = app.frame_border_mm;
             if ValueBar::new("Border", 0.1, 3.0)
                 .decimals(2)
-                .suffix(" mm")
+                .display_text(px_mm_text(b, app.page_dpi()))
                 .show(ui, &mut b)
                 .changed()
             {
@@ -491,7 +491,7 @@ pub(crate) fn sec_obj_frame(ui: &mut egui::Ui, app: &mut App) {
     let mut mm = app.border_edit.unwrap_or(fs.border_px / px_per_mm);
     let resp = ValueBar::new("Border", 0.1, 3.0)
         .decimals(2)
-        .suffix(" mm")
+        .display_text(px_mm_text(mm, app.page_dpi()))
         .show(ui, &mut mm);
     if resp.changed() {
         app.border_edit = Some(mm);

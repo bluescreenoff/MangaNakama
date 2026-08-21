@@ -6,7 +6,7 @@
 use super::icons::{self, Icon};
 use super::theme;
 use super::theme::ValueBar;
-use super::widgets::{group_caption, icon_btn};
+use super::widgets::{group_caption, icon_btn, px_mm_text};
 use crate::app::{App, LayerFilterKind};
 use crate::cmd::AppCmd;
 use mn_core::{Blend, FillKind, LayerKind};
@@ -77,7 +77,7 @@ pub(super) fn layer_property(ui: &mut egui::Ui, app: &mut App) {
             let mut mm = app.border_edit.unwrap_or(fs.border_px / px_per_mm);
             let resp = ValueBar::new("Thickness", 0.1, 3.0)
                 .decimals(2)
-                .suffix(" mm")
+                .display_text(px_mm_text(mm, app.page_dpi()))
                 .show(ui, &mut mm);
             if resp.changed() {
                 app.border_edit = Some(mm);

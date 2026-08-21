@@ -24,10 +24,15 @@ use crate::tile::{Tile, TileIdx};
 
 /// One undoable step.
 ///
-/// Both variants carry an index into `Document::layers` at the time the op was
-/// recorded. Layer-structure changes (add/remove/duplicate/reorder) invalidate
-/// these indices, so `Document` clears the history when one happens. See
-/// `Document::add_layer` and friends.
+/// Most variants carry an index into `Document::layers` at the time the op
+/// was recorded. Those indices stay meaningful because undo is LIFO and
+/// every layer-structure change (add/remove/duplicate/reorder — see
+/// `Document::record_structure`) records a [`UndoGroup::Structure`]
+/// snapshot: by the time an index-carrying group is swapped, the Structure
+/// swaps above it have restored the exact stack it was recorded against.
+/// (Until 2026-08-21 structure changes cleared the history instead; the
+/// one survivor of that model is `Document::resize_to`, whose canvas-size
+/// change a snapshot cannot express.)
 #[derive(Clone, Debug)]
 pub enum UndoGroup {
     /// Every tile a single op touched, with its pre-image. `None` in the second
@@ -117,17 +122,18 @@ pub enum UndoGroup {
         strokes: crate::stroke_set::StrokeSet,
     },
     /// A TRANSACTION: several groups, one user gesture, one undo press
-    /// (batch layer operations). Swapping swaps the members in order and
-    /// the inverse carries them REVERSED, so redo replays forward again.
-    /// Document-level for [`UndoGroup::layer`] purposes — safe because a
-    /// layer-STRUCTURE change clears the whole history (the enum's doc
-    /// comment), so member indices cannot outlive their meaning.
+    /// (batch layer operations, recorded action runs). Swapping swaps the
+    /// members in order and the inverse carries them REVERSED, so redo
+    /// replays forward again. Document-level for [`UndoGroup::layer`]
+    /// purposes — member indices stay meaningful for the LIFO reason on
+    /// the enum: members apply newest-first, each against exactly the doc
+    /// state the previous member's swap produced, and a structural member
+    /// is itself a [`UndoGroup::Structure`] swap.
     Compound(Vec<UndoGroup>),
     /// A whole-STACK snapshot: the layer vec and active index as they were
-    /// before an action-sequence run (recordable actions replay through the
-    /// normal commands, and any structural step clears the history — this
-    /// group, pushed after the run onto the cleared history, is what makes
-    /// the whole run one undo press). `Arc`-cheap like `duplicate_layer`:
+    /// before a structural op (add/remove/duplicate/move/merge/divide/
+    /// combine — `Document::record_structure`). `Arc`-cheap like
+    /// `duplicate_layer`:
     /// a tile only becomes a copy when someone later paints on it.
     /// Document-level; `tile_count` reports 0 (the snapshot is handles, not
     /// pixel copies). **Swapping does NOT stamp tile revisions** — restored
@@ -203,8 +209,9 @@ impl UndoGroup {
 /// DEFAULT for [`History::limit`], and the shipped value of the `undo_depth`
 /// preference. Generous on purpose: a group is a handful of `Arc`s, not
 /// pixels — a snapshot only becomes a real 32 KiB copy when a later op
-/// rewrites the tile. (Owner 2026-08-14: 200 felt shallow; the deeper fix is
-/// making structural layer ops undoable instead of history-clearing.)
+/// rewrites the tile. (Owner 2026-08-14: 200 felt shallow. The deeper fix —
+/// structural layer ops recording instead of history-clearing — landed
+/// 2026-08-21, so the depth is finally what this number says it is.)
 pub const UNDO_LIMIT: usize = 400;
 
 /// Undo + redo stacks. Owned by `Document`; you drive it through

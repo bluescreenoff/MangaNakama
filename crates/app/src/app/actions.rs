@@ -13,12 +13,11 @@
 //!   `Document`. Each command arm carries its own cache doors (evictions,
 //!   thumbnail resets, frame renumbering); a replay that bypassed dispatch
 //!   would skip exactly those.
-//! * **One run = one undo press.** A run containing a structural step
-//!   (new layer / folder) has its history cleared by that step anyway, so
-//!   the run ends by pushing ONE `UndoGroup::Structure` (the pre-run stack,
-//!   `Arc`-cheap). A run of only non-structural steps instead bundles the
-//!   groups it pushed into ONE `Compound` and the user's earlier history
-//!   survives — clearing it for a tone tweak would be theft.
+//! * **One run = one undo press.** Every step records — structural ones
+//!   (new layer / folder) as `UndoGroup::Structure` snapshots since the
+//!   2026-08-21 structural-undo round — so the run bundles whatever it
+//!   pushed into ONE `Compound` via `wrap_recent`, and the user's earlier
+//!   history always survives.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -64,18 +63,6 @@ impl ActionStep {
             ActionStep::SelectBelow => "Select layer below".into(),
             ActionStep::GaussianBlur(s) => format!("Gaussian blur σ {s:.1}"),
         }
-    }
-
-    /// Structural steps change the layer stack — they clear the undo
-    /// history when replayed, which decides how the run wraps its undo.
-    fn is_structural(&self) -> bool {
-        matches!(
-            self,
-            ActionStep::NewRasterLayer
-                | ActionStep::NewVectorLayer
-                | ActionStep::NewFolder
-                | ActionStep::NewFrameFolder
-        )
     }
 
     /// Lower to the command it replays as. `active` is read at replay time,
@@ -241,9 +228,7 @@ impl App {
             self.set_status("this action has no enabled steps");
             return;
         }
-        let structural = steps.iter().any(ActionStep::is_structural);
-        let before = structural.then(|| (self.doc.layers.clone(), self.doc.active));
-        let depth_before = self.doc.undo_labels().len();
+        let ops_before = self.doc.op_count();
         // The recorder must not eat the replay (recording while running an
         // existing action is how CSP composes them — v1 keeps it simple and
         // records nothing during a run).
@@ -253,21 +238,14 @@ impl App {
             cmd::dispatch(self, cmd);
         }
         self.action_running = false;
-        match before {
-            Some((layers, active)) => {
-                // The structural steps cleared the history mid-run; the
-                // snapshot pair (pre-run stack in the group, post-run stack
-                // live) supersedes whatever else the run pushed.
-                self.doc.push_structure(&name, layers, active);
-            }
-            None => {
-                // Non-structural run: bundle what it pushed, keep the
-                // user's earlier history. Newest-first member order is the
-                // undo order (Compound swaps members in sequence).
-                let n = self.doc.undo_labels().len().saturating_sub(depth_before);
-                self.doc.wrap_recent(&name, n);
-            }
-        }
+        // Every step records now — structural ones as Structure snapshots
+        // (2026-08-21) — so ONE bundling path: wrap what the run pushed
+        // into a single press, keeping the user's earlier history. Counted
+        // by the ops tally, not stack depth: the depth stops moving when
+        // the cap trims the oldest entries mid-run. Newest-first member
+        // order is the undo order (Compound swaps members in sequence).
+        let pushed = (self.doc.op_count().saturating_sub(ops_before)) as usize;
+        self.doc.wrap_recent(&name, pushed.min(self.doc.undo_len()));
         self.set_status(format!("\"{name}\" ran — one undo takes it all back"));
         self.mark_dirty();
     }

@@ -22,10 +22,11 @@ than leaving the palette with no editing target, and the last remaining
 row cannot be deselected at all.</div>
 <div class="quirk warn"><b>Any structural change clears the
 multi-selection.</b> Add, delete, move or import a layer and the extra
-rows drop back to one. This is the same door the undo history goes
-through, for the same reason: the selection is a list of row
+rows drop back to one. The selection is a list of row
 <i>positions</i>, and those positions stop meaning what they meant the
-moment the stack shifts. Nothing is lost — re-pick the rows.</div>
+moment the stack shifts. Nothing is lost — re-pick the rows. (Your undo
+history no longer shares this fate: structural changes are ordinary
+undo steps now.)</div>
 <div class="quirk warn"><b>"Selection from this layer's ink" now lives on
 the THUMBNAIL only.</b> <kbd>Ctrl</kbd>+click the thumbnail to load the
 layer's alpha as a selection; hold <kbd>Shift</kbd> to add,
@@ -135,13 +136,12 @@ whatever layer is active; each step has a checkbox, so a stored
 sequence can run with parts switched off. Actions live in
 <code>actions.json</code> beside the executable — deleting
 <code>ui.txt</code> to fix a dock layout does not touch them.</div>
-<div class="quirk"><b>One run, one undo press.</b> A run that creates
-layers or folders replaces your undo history with a single step named
-after the action — the same rule any new layer already follows, at run
-size. A run of only non-structural steps (tone, border, blur, rename)
-stacks one step on TOP of your history instead, and everything before
-it stays undoable. (A run of nothing but renames pushes no step at all
-— renames are not undoable here, run-wrapped or not.)</div>
+<div class="quirk"><b>One run, one undo press.</b> A run stacks one
+step named after the action on TOP of your history, and everything
+before it stays undoable — creating layers and folders included, since
+those are ordinary undo steps now. (A run of nothing but renames
+pushes no step at all — renames are not undoable here, run-wrapped or
+not.)</div>
 <div class="quirk warn"><b>Recording only hears commands aimed at the
 active layer.</b> Steps carry no layer numbers — replay follows
 whatever is active, like Clip Studio's. Clicking a different row while

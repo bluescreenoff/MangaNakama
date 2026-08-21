@@ -212,7 +212,7 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
             }
             ui.separator();
             if item(ui, "Preferences…", "") {
-                app.push_cmd(AppCmd::OpenPrefs);
+                app.push_cmd(AppCmd::OpenPrefs(None));
                 ui.close();
             }
         });

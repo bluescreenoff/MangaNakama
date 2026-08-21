@@ -605,13 +605,18 @@ pub(super) fn canvas_size_window(ctx: &egui::Context, app: &mut App) {
 /// A group header inside the Preferences window. Five of these instead of
 /// tabs: ten rows fit in one column, and a tab bar over ten rows is a
 /// filing system for a drawer with three things in it.
-fn pref_head(ui: &mut egui::Ui, text: &str) {
+fn pref_head(ui: &mut egui::Ui, text: &str, focus: Option<&str>) {
     ui.add_space(7.0);
-    ui.label(
-        egui::RichText::new(text)
-            .strong()
-            .color(super::theme::TEXT_STRONG),
-    );
+    // The window has no tabs, so "open Preferences on Performance" — what
+    // the command palette's Preferences rows ask for — can only mean: open
+    // it with that header lit. Accent rather than a scroll, because every
+    // header is already on screen; the only thing missing is where to look.
+    let lit = focus == Some(text);
+    ui.label(egui::RichText::new(text).strong().color(if lit {
+        super::theme::ACCENT
+    } else {
+        super::theme::TEXT_STRONG
+    }));
     ui.add_space(2.0);
 }
 
@@ -638,6 +643,7 @@ pub(super) fn prefs_window(ctx: &egui::Context, app: &mut App) {
         return;
     }
     let mut open = app.prefs_open;
+    let focus = app.prefs_focus;
     let mut changed = false;
     let mut reset = false;
     let mut preset_pick: Option<String> = None;
@@ -656,7 +662,7 @@ pub(super) fn prefs_window(ctx: &egui::Context, app: &mut App) {
             ui.set_max_width(430.0);
             let p = &mut app.prefs;
 
-            pref_head(ui, "Saving");
+            pref_head(ui, "Saving", focus);
             egui::Grid::new("mn.prefs.saving")
                 .num_columns(2)
                 .spacing([10.0, 5.0])
@@ -712,7 +718,7 @@ pub(super) fn prefs_window(ctx: &egui::Context, app: &mut App) {
                  trigger.",
             );
 
-            pref_head(ui, "Drawing");
+            pref_head(ui, "Drawing", focus);
             egui::Grid::new("mn.prefs.drawing")
                 .num_columns(2)
                 .spacing([10.0, 5.0])
@@ -733,7 +739,7 @@ pub(super) fn prefs_window(ctx: &egui::Context, app: &mut App) {
                  stabilizer. 0 turns the floor off.",
             );
 
-            pref_head(ui, "Canvas & view");
+            pref_head(ui, "Canvas & view", focus);
             egui::Grid::new("mn.prefs.canvas")
                 .num_columns(2)
                 .spacing([10.0, 5.0])
@@ -815,7 +821,7 @@ pub(super) fn prefs_window(ctx: &egui::Context, app: &mut App) {
                 });
             ui.weak("New canvas and preset apply to the next document you create.");
 
-            pref_head(ui, "Text");
+            pref_head(ui, "Text", focus);
             egui::Grid::new("mn.prefs.text")
                 .num_columns(2)
                 .spacing([10.0, 5.0])
@@ -839,7 +845,7 @@ pub(super) fn prefs_window(ctx: &egui::Context, app: &mut App) {
                     ui.end_row();
                 });
 
-            pref_head(ui, "History");
+            pref_head(ui, "History", focus);
             egui::Grid::new("mn.prefs.history")
                 .num_columns(2)
                 .spacing([10.0, 5.0])
@@ -863,7 +869,7 @@ pub(super) fn prefs_window(ctx: &egui::Context, app: &mut App) {
             // was any way to SEE which authority decided, so an owner whose
             // machine measured CPU-faster could tell "working as designed"
             // from "broken and silent". Same sentence as the startup log.
-            pref_head(ui, "Performance");
+            pref_head(ui, "Performance", focus);
             ui.label(gpu_line);
             ui.weak(
                 "Inking moves to the GPU only where a measurement on this machine says \
@@ -906,6 +912,11 @@ pub(super) fn prefs_window(ctx: &egui::Context, app: &mut App) {
         app.autosave_rearm = Some(app.prefs.autosave_ms());
     }
     app.prefs_open = open;
+    if !open {
+        // The lit header belongs to the trip that asked for it, not to the
+        // next time the window is opened from the menu.
+        app.prefs_focus = None;
+    }
 }
 
 // --- tonal correction ---------------------------------------------------

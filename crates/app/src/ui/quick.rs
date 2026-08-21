@@ -16,7 +16,20 @@ use std::path::PathBuf;
 
 use super::theme;
 use crate::app::App;
-use crate::cmd::{AppCmd, Tool};
+use crate::cmd::{AppCmd, SubTool, Tool};
+
+/// The Preferences window's section headers, in the order it draws them —
+/// the palette's "Preferences ▸ …" rows open the window with one of these
+/// lit (`ui::dialogs::pref_head`). Renaming a header here without renaming
+/// it there only costs the highlight, never the row.
+const PREF_SECTIONS: [&str; 6] = [
+    "Saving",
+    "Drawing",
+    "Canvas & view",
+    "Text",
+    "History",
+    "Performance",
+];
 
 /// One searchable entry: what it is called, where it lives (the parenthetical
 /// UI-052 shows), and what it runs. Curated — payload commands are named,
@@ -264,9 +277,14 @@ pub struct Entry {
 }
 
 /// Everything the palette can run: `command_index()` first, then one row per
-/// brush preset. Taking the presets as an argument rather than reading `App`
-/// is what makes the whole search testable.
-pub fn palette_entries(presets: &[(String, PathBuf)]) -> Vec<Entry> {
+/// brush preset, then the rest of the Sub Tool list, the user's own auto
+/// actions, the Preferences sections and the palettes the Workspace menu
+/// reopens. Taking the presets and action names as arguments rather than
+/// reading `App` is what makes the whole search testable.
+///
+/// Half of what anyone hunts for is not a menu item: it is a sub tool, an
+/// action he recorded last week, or the palette he closed by accident.
+pub fn palette_entries(presets: &[(String, PathBuf)], actions: &[String]) -> Vec<Entry> {
     command_index()
         .into_iter()
         .map(|(label, path, cmd)| Entry {
@@ -278,6 +296,32 @@ pub fn palette_entries(presets: &[(String, PathBuf)]) -> Vec<Entry> {
             label: name.clone(),
             path: "Sub Tool ▸ Brush",
             cmd: AppCmd::SelectBrush(p.clone()),
+        }))
+        // Every non-brush sub tool, switching the TOOL as well as the mode —
+        // picking "Lasso" from the palette must leave you holding the
+        // Selection tool, exactly as clicking that row does.
+        .chain(SubTool::ALL.iter().map(|&s| Entry {
+            label: s.label().to_owned(),
+            path: s.path(),
+            cmd: AppCmd::SetSubTool(s),
+        }))
+        // Auto actions are index-keyed (`ActionRun`), so these rows are built
+        // fresh from the list every time the overlay opens — a renamed or
+        // deleted action must never leave a row pointing at its old slot.
+        .chain(actions.iter().enumerate().map(|(i, name)| Entry {
+            label: name.clone(),
+            path: "Auto Action",
+            cmd: AppCmd::ActionRun(i),
+        }))
+        .chain(PREF_SECTIONS.iter().map(|&s| Entry {
+            label: s.to_owned(),
+            path: "Preferences",
+            cmd: AppCmd::OpenPrefs(Some(s)),
+        }))
+        .chain(super::dock::ALL.iter().map(|&p| Entry {
+            label: format!("{} palette", p.title()),
+            path: "Workspace",
+            cmd: AppCmd::PaletteOpen(p),
         }))
         .collect()
 }
@@ -379,7 +423,8 @@ pub fn command_palette(ctx: &egui::Context, app: &mut App) {
         return;
     }
 
-    let entries = palette_entries(&app.presets);
+    let action_names: Vec<String> = app.actions.iter().map(|a| a.name.clone()).collect();
+    let entries = palette_entries(&app.presets, &action_names);
     let hits = palette_filter(
         &entries,
         &app.cmdpal_query,
@@ -560,8 +605,119 @@ mod tests {
         ]
     }
 
+    /// Two named actions, the same shape the Auto Actions palette holds.
+    fn fake_actions() -> Vec<String> {
+        vec!["Tone a flat".to_owned(), "Panel setup".to_owned()]
+    }
+
+    fn all_entries() -> Vec<Entry> {
+        palette_entries(&fake_presets(), &fake_actions())
+    }
+
     fn labels(entries: &[Entry], hits: &[usize]) -> Vec<String> {
         hits.iter().map(|&i| entries[i].label.clone()).collect()
+    }
+
+    /// The sub tool half beyond the brushes: every row of every tool's Sub
+    /// Tool list is reachable, and running one switches the TOOL as well as
+    /// the mode — a "Lasso" that left you holding the Fill tool would be a
+    /// worse answer than not listing it.
+    #[test]
+    fn palette_entries_carry_every_sub_tool() {
+        let entries = all_entries();
+        let lasso = entries
+            .iter()
+            .find(|e| e.label == "Lasso" && e.path == "Sub Tool ▸ Selection")
+            .expect("the Selection tool's Lasso row");
+        match lasso.cmd {
+            AppCmd::SetSubTool(s) => {
+                assert_eq!(s.tool(), Tool::Select, "the pick carries its tool");
+                assert_eq!(s, crate::cmd::SubTool::Select(crate::cmd::SelectMode::Lasso));
+            }
+            ref other => panic!("a sub tool row must push SetSubTool, not {other:?}"),
+        }
+        // Every tool with a sub tool list is represented, and the group name
+        // is searchable on its own ("balloon" lists the balloon family).
+        for path in [
+            "Sub Tool ▸ Fill",
+            "Sub Tool ▸ Auto select",
+            "Sub Tool ▸ Selection",
+            "Sub Tool ▸ Frame border",
+            "Sub Tool ▸ Balloon",
+            "Sub Tool ▸ Operation",
+            "Sub Tool ▸ Figure",
+            "Sub Tool ▸ Gradient",
+            "Sub Tool ▸ Eyedropper",
+            "Sub Tool ▸ Move",
+        ] {
+            assert!(entries.iter().any(|e| e.path == path), "{path} has rows");
+        }
+        let family = labels(&entries, &palette_filter(&entries, "balloon", &[], 20));
+        assert!(family.len() >= 4, "the balloon family is findable {family:?}");
+        let magnetic = labels(&entries, &palette_filter(&entries, "magnetic", &[], 5));
+        assert_eq!(magnetic, vec!["Magnetic lasso".to_owned()]);
+    }
+
+    /// The user's own auto actions are runnable from the palette, on the
+    /// SAME command the Auto Actions palette's ▶ pushes — index-keyed, so
+    /// the rows are built from today's list, not remembered.
+    #[test]
+    fn palette_entries_carry_the_auto_actions() {
+        let entries = all_entries();
+        let hits = palette_filter(&entries, "tone a flat", &[], PALETTE_ROWS);
+        assert_eq!(labels(&entries, &hits), vec!["Tone a flat".to_owned()]);
+        let row = &entries[hits[0]];
+        assert_eq!(row.path, "Auto Action");
+        assert!(matches!(row.cmd, AppCmd::ActionRun(0)), "{:?}", row.cmd);
+        // The second action keeps its own index — an off-by-one here runs
+        // the wrong sequence at the user's layers.
+        let second = entries
+            .iter()
+            .find(|e| e.label == "Panel setup")
+            .expect("the second action");
+        assert!(matches!(second.cmd, AppCmd::ActionRun(1)), "{:?}", second.cmd);
+        // No actions recorded: no rows, and nothing else changes.
+        let bare = palette_entries(&fake_presets(), &[]);
+        assert!(bare.iter().all(|e| e.path != "Auto Action"));
+        assert_eq!(bare.len() + 2, entries.len());
+    }
+
+    /// Settings and palettes: each Preferences section opens the window ON
+    /// itself, and every palette the Workspace menu reopens is reachable by
+    /// name — the two things you cannot reach when the palette you need is
+    /// the one you closed.
+    #[test]
+    fn palette_entries_jump_to_settings_and_palettes() {
+        let entries = all_entries();
+        for sec in PREF_SECTIONS {
+            let row = entries
+                .iter()
+                .find(|e| e.label == sec && e.path == "Preferences")
+                .unwrap_or_else(|| panic!("Preferences ▸ {sec} has no row"));
+            match row.cmd {
+                AppCmd::OpenPrefs(Some(s)) => assert_eq!(s, sec, "opens on its own section"),
+                ref other => panic!("{sec} must open Preferences, not {other:?}"),
+            }
+        }
+        // Typing the window's name lists its sections (the path is searched;
+        // a fuzzy straggler or two below them is the ladder working).
+        let prefs = labels(&entries, &palette_filter(&entries, "preferences", &[], 20));
+        assert_eq!(&prefs[..PREF_SECTIONS.len()], &PREF_SECTIONS, "{prefs:?}");
+        // Every dockable palette, on the command the Workspace menu runs.
+        for p in super::super::dock::ALL {
+            let want = format!("{} palette", p.title());
+            let row = entries
+                .iter()
+                .find(|e| e.label == want)
+                .unwrap_or_else(|| panic!("{want} has no row"));
+            assert_eq!(row.path, "Workspace");
+            match row.cmd {
+                AppCmd::PaletteOpen(q) => assert_eq!(q, p, "the row reopens ITS palette"),
+                ref other => panic!("{want} must push PaletteOpen, not {other:?}"),
+            }
+        }
+        let hist = labels(&entries, &palette_filter(&entries, "history palette", &[], 5));
+        assert_eq!(hist, vec!["History palette".to_owned()]);
     }
 
     /// Brushes are half the reason the overlay exists: they must be in the
@@ -571,7 +727,7 @@ mod tests {
     #[test]
     fn palette_entries_carry_the_brush_presets() {
         let presets = fake_presets();
-        let entries = palette_entries(&presets);
+        let entries = palette_entries(&presets, &fake_actions());
         assert!(
             entries.len() > command_index().len(),
             "the presets are appended, not replacing the commands"
@@ -590,7 +746,7 @@ mod tests {
     /// prefix outranks a mid-word hit for the same query.
     #[test]
     fn palette_filter_matches_labels_and_menu_paths() {
-        let entries = palette_entries(&fake_presets());
+        let entries = all_entries();
         let hits = labels(&entries, &palette_filter(&entries, "eras", &[], PALETTE_ROWS));
         assert!(hits.contains(&"Eraser".to_owned()), "{hits:?}");
         let rulers = labels(&entries, &palette_filter(&entries, "ruler", &[], 20));
@@ -613,7 +769,7 @@ mod tests {
     /// index's own order, so the list is never empty.
     #[test]
     fn palette_filter_leads_with_recents_on_an_empty_query() {
-        let entries = palette_entries(&fake_presets());
+        let entries = all_entries();
         let recents = vec!["Redo".to_owned(), "Kabura pen".to_owned()];
         let hits = labels(&entries, &palette_filter(&entries, "", &recents, PALETTE_ROWS));
         assert_eq!(hits.len(), PALETTE_ROWS, "the empty query still fills rows");

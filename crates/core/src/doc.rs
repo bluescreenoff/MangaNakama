@@ -1706,13 +1706,12 @@ impl Document {
         true
     }
 
-    /// Recordable actions, the non-structural face: bundle the newest `n`
-    /// history steps into ONE labelled step. Members are collected
+    /// Bundle the newest `n` history steps into ONE labelled step
+    /// (recordable action runs, whole-work reflows). Members are collected
     /// newest-first, which IS the swap order `Compound` needs (undo unwinds
     /// the run backwards; the reversed inverse replays it forward on redo).
-    /// Safe for the usual reason: these members are non-structural by
-    /// construction (a structural step would have cleared the history and
-    /// the caller takes the `push_structure` road instead).
+    /// Structural members are fine: each is a Structure swap, and the LIFO
+    /// argument on `UndoGroup`'s doc comment holds inside a Compound too.
     pub fn wrap_recent(&mut self, label: &str, n: usize) -> bool {
         if n == 0 {
             return false;
@@ -1732,6 +1731,41 @@ impl Document {
         self.push_compound(label, members)
     }
 
+    /// The layer stack as an undo pre-image: `Arc`-cheap clones with any
+    /// open op's recording scrubbed (a snapshot must never inherit one —
+    /// the same rule `duplicate_layer` follows). Taken at the TOP of every
+    /// structural op, before the first mutation.
+    fn stack_snapshot(&self) -> Vec<Layer> {
+        let mut v = self.layers.clone();
+        for l in &mut v {
+            l.recording = None;
+        }
+        v
+    }
+
+    /// Record a structural op (add/remove/duplicate/move/merge/divide/
+    /// combine) as ONE undoable step: the caller took [`Self::stack_snapshot`]
+    /// and noted `active` BEFORE mutating, and calls this on the success
+    /// path. This replaced the old clear-the-history model (2026-08-21):
+    /// undo is LIFO, so an index-carrying group deeper in the stack is only
+    /// ever swapped once the Structure swaps above it have restored the
+    /// exact stack it was recorded against — indices cannot go stale as
+    /// long as every structural change records one of these.
+    pub fn record_structure(&mut self, label: &str, before: Vec<Layer>, active_before: usize) {
+        self.cancel_op();
+        // The palette multi-selection is index-keyed; a structural shift is
+        // exactly what it must not survive. Cheap to rebuild, so clearing
+        // stays the safe move even though the history now survives.
+        self.layer_multi.clear();
+        self.history.push_labeled(
+            label,
+            UndoGroup::Structure {
+                layers: before,
+                active: active_before,
+            },
+        );
+    }
+
     /// Recordable actions: make a whole replayed run ONE undo press. The
     /// caller cloned `layers` and noted `active` BEFORE replaying; whatever
     /// the run pushed or cleared since is superseded by the snapshot pair
@@ -1749,23 +1783,28 @@ impl Document {
         self.touch();
     }
 
-    /// True when the next undo would move a [`UndoGroup::Structure`] — the
-    /// app must fully invalidate the GPU tile cache around that swap
-    /// (restored tiles keep their old, lower revisions; the cache uploads
-    /// only on newer).
+    /// True when `g` is, or contains, a [`UndoGroup::Structure`] — a
+    /// Compound from a recorded action run can carry one in its belly, and
+    /// the cache-invalidation door below must see through the wrapper.
+    fn group_is_structural(g: &UndoGroup) -> bool {
+        match g {
+            UndoGroup::Structure { .. } => true,
+            UndoGroup::Compound(members) => members.iter().any(Self::group_is_structural),
+            _ => false,
+        }
+    }
+
+    /// True when the next undo would move a [`UndoGroup::Structure`]
+    /// (possibly inside a Compound) — the app must fully invalidate the GPU
+    /// tile cache around that swap (restored tiles keep their old, lower
+    /// revisions; the cache uploads only on newer).
     pub fn next_undo_is_structure(&self) -> bool {
-        matches!(
-            self.history.peek_undo(),
-            Some(UndoGroup::Structure { .. })
-        )
+        self.history.peek_undo().is_some_and(Self::group_is_structural)
     }
 
     /// Same door, redo side.
     pub fn next_redo_is_structure(&self) -> bool {
-        matches!(
-            self.history.peek_redo(),
-            Some(UndoGroup::Structure { .. })
-        )
+        self.history.peek_redo().is_some_and(Self::group_is_structural)
     }
 
     /// Vector inking (docs/VECTOR-INKING.md): close the open op as ONE
@@ -2220,16 +2259,17 @@ impl Document {
         self.history.set_limit(limit);
     }
 
-    /// Throw the history away (file load, or a change undo cannot express).
+    /// Throw the history away (file load, or a change undo cannot express —
+    /// today that means `resize_to`; the other structural ops record a
+    /// [`UndoGroup::Structure`] instead, see `record_structure`).
     pub fn clear_history(&mut self) {
         self.cancel_op();
         // The palette multi-selection is index-keyed; everything that
-        // shifts indices comes through here (see `layer_multi`'s note).
+        // shifts indices clears it (see `layer_multi`'s note).
         self.layer_multi.clear();
         self.history.clear();
-        // PR-041: the structural layer ops (add, delete, reorder, import)
-        // are the ones that come through here INSTEAD of pushing a group,
-        // so counting only pushes would leave exactly the unrecoverable
+        // PR-041: a change that comes through here pushes no group, so
+        // counting only pushes would leave exactly the unrecoverable
         // changes uncounted. `clear` deliberately does not reset the tally.
         self.history.note_op();
     }
@@ -2240,10 +2280,12 @@ impl Document {
     // the last element is the top. (ORA's stack.xml is the other way round —
     // `core::ora` reverses on the way in and out.)
     //
-    // Any op that shifts layer indices clears the undo history, because
-    // `UndoGroup::layer` is an index. Blunt, but it cannot restore pixels into
-    // the wrong layer. A stable `LayerId` would fix it properly — noted for a
-    // later pass.
+    // Any op that shifts layer indices records a `UndoGroup::Structure`
+    // snapshot through `record_structure` (pattern: take `stack_snapshot()`
+    // + `active` BEFORE the first mutation, record on the success path).
+    // Index-carrying groups deeper in the stack stay valid because undo is
+    // LIFO — see the enum's doc comment. The one exception is `resize_to`,
+    // which still clears (canvas size is outside the snapshot).
 
     // ------------------------------------------------------------ folders --
     //
@@ -2389,6 +2431,7 @@ impl Document {
     /// New empty folder directly above `index`'s block, same depth, active.
     /// Clears the undo history. Returns the new index.
     pub fn add_folder_above(&mut self, index: usize, name: impl Into<String>) -> usize {
+        let (before, active_before) = (self.stack_snapshot(), self.active);
         let depth = self.layers.get(index).map(|l| l.depth).unwrap_or(0);
         let at = (index + 1).min(self.layers.len());
         let mut f = Layer::new(name);
@@ -2397,22 +2440,23 @@ impl Document {
         self.layers.insert(at, f);
         self.active = at;
         self.normalize_depths();
-        self.clear_history();
+        self.record_structure("New folder", before, active_before);
         self.touch();
         at
     }
 
     /// New empty layer as the **topmost child** of the folder at `index`, and
-    /// make it active. Clears the undo history. Returns the new index.
+    /// make it active. Records one structural undo step. Returns the new index.
     pub fn add_layer_in_folder(&mut self, index: usize, name: impl Into<String>) -> Option<usize> {
         if !self.layers.get(index)?.folder {
             return None;
         }
+        let (before, active_before) = (self.stack_snapshot(), self.active);
         let mut l = Layer::new(name);
         l.depth = self.layers[index].depth + 1;
         self.layers.insert(index, l);
         self.active = index;
-        self.clear_history();
+        self.record_structure("New layer", before, active_before);
         self.touch();
         Some(index)
     }
@@ -2435,6 +2479,7 @@ impl Document {
         frames: FrameSet,
         fill_white: bool,
     ) -> usize {
+        let (before, active_before) = (self.stack_snapshot(), self.active);
         let mut draw = Layer::new("Layer 1");
         draw.depth = 1;
         let mut header = Layer::new(name);
@@ -2451,7 +2496,7 @@ impl Document {
         self.layers.push(header);
         // Draw layer active: the next pen stroke lands inside the folder.
         self.active = self.layers.len() - 2;
-        self.clear_history();
+        self.record_structure("New frame folder", before, active_before);
         self.touch();
         self.layers.len() - 1
     }
@@ -2469,6 +2514,7 @@ impl Document {
         split_off: FrameSet,
     ) -> Option<usize> {
         let size = self.size;
+        let (before, active_before) = (self.stack_snapshot(), self.active);
         let l = self.layers.get_mut(index)?;
         if !(l.folder && l.is_frame()) {
             return None;
@@ -2498,7 +2544,7 @@ impl Document {
         self.layers.insert(at, white);
         self.active = at + 1; // the new draw layer
         self.normalize_depths();
-        self.clear_history();
+        self.record_structure("Divide frame folder", before, active_before);
         self.touch();
         Some(at + 2)
     }
@@ -2528,9 +2574,11 @@ impl Document {
         // Snapshot the contents BEFORE the header is rewritten.
         let mut block: Vec<Layer> = self.layers[self.children_range(index)].to_vec();
         if block.is_empty() {
-            // Nothing to duplicate — the empty-folder answer IS the answer.
+            // Nothing to duplicate — the empty-folder answer IS the answer
+            // (and it records its own structural undo step).
             return self.divide_frame_folder(index, keep, split_off);
         }
+        let (before, active_before) = (self.stack_snapshot(), self.active);
         for c in &mut block {
             // A clone must never inherit an open op's recording.
             c.recording = None;
@@ -2557,7 +2605,7 @@ impl Document {
         }
         self.active = at + k - 1; // the copy's topmost child
         self.normalize_depths();
-        self.clear_history();
+        self.record_structure("Divide frame folder", before, active_before);
         self.touch();
         Some(at + k)
     }
@@ -2580,6 +2628,7 @@ impl Document {
         if (slot == r.start || slot == from + 1) && depth == base {
             return false; // dropped where it already sits
         }
+        let (before, active_before) = (self.stack_snapshot(), self.active);
         let active_offset = if self.active >= r.start && self.active <= from {
             Some(self.active - r.start)
         } else {
@@ -2608,14 +2657,14 @@ impl Document {
             }
         };
         self.normalize_depths();
-        self.clear_history();
+        self.record_structure("Move layer", before, active_before);
         self.touch();
         true
     }
 
     /// Insert a new empty layer directly above `index` (same depth — a
-    /// sibling) and make it active. Returns the new layer's index. Clears the
-    /// undo history.
+    /// sibling) and make it active. Returns the new layer's index. Records
+    /// one structural undo step.
     /// The top of the clip run riding `index`: the last CONSECUTIVE clipped
     /// (same depth, non-folder) layer above it — `index` itself when nothing
     /// rides. From a mid-run member it finds the same top, so an insert
@@ -2635,6 +2684,7 @@ impl Document {
     }
 
     pub fn add_layer_above(&mut self, index: usize, name: impl Into<String>) -> usize {
+        let (before, active_before) = (self.stack_snapshot(), self.active);
         // docs/CLIPPING-SCENARIOS.md: a plain insert INSIDE a clip run would
         // silently re-base the members above it onto the new empty layer —
         // everything clipped goes invisible. Hop above the run instead; a
@@ -2647,7 +2697,7 @@ impl Document {
         self.layers.insert(at, l);
         self.active = at;
         self.normalize_depths();
-        self.clear_history();
+        self.record_structure("New layer", before, active_before);
         self.touch();
         at
     }
@@ -2659,7 +2709,7 @@ impl Document {
 
     /// Remove a layer — a folder goes with everything inside it. Refuses to
     /// empty the document and refuses an out-of-range index; both return
-    /// `false`. Clears the undo history.
+    /// `false`. Records one structural undo step.
     pub fn remove_layer(&mut self, index: usize) -> bool {
         if index >= self.layers.len() {
             return false;
@@ -2668,12 +2718,13 @@ impl Document {
         if r.len() >= self.layers.len() {
             return false;
         }
+        let (before, active_before) = (self.stack_snapshot(), self.active);
         self.layers.drain(r);
         if self.active >= self.layers.len() {
             self.active = self.layers.len() - 1;
         }
         self.normalize_depths();
-        self.clear_history();
+        self.record_structure("Delete layer", before, active_before);
         self.touch();
         true
     }
@@ -2681,11 +2732,12 @@ impl Document {
     /// Copy a layer (pixels included — `Arc` clones, so it is cheap until one
     /// of the two is painted on) and insert the copy above it. A folder is
     /// copied with its children. Returns the new index of the copied layer.
-    /// Clears the undo history.
+    /// Records one structural undo step.
     pub fn duplicate_layer(&mut self, index: usize) -> Option<usize> {
         if index >= self.layers.len() {
             return None;
         }
+        let (before, active_before) = (self.stack_snapshot(), self.active);
         let r = self.block_range(index);
         let mut block: Vec<Layer> = self.layers[r.clone()].to_vec();
         for l in &mut block {
@@ -2701,7 +2753,7 @@ impl Document {
         }
         let at = index + k;
         self.active = at;
-        self.clear_history();
+        self.record_structure("Duplicate layer", before, active_before);
         self.touch();
         Some(at)
     }
@@ -2797,15 +2849,16 @@ impl Document {
     }
 
     /// New frame (koma) layer at the **top** of the stack — frames sit above
-    /// the art they mask — rasterized from `frames` and made active. Clears the
-    /// undo history like any structural layer op. Returns the new index.
+    /// the art they mask — rasterized from `frames` and made active. Records
+    /// one structural undo step. Returns the new index.
     pub fn add_frame_layer(&mut self, name: impl Into<String>, frames: FrameSet) -> usize {
+        let (before, active_before) = (self.stack_snapshot(), self.active);
         let mut l = Layer::new(name);
         l.replace_tiles(frames.rasterize(self.size));
         l.kind = LayerKind::Frame(frames);
         self.layers.push(l);
         self.active = self.layers.len() - 1;
-        self.clear_history();
+        self.record_structure("New frame layer", before, active_before);
         self.touch();
         self.active
     }
@@ -2843,6 +2896,7 @@ impl Document {
         if self.enclosing_folder(ia) != self.enclosing_folder(ib) {
             return None; // same depth, DIFFERENT parents — not siblings
         }
+        let (before, active_before) = (self.stack_snapshot(), self.active);
         // Audit 2026-08-21: the combine DESTROYS B's header, and everything
         // that renders at FOLDER level goes with it — the compositor reads
         // visibility/opacity/blend/through/draft off the header, and border
@@ -2916,7 +2970,7 @@ impl Document {
         // header is the selection after a combine (both used to differ —
         // audit H, 2026-08-19).
         self.active = lo.start + n - 1;
-        self.clear_history();
+        self.record_structure("Combine frame folders", before, active_before);
         self.touch();
         Some(lo.start + n - 1)
     }
@@ -2962,6 +3016,7 @@ impl Document {
         if lo.end > hi.start {
             return None;
         }
+        let (before, active_before) = (self.stack_snapshot(), self.active);
         let parent_depth = ha.depth;
         // Splice the lower block up, adjacent to the higher block. When
         // the pair is already adjacent this is a no-op (insert_at ==
@@ -2983,7 +3038,7 @@ impl Document {
         self.layers.insert(run.end, header);
         self.normalize_depths();
         self.active = run.end;
-        self.clear_history();
+        self.record_structure("Group frame folders", before, active_before);
         self.touch();
         Some(run.end)
     }
@@ -3310,14 +3365,15 @@ impl Document {
 
     /// New balloon layer at the **top** of the stack — balloons sit above the
     /// art and the frames they annotate — rasterized from `balloons` and made
-    /// active. Clears the undo history like any structural layer op.
+    /// active. Records one structural undo step.
     pub fn add_balloon_layer(&mut self, name: impl Into<String>, balloons: BalloonSet) -> usize {
+        let (before, active_before) = (self.stack_snapshot(), self.active);
         let mut l = Layer::new(name);
         l.replace_tiles(balloons.rasterize(self.size));
         l.kind = LayerKind::Balloon(balloons);
         self.layers.push(l);
         self.active = self.layers.len() - 1;
-        self.clear_history();
+        self.record_structure("New balloon layer", before, active_before);
         self.touch();
         self.active
     }
@@ -3348,15 +3404,16 @@ impl Document {
     }
 
     /// New text layer at the **top** of the stack (text sits above everything,
-    /// balloons included), rasterized from `texts` and made active. Clears the
-    /// undo history like any structural layer op.
+    /// balloons included), rasterized from `texts` and made active. Records
+    /// one structural undo step.
     pub fn add_text_layer(&mut self, name: impl Into<String>, texts: TextSet) -> usize {
+        let (before, active_before) = (self.stack_snapshot(), self.active);
         let mut l = Layer::new(name);
         l.replace_tiles(texts.rasterize(self.size));
         l.kind = LayerKind::Text(texts);
         self.layers.push(l);
         self.active = self.layers.len() - 1;
-        self.clear_history();
+        self.record_structure("New text layer", before, active_before);
         self.touch();
         self.active
     }
@@ -3451,6 +3508,7 @@ impl Document {
         {
             return false;
         }
+        let (before, active_before) = (self.stack_snapshot(), self.active);
         let upper = self.layers[index].clone();
         if upper.visible {
             let lower = &mut self.layers[index - 1];
@@ -3490,7 +3548,7 @@ impl Document {
         }
         self.layers.remove(index);
         self.active = index - 1;
-        self.clear_history();
+        self.record_structure("Merge down", before, active_before);
         self.touch();
         true
     }
@@ -4134,6 +4192,10 @@ impl Document {
         self.trim_outside(new);
         self.size = new;
         self.selection = None;
+        // STILL clears (2026-08-21, the structural-undo round): the canvas
+        // SIZE is not in a `UndoGroup::Structure` snapshot, and dropped
+        // outside-tiles are destroyed for real — a resize is the one
+        // structural change undo genuinely cannot express yet.
         self.clear_history();
         self.touch();
     }
@@ -5395,16 +5457,104 @@ mod tests {
     }
 
     #[test]
-    fn structural_layer_ops_clear_the_history() {
-        // UndoGroup::layer is an index; reordering would aim it at the wrong
-        // layer, so the history is dropped instead.
+    fn structural_layer_ops_record_and_the_history_survives() {
+        // The 2026-08-21 model: a structural op pushes a Structure snapshot
+        // instead of clearing. Undo is LIFO, so the paint group recorded
+        // BEFORE the add is still valid once the add's swap has restored
+        // the one-layer stack it was recorded against.
         let mut doc = Document::default();
         doc.begin_op();
         paint(&mut doc, TileIdx::new(0, 0), 10);
         doc.end_op();
         assert!(doc.can_undo());
         doc.add_layer("2");
+        assert_eq!(doc.layers.len(), 2);
+        assert_eq!(doc.undo_len(), 2, "the paint step survived the add");
+        assert!(doc.next_undo_is_structure(), "the add is on top");
+        assert!(doc.undo(), "undo the add");
+        assert_eq!(doc.layers.len(), 1, "the new layer is gone");
+        assert!(doc.undo(), "…then undo the paint on the restored stack");
+        assert!(doc.layers[0].tiles().next().is_none(), "paint took back");
+        assert!(doc.redo() && doc.redo(), "the whole chain replays forward");
+        assert_eq!(doc.layers.len(), 2);
+    }
+
+    /// The full LIFO round trip across several structural shapes: every op
+    /// undoes in reverse order and redoes forward, and pixel groups
+    /// recorded between structural steps restore into the right layers.
+    #[test]
+    fn structural_undo_round_trips_a_mixed_chain() {
+        let mut doc = Document::default();
+        doc.begin_op();
+        paint(&mut doc, TileIdx::new(0, 0), 10);
+        doc.end_op();
+        doc.add_layer("2");
+        doc.begin_op();
+        paint(&mut doc, TileIdx::new(1, 0), 20);
+        doc.end_op();
+        let dup = doc.duplicate_layer(doc.active).unwrap();
+        assert_eq!(doc.layers.len(), 3);
+        assert!(doc.remove_layer(dup));
+        assert_eq!(doc.layers.len(), 2);
+        assert_eq!(doc.undo_len(), 5);
+        for _ in 0..5 {
+            assert!(doc.undo());
+        }
+        assert_eq!(doc.layers.len(), 1, "back to the single empty layer");
+        assert!(
+            doc.layers[0].tiles().next().is_none(),
+            "first paint undone last"
+        );
         assert!(!doc.can_undo());
+        for _ in 0..5 {
+            assert!(doc.redo());
+        }
+        assert_eq!(doc.layers.len(), 2, "dup redone, then its removal");
+        assert!(
+            doc.layers[1].tiles().next().is_some(),
+            "second paint replayed into the re-added layer"
+        );
+    }
+
+    /// Merge-down is destructive on the lower layer's pixels; the Structure
+    /// snapshot holds the pre-merge tiles by Arc, so undo restores both
+    /// layers exactly.
+    #[test]
+    fn merge_down_undoes_to_both_layers() {
+        let mut doc = Document::default();
+        doc.begin_op();
+        paint(&mut doc, TileIdx::new(0, 0), 10);
+        doc.end_op();
+        doc.add_layer("upper");
+        doc.begin_op();
+        paint(&mut doc, TileIdx::new(0, 0), 200);
+        doc.end_op();
+        assert!(doc.merge_down(1));
+        assert_eq!(doc.layers.len(), 1);
+        assert!(doc.undo(), "undo the merge");
+        assert_eq!(doc.layers.len(), 2, "upper layer is back");
+        assert_eq!(
+            px(&doc, 0, TileIdx::new(0, 0)).unwrap()[0],
+            10,
+            "lower layer's pre-merge pixels restored"
+        );
+    }
+
+    /// The multi-selection is index-keyed: a structural op still clears it
+    /// even though the history now survives.
+    #[test]
+    fn structural_ops_clear_the_multi_selection_not_the_history() {
+        let mut doc = Document::default();
+        doc.add_layer("2");
+        doc.toggle_multi(0);
+        assert_eq!(doc.multi_targets().len(), 2);
+        doc.add_layer("3");
+        assert_eq!(
+            doc.multi_targets().len(),
+            1,
+            "selection cleared back to the active row alone"
+        );
+        assert!(doc.can_undo(), "history kept");
     }
 
     #[test]
@@ -5423,7 +5573,7 @@ mod tests {
         let one_frame = FrameSet::single_rect([64.0, 64.0, 192.0, 192.0], 4.0);
         let li = doc.add_frame_layer("Frame 1", one_frame.clone());
         assert!(doc.layers[li].is_frame());
-        assert!(!doc.can_undo(), "adding the layer is structural");
+        assert!(doc.can_undo(), "adding the layer records one structural step");
         let raster_before = doc.layers[li].tile_count();
         assert!(raster_before > 0);
 
@@ -6673,9 +6823,10 @@ mod op_count_tests {
         );
     }
 
-    /// Structural layer ops push no group — they clear the history instead
-    /// — so counting only pushes would leave exactly the changes undo
-    /// cannot bring back uncounted.
+    /// Structural layer ops record a Structure group now, so they count
+    /// through the ordinary push path; the change undo genuinely cannot
+    /// express (`clear_history`, e.g. a resize) still counts via `note_op`
+    /// and never rewinds the tally.
     #[test]
     fn structural_ops_count_and_clearing_the_history_does_not_reset_the_tally() {
         let mut doc = Document::new(128, 128);
@@ -6688,10 +6839,13 @@ mod op_count_tests {
             "adding a layer is an operation ({before} -> {})",
             doc.op_count()
         );
-        assert_eq!(doc.undo_len(), 0, "…and it threw the history away");
+        assert_eq!(doc.undo_len(), 2, "…and it is on the stack, not a wipe");
+        let ops = doc.op_count();
+        doc.clear_history();
+        assert_eq!(doc.undo_len(), 0);
         assert!(
-            doc.op_count() >= before,
-            "the tally is monotonic: clear_history must never rewind it"
+            doc.op_count() > ops,
+            "the tally is monotonic: clear_history counts and never rewinds"
         );
     }
     // --- PA-001: the paper + the transparency checker ---------------------

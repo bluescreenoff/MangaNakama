@@ -885,6 +885,145 @@ impl BalloonMode {
     }
 }
 
+/// One row of the Sub Tool list, as a command: the TOOL and the sub tool
+/// inside it, picked in one press. The list itself (`ui/subtool.rs`) sets
+/// these same fields directly — this enum is the door the Ctrl+K palette
+/// (and anything else that has only a command to push) uses, so a new sub
+/// tool row wants an arm here too or it stays unreachable by search. The
+/// brush presets are NOT here: they are their own rows, on `SelectBrush`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SubTool {
+    /// The three 参照 rows, which also return to the click sub tool.
+    FillRefer(mn_core::FillRefer),
+    Fill(FillMode),
+    Wand(mn_core::FillRefer),
+    Select(SelectMode),
+    Frame(FrameMode),
+    Balloon(BalloonMode),
+    Text,
+    Object(ObjectMode),
+    Figure(FigureMode),
+    Gradient(GradMode),
+    Eyedrop(mn_core::FillRefer),
+    Pan(PanMode),
+}
+
+impl SubTool {
+    /// Every sub tool the list offers, in the list's own order.
+    pub const ALL: &'static [SubTool] = {
+        use mn_core::FillRefer::{Active, All, Reference};
+        &[
+            SubTool::FillRefer(All),
+            SubTool::FillRefer(Active),
+            SubTool::FillRefer(Reference),
+            SubTool::Fill(FillMode::Enclose),
+            SubTool::Fill(FillMode::Lasso),
+            SubTool::Wand(All),
+            SubTool::Wand(Active),
+            SubTool::Wand(Reference),
+            SubTool::Select(SelectMode::Rect),
+            SubTool::Select(SelectMode::Lasso),
+            SubTool::Select(SelectMode::Magnetic),
+            SubTool::Select(SelectMode::Shrink),
+            SubTool::Frame(FrameMode::Rect),
+            SubTool::Frame(FrameMode::Polyline),
+            SubTool::Frame(FrameMode::Pen),
+            SubTool::Frame(FrameMode::DivideFolder),
+            SubTool::Frame(FrameMode::DivideBorder),
+            SubTool::Balloon(BalloonMode::Ellipse),
+            SubTool::Balloon(BalloonMode::Round),
+            SubTool::Balloon(BalloonMode::Draw),
+            SubTool::Balloon(BalloonMode::Tail),
+            SubTool::Text,
+            SubTool::Object(ObjectMode::Object),
+            SubTool::Object(ObjectMode::PickLayer),
+            SubTool::Figure(FigureMode::Line),
+            SubTool::Figure(FigureMode::Rect),
+            SubTool::Figure(FigureMode::Ellipse),
+            SubTool::Figure(FigureMode::Polygon),
+            SubTool::Gradient(GradMode::FgToBg),
+            SubTool::Gradient(GradMode::FgToTransparent),
+            SubTool::Gradient(GradMode::TransparentToFg),
+            SubTool::Eyedrop(All),
+            SubTool::Eyedrop(Active),
+            SubTool::Eyedrop(Reference),
+            SubTool::Pan(PanMode::Hand),
+            SubTool::Pan(PanMode::Rotate),
+        ]
+    };
+
+    /// The tool this sub tool lives under — picking it switches tools too.
+    pub fn tool(self) -> Tool {
+        match self {
+            SubTool::FillRefer(_) | SubTool::Fill(_) => Tool::Fill,
+            SubTool::Wand(_) => Tool::Wand,
+            SubTool::Select(_) => Tool::Select,
+            SubTool::Frame(_) => Tool::Frame,
+            SubTool::Balloon(_) => Tool::Balloon,
+            SubTool::Text => Tool::Text,
+            SubTool::Object(_) => Tool::Object,
+            SubTool::Figure(_) => Tool::Figure,
+            SubTool::Gradient(_) => Tool::Gradient,
+            SubTool::Eyedrop(_) => Tool::Eyedrop,
+            SubTool::Pan(_) => Tool::Pan,
+        }
+    }
+
+    /// The Sub Tool list's own row text.
+    pub fn label(self) -> &'static str {
+        use mn_core::FillRefer::{Active, All, Reference};
+        match self {
+            SubTool::FillRefer(All) => "Refer other layers",
+            SubTool::FillRefer(Active) => "Refer editing layer only",
+            SubTool::FillRefer(Reference) => "Refer reference layer",
+            SubTool::Fill(FillMode::Click) => "Fill",
+            SubTool::Fill(FillMode::Enclose) => "Enclose and fill",
+            SubTool::Fill(FillMode::Lasso) => "Lasso fill",
+            SubTool::Wand(All) => "Refer all layers",
+            SubTool::Wand(Active) => "Refer editing layer only",
+            SubTool::Wand(Reference) => "Refer reference layer",
+            SubTool::Select(SelectMode::Rect) => "Rectangle",
+            SubTool::Select(SelectMode::Lasso) => "Lasso",
+            SubTool::Select(SelectMode::Magnetic) => "Magnetic lasso",
+            SubTool::Select(SelectMode::Shrink) => "Shrink (flats)",
+            SubTool::Frame(FrameMode::Rect) => "Rectangle frame",
+            SubTool::Frame(FrameMode::Polyline) => "Polyline frame",
+            SubTool::Frame(FrameMode::Pen) => "Frame border pen",
+            SubTool::Frame(FrameMode::DivideFolder) => "Divide frame folder",
+            SubTool::Frame(FrameMode::DivideBorder) => "Divide frame border",
+            SubTool::Balloon(m) => m.label(),
+            SubTool::Text => "Text",
+            SubTool::Object(m) => m.label(),
+            SubTool::Figure(m) => m.label(),
+            SubTool::Gradient(m) => m.label(),
+            SubTool::Eyedrop(All) => "Pick displayed color",
+            SubTool::Eyedrop(Active) => "Pick color from layer",
+            SubTool::Eyedrop(Reference) => "Pick from reference layers",
+            SubTool::Pan(PanMode::Hand) => "Hand",
+            SubTool::Pan(PanMode::Rotate) => "Rotate",
+        }
+    }
+
+    /// Where the row lives, for the palette's weak right-hand text — the
+    /// Sub Tool list's own group caption, so searching the GROUP name
+    /// ("selection", "balloon") lists that tool's whole family.
+    pub fn path(self) -> &'static str {
+        match self {
+            SubTool::FillRefer(_) | SubTool::Fill(_) => "Sub Tool ▸ Fill",
+            SubTool::Wand(_) => "Sub Tool ▸ Auto select",
+            SubTool::Select(_) => "Sub Tool ▸ Selection",
+            SubTool::Frame(_) => "Sub Tool ▸ Frame border",
+            SubTool::Balloon(_) => "Sub Tool ▸ Balloon",
+            SubTool::Text => "Sub Tool ▸ Text",
+            SubTool::Object(_) => "Sub Tool ▸ Operation",
+            SubTool::Figure(_) => "Sub Tool ▸ Figure",
+            SubTool::Gradient(_) => "Sub Tool ▸ Gradient",
+            SubTool::Eyedrop(_) => "Sub Tool ▸ Eyedropper",
+            SubTool::Pan(_) => "Sub Tool ▸ Move",
+        }
+    }
+}
+
 /// CSP's three drawing-colour slots. `Transparent` is a *colour*, not a tool:
 /// drawing with it erases using the current brush's own dab shape/texture
 /// (spec section B finding #1 — the single highest-value CSP behaviour).
@@ -1300,8 +1439,10 @@ pub enum AppCmd {
     /// The options window's Export button: ask for the folder.
     ExportAllPagesGo,
     ExportAllPagesPath(PathBuf),
-    /// Open the Preferences window (Edit ▸ Preferences…).
-    OpenPrefs,
+    /// Open the Preferences window (Edit ▸ Preferences…). The payload is the
+    /// section header to point at — the window has no tabs, so "open on the
+    /// Performance page" is "open it with that header lit".
+    OpenPrefs(Option<&'static str>),
     /// PM-053: write every text item in the chapter to a `.txt` in
     /// reading order (the translator/letterer handoff).
     ExportText,
@@ -1519,6 +1660,11 @@ pub enum AppCmd {
     /// Main to black, sub to white (CSP `F8`).
     ResetColors,
     SetTool(Tool),
+    /// Pick a tool AND the sub tool inside it (the Ctrl+K palette's Sub Tool
+    /// rows; see [`SubTool`]).
+    SetSubTool(SubTool),
+    /// Reopen a closed palette (Workspace menu / the command palette).
+    PaletteOpen(crate::ui::dock::Palette),
     /// Owner item 2026-08-19: in the Object tool, pressing its key AGAIN
     /// cycles the selection through the stack under the pick point
     /// (Shift = backward). Selection only — no mutation, no undo.
@@ -1973,6 +2119,16 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
         // tile it restores, and the tile cache evicts on revision.
         AppCmd::Undo => {
             app.commit_text_edit();
+            // Ctrl+Z with a floating paste/material still live: the float
+            // is not in history yet, so "undo" means take the placement
+            // back — NOT silently rewind something older underneath it
+            // (owner 2026-08-21: dragged a material in, Ctrl+Z "did
+            // nothing").
+            if app.transform_drag.take().is_some() {
+                app.set_status("placement taken back");
+                app.mark_dirty();
+                return;
+            }
             // A tone-param undo can flip a layer back to non-tone: the GPU
             // tile cache then holds derived rasters newer than the source
             // tiles, which the revision compare would keep. Evict on change.
@@ -2317,6 +2473,10 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 app.doc.layers[active].set_tile(idx, Some(tile));
             }
             app.doc.end_op();
+            // One gesture, one press: the structural New-layer record and
+            // the pixel op wrap together (structural ops record instead of
+            // clearing since 2026-08-21).
+            app.doc.wrap_recent("Generate lines", 2);
             app.set_status(format!("{name} generated — {count} lines"));
             app.mark_dirty();
         }
@@ -2853,8 +3013,9 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 ));
             }
         },
-        AppCmd::OpenPrefs => {
+        AppCmd::OpenPrefs(section) => {
             app.prefs_open = true;
+            app.prefs_focus = section;
             app.mark_dirty();
         }
         AppCmd::ExportText => {}
@@ -4420,8 +4581,9 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                     // Paste-into-panel (owner HIGH): the fresh layer lands
                     // INSIDE the frame folder as its topmost child and
                     // active, so the stamp below hits it and the folder
-                    // seal clips the art to the panel. Structural like
-                    // every layer-list change (history clears); Esc before
+                    // seal clips the art to the panel. The layer add and
+                    // the stamp record separately and are wrapped into ONE
+                    // "Paste" press at the end of the arm; Esc before
                     // this point leaves nothing behind.
                     // (MT-034 note: the pre-paste active is not needed — BelowActive
                     // turned out unreachable under r74 rules and was cut.)
@@ -4437,6 +4599,12 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                     //  · a paste that stamps an existing layer is clamped to
                     //    the coverage inside the commit's own op.
                     let mut masked = false;
+                    // A paste that creates its layer records several steps
+                    // (Structure add, the stamp, maybe a reorder) — wrapped
+                    // into ONE "Paste" press below, now that structural ops
+                    // record instead of clearing (2026-08-21).
+                    let created = drag.create_in.is_some();
+                    let ops_before = app.doc.op_count();
                     if let Some(folder) = drag.create_in {
                         // Index captured at paste time; anything that
                         // reshuffled the stack while the float was open must
@@ -4446,9 +4614,8 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                         refused = !ok;
                         // The mask rides the layer that was just created, so
                         // there is no prior mask to restore and nothing to
-                        // record: `add_layer_in_folder` already cleared the
-                        // history (structural, like every layer add). One
-                        // paste stays ONE undo step — the commit's tile op.
+                        // record — undoing the add's Structure step takes
+                        // the layer and its mask away together.
                         if ok && !drag.clear_source {
                             let m = app
                                 .doc
@@ -4546,6 +4713,14 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                             (true, false) => "transform committed",
                             (false, _) => "transform refused",
                         });
+                        if created {
+                            let pushed =
+                                app.doc.op_count().saturating_sub(ops_before) as usize;
+                            if pushed > 1 {
+                                app.doc
+                                    .wrap_recent("Paste", pushed.min(app.doc.undo_len()));
+                            }
+                        }
                     }
                 }
                 app.mark_dirty();
@@ -5502,6 +5677,15 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 if t != Tool::Text {
                     app.commit_text_edit();
                 }
+                // A live transform float (pasted material, floating
+                // selection) owns the canvas over every tool, so leaving
+                // it armed across a switch turns the pen into a
+                // move-the-material tool (owner 2026-08-21). Switching
+                // away COMMITS the placement — the Object tool keeps it
+                // live for further nudging.
+                if t != Tool::Object && app.tool != t && app.transform_drag.is_some() {
+                    dispatch(app, AppCmd::TransformCommit);
+                }
                 let old = app.tool;
                 app.tool = t;
                 // Pen and Eraser are separate sub tools (owner order): each
@@ -5607,6 +5791,50 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 "manual not found — docs/manual/ lives beside the exe (manual/index.html)",
             ),
         },
+
+        // The Sub Tool list's rows, as one command. The tool switch goes
+        // through `SetTool` and the two modes that have their own commands
+        // through those, so a palette pick and a click in the list run the
+        // same code — including the status lines and the mid-gesture
+        // cleanups those arms carry.
+        AppCmd::SetSubTool(s) => {
+            dispatch(app, AppCmd::SetTool(s.tool()));
+            match s {
+                SubTool::FillRefer(r) => {
+                    app.fill_opts.refer = r;
+                    dispatch(app, AppCmd::SetFillMode(FillMode::Click));
+                }
+                SubTool::Fill(m) => dispatch(app, AppCmd::SetFillMode(m)),
+                SubTool::Wand(r) => app.wand_opts.refer = r,
+                SubTool::Select(m) => dispatch(app, AppCmd::SetSelectMode(m)),
+                SubTool::Frame(m) => {
+                    app.frame_mode = m;
+                    app.frame_poly = None;
+                    app.frame_pen = None;
+                }
+                SubTool::Balloon(m) => app.balloon_mode = m,
+                SubTool::Text => {}
+                SubTool::Object(m) => app.object_mode = m,
+                SubTool::Figure(m) => {
+                    app.figure_mode = m;
+                    app.figure_poly = None;
+                }
+                SubTool::Gradient(m) => app.grad_mode = m,
+                SubTool::Eyedrop(r) => app.eyedrop_opts.refer = r,
+                SubTool::Pan(m) => app.pan_mode = m,
+            }
+            app.mark_dirty();
+        }
+        AppCmd::PaletteOpen(p) => {
+            // Reopening an open palette moves nothing, which from the
+            // command palette looks like the press was swallowed — say so.
+            if crate::ui::dock::is_open(app, p) {
+                app.set_status(format!("{} is already open", p.title()));
+            } else {
+                crate::ui::dock::reopen(app, p);
+            }
+            app.mark_dirty();
+        }
 
         // --- selection + fill -----------------------------------------------
         AppCmd::SetSelectMode(m) => {

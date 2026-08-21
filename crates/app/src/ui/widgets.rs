@@ -110,3 +110,39 @@ pub(super) fn group_caption(ui: &mut egui::Ui, label: &str) {
         egui::Stroke::new(1.0, theme::OUTLINE),
     );
 }
+
+/// A border thickness in BOTH units (owner, 2026-08-21). The value is EDITED
+/// in mm — that is what a printer and a frame folder speak — but CSP shows
+/// the same border as "15", meaning pixels at the page's dpi, and a mm-only
+/// readout leaves nothing to compare against the app the owner is coming
+/// from. Pure (mm + dpi in, one string out) so the rounding is testable:
+/// thick borders read as whole pixels, sub-10 px ones keep a decimal, since
+/// "2 px" and "2.4 px" are a visible difference at 96 dpi.
+pub(super) fn px_mm_text(mm: f32, dpi: u32) -> String {
+    let px = mm / 25.4 * dpi.max(1) as f32;
+    let px = if px >= 10.0 {
+        format!("{px:.0}")
+    } else {
+        format!("{px:.1}")
+    };
+    format!("{px} px · {mm:.2} mm")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::px_mm_text;
+
+    /// The owner's own numbers: CSP's "15" and our "0.64 mm" are the same
+    /// border at 600 dpi, and the label says both.
+    #[test]
+    fn px_mm_text_says_both_units() {
+        assert_eq!(px_mm_text(0.64, 600), "15 px · 0.64 mm");
+        // 0.8 mm is our own default frame border (cmd.rs), CSP's 19 px.
+        assert_eq!(px_mm_text(0.8, 600), "19 px · 0.80 mm");
+        // A pixel canvas has no page setup: 96 dpi, where the same border is
+        // thin enough that the decimal is the whole information.
+        assert_eq!(px_mm_text(0.64, 96), "2.4 px · 0.64 mm");
+        // Degenerate dpi must not divide by zero or print "inf px".
+        assert_eq!(px_mm_text(1.0, 0), "0.0 px · 1.00 mm");
+    }
+}

@@ -7,7 +7,7 @@
 
 use super::icons::Icon;
 use super::theme::{self, ValueBar};
-use super::widgets::{group_caption, icon_btn};
+use super::widgets::{group_caption, icon_btn, px_mm_text};
 use crate::app::App;
 use crate::cmd::{AppCmd, BalloonMode, Tool};
 

@@ -957,7 +957,9 @@ mod tests {
         assert!(near(get(&doc, 0, 10, 10)[0], 0.4));
         assert!(near(get(&doc, l2, 10, 10)[0], 0.8));
         assert!(near(get(&doc, locked, 10, 10)[0], 0.8), "locked untouched");
-        assert_eq!(doc.undo_labels().len(), 1, "ONE step for the whole set");
+        // Three entries total: the two structural New-layer records from
+        // the setup, then ONE Compound for the whole correction set.
+        assert_eq!(doc.undo_labels().len(), 3, "ONE step for the whole set");
         assert!(doc.undo());
         assert!(near(get(&doc, 0, 10, 10)[0], 0.6), "undo restores layer 0");
         assert!(near(get(&doc, l2, 10, 10)[0], 0.2), "and layer 2");

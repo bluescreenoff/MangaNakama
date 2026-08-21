@@ -201,6 +201,10 @@ pub struct App {
     pub canvas_size_open: bool,
     /// Preferences window (Edit ▸ Preferences…).
     pub prefs_open: bool,
+    /// The section header the window opened ON, lit so the eye lands there.
+    /// The window is one column of headers rather than tabs, so this is what
+    /// "jump to Preferences ▸ Performance" can mean; cleared when it closes.
+    pub prefs_focus: Option<&'static str>,
     /// TC-004/005/006/011: the open tonal-correction dialog's live
     /// parameters; `None` = no correction dialog open.
     pub adjust_draft: Option<mn_core::Adjust>,
@@ -1087,6 +1091,7 @@ impl App {
             work_settings_draft: WorkSettingsDraft::default(),
             canvas_size_open: false,
             prefs_open: false,
+            prefs_focus: None,
             adjust_draft: None,
             adjust_preview: None,
             goto_page_open: false,
@@ -1822,16 +1827,21 @@ impl App {
         });
     }
 
-    /// Millimetres to canvas px at the page's dpi (96 when the document has no
-    /// page setup — pixel presets still get sane gutter/border defaults).
-    pub fn mm_to_px(&self, mm: f32) -> f32 {
-        let dpi = self
-            .page
+    /// The dpi print units convert against (96 when the document has no page
+    /// setup — pixel presets still get sane gutter/border defaults). ONE
+    /// fallback, shared by `mm_to_px` and the px/mm readouts, so a border
+    /// cannot be measured against one dpi and printed against another.
+    pub fn page_dpi(&self) -> u32 {
+        self.page
             .as_ref()
             .map(|p| p.dpi)
             .filter(|d| *d > 0)
-            .unwrap_or(96);
-        mm / 25.4 * dpi as f32
+            .unwrap_or(96)
+    }
+
+    /// Millimetres to canvas px at the page's dpi.
+    pub fn mm_to_px(&self, mm: f32) -> f32 {
+        mm / 25.4 * self.page_dpi() as f32
     }
 
     /// The DPI tone screens rasterize against: the page's print dpi, or the

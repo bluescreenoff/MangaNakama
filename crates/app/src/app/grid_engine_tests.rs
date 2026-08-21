@@ -295,8 +295,9 @@ fn object_key_cycles_the_stack_and_text_handover_gives_the_balloon() {
         app.object_sel.is_some() && app.text_sel.is_none(),
         "back to the frame"
     );
-    // Selection only: no document mutation, no undo step.
-    assert_eq!(app.doc.undo_len(), 0, "cycling is not an undo step");
+    // Selection only: no document mutation, no undo step beyond what the
+    // setup's structural adds recorded.
+    assert_eq!(app.doc.undo_len(), 3, "cycling is not an undo step");
 
     // Text→Object handover: with the text selected from the TEXT tool,
     // switching to Object selects the balloon under it.

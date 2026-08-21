@@ -6851,7 +6851,11 @@ fn frame_move_undoes_every_childs_art_and_mask() {
         "mask rode along"
     );
 
-    while app.doc.undo() {}
+    // Undo the MOVE only — the setup's structural add records too now, and
+    // unwinding past it would delete the folder (and `draw`'s index).
+    while app.doc.undo_len() > 1 {
+        assert!(app.doc.undo());
+    }
     assert!(
         alpha_at(&app, draw, 100, 100) > 0,
         "undo restores the art at its ORIGINAL place (the old bug deleted it)"
@@ -6916,7 +6920,11 @@ fn frame_move_records_children_when_active_layer_is_elsewhere() {
     };
     assert!(alpha_at(&app, 200, 100) > 0, "ink moved");
 
-    while app.doc.undo() {}
+    // Undo the MOVE only — see frame_move_undoes_every_childs_art_and_mask:
+    // unwinding the setup's structural record would delete the folder.
+    while app.doc.undo_len() > 1 {
+        assert!(app.doc.undo());
+    }
     assert!(
         alpha_at(&app, 100, 100) > 0,
         "undo restores the child's art even though it was never active"
@@ -7242,7 +7250,15 @@ fn paste_into_a_selection_masks_a_created_layer() {
         "non-destructive: the hidden pixels are still on the layer"
     );
     assert!(app.doc.selection.is_some(), "the selection survives a paste");
-    assert_eq!(app.doc.undo_len(), 1, "one paste = one undo step");
+    // Three entries: the setup's frame folder and "rough" layer (structural
+    // adds record now), then ONE wrapped "Paste" step for the layer-create
+    // + stamp pair.
+    assert_eq!(app.doc.undo_len(), 3, "one paste = one undo step");
+    assert_eq!(
+        app.doc.undo_labels().last().map(String::as_str),
+        Some("Paste"),
+        "the paste wrapped its layer-add and stamp into one press"
+    );
     assert!(
         app.status.contains("masked"),
         "the status says it was masked, got {:?}",

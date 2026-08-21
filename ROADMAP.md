@@ -62,9 +62,14 @@ lines) with tiling and taggable search; a Pattern Studio — draw on a
 wrap-around tile, watch it repeat live, save it as a material in one click;
 perspective rulers with one, two or three vanishing points, all movable after
 creation; text with vertical Japanese, per-range styling, furigana and mixed
-fonts; a story editor; multi-page work folders with a page manager and
-scalable page previews; print preflight; and a chapter reader with
-right-to-left spreads, fullscreen, and an edit-and-return round trip.
+fonts; named text styles on the work (dialogue, thought, shout, narration —
+edit the style once and every balloon on every page reflows); speed lines and
+focus lines as live objects (focus point, radii, angle and density stay
+editable on-canvas after placement); a reference-images palette with
+free-floating viewers and Alt+click colour picking; a story editor;
+multi-page work folders with a page manager and scalable page previews; print
+preflight; and a chapter reader with right-to-left spreads, fullscreen, and an
+edit-and-return round trip.
 
 **Files.** OpenRaster (`.ora`) as the native layered format, a single-file
 `.mnc` for a whole comic, full-resolution PNG export per page or for the whole
@@ -87,24 +92,15 @@ every multi-step official recipe is a feature opportunity.
    background benchmark decides, never a blanket default. Still CPU-only:
    smudge combined with wash (the sampler would have to read the in-flight
    wash buffer) and the spectral-paint / colorize / posterize presets.
-2. **Text styles on the work.** Named styles — dialogue, thought, shout,
-   narration — with Japanese Q sizes and line spacing as defaults. Edit the
-   style and every balloon on every page reflows; no more "change the font
-   mid-chapter and go fix thirty pages by hand".
-3. **Speed lines and focus lines as live objects.** Drag inside a panel;
-   focus point, spread, density, taper and an outline switch are on-canvas
-   handles from the first stroke. Clips to the panel, stays editable.
-4. **Brushes and materials without ceremony.** Lasso marks on the canvas
+2. **Brushes and materials without ceremony.** Lasso marks on the canvas
    and "make brush" / "make material" from them; tune with a live test
    stroke; edit and organise in place instead of a register-material tour.
-5. **A reference-images palette.** Drop images in, get a thumbnail strip
-   plus as many viewers as you want — dockable or floating free.
-6. **A small scripting surface.** Batch operations now cover rename,
+3. **A small scripting surface.** Batch operations now cover rename,
    tone, draft, layer colour and blend over name patterns (`*` wildcards)
    — on one page or every page in the work. The scripting surface proper
    waits until real use asks for more than the dialog covers.
-7. **HDR / linear-light colour.**
-8. **The manual, kept honest.** Static HTML beside the executable exists;
+4. **HDR / linear-light colour.**
+5. **The manual, kept honest.** Static HTML beside the executable exists;
    its job is the quirks — the interlocks you would otherwise discover by
    having something silently do nothing — and it grows with every round.
 
@@ -115,7 +111,14 @@ a fill tool that measures gap and fringe itself instead of seven numeric
 options, "make brush from selection" with generated variation, instances
 (place one drawing on many pages, edit once), one-gesture screentone
 application, perspective rulers that explain themselves plus a fisheye
-curvature slider, and print-finishing presets.
+curvature slider, print-finishing presets, changing a work's page size
+after creation (Clip Studio makes that decision irreversible; ours should
+not), and layer comps that store more than visibility.
+
+Very low priority, recorded so it is not re-proposed: fitting perspective
+rulers to an existing drawing's strokes. The fitting math is tractable;
+making it robust against real sketches is the expensive part, and the
+payoff does not justify it yet.
 
 ## Explicitly out of scope
 

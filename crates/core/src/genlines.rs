@@ -461,7 +461,11 @@ mod spec_tests {
             Some(std::sync::Arc::new(crate::tile::Tile::default())),
         );
         doc.end_op();
-        assert_eq!(doc.undo_labels(), ["Regenerate lines", "Stroke"]);
+        assert_eq!(
+            doc.undo_labels(),
+            ["New layer", "Regenerate lines", "Stroke"],
+            "the setup's structural add records too"
+        );
         let snap = |d: &Document| -> std::collections::BTreeMap<crate::tile::TileIdx, Vec<u16>> {
             d.layers[li]
                 .tiles()
@@ -478,7 +482,7 @@ mod spec_tests {
         assert_ne!(before, regenerated, "the regen changed the raster");
         assert_eq!(
             doc.undo_labels(),
-            ["Regenerate lines", "Stroke", "Regenerate lines"],
+            ["New layer", "Regenerate lines", "Stroke", "Regenerate lines"],
             "one step for the regen, and the older steps survived it"
         );
 

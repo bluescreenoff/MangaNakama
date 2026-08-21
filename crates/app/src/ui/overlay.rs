@@ -655,46 +655,24 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
         }
     }
 
-    // THE SELECTED FRAME STAYS LEGIBLE WHEN IT IS UNDERNEATH (owner HIGH,
-    // 2026-08-18, specced by Opus in f160fba): while a frame folder is
-    // selected, paint its real polygon PANEL WHITE above the composite —
-    // the white it will actually cover with is the information he is
-    // reading, not a "here-it-is" tint. Full strength while an Object
-    // drag is live (moving/resizing an occluded panel is the scenario);
-    // quieter when it is merely selected, so it never fights normal
-    // drawing. Pure overlay: this painter only runs on the live canvas —
-    // offscreen renders, exports and the reader never see it.
+    // THE DRAGGED FRAME STAYS LEGIBLE WHEN IT IS UNDERNEATH (owner HIGH,
+    // 2026-08-18, f160fba; narrowed 2026-08-21): while an Object-tool
+    // drag is live, paint the panel's real polygon PANEL WHITE above the
+    // composite — the white it will actually cover with is the
+    // information the artist is reading during a move/resize of an
+    // occluded panel. Owner feedback killed the mere-selection washes
+    // (208 under the Object tool, 160 on plain list selection): they
+    // lightened the ink inside the panel every time a frame folder was
+    // selected, and the blue outside-veil above already says which
+    // regions are panels. Pure overlay: this painter only runs on the
+    // live canvas — offscreen renders, exports and the reader never see
+    // it.
+    if app.tool == Tool::Object
+        && app.object_sel.is_some()
+        && let Some(shown) = app.object_drag.as_ref().map(|d| d.preview())
     {
-        let dragging = app.object_drag.is_some();
-        // (a) the Object tool's selected frame — the move/reshape case.
-        if app.tool == Tool::Object
-            && let Some((li, fi)) = app.object_sel
-            && let Some(shown) = app.object_drag.as_ref().map(|d| d.preview()).or_else(|| {
-                app.doc
-                    .layers
-                    .get(li)
-                    .and_then(|l| l.frames())
-                    .and_then(|fs| fs.frames.get(fi))
-                    .cloned()
-            })
-        {
-            let alpha = if dragging { 255 } else { 208 };
-            let pts: Vec<egui::Pos2> = shown.points.iter().map(|p| to_pt(p[0], p[1])).collect();
-            fill_polygon(&painter, &pts, egui::Color32::from_white_alpha(alpha));
-        }
-        // (b) a frame folder selected in the Layers palette (the active
-        // layer IS the header) — quieter still, and never duplicated with
-        // (a)'s stronger fill.
-        if app.tool != Tool::Object
-            && let Some(l) = app.doc.layers.get(app.doc.active)
-            && l.is_frame()
-            && let Some(fs) = l.frames()
-        {
-            for f in &fs.frames {
-                let pts: Vec<egui::Pos2> = f.points.iter().map(|p| to_pt(p[0], p[1])).collect();
-                fill_polygon(&painter, &pts, egui::Color32::from_white_alpha(160));
-            }
-        }
+        let pts: Vec<egui::Pos2> = shown.points.iter().map(|p| to_pt(p[0], p[1])).collect();
+        fill_polygon(&painter, &pts, egui::Color32::from_white_alpha(255));
     }
 
     if app.tool == Tool::Object {

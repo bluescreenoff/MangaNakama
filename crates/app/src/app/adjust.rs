@@ -295,7 +295,9 @@ mod tests {
         app.adjust_commit();
         assert!((read(&app, 0) - 0.4).abs() < 0.002, "applied once to 0");
         assert!((read(&app, 1) - 0.8).abs() < 0.002, "applied once to 1");
-        assert_eq!(app.doc.undo_labels().len(), 1, "ONE step for the set");
+        // Two entries: the setup's structural New-layer record, then ONE
+        // Compound for the whole correction set.
+        assert_eq!(app.doc.undo_labels().len(), 2, "ONE step for the set");
         assert!(app.doc.undo());
         assert!((read(&app, 0) - 0.6).abs() < 0.002, "undo restores 0");
         assert!((read(&app, 1) - 0.2).abs() < 0.002, "undo restores 1");
