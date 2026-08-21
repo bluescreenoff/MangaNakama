@@ -537,11 +537,22 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 }
             });
         });
-        // TC-004/005/006/007/011 (CSP 色調補正): whole-layer pixel
-        // corrections. Each is one undo step on the active layer, clipped
-        // to the selection when there is one; the four with parameters open
-        // one shared dialog with a live canvas preview.
+        // TC-002/003/004/005/006/007/011 (CSP 色調補正): whole-layer pixel
+        // corrections. Each is one undo step across the selected layers,
+        // clipped to the selection when there is one; the parameterised
+        // ones open one shared dialog with a live canvas preview.
         ui.menu_button("Correction", |ui| {
+            // TC-002/003 lead, as in CSP: the two corrections that shape a
+            // scan before anything else touches it.
+            if item(ui, "Levels…", "") {
+                app.push_cmd(AppCmd::AdjustOpen(mn_core::Adjust::LEVELS));
+                ui.close();
+            }
+            if item(ui, "Tone curve…", "") {
+                app.push_cmd(AppCmd::AdjustOpen(mn_core::Adjust::TONE_CURVE));
+                ui.close();
+            }
+            ui.separator();
             if item(ui, "Brightness/Contrast…", "") {
                 app.push_cmd(AppCmd::AdjustOpen(mn_core::Adjust::BRIGHTNESS_CONTRAST));
                 ui.close();

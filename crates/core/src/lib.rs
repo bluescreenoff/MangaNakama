@@ -50,7 +50,7 @@ pub mod tone;
 pub mod transform;
 pub mod undo;
 
-pub use adjust::Adjust;
+pub use adjust::{Adjust, TONE_CURVE_MAX};
 pub use balloon::{
     Balloon, BalloonHandle, BalloonInk, BalloonSet, BalloonShape, BalloonTone, Tail, TailGeom,
     TailKind,

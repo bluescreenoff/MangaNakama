@@ -39,6 +39,13 @@ use crate::tile::{TILE_PIXELS, Tile, TileIdx};
 /// already uses (written over 32768 so the shared origin stays visible).
 const LUMA: [f32; 3] = [6967.0 / 32768.0, 23435.0 / 32768.0, 2366.0 / 32768.0];
 
+/// How many control points a [`Adjust::ToneCurve`] can carry.
+///
+/// A fixed capacity, not a `Vec`: [`Adjust`] is `Copy` (the preview copies it
+/// every frame and the command queue moves it around), and CSP's curve dialog
+/// is a handful of handles anyway.
+pub const TONE_CURVE_MAX: usize = 8;
+
 /// One tonal correction and its parameters.
 ///
 /// Slider ranges are normalised: CSP shows −100..100, we carry −1..1, and
@@ -63,6 +70,33 @@ pub enum Adjust {
     /// TC-011. Luma at or above `threshold` goes white, below goes black.
     /// The print-prep operation: bitonal lineart in one step.
     Binarize { threshold: f32 },
+    /// TC-002 (CSP レベル補正). The scanner operation: pull the input black
+    /// and white points in onto the ink and the paper, bend the midtones with
+    /// `gamma`, then re-spread onto the output range. All five are 0..1
+    /// except `gamma` (0.1..10, 1.0 = no bend); CSP shows them 0..255.
+    ///
+    /// Rest is `in_black = 0`, `in_white = 1`, `gamma = 1`, `out_black = 0`,
+    /// `out_white = 1`.
+    Levels {
+        in_black: f32,
+        in_white: f32,
+        gamma: f32,
+        out_black: f32,
+        out_white: f32,
+    },
+    /// TC-003 (CSP トーンカーブ). `n` control points on the unit square, in
+    /// `pts[..n]`, sorted by x with the ends pinned at x = 0 and x = 1; the
+    /// slots past `n` are dead and must be left at their default so `==` and
+    /// [`Self::is_identity`] stay exact.
+    ///
+    /// The interpolation is monotone cubic (Fritsch–Carlson): a plain
+    /// Catmull-Rom through hand-placed points overshoots, and an overshoot on
+    /// a tone curve is a visible dark halo in a gradient that the user never
+    /// asked for.
+    ToneCurve {
+        pts: [[f32; 2]; TONE_CURVE_MAX],
+        n: u8,
+    },
 }
 
 impl Adjust {
@@ -78,6 +112,27 @@ impl Adjust {
     };
     pub const POSTERIZE: Self = Self::Posterize { levels: 8 };
     pub const BINARIZE: Self = Self::Binarize { threshold: 0.5 };
+    pub const LEVELS: Self = Self::Levels {
+        in_black: 0.0,
+        in_white: 1.0,
+        gamma: 1.0,
+        out_black: 0.0,
+        out_white: 1.0,
+    };
+    /// The straight line, as two points — the identity curve the dialog opens
+    /// on and the one [`Self::is_identity`] recognises.
+    pub const TONE_CURVE: Self = Self::ToneCurve {
+        pts: Self::TONE_CURVE_REST,
+        n: 2,
+    };
+    /// The default point array. Dead slots are `[0, 0]`, and every editor must
+    /// put them back that way — a stale value in `pts[5]` compares unequal and
+    /// would make an identity curve push an undo step.
+    pub const TONE_CURVE_REST: [[f32; 2]; TONE_CURVE_MAX] = {
+        let mut p = [[0.0; 2]; TONE_CURVE_MAX];
+        p[1] = [1.0, 1.0];
+        p
+    };
 
     /// The name the History palette shows, and the dialog's title.
     pub fn label(&self) -> &'static str {
@@ -87,6 +142,8 @@ impl Adjust {
             Adjust::Posterize { .. } => "Posterization",
             Adjust::Invert => "Reverse gradient",
             Adjust::Binarize { .. } => "Binarization",
+            Adjust::Levels { .. } => "Levels",
+            Adjust::ToneCurve { .. } => "Tone curve",
         }
     }
 
@@ -109,6 +166,30 @@ impl Adjust {
                 saturation,
                 luminosity,
             } => hue == 0.0 && saturation == 0.0 && luminosity == 0.0,
+            Adjust::Levels {
+                in_black,
+                in_white,
+                gamma,
+                out_black,
+                out_white,
+            } => {
+                in_black == 0.0
+                    && in_white == 1.0
+                    && gamma == 1.0
+                    && out_black == 0.0
+                    && out_white == 1.0
+            }
+            // Every control point on the diagonal: the Fritsch–Carlson
+            // tangents are then all 1 and the curve IS the line, so this is a
+            // provable no-op and not a guess. The common case is the untouched
+            // two-point default.
+            Adjust::ToneCurve { pts, n } => {
+                let n = n as usize;
+                n >= 2
+                    && pts[0] == [0.0, 0.0]
+                    && pts[n - 1] == [1.0, 1.0]
+                    && pts[..n].iter().all(|p| p[0] == p[1])
+            }
             _ => false,
         }
     }
@@ -162,8 +243,116 @@ impl Adjust {
                     [0.0; 3]
                 }
             }
+            Adjust::Levels {
+                in_black,
+                in_white,
+                gamma,
+                out_black,
+                out_white,
+            } => {
+                // A degenerate or inverted input range would divide by zero
+                // or flip the image; the floor turns it into the hard
+                // threshold the user is asking for by dragging them together.
+                let span = (in_white - in_black).max(1e-6);
+                let inv_g = 1.0 / gamma.clamp(0.1, 10.0);
+                let mut out = [0.0f32; 3];
+                for i in 0..3 {
+                    let t = ((rgb[i] - in_black) / span).clamp(0.0, 1.0).powf(inv_g);
+                    out[i] = (out_black + t * (out_white - out_black)).clamp(0.0, 1.0);
+                }
+                out
+            }
+            Adjust::ToneCurve { pts, n } => {
+                let p = &pts[..(n as usize).min(TONE_CURVE_MAX)];
+                [
+                    curve_eval(p, rgb[0]),
+                    curve_eval(p, rgb[1]),
+                    curve_eval(p, rgb[2]),
+                ]
+            }
         }
     }
+}
+
+/// Monotone cubic (Fritsch–Carlson) through `pts`, evaluated at `x`.
+///
+/// The limiter is the whole point: it clips the Hermite tangents so a segment
+/// between two monotone points can never leave the box those points bound.
+/// Straight Catmull-Rom does leave it, and the ringing lands in the midtones
+/// of a gradient where it reads as a band the artist did not draw.
+///
+/// Fewer than two points degenerates gracefully: none = identity, one = the
+/// constant that point names.
+fn curve_eval(pts: &[[f32; 2]], x: f32) -> f32 {
+    let n = pts.len();
+    if n == 0 {
+        return x.clamp(0.0, 1.0);
+    }
+    if n == 1 {
+        return pts[0][1].clamp(0.0, 1.0);
+    }
+    // Outside the control range the end value stands — the ends are pinned to
+    // x = 0 and x = 1 by the editor, so this is the boundary guard, not a
+    // routine path.
+    if x <= pts[0][0] {
+        return pts[0][1].clamp(0.0, 1.0);
+    }
+    if x >= pts[n - 1][0] {
+        return pts[n - 1][1].clamp(0.0, 1.0);
+    }
+
+    let mut d = [0.0f32; TONE_CURVE_MAX]; // secant slopes, d[..n-1]
+    for i in 0..n - 1 {
+        let h = (pts[i + 1][0] - pts[i][0]).max(1e-6);
+        d[i] = (pts[i + 1][1] - pts[i][1]) / h;
+    }
+    let mut m = [0.0f32; TONE_CURVE_MAX]; // tangents, m[..n]
+    m[0] = d[0];
+    m[n - 1] = d[n - 2];
+    for i in 1..n - 1 {
+        m[i] = 0.5 * (d[i - 1] + d[i]);
+    }
+    for i in 0..n - 1 {
+        if d[i] == 0.0 {
+            // A flat run must stay flat, or the cubic bulges through it.
+            m[i] = 0.0;
+            m[i + 1] = 0.0;
+            continue;
+        }
+        let mut a = m[i] / d[i];
+        let mut b = m[i + 1] / d[i];
+        // A tangent that disagrees in sign with its secant is an overshoot
+        // waiting to happen; zero it, then keep (a, b) inside the circle of
+        // radius 3 that Fritsch–Carlson proves monotone.
+        if a < 0.0 {
+            a = 0.0;
+        }
+        if b < 0.0 {
+            b = 0.0;
+        }
+        let s = a * a + b * b;
+        if s > 9.0 {
+            let tau = 3.0 / s.sqrt();
+            a *= tau;
+            b *= tau;
+        }
+        m[i] = a * d[i];
+        m[i + 1] = b * d[i];
+    }
+
+    let i = pts[..n - 1]
+        .iter()
+        .rposition(|p| p[0] <= x)
+        .unwrap_or(0)
+        .min(n - 2);
+    let h = (pts[i + 1][0] - pts[i][0]).max(1e-6);
+    let t = ((x - pts[i][0]) / h).clamp(0.0, 1.0);
+    let (t2, t3) = (t * t, t * t * t);
+    let y = (2.0 * t3 - 3.0 * t2 + 1.0) * pts[i][1]
+        + (t3 - 2.0 * t2 + t) * h * m[i]
+        + (-2.0 * t3 + 3.0 * t2) * pts[i + 1][1]
+        + (t3 - t2) * h * m[i + 1];
+    y.clamp(0.0, 1.0)
 }
 
 fn rgb_to_hsv(c: [f32; 3]) -> [f32; 3] {
@@ -484,6 +673,122 @@ mod tests {
         }
         .map(c);
         assert!((0..3).all(|i| near(spun[i], c[i])), "{spun:?}");
+    }
+
+    /// A tone curve from a point list, with the dead slots left at rest.
+    fn curve(points: &[[f32; 2]]) -> Adjust {
+        let mut pts = Adjust::TONE_CURVE_REST;
+        pts[..points.len()].copy_from_slice(points);
+        for p in pts.iter_mut().skip(points.len()) {
+            *p = [0.0, 0.0];
+        }
+        Adjust::ToneCurve {
+            pts,
+            n: points.len() as u8,
+        }
+    }
+
+    #[test]
+    fn levels_rest_is_identity() {
+        let c = [0.0, 0.37, 1.0];
+        let out = Adjust::LEVELS.map(c);
+        assert!((0..3).all(|i| near(out[i], c[i])), "{out:?}");
+        assert!(Adjust::LEVELS.is_identity());
+        // And any single knob off rest is NOT identity — an empty undo step
+        // is the failure this guards.
+        let mut moved = Adjust::LEVELS;
+        if let Adjust::Levels { gamma, .. } = &mut moved {
+            *gamma = 1.2;
+        }
+        assert!(!moved.is_identity());
+    }
+
+    /// Levels with everything at rest but the named knobs.
+    fn levels(in_black: f32, in_white: f32, gamma: f32, out_black: f32, out_white: f32) -> Adjust {
+        Adjust::Levels {
+            in_black,
+            in_white,
+            gamma,
+            out_black,
+            out_white,
+        }
+    }
+
+    #[test]
+    fn levels_gamma_brightens_midtones_without_moving_the_ends() {
+        let g = levels(0.0, 1.0, 2.0, 0.0, 1.0);
+        assert!(near(g.map([0.0; 3])[0], 0.0), "black stays black");
+        assert!(near(g.map([1.0; 3])[0], 1.0), "white stays white");
+        let mid = g.map([0.5; 3])[0];
+        assert!(mid > 0.5, "gamma 2 must brighten mid grey, got {mid}");
+        assert!(near(mid, 0.5f32.sqrt()), "gamma is x^(1/g): {mid}");
+        // The other direction darkens.
+        assert!(levels(0.0, 1.0, 0.5, 0.0, 1.0).map([0.5; 3])[0] < 0.5);
+    }
+
+    #[test]
+    fn levels_input_range_clips_and_output_range_remaps() {
+        // Input: everything at or below 0.25 goes to black, at or above 0.75
+        // to white — the scanner move.
+        let clip = levels(0.25, 0.75, 1.0, 0.0, 1.0);
+        assert_eq!(clip.map([0.1; 3])[0], 0.0);
+        assert_eq!(clip.map([0.9; 3])[0], 1.0);
+        assert!(near(clip.map([0.5; 3])[0], 0.5), "the middle stays middle");
+        // Output: the whole image is squeezed into 0.2..0.8.
+        let out = levels(0.0, 1.0, 1.0, 0.2, 0.8);
+        assert!(near(out.map([0.0; 3])[0], 0.2));
+        assert!(near(out.map([1.0; 3])[0], 0.8));
+        assert!(near(out.map([0.5; 3])[0], 0.5));
+    }
+
+    #[test]
+    fn tone_curve_identity_is_identity_and_pins_the_ends() {
+        assert!(Adjust::TONE_CURVE.is_identity());
+        for i in 0..=20 {
+            let x = i as f32 / 20.0;
+            let y = Adjust::TONE_CURVE.map([x; 3])[0];
+            assert!(near(y, x), "identity curve moved {x} to {y}");
+        }
+        // A raised midpoint still pins both ends.
+        let up = curve(&[[0.0, 0.0], [0.5, 0.75], [1.0, 1.0]]);
+        assert!(near(up.map([0.0; 3])[0], 0.0), "black end");
+        assert!(near(up.map([1.0; 3])[0], 1.0), "white end");
+        assert!(near(up.map([0.5; 3])[0], 0.75), "the point itself");
+        assert!(up.map([0.25; 3])[0] > 0.25, "and it lifts its neighbourhood");
+        assert!(!up.is_identity());
+        // Points that all sit ON the diagonal really are a no-op, extra
+        // handles or not.
+        assert!(curve(&[[0.0, 0.0], [0.4, 0.4], [1.0, 1.0]]).is_identity());
+    }
+
+    #[test]
+    fn tone_curve_never_overshoots_monotone_points() {
+        // The Catmull-Rom failure: a flat run followed by a steep rise rings
+        // BELOW zero (a dark halo) before it climbs. Fritsch–Carlson must
+        // stay inside the box its neighbours bound, and stay monotone.
+        let c = curve(&[[0.0, 0.1], [0.3, 0.1], [0.35, 0.9], [1.0, 1.0]]);
+        let mut prev = -1.0f32;
+        for i in 0..=200 {
+            let x = i as f32 / 200.0;
+            let y = c.map([x; 3])[0];
+            assert!(
+                (0.1 - 0.0005..=1.0).contains(&y),
+                "overshoot at {x}: {y} left the data's range"
+            );
+            assert!(y >= prev - 0.0005, "not monotone at {x}: {prev} -> {y}");
+            prev = y;
+        }
+        // The flat run is actually flat, not a bulge.
+        assert!(near(c.map([0.15; 3])[0], 0.1));
+    }
+
+    #[test]
+    fn tone_curve_applies_per_channel() {
+        // One curve, three channels, each read independently — a curve that
+        // reduced to luma would flatten colour.
+        let c = curve(&[[0.0, 0.0], [0.5, 0.75], [1.0, 1.0]]);
+        let out = c.map([0.5, 0.0, 1.0]);
+        assert!(near(out[0], 0.75) && near(out[1], 0.0) && near(out[2], 1.0), "{out:?}");
     }
 
     // --- the document applier --------------------------------------------

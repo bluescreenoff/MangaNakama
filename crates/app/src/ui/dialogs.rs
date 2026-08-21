@@ -923,6 +923,165 @@ fn pct_row(ui: &mut egui::Ui, label: &str, v: &mut f32) {
     ui.end_row();
 }
 
+/// TC-002: a level knob, shown on CSP's 0..255 scale over a 0..1 value.
+fn level_row(ui: &mut egui::Ui, label: &str, v: &mut f32) {
+    ui.label(label);
+    let mut shown = *v * 255.0;
+    if ui
+        .add(egui::Slider::new(&mut shown, 0.0..=255.0).fixed_decimals(0))
+        .changed()
+    {
+        *v = shown / 255.0;
+    }
+    ui.end_row();
+}
+
+/// TC-003: the tone-curve point editor.
+///
+/// Drag a handle; click empty space to add one; drag a handle out of the box
+/// to delete it. The two END handles are pinned to x = 0 and x = 1 — the
+/// evaluator clamps outside the control range, so an unpinned end would turn
+/// a whole tail of the histogram flat without ever showing why.
+///
+/// The drag index lives in egui memory rather than on `App`: it is dead state
+/// the moment this window closes, and nothing outside the widget reads it.
+fn tone_curve_editor(ui: &mut egui::Ui, pts: &mut [[f32; 2]; mn_core::TONE_CURVE_MAX], n: &mut u8) {
+    use super::theme;
+    use egui::{Pos2, pos2};
+
+    const PICK_RADIUS: f32 = 10.0;
+    const SIDE: f32 = 224.0;
+    // Keeps neighbours from stacking on one x (the evaluator would divide by
+    // a zero-width span) and leaves a handle grabbable.
+    const MIN_GAP: f32 = 0.02;
+
+    let id = ui.make_persistent_id("mn.tone_curve.drag");
+    let mut drag: Option<usize> = ui.data(|d| d.get_temp(id));
+
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(SIDE, SIDE), egui::Sense::click_and_drag());
+    let painter = ui.painter_at(rect);
+    let to_px = |p: [f32; 2]| -> Pos2 {
+        pos2(
+            rect.left() + p[0].clamp(0.0, 1.0) * rect.width(),
+            rect.bottom() - p[1].clamp(0.0, 1.0) * rect.height(),
+        )
+    };
+    let from_px = |pos: Pos2| -> [f32; 2] {
+        [
+            ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0),
+            ((rect.bottom() - pos.y) / rect.height()).clamp(0.0, 1.0),
+        ]
+    };
+
+    painter.rect_filled(rect, 2.0, theme::FIELD);
+    let grid = egui::Stroke::new(1.0, theme::OUTLINE);
+    for k in 1..4 {
+        let f = k as f32 / 4.0;
+        let x = rect.left() + f * rect.width();
+        let y = rect.top() + f * rect.height();
+        painter.line_segment([pos2(x, rect.top()), pos2(x, rect.bottom())], grid);
+        painter.line_segment([pos2(rect.left(), y), pos2(rect.right(), y)], grid);
+    }
+    // The untouched diagonal, so "how far from nothing" is readable.
+    painter.line_segment([to_px([0.0, 0.0]), to_px([1.0, 1.0])], grid);
+
+    // The curve itself is drawn by SAMPLING `Adjust::map`, never by a second
+    // copy of the interpolation — a preview that draws one curve and applies
+    // another is the exact lie this codebase keeps `correct_tile` shared to
+    // avoid.
+    let shown = mn_core::Adjust::ToneCurve { pts: *pts, n: *n };
+    let steps = SIDE as usize / 2;
+    let line: Vec<Pos2> = (0..=steps)
+        .map(|i| {
+            let x = i as f32 / steps as f32;
+            to_px([x, shown.map([x; 3])[0]])
+        })
+        .collect();
+    painter.add(egui::Shape::line(
+        line,
+        egui::Stroke::new(2.0, theme::ACCENT),
+    ));
+
+    let count = (*n as usize).min(mn_core::TONE_CURVE_MAX);
+    for (i, p) in pts[..count].iter().enumerate() {
+        let pos = to_px(*p);
+        let hot = drag == Some(i);
+        painter.circle_filled(pos, if hot { 5.5 } else { 4.0 }, theme::ACCENT);
+        if hot {
+            painter.circle_stroke(pos, 5.5, egui::Stroke::new(1.5, theme::TEXT_STRONG));
+        }
+    }
+
+    if let Some(pos) = resp.interact_pointer_pos() {
+        let nearest = pts[..count]
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (i, to_px(*p).distance(pos)))
+            .min_by(|a, b| a.1.total_cmp(&b.1));
+        if resp.drag_started() {
+            drag = match nearest {
+                Some((i, d)) if d <= PICK_RADIUS => Some(i),
+                _ if count < mn_core::TONE_CURVE_MAX => {
+                    // Insert sorted, never before the first end or after the
+                    // last one.
+                    let p = from_px(pos);
+                    let at = pts[..count]
+                        .partition_point(|q| q[0] < p[0])
+                        .clamp(1, count.saturating_sub(1).max(1));
+                    pts[at..=count].rotate_right(1);
+                    pts[at] = p;
+                    *n = count as u8 + 1;
+                    Some(at)
+                }
+                _ => None,
+            };
+        } else if resp.dragged() {
+            if let Some(i) = drag.filter(|&i| i < count) {
+                let mut p = from_px(pos);
+                // The ends own their x; the interior stays strictly between
+                // its neighbours so the point order never inverts.
+                if i == 0 {
+                    p[0] = 0.0;
+                } else if i == count - 1 {
+                    p[0] = 1.0;
+                } else {
+                    let lo = pts[i - 1][0] + MIN_GAP;
+                    let hi = pts[i + 1][0] - MIN_GAP;
+                    p[0] = p[0].clamp(lo.min(hi), hi.max(lo));
+                }
+                pts[i] = p;
+            }
+        }
+    }
+    if resp.drag_stopped() {
+        // Dragged out of the box = delete, and only an interior point can go
+        // (dropping an end would unpin it).
+        if let Some(i) = drag.filter(|&i| i > 0 && i + 1 < count) {
+            let out = ui
+                .ctx()
+                .pointer_latest_pos()
+                .is_none_or(|p| !rect.expand(6.0).contains(p));
+            if out {
+                pts[i..count].rotate_left(1);
+                pts[count - 1] = [0.0, 0.0];
+                *n = count as u8 - 1;
+            }
+        }
+        drag = None;
+    }
+    ui.data_mut(|d| match drag {
+        Some(i) => {
+            d.insert_temp(id, i);
+        }
+        None => d.remove::<usize>(id),
+    });
+    resp.on_hover_text(
+        "Drag a point; click empty space to add one; drag a point out of the \
+box to delete it. The two ends are pinned to the left and right edges. The \
+curve is monotone — it never overshoots between your points.",
+    );
+}
+
 /// TC-004/005/006/011: the tonal-correction dialog. One window for all four
 /// parameterised corrections — the open draft's variant picks the sliders,
 /// so a new correction is a match arm and not a new dialog.
@@ -974,6 +1133,40 @@ pub(super) fn adjust_window(ctx: &egui::Context, app: &mut App) {
                     mn_core::Adjust::Binarize { threshold } => {
                         ui.label("Threshold");
                         ui.add(egui::Slider::new(threshold, 0.0..=1.0).fixed_decimals(2));
+                        ui.end_row();
+                    }
+                    mn_core::Adjust::Levels {
+                        in_black,
+                        in_white,
+                        gamma,
+                        out_black,
+                        out_white,
+                    } => {
+                        ui.strong("Input");
+                        ui.end_row();
+                        level_row(ui, "Black point", in_black);
+                        level_row(ui, "White point", in_white);
+                        ui.label("Gamma");
+                        ui.add(
+                            egui::Slider::new(gamma, 0.1..=10.0)
+                                .logarithmic(true)
+                                .fixed_decimals(2),
+                        );
+                        ui.end_row();
+                        ui.strong("Output");
+                        ui.end_row();
+                        level_row(ui, "Black point", out_black);
+                        level_row(ui, "White point", out_white);
+                    }
+                    mn_core::Adjust::ToneCurve { pts, n } => {
+                        ui.label("Curve");
+                        tone_curve_editor(ui, pts, n);
+                        ui.end_row();
+                        ui.label("");
+                        if ui.button("Reset curve").clicked() {
+                            *pts = mn_core::Adjust::TONE_CURVE_REST;
+                            *n = 2;
+                        }
                         ui.end_row();
                     }
                     // Reverse gradient has no parameters and never opens
