@@ -36,6 +36,11 @@ pub struct Shell {
     focused: bool,
     /// Region the panels left for the canvas, in **points**, last frame.
     canvas_rect_pts: Rect,
+    /// UI drawn INSIDE the canvas rect on the background layer (the
+    /// selection launcher bar): egui owns the pointer there — pen taps must
+    /// not paint through it, and the cursor is egui's arrow, not the canvas
+    /// crosshair. Rebuilt every frame by whoever draws such a widget.
+    ui_islands: Vec<Rect>,
     wants_keyboard: bool,
     pub cursor: egui::CursorIcon,
     /// UTF-16 high surrogate waiting for its pair (WM_CHAR arrives in halves).
@@ -89,6 +94,7 @@ impl Shell {
             },
             focused: true,
             canvas_rect_pts: Rect::EVERYTHING,
+            ui_islands: Vec::new(),
             wants_keyboard: false,
             cursor: egui::CursorIcon::Default,
             pending_surrogate: None,
@@ -103,9 +109,20 @@ impl Shell {
         match self.ctx.layer_id_at(pos) {
             // A window / menu / popup / tooltip is under the point.
             Some(layer) if layer.order != egui::Order::Background => true,
-            // Background layer: panels are egui's, the free rect is the canvas.
-            _ => !self.canvas_rect_pts.contains(pos),
+            // Background layer: panels are egui's, the free rect is the
+            // canvas — except registered UI islands drawn over it (the
+            // selection launcher), which are egui's too.
+            _ => {
+                !self.canvas_rect_pts.contains(pos)
+                    || self.ui_islands.iter().any(|r| r.contains(pos))
+            }
         }
+    }
+
+    /// Declare a background-layer widget drawn INSIDE the canvas rect this
+    /// frame (see `ui_islands`). Cleared at every `begin`.
+    pub fn add_ui_island(&mut self, r: Rect) {
+        self.ui_islands.push(r);
     }
 
     /// True while a text field has focus — app shortcuts must stand down.
@@ -115,6 +132,12 @@ impl Shell {
 
     pub fn set_canvas_rect_points(&mut self, r: Rect) {
         self.canvas_rect_pts = r;
+    }
+
+    /// The canvas area in points, as last reported — what the chrome
+    /// underlay paints AROUND (ui.rs).
+    pub fn canvas_rect_points(&self) -> Rect {
+        self.canvas_rect_pts
     }
 
     /// The canvas area in client pixels (what zoom/rotate commands anchor on).
@@ -241,6 +264,7 @@ impl Shell {
     // --- frame -----------------------------------------------------------
 
     pub fn begin(&mut self, size_px: (u32, u32)) -> RawInput {
+        self.ui_islands.clear();
         let mut viewports = egui::ViewportIdMap::default();
         viewports.insert(
             ViewportId::ROOT,

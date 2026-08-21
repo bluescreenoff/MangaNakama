@@ -200,6 +200,9 @@ fn action_steps(ui: &mut egui::Ui, app: &mut App, i: usize, recording: bool) -> 
     let mut dirty = false;
     let mut op: Option<StepOp> = None;
     let n = app.actions[i].steps.len();
+    // The widget the open picker hangs off: a row's ＋ if that row aimed it,
+    // otherwise the ＋ step button at the bottom (filled in below).
+    let mut picker_anchor: Option<egui::Response> = None;
 
     for si in 0..n {
         let row = ui
@@ -238,8 +241,12 @@ fn action_steps(ui: &mut egui::Ui, app: &mut App, i: usize, recording: bool) -> 
                 if lr.clicked() && has_params {
                     app.action_step_edit = if open { None } else { Some((i, si)) };
                 }
-                if icon_btn(ui, Icon::Plus, BTN, false, true, "insert a step here").clicked() {
+                let plus = icon_btn(ui, Icon::Plus, BTN, false, true, "insert a step here");
+                if plus.clicked() {
                     app.action_picker = Some((i, si));
+                }
+                if app.action_picker == Some((i, si)) {
+                    picker_anchor = Some(plus);
                 }
                 if icon_btn(ui, Icon::Duplicate, BTN, false, true, "duplicate step").clicked() {
                     op = Some(StepOp::Duplicate(si));
@@ -297,43 +304,57 @@ fn action_steps(ui: &mut egui::Ui, app: &mut App, i: usize, recording: bool) -> 
 
     // Append control + the picker it opens. The picker also opens from a
     // row's ＋, which aims it at that row's slot instead of the end.
-    ui.horizontal(|ui| {
-        ui.add_space(14.0);
-        if ui.small_button("＋ step").clicked() {
-            app.action_picker = match app.action_picker {
-                Some((a, s)) if a == i && s == n => None,
-                _ => Some((i, n)),
-            };
-        }
-    });
+    let add = ui
+        .horizontal(|ui| {
+            ui.add_space(14.0);
+            let r = ui.small_button("＋ step");
+            if r.clicked() {
+                app.action_picker = match app.action_picker {
+                    Some((a, s)) if a == i && s == n => None,
+                    _ => Some((i, n)),
+                };
+            }
+            r
+        })
+        .inner;
+    // The picker is a popup on its own layer, not a frame in the row flow:
+    // laid out inline it inherited the enclosing HORIZONTAL layout, so the
+    // entries ran sideways over each other and off the palette edge. A popup
+    // stacks them, flips itself to stay on screen, and closes on Escape or a
+    // click outside — the menu behaviour the rest of the app has.
     if let Some((pi, slot)) = app.action_picker
         && pi == i
     {
         let mut picked: Option<ActionStep> = None;
-        ui.horizontal(|ui| {
-            ui.add_space(14.0);
-            egui::Frame::new()
-                .fill(theme::PANEL)
-                .inner_margin(egui::Margin::same(4))
-                .corner_radius(theme::R_PANEL)
-                .show(ui, |ui| {
-                    ui.set_max_width(190.0);
-                    ui.label(
-                        egui::RichText::new(if slot >= n {
-                            "add step at the end".to_owned()
-                        } else {
-                            format!("insert step at {}", slot + 1)
-                        })
-                        .color(theme::TEXT_WEAK)
-                        .size(10.0),
-                    );
-                    for kind in ActionStep::kinds() {
-                        if ui.selectable_label(false, kind.kind_label()).clicked() {
-                            picked = Some(kind);
+        let mut open = true;
+        egui::Popup::from_response(picker_anchor.as_ref().unwrap_or(&add))
+            .open_bool(&mut open)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .layout(egui::Layout::top_down_justified(egui::Align::Min))
+            .width(190.0)
+            .show(|ui| {
+                ui.label(
+                    egui::RichText::new(if slot >= n {
+                        "add step at the end".to_owned()
+                    } else {
+                        format!("insert step at {}", slot + 1)
+                    })
+                    .color(theme::TEXT_WEAK)
+                    .size(10.0),
+                );
+                egui::ScrollArea::vertical()
+                    .max_height(300.0)
+                    .show(ui, |ui| {
+                        for kind in ActionStep::kinds() {
+                            if ui.selectable_label(false, kind.kind_label()).clicked() {
+                                picked = Some(kind);
+                            }
                         }
-                    }
-                });
-        });
+                    });
+            });
+        if !open {
+            app.action_picker = None;
+        }
         if let Some(step) = picked {
             let params = step.has_params();
             op = Some(StepOp::Insert(slot, step));

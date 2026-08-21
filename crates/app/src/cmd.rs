@@ -774,7 +774,9 @@ impl Default for ToneToolOpts {
     fn default() -> Self {
         Self {
             tone: mn_core::tone::ToneParams::default(),
-            density: 1.0,
+            // A visible SCREEN, not a black fill: 100% coverage defeats the
+            // point of one-click tone (readable halftone is the product).
+            density: 0.4,
             // Lineart that a bucket fill would leak through is the normal
             // case for a tone gesture, so the default seals harder than
             // `FillOpts::default()`'s 2 px.

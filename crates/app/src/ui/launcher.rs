@@ -39,14 +39,23 @@ pub(super) fn selection_launcher(ui: &mut egui::Ui, app: &mut App, canvas: egui:
     if !any {
         return;
     }
-    // Anchor just under the selection's top-left, clamped into the canvas.
+    // Anchor just under the selection, CENTERED on it (owner report
+    // 2026-08-21: left-anchored read as misaligned), clamped into the canvas.
     let bar_w = 14.0 * 24.0 + 34.0 + 12.0;
-    let mut pos = egui::pos2(x0, (y1 + 6.0).min(canvas.bottom() - 30.0));
+    let mut pos = egui::pos2(
+        (x0 + x1) * 0.5 - bar_w * 0.5,
+        (y1 + 6.0).min(canvas.bottom() - 30.0),
+    );
     pos.x = pos
         .x
         .clamp(canvas.left(), (canvas.right() - bar_w).max(canvas.left()));
     pos.y = pos.y.clamp(canvas.top(), canvas.bottom() - 30.0);
     let bar = egui::Rect::from_min_size(pos, egui::vec2(bar_w, 28.0));
+    // The bar sits INSIDE the canvas rect on the background layer: without
+    // this, `owns_pointer` calls it canvas — a pen tap on Copy painted a
+    // dot, and the cursor stayed the canvas crosshair over the buttons
+    // (owner report 2026-08-21).
+    app.shell.add_ui_island(bar);
 
     ui.scope_builder(
         egui::UiBuilder::new()

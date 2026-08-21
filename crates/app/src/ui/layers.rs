@@ -730,6 +730,15 @@ const FOLDER_ROW_H: f32 = 34.0;
 /// the old right-edge badges).
 const FLAG_COL_W: f32 = 16.0;
 
+/// The status marks carry their own hue so the column reads at a glance
+/// without being deciphered (owner 2026-08-21): red for the reference
+/// lighthouse, blue for the draft pencil. Both sit at the ACCENT's weight —
+/// desaturated enough not to glow against the dark rail.
+const REF_MARK: egui::Color32 = egui::Color32::from_rgb(0xcf, 0x5d, 0x59);
+
+/// See [`REF_MARK`] — the draft pencil's blue.
+const DRAFT_MARK: egui::Color32 = egui::Color32::from_rgb(0x66, 0x9e, 0xd6);
+
 /// The active row's fill. CSP paints the editing row an unmissable blue;
 /// the audit round toned ours from the original #2f5e99 glare down to
 /// CSP's own weight — the 1px lighter edges (below) keep it unmissable in
@@ -1278,22 +1287,11 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
         ] {
             p.vline(x, rect.y_range(), egui::Stroke::new(1.0, theme::BORDER));
         }
-        // Status column: an empty stroked box on every layer row (the
-        // affordance CSP draws — the cell is clickable), filled by the
-        // reference mark (accent — it changes tool behaviour) above the
-        // draft mark; one alone centres.
-        if !row.reference && !row.draft {
-            let br = egui::Rect::from_center_size(
-                egui::pos2(flag_cell.center().x, cy),
-                egui::vec2(9.0, 9.0),
-            );
-            p.rect_stroke(
-                br,
-                1.0,
-                egui::Stroke::new(1.0, egui::Color32::from_rgb(0x4a, 0x4a, 0x50)),
-                egui::StrokeKind::Inside,
-            );
-        }
+        // Status column: the reference mark above the draft mark, one alone
+        // centres. A layer with neither stays EMPTY — the round before this
+        // drew a stroked box there as CSP's affordance, but the cell has no
+        // click of its own (the marks are set from the header buttons and the
+        // row's context menu), so the box read as a checkbox that did nothing.
         if row.reference || row.draft {
             let fs = egui::vec2(12.0, 12.0);
             let cx = flag_cell.center().x;
@@ -1305,26 +1303,26 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
                         p,
                         egui::Rect::from_center_size(up, fs),
                         Icon::Reference,
-                        theme::ACCENT,
+                        REF_MARK,
                     );
                     icons::paint(
                         p,
                         egui::Rect::from_center_size(dn, fs),
                         Icon::Draft,
-                        theme::TEXT_WEAK,
+                        DRAFT_MARK,
                     );
                 }
                 (true, false) => icons::paint(
                     p,
                     egui::Rect::from_center_size(egui::pos2(cx, cy), fs),
                     Icon::Reference,
-                    theme::ACCENT,
+                    REF_MARK,
                 ),
                 (false, true) => icons::paint(
                     p,
                     egui::Rect::from_center_size(egui::pos2(cx, cy), fs),
                     Icon::Draft,
-                    theme::TEXT_WEAK,
+                    DRAFT_MARK,
                 ),
                 (false, false) => unreachable!(),
             }

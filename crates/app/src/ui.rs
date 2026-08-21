@@ -95,6 +95,41 @@ pub fn build(ui: &mut egui::Ui, app: &mut App) {
         canvas_overlay(ui, app, canvas);
         launcher::selection_launcher(ui, app, canvas);
     } else {
+        // The wgpu canvas covers the WHOLE window under egui, and the dock
+        // chrome has hairline gaps (area padding, separator seams, panel
+        // junctions) the old fixed panels used to blanket — a rotated page
+        // peeked through the top bars as white slivers (owner report
+        // 2026-08-21). Paint an opaque underlay around the canvas HOLE
+        // before the tree, so nothing can shine through the chrome. Last
+        // frame's hole rect — the same one-frame contract `owns_pointer`
+        // lives with; the first frame has no hole yet and paints nothing.
+        let screen = ui.available_rect_before_wrap();
+        let hole = app.shell.canvas_rect_points().intersect(screen);
+        if hole.is_positive() {
+            let p = ui.painter();
+            for r in [
+                egui::Rect::from_min_max(
+                    screen.min,
+                    egui::pos2(screen.max.x, hole.top()),
+                ),
+                egui::Rect::from_min_max(
+                    egui::pos2(screen.min.x, hole.bottom()),
+                    screen.max,
+                ),
+                egui::Rect::from_min_max(
+                    egui::pos2(screen.min.x, hole.top()),
+                    egui::pos2(hole.left(), hole.bottom()),
+                ),
+                egui::Rect::from_min_max(
+                    egui::pos2(hole.right(), hole.top()),
+                    egui::pos2(screen.max.x, hole.bottom()),
+                ),
+            ] {
+                if r.is_positive() {
+                    p.rect_filled(r, 0.0, theme::WINDOW);
+                }
+            }
+        }
         dock::tree(ui, app);
     }
 

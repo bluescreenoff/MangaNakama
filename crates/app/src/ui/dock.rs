@@ -384,12 +384,19 @@ pub fn merge_columns(
 
     // split() refuses a parent as the new child, so each side goes in as a
     // placeholder leaf that patch #17 then overwrites with the whole column.
+    //
+    // FRACTION TRAP: `Tree::split`'s doc says the fraction is "how much the
+    // OLD node occupies", but the layout gives it to the LEFT child by
+    // POSITION (`midpoint = min + width * fraction`) — so for split_LEFT
+    // the fraction sizes the NEW node. Passing `1.0 - lfrac` here handed
+    // the palette column 85% of the window and crushed the canvas into the
+    // remainder (owner's first docking-2 launch).
     let mut canvas_node = NodeIndex::root();
     if has_tabs(&left) {
         let tree = merged.main_surface_mut();
         let [canvas, slot] = tree.split_left(
             canvas_node,
-            1.0 - lfrac,
+            lfrac,
             vec![Pane::Palette(Palette::Tool)],
         );
         tree.graft_at(slot, left.main_surface());
@@ -735,6 +742,20 @@ fn dock_style(ui: &egui::Ui) -> Style {
 /// immediate mode, two mutable aliases of the same struct would not fly).
 pub fn tree(ui: &mut egui::Ui, app: &mut App) {
     let mut dock = std::mem::replace(&mut app.dock, minimal_tree());
+    // The canvas leaf never collapses: the leaf-collapse chevron folding
+    // the drawing surface away is a burial by another door. Un-collapsing
+    // BEFORE the pass keeps the chevron from ever taking effect on it;
+    // palette leaves keep theirs.
+    for (path, node) in dock.iter_all_nodes_mut() {
+        if !path.surface.is_main() {
+            continue;
+        }
+        if let Some(leaf) = node.get_leaf_mut()
+            && leaf.tabs.iter().any(|t| t.is_canvas_class())
+        {
+            leaf.collapsed = false;
+        }
+    }
     DockArea::new(&mut dock)
         .id(egui::Id::new("mn.dock"))
         .style(dock_style(ui))
@@ -861,6 +882,19 @@ mod tests {
                 .count(),
             1,
             "exactly one canvas pane"
+        );
+        // The FRACTION TRAP pin (merge_columns comment): the root split's
+        // fraction sizes the LEFT child by position, so the palette column
+        // must get ITS width share — inverted, it swallowed 85% of the
+        // window and crushed the canvas (owner's first docking-2 launch).
+        let v: serde_json::Value =
+            serde_json::from_str(&to_json_tree(&merged)).expect("tree json");
+        let root_frac = v["surfaces"][0]["Main"]["nodes"][0]["Horizontal"]["fraction"]
+            .as_f64()
+            .expect("root split fraction");
+        assert!(
+            (root_frac - 186.0 / 1280.0).abs() < 0.02,
+            "left column keeps its width share of the window, got {root_frac}"
         );
         // The float is a window surface of the merged state now.
         assert!(
