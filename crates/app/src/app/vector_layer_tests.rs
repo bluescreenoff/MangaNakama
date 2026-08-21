@@ -420,6 +420,39 @@ fn deleting_a_selected_stroke_is_one_step() {
     assert!(layer_alpha(&app, li) > 0);
 }
 
+/// Drawing selects what you JUST drew: reaching for the Object tool after
+/// inking must not light up a stroke picked earlier, and undo must never
+/// leave the selection pointing at a stroke that is gone.
+#[test]
+fn drawing_selects_the_newest_stroke() {
+    let Some(mut app) = vector_app() else { return };
+    let li = app.doc.active;
+    drag(&mut app, 200.0);
+    assert_eq!(app.vector_sel, Some(0), "the first stroke selects itself");
+
+    // Select the first stroke by hand, then draw a second: the stale pick
+    // must not survive (the owner-reported bug).
+    app.tool = Tool::Object;
+    assert!(app.vector_hit(120.0, 200.0, false));
+    app.vector_drag = None;
+    assert_eq!(app.vector_sel, Some(0));
+    app.tool = Tool::Pen;
+    app.apply_draw_state();
+    drag(&mut app, 260.0);
+    let count = |app: &App| app.doc.layers[li].strokes.as_ref().unwrap().strokes.len();
+    assert_eq!(count(&app), 2);
+    assert_eq!(app.vector_sel, Some(1), "the newest stroke is the selected one");
+
+    // Undo the newest stroke: the selection must not dangle past the set.
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::Undo);
+    assert_eq!(count(&app), 1);
+    assert!(
+        app.vector_sel.is_none_or(|si| si < count(&app)),
+        "selection dangles after undo: {:?}",
+        app.vector_sel
+    );
+}
+
 /// Ordinary layers keep ordinary strokes: nothing records, undo behaves
 /// exactly as before.
 #[test]
@@ -430,6 +463,7 @@ fn plain_layers_do_not_record() {
     assert!(app.doc.layers[li].strokes.is_none());
     drag(&mut app, 240.0);
     assert!(layer_alpha(&app, li) > 0);
+    assert_eq!(app.vector_sel, None, "a non-recording stroke selects nothing");
     crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::Undo);
     assert_eq!(layer_alpha(&app, li), 0);
 }

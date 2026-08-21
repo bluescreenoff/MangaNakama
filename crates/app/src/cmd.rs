@@ -4535,10 +4535,17 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
         }
         AppCmd::SelectLayer(i) => {
             app.commit_text_edit();
+            // PA-001: picking a layer un-picks the Paper row, whichever way
+            // the pick arrived (palette row, shortcut, another command).
+            app.paper_selected = false;
             if app.doc.set_active(i) {
                 // Audit H1: armed mask-edit must not survive onto a layer
                 // that has no mask.
                 app.disarm_mask_edit_if_unmasked();
+                // A stroke index is only meaningful on the layer it was
+                // picked on — carried across, it would light an unrelated
+                // stroke on the next vector layer with enough strokes.
+                app.vector_sel = None;
                 app.mark_dirty();
             }
         }

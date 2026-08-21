@@ -716,15 +716,27 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
                 pts.clone(),
                 egui::Stroke::new(1.5, theme::ACCENT),
             ));
+            // Two handle classes, Clip Studio's convention: SQUARES are the
+            // special points — today the stroke's two ENDPOINTS, and the
+            // shape reserved for corner points when they land — CIRCLES the
+            // ordinary handles between them. Rendering only: both classes
+            // come out of the one `handle_indices` list the hit test grabs,
+            // so what you see is still exactly what you can grab.
+            let last = s.points.len().saturating_sub(1);
             for i in crate::app::vector_edit::handle_indices(s) {
-                let hrect = egui::Rect::from_center_size(pts[i], egui::vec2(7.0, 7.0));
-                painter.rect_filled(hrect, 1.0, egui::Color32::WHITE);
-                painter.rect_stroke(
-                    hrect,
-                    1.0,
-                    egui::Stroke::new(1.2, theme::ACCENT),
-                    egui::StrokeKind::Inside,
-                );
+                if i == 0 || i == last {
+                    let hrect = egui::Rect::from_center_size(pts[i], egui::vec2(7.0, 7.0));
+                    painter.rect_filled(hrect, 1.0, egui::Color32::WHITE);
+                    painter.rect_stroke(
+                        hrect,
+                        1.0,
+                        egui::Stroke::new(1.2, theme::ACCENT),
+                        egui::StrokeKind::Inside,
+                    );
+                } else {
+                    painter.circle_filled(pts[i], 3.4, egui::Color32::WHITE);
+                    painter.circle_stroke(pts[i], 3.4, egui::Stroke::new(1.2, theme::ACCENT));
+                }
             }
         }
         if let Some((li, fi)) = app.object_sel {

@@ -476,6 +476,12 @@ pub struct App {
     pub layer_thumbs: Vec<Option<(u64, egui::TextureHandle)>>,
     /// Inline layer rename in progress: (index, edit buffer).
     pub renaming: Option<(usize, String)>,
+    /// PA-001: the Layers palette's Paper row is the highlighted one. The
+    /// paper is NOT a layer, so this is a palette highlight beside
+    /// `doc.active` rather than a second active-layer authority — nothing
+    /// downstream ever sees "the active layer is the paper". Selecting any
+    /// layer clears it (`AppCmd::SelectLayer` and the row click both do).
+    pub paper_selected: bool,
     /// Doc revision at the last successful save/open/new — dirty tracking.
     saved_revision: u64,
     /// Structural page changes (add/delete/reorder) revisions can't see.
@@ -1182,6 +1188,7 @@ impl App {
             hex_edit: String::new(),
             layer_thumbs: Vec::new(),
             renaming: None,
+            paper_selected: false,
             saved_revision: 0,
             pages_dirty: false,
             last_title: String::new(),
@@ -2558,6 +2565,19 @@ impl App {
                 // replay must re-run it at the same strength.
                 stroke.stabilizer = self.props_current.stabilizer;
                 self.doc.end_op_vector_stroke(stroke);
+                // Reaching for the Object tool right after inking means "edit
+                // THAT stroke": select the record just pushed (the newest on
+                // the layer) so a selection left over from an earlier click
+                // cannot light up the wrong stroke. A layer that turned out
+                // not to record selects nothing. Undo/redo/trim/delete keep
+                // clearing the selection themselves, so the index can never
+                // outlive its stroke.
+                self.vector_sel = self
+                    .doc
+                    .layers
+                    .get(self.doc.active)
+                    .and_then(|l| l.strokes.as_ref())
+                    .and_then(|set| set.strokes.len().checked_sub(1));
             }
             _ => {
                 self.doc.end_op();
@@ -3492,7 +3512,7 @@ fn scan_presets() -> Vec<(String, PathBuf)> {
 
 /// The assets/brushes directory next to whichever root actually contains
 /// presets — also where texture-tip masks live (`textures/*.png`).
-fn brushes_root() -> Option<PathBuf> {
+pub(crate) fn brushes_root() -> Option<PathBuf> {
     let mut roots: Vec<PathBuf> = Vec::new();
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent()

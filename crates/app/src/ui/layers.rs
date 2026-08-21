@@ -9,7 +9,7 @@ use super::theme::ValueBar;
 use super::widgets::{group_caption, icon_btn};
 use crate::app::{App, LayerFilterKind};
 use crate::cmd::AppCmd;
-use mn_core::Blend;
+use mn_core::{Blend, FillKind, LayerKind};
 
 // The picker order is OURS, not CSP's: parts 1, 2 and 3 in the order they
 // shipped, appended never re-sorted, because a saved workspace and the
@@ -667,6 +667,43 @@ const LABEL_COLORS: [[u8; 3]; 6] = [
 
 const LAYER_ROW_H: f32 = 34.0;
 
+/// The per-type marker a palette row carries beside its thumbnail, CSP's
+/// layer-type glyph. `None` = a plain raster layer: the common case stays
+/// bare so the marked kinds are the ones that catch the eye.
+///
+/// Most-specific first, because the kinds overlap in storage: a frame folder
+/// is a folder AND a frame, a tone is either painted ink screened (`tone`) or
+/// a LIVE fill layer's parameters, and vector inking is a `strokes` set
+/// recorded BESIDE an ordinary raster — so it is the last test before bare.
+pub(crate) fn row_glyph(l: &mn_core::Layer) -> Option<Icon> {
+    if l.folder {
+        return Some(if l.is_frame() {
+            Icon::Frame
+        } else {
+            Icon::Folder
+        });
+    }
+    if l.is_text() {
+        return Some(Icon::Text);
+    }
+    if l.is_balloon() {
+        return Some(Icon::Balloon);
+    }
+    if l.is_frame() {
+        return Some(Icon::Frame);
+    }
+    if l.tone.is_some() || matches!(l.kind, LayerKind::Fill(FillKind::Tone { .. })) {
+        return Some(Icon::Tone);
+    }
+    if matches!(l.kind, LayerKind::Fill(_)) {
+        return Some(Icon::Fill);
+    }
+    if l.strokes.is_some() {
+        return Some(Icon::Vector);
+    }
+    None
+}
+
 pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
     // Top strip: the active layer's blend + opacity, exactly CSP's layout.
     let active = app.doc.active;
@@ -771,6 +808,20 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
         if icon_btn(ui, Icon::Plus, s, false, true, "New layer").clicked() {
             app.push_cmd(AppCmd::AddLayer);
         }
+        // Same command as Layer ▸ New vector layer, and the same glyph the
+        // resulting row carries.
+        if icon_btn(
+            ui,
+            Icon::Vector,
+            s,
+            false,
+            true,
+            "New vector layer — strokes record as editable geometry",
+        )
+        .clicked()
+        {
+            app.push_cmd(AppCmd::AddVectorLayer);
+        }
         if icon_btn(ui, Icon::Frame, s, false, true, "New frame border folder").clicked() {
             app.push_cmd(AppCmd::NewFrameLayer);
         }
@@ -842,17 +893,22 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
         /// or, for a folder without one, the colour it inherits (PC-002).
         strip: Option<[u8; 3]>,
         is_frame: bool,
-        is_balloon: bool,
-        is_text: bool,
+        /// The layer-type marker (`row_glyph`); `None` = plain raster.
+        glyph: Option<Icon>,
         depth: u8,
         folder: bool,
         open: bool,
         clip: bool,
+        /// The clip flag is set but resolves to NO base (`clip_bases`) — the
+        /// flag is being ignored and the row should say so, not lie red
+        /// (docs/CLIPPING-SCENARIOS.md 5a).
+        clip_dangling: bool,
         lock: bool,
         lock_alpha: bool,
         reference: bool,
         draft: bool,
     }
+    let clip_bases = app.doc.clip_bases();
     let rows: Vec<Row> = app
         .doc
         .layers
@@ -868,12 +924,12 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
             // `Document::palette_colour`).
             strip: app.doc.palette_colour(i),
             is_frame: l.is_frame(),
-            is_balloon: l.is_balloon(),
-            is_text: l.is_text(),
+            glyph: row_glyph(l),
             depth: l.depth,
             folder: l.folder,
             open: l.open,
             clip: l.clip,
+            clip_dangling: l.clip && !l.folder && clip_bases[i].is_none(),
             lock: l.lock,
             lock_alpha: l.lock_alpha,
             reference: l.reference,
@@ -1116,6 +1172,9 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
             egui::StrokeKind::Inside,
         );
         // Clip marker: CSP's red bar down the left edge of the thumbnail.
+        // A DANGLING flag (set, but no valid base below — the compositor
+        // ignores it) dims to grey so "why is this suddenly unclipped"
+        // is answerable at a glance (docs/CLIPPING-SCENARIOS.md 5a).
         if row.clip {
             p.rect_filled(
                 egui::Rect::from_min_max(
@@ -1123,23 +1182,21 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
                     egui::pos2(tr.left() - 1.5, tr.bottom()),
                 ),
                 0.0,
-                egui::Color32::from_rgb(0xe5, 0x4b, 0x4b),
+                if row.clip_dangling {
+                    theme::TEXT_WEAK
+                } else {
+                    egui::Color32::from_rgb(0xe5, 0x4b, 0x4b)
+                },
             );
         }
 
-        // Vector layers carry their marker before the text (CSP's folder icon
-        // position): koma for frames, bubble for balloons.
+        // The layer-type marker sits between the thumbnail and the name
+        // (CSP's position): koma for frames, bubble for balloons, dots for a
+        // tone, a curve for a vector layer, and so on — see `row_glyph`.
         let mut text_x = tr.right() + 7.0;
-        if row.is_frame || row.is_balloon || row.is_text {
+        if let Some(icon) = row.glyph {
             let fr =
                 egui::Rect::from_center_size(egui::pos2(text_x + 6.0, cy), egui::vec2(13.0, 13.0));
-            let icon = if row.is_frame {
-                Icon::Frame
-            } else if row.is_text {
-                Icon::Text
-            } else {
-                Icon::Balloon
-            };
             icons::paint(
                 p,
                 fr,
@@ -1342,8 +1399,14 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
             let m = ui.input(|i| i.modifiers);
             let op = crate::cmd::effective_sel_op(m.shift, m.alt, app.sel_op);
             app.push_cmd(AppCmd::SelectFromLayer(i, op));
-        } else if resp.clicked() && !selected {
-            app.push_cmd(AppCmd::SelectLayer(i));
+        } else if resp.clicked() {
+            // `SelectLayer` clears the Paper highlight, but a click on the
+            // row that is ALREADY active pushes no command — so clear it
+            // here too, or the paper stays lit beside the active layer.
+            app.paper_selected = false;
+            if !selected {
+                app.push_cmd(AppCmd::SelectLayer(i));
+            }
         }
         if !filtering && resp.drag_started() {
             egui::DragAndDrop::set_payload(ui.ctx(), LayerDrag(i));
@@ -1376,12 +1439,25 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
     }
 
     // Paper row: the canvas' white ground, CSP-style at the bottom of the
-    // stack. Display only — a real paper toggle is a later round.
+    // stack. It SELECTS like a layer row (highlight + active row) and nothing
+    // more — the paper is not a layer, so `doc.active` never points at it and
+    // no downstream code has to know about this.
     {
         let w = ui.available_width();
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(w, LAYER_ROW_H), egui::Sense::hover());
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, LAYER_ROW_H), egui::Sense::click());
+        let resp = resp.on_hover_text("the page's ground — View ▸ Paper sets its colour");
+        if resp.clicked() {
+            app.paper_selected = true;
+        }
+        let selected = app.paper_selected;
+        let [pr, pg, pb] = app.doc.paper.colour;
         let cy = rect.center().y;
         let p = ui.painter();
+        if selected {
+            p.rect_filled(rect, 2.0, theme::SEL_ROW);
+        } else if resp.hovered() {
+            p.rect_filled(rect, 2.0, theme::HOVER);
+        }
         let eye_r = egui::Rect::from_center_size(
             egui::pos2(rect.left() + 10.0, cy),
             egui::vec2(15.0, 15.0),
@@ -1405,19 +1481,30 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
         );
         let tr =
             egui::Rect::from_center_size(egui::pos2(eye_col + 39.0, cy), egui::vec2(26.0, 26.0));
-        p.rect_filled(tr, 2.0, egui::Color32::WHITE);
+        // The swatch is the paper's ACTUAL colour, so a cream page reads
+        // cream here too.
+        p.rect_filled(tr, 2.0, egui::Color32::from_rgb(pr, pg, pb));
         p.rect_stroke(
             tr,
             2.0,
             egui::Stroke::new(1.0, theme::BORDER),
             egui::StrokeKind::Inside,
         );
+        let text_col = if selected {
+            theme::TEXT_STRONG
+        } else {
+            theme::TEXT_WEAK
+        };
+        // Same glyph slot as a layer row: the sheet marks the ground.
+        let gr =
+            egui::Rect::from_center_size(egui::pos2(tr.right() + 13.0, cy), egui::vec2(13.0, 13.0));
+        icons::paint(p, gr, Icon::Paper, text_col);
         p.text(
-            egui::pos2(tr.right() + 7.0, cy),
+            egui::pos2(gr.right() + 5.0, cy),
             egui::Align2::LEFT_CENTER,
             "Paper",
             egui::FontId::proportional(11.5),
-            theme::TEXT_WEAK,
+            text_col,
         );
     }
 
@@ -1610,6 +1697,58 @@ mod tests {
         let mut f = plain(LayerFilterKind::All, "zzz");
         f.ref_only = true;
         assert!(!f.passes(&d, 1));
+    }
+
+    /// The owner's r-round eye test: every row type must LOOK different.
+    /// Pins the marker each kind resolves to, and the two overlaps that
+    /// decide the order — a frame FOLDER is both, and a tone/vector layer
+    /// is an ordinary raster with something recorded beside it.
+    #[test]
+    fn every_layer_kind_gets_its_own_glyph() {
+        let mut d = Document::new(200, 200);
+        assert_eq!(row_glyph(&d.layers[0]), None, "a plain raster stays bare");
+
+        let li = d.add_layer("Vector 1");
+        d.layers[li].strokes = Some(mn_core::StrokeSet::default());
+        assert_eq!(row_glyph(&d.layers[li]), Some(Icon::Vector));
+
+        let li = d.add_layer("Tone 1");
+        d.layers[li].tone = Some(mn_core::tone::ToneParams::default());
+        assert_eq!(row_glyph(&d.layers[li]), Some(Icon::Tone));
+        // A tone that also records strokes is still a TONE: the screen is
+        // what the row shows on the canvas.
+        d.layers[li].strokes = Some(mn_core::StrokeSet::default());
+        assert_eq!(row_glyph(&d.layers[li]), Some(Icon::Tone));
+
+        let li = d.add_layer("Flat");
+        d.layers[li].kind = LayerKind::Fill(FillKind::Flat {
+            color: [0.0, 0.0, 0.0, 1.0],
+        });
+        assert_eq!(row_glyph(&d.layers[li]), Some(Icon::Fill));
+        // A LIVE fill layer whose parameters ARE a screentone reads as one.
+        d.layers[li].kind = LayerKind::Fill(FillKind::Tone {
+            tone: mn_core::tone::ToneParams::default(),
+            density: 0.5,
+        });
+        assert_eq!(row_glyph(&d.layers[li]), Some(Icon::Tone));
+
+        d.add_text_layer("Dialogue", TextSet { texts: Vec::new() });
+        assert_eq!(row_glyph(d.layers.last().unwrap()), Some(Icon::Text));
+        d.add_balloon_layer(
+            "Bubbles",
+            mn_core::BalloonSet {
+                balloons: Vec::new(),
+                border_px: 2.0,
+                pressure_width: false,
+            },
+        );
+        assert_eq!(row_glyph(d.layers.last().unwrap()), Some(Icon::Balloon));
+
+        // A frame folder is a folder AND a frame — the koma marker wins.
+        let hdr = d.add_frame_folder("Frame 1", FrameSet::single_rect([1.0, 1.0, 9.0, 9.0], 2.0));
+        assert_eq!(row_glyph(&d.layers[hdr]), Some(Icon::Frame));
+        let plain = d.add_folder_above(hdr, "Group");
+        assert_eq!(row_glyph(&d.layers[plain]), Some(Icon::Folder));
     }
 
     /// SL-003's manga row: the scope is the frame folder BLOCK — header

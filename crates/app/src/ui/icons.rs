@@ -97,6 +97,13 @@ pub enum Icon {
     Poly,
     /// Gradient tool: a ramp square.
     Gradient,
+    /// Vector layer (docs/VECTOR-INKING.md): a curve with its control points
+    /// — the strokes are geometry beside the pixels.
+    Vector,
+    /// Tone layer (CSP トーンレイヤー): a halftone patch, dots ramping.
+    Tone,
+    /// The paper under the stack (PA-001): a sheet with a folded corner.
+    Paper,
 }
 
 /// Paint `icon` to fill `r` (which should be square-ish), in `color`.
@@ -665,6 +672,55 @@ pub fn paint(p: &Painter, r: Rect, icon: Icon, color: Color32) {
                 p.rect_filled(strip, 0.0, Color32::from_gray(v));
             }
             p.rect_stroke(g, 0.0, thin, egui::StrokeKind::Inside);
+        }
+        Icon::Vector => {
+            // A quadratic through (0.12,0.80) → (0.88,0.72) pulled up by a
+            // handle at (0.50,0.04), with square grips on the two ends: the
+            // "this layer records geometry" marker.
+            let pts: Vec<Pos2> = (0..=16)
+                .map(|i| {
+                    let t = i as f32 / 16.0;
+                    let u = 1.0 - t;
+                    let x = u * u * 0.12 + 2.0 * u * t * 0.50 + t * t * 0.88;
+                    let y = u * u * 0.80 + 2.0 * u * t * 0.04 + t * t * 0.72;
+                    pt(r, x, y)
+                })
+                .collect();
+            p.add(Shape::line(pts, line));
+            for (x, y) in [(0.12, 0.80), (0.88, 0.72)] {
+                p.rect_filled(
+                    Rect::from_center_size(pt(r, x, y), Vec2::splat(w * 0.22)),
+                    0.0,
+                    color,
+                );
+            }
+        }
+        Icon::Tone => {
+            // 3x3 halftone grid, dots growing toward the bottom-right so the
+            // glyph reads as a density ramp rather than a dice face.
+            for (row, y) in [0.22_f32, 0.50, 0.78].into_iter().enumerate() {
+                for (col, x) in [0.22_f32, 0.50, 0.78].into_iter().enumerate() {
+                    let t = (row + col) as f32 / 4.0;
+                    p.circle_filled(pt(r, x, y), w * (0.055 + 0.085 * t), color);
+                }
+            }
+        }
+        Icon::Paper => {
+            // Sheet outline with the top-right corner turned down.
+            p.add(Shape::closed_line(
+                poly(
+                    r,
+                    &[
+                        (0.20, 0.10),
+                        (0.62, 0.10),
+                        (0.82, 0.30),
+                        (0.82, 0.90),
+                        (0.20, 0.90),
+                    ],
+                ),
+                thin,
+            ));
+            p.line(poly(r, &[(0.62, 0.10), (0.62, 0.30), (0.82, 0.30)]), thin);
         }
     }
 }
