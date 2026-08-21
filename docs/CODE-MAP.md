@@ -211,6 +211,17 @@ The recurring failure shapes, in order of how often they have shipped:
 - Selection coverage is weighted, not boolean, and selection ops go
   through coverage-based bounds — a new op that derives its region from
   one outline loop breaks multi-island selections.
+- A PASTE with a selection active lands MASKED to it (owner 2026-08-21),
+  and the halves live apart: `cmd.rs`'s `TransformCommit` picks the shape —
+  a paste that CREATES its layer gets a non-destructive layer mask built
+  from the coverage (`fill_layer::mask_from_selection`), a paste that
+  stamps an existing layer passes `mask_to_selection: true` into
+  `commit_transform`, which clamps inside the commit's own op. Exactly one
+  may fire per commit: both would weight a feathered edge twice. The tell
+  for "this is a paste" is `clear_source == false` — clamping a LIFTED
+  float (Transform, Flip) would erase the selection's own art the moment it
+  moved. The mask reads the LIVE selection at commit, not a lift-time
+  snapshot; only the source CLEAR needs to mirror the lift.
 
 ## Text (`crates/text`)
 

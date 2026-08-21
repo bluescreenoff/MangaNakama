@@ -1929,6 +1929,11 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
     ) {
         app.adjust_preview_revert();
     }
+    // docs/CLIPPING-SCENARIOS.md 5b: a structure edit that silences or
+    // re-attaches someone's clip should SAY so, not just change the
+    // picture. Snapshot which clipped layers are dangling; the tail of
+    // this function compares and reports.
+    let clip_before = clip_dangling_by_name(&app.doc);
     match cmd {
         // --- history ------------------------------------------------------
         // No `renderer.invalidate()`: undo stamps a fresh revision on every
@@ -4267,6 +4272,17 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                     // (MT-034 note: the pre-paste active is not needed — BelowActive
                     // turned out unreachable under r74 rules and was cut.)
                     let mut refused = false;
+                    // Paste into a selection (owner 2026-08-21). A paste is a
+                    // float that never lifted anything (`!clear_source`); with
+                    // ants up it must arrive MASKED to them. Two shapes, and
+                    // exactly one of them fires per commit — applying both
+                    // would weight a feathered edge twice:
+                    //  · a paste that CREATES its layer gets a non-destructive
+                    //    layer mask built from the selection's coverage (the
+                    //    user can disable it to reveal the whole paste), or
+                    //  · a paste that stamps an existing layer is clamped to
+                    //    the coverage inside the commit's own op.
+                    let mut masked = false;
                     if let Some(folder) = drag.create_in {
                         // Index captured at paste time; anything that
                         // reshuffled the stack while the float was open must
@@ -4274,7 +4290,31 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                         let ok = app.doc.layers.get(folder).is_some_and(|l| l.is_frame())
                             && app.doc.add_layer_in_folder(folder, "Pasted").is_some();
                         refused = !ok;
+                        // The mask rides the layer that was just created, so
+                        // there is no prior mask to restore and nothing to
+                        // record: `add_layer_in_folder` already cleared the
+                        // history (structural, like every layer add). One
+                        // paste stays ONE undo step — the commit's tile op.
+                        if ok && !drag.clear_source {
+                            let m = app
+                                .doc
+                                .selection
+                                .as_ref()
+                                .and_then(|s| mn_core::fill_layer::mask_from_selection(&app.doc, s));
+                            if let Some(m) = m {
+                                let li = app.doc.active;
+                                app.doc.layers[li].mask = Some(m);
+                                app.renderer.invalidate();
+                                masked = true;
+                            }
+                        }
                     }
+                    // The stamping case: no fresh layer to hang a mask on, so
+                    // the coverage is baked at commit (undoable in one step).
+                    let clamp = !drag.clear_source
+                        && drag.create_in.is_none()
+                        && app.doc.selection.is_some();
+                    masked |= clamp;
                     if refused {
                         app.set_status("transform refused — target folder is gone");
                     } else {
@@ -4290,6 +4330,7 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                             &drag.xform,
                             drag.lift_selection.as_ref(),
                             drag.clear_source,
+                            clamp,
                             None, // CPU resample; GPU path is a follow-up
                         );
                         // LM-009: a pure translation drags a LINKED mask
@@ -4346,10 +4387,10 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                                 }
                             }
                         }
-                        app.set_status(if ok {
-                            "transform committed"
-                        } else {
-                            "transform refused"
+                        app.set_status(match (ok, masked) {
+                            (true, true) => "pasted into the selection — masked",
+                            (true, false) => "transform committed",
+                            (false, _) => "transform refused",
                         });
                     }
                 }
@@ -4428,6 +4469,7 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                                     &xform,
                                     sel.as_ref(),
                                     true,
+                                    false, // a lifted flip, not a paste
                                     None,
                                 );
                                 app.doc.selection = sel;
@@ -5857,6 +5899,45 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
     // The Pages palette follows the document (manga ⇒ present, plain image ⇒
     // closed) — after the command, so new/open/add/delete page all reconcile.
     app.sync_pages_palette();
+    report_clip_changes(app, &clip_before);
+}
+
+/// docs/CLIPPING-SCENARIOS.md 5b support: `(name, dangling)` for every
+/// clipped layer. Keyed by NAME on purpose — indices shift under the very
+/// edits 5b reports on, and the report only fires for a name present on
+/// both sides, so a rename can never false-positive.
+fn clip_dangling_by_name(doc: &mn_core::Document) -> Vec<(String, bool)> {
+    let bases = doc.clip_bases();
+    doc.layers
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.clip && !l.folder)
+        .map(|(i, l)| (l.name.clone(), bases[i].is_none()))
+        .collect()
+}
+
+/// 5b: when the command changed whether some clip has a base, say so. The
+/// first change wins the status line (it is a status line, not an audit);
+/// duplicate layer names share a verdict, which is as good as a name key
+/// gets. Pinned by `cmd_tests::a_structure_edit_that_silences_a_clip_reports_it`.
+fn report_clip_changes(app: &mut App, before: &[(String, bool)]) {
+    let after = clip_dangling_by_name(&app.doc);
+    for (name, dangling) in &after {
+        let Some((_, was)) = before.iter().find(|(n, _)| n == name) else {
+            continue;
+        };
+        if dangling == was {
+            continue;
+        }
+        if *dangling {
+            app.set_status(format!(
+                "\"{name}\": clip lost its base here — the flag is ignored (grey mark)"
+            ));
+        } else {
+            app.set_status(format!("\"{name}\": clip re-attached to what sits below"));
+        }
+        return;
+    }
 }
 
 /// CO-023, the eyedropper's half of the Color Set: when the user has asked
@@ -5980,4 +6061,51 @@ pub(crate) fn manual_path() -> Option<std::path::PathBuf> {
     }
     let dev = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/manual/index.html");
     dev.exists().then_some(dev)
+}
+
+/// docs/CLIPPING-SCENARIOS.md 5b: the status line speaks when an edit
+/// silences or re-attaches an existing clip. (No test module existed in
+/// this file before; the headless fixture copies `app::adjust::tests`.)
+#[cfg(test)]
+mod cmd_tests {
+    use super::*;
+
+    fn headless() -> Option<App> {
+        let renderer = mn_gpu::Renderer::new_headless(mn_gpu::GpuConfig {
+            force_fallback: std::env::var("MN_WARP").is_ok(),
+            no_vsync: false,
+        })
+        .ok()?;
+        Some(App::new(renderer, (1280, 860), 1.0))
+    }
+
+    #[test]
+    fn a_structure_edit_that_silences_a_clip_reports_it() {
+        let Some(mut app) = headless() else {
+            println!("[test] SKIP: no usable adapter");
+            return;
+        };
+        // A folder with ink-bearing potential below a clipped "Shade":
+        // clip-to-folder makes the header the base, so flipping the folder
+        // Through is exactly the edit that silences the clip (2a note).
+        let hi = app.doc.add_folder_above(0, "F");
+        app.doc.add_layer_in_folder(hi, "in").unwrap();
+        let hi = hi + 1;
+        let top = app.doc.add_layer_above(hi, "Shade");
+        assert!(app.doc.set_layer_clip(top, true));
+        assert_eq!(app.doc.clip_bases()[top], Some(hi), "fixture: clip is live");
+
+        dispatch(&mut app, AppCmd::SetFolderThrough(hi, true));
+        assert!(
+            app.status.contains("Shade") && app.status.contains("lost its base"),
+            "silencing reported: {}",
+            app.status
+        );
+        dispatch(&mut app, AppCmd::SetFolderThrough(hi, false));
+        assert!(
+            app.status.contains("Shade") && app.status.contains("re-attached"),
+            "re-attach reported: {}",
+            app.status
+        );
+    }
 }

@@ -7054,6 +7054,128 @@ fn paste_into_foreign_panel_creates_layer_inside_folder() {
     assert_eq!(app.doc.layers.len(), n, "cancel created no layer");
 }
 
+/// Paste into a selection (owner 2026-08-21), the STAMPING shape: with
+/// ants up, a paste that lands on the active layer is clamped to the
+/// selection's coverage — the half outside never lands. The selection
+/// survives (CSP keeps it), the whole paste is ONE undo step, and the
+/// same paste with no selection is unchanged.
+#[test]
+fn paste_into_a_selection_masks_the_stamp() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    let alpha = |a: &App, x: i32, y: i32| -> u16 {
+        let ti = TileIdx::of_pixel(x, y);
+        a.doc
+            .active_layer()
+            .tile(ti)
+            .map(|t| t.pixel((x - ti.origin().0) as usize, (y - ti.origin().1) as usize)[3])
+            .unwrap_or(0)
+    };
+    // An 8x8 opaque blob at canvas (100,100)..(108,108). The ants cover
+    // x < 104, splitting it down the middle.
+    app.clipboard = Some(clip_blob([100, 100]));
+    app.doc.selection = Some(mn_core::Selection::from_rect(
+        &app.doc, 0.0, 0.0, 104.0, 400.0,
+    ));
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::PasteInPlace);
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::TransformCommit);
+    assert!(alpha(&app, 101, 101) > 0, "inside the ants the paste lands");
+    assert_eq!(alpha(&app, 106, 101), 0, "outside the ants nothing lands");
+    assert!(
+        app.status.contains("masked"),
+        "the status says it was masked, got {:?}",
+        app.status
+    );
+    assert!(app.doc.selection.is_some(), "the selection survives a paste");
+    assert_eq!(app.doc.undo_len(), 1, "one paste = one undo step");
+    assert!(app.doc.undo());
+    assert_eq!(alpha(&app, 101, 101), 0, "one undo takes the paste back");
+
+    // No selection: the pre-feature behaviour, both halves land.
+    app.doc.selection = None;
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::PasteInPlace);
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::TransformCommit);
+    assert!(alpha(&app, 101, 101) > 0);
+    assert!(
+        alpha(&app, 106, 101) > 0,
+        "no selection, no mask — the whole blob lands"
+    );
+    assert!(!app.status.contains("masked"), "got {:?}", app.status);
+}
+
+/// The other shape: a paste that CREATES its layer (rule 2) gets the
+/// selection as a NON-DESTRUCTIVE layer mask — the pixels outside the
+/// ants are still on the layer, hidden by a mask the artist can disable.
+/// The mask is built from per-tile COVERAGE, and from the LIVE selection
+/// at commit, so setting the ants while the float is open works.
+#[test]
+fn paste_into_a_selection_masks_a_created_layer() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    app.doc.add_frame_folder(
+        "Frame 1",
+        mn_core::FrameSet::single_rect([64.0, 64.0, 320.0, 400.0], 4.0),
+    );
+    app.doc.active = 0;
+    let _loose = app.doc.add_layer("rough");
+    let header = app.doc.layers.iter().position(|l| l.is_frame()).unwrap();
+    let target = crate::cmd::PasteTarget {
+        folder: Some(header),
+        owns_active: false,
+        rect: [64.0, 64.0, 320.0, 400.0],
+        label: "Frame 1".into(),
+    };
+    crate::cmd::open_float_aimed(&mut app, clip_blob([0, 0]), Some(&target));
+    // Where the float will land, read off the drag itself — the ants are
+    // then drawn across its middle, so the assert pins geometry, not a
+    // constant.
+    let b = app.transform_drag.as_ref().expect("float opened").bbox;
+    let (x0, x1) = (b[0][0], b[2][0]);
+    let mid = ((x0 + x1) * 0.5).round();
+    let row = ((b[0][1] + b[2][1]) * 0.5).round() as i32;
+    app.doc.selection = Some(mn_core::Selection::from_rect(&app.doc, 0.0, 0.0, mid, 400.0));
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::TransformCommit);
+
+    let li = app.doc.active;
+    assert_eq!(app.doc.layers[li].name, "Pasted", "the paste made its layer");
+    let at = |x: i32, y: i32| -> (u16, u16) {
+        let ti = TileIdx::of_pixel(x, y);
+        let (lx, ly) = ((x - ti.origin().0) as usize, (y - ti.origin().1) as usize);
+        let l = &app.doc.layers[li];
+        let ink = l.tile(ti).map(|t| t.pixel(lx, ly)[3]).unwrap_or(0);
+        let cov = l
+            .mask
+            .as_ref()
+            .and_then(|m| m.tiles.get(&ti))
+            .map(|t| t.pixel(lx, ly)[3])
+            .unwrap_or(0);
+        (ink, cov)
+    };
+    assert!(
+        app.doc.layers[li].mask.as_ref().is_some_and(|m| m.enabled),
+        "the selection became an ENABLED layer mask"
+    );
+    let inside = at(x0 as i32 + 1, row);
+    let outside = at(mid as i32 + 1, row);
+    assert!(inside.1 > 0, "inside the ants the mask shows the paste");
+    assert_eq!(outside.1, 0, "outside the ants the mask hides it");
+    assert!(
+        outside.0 > 0,
+        "non-destructive: the hidden pixels are still on the layer"
+    );
+    assert!(app.doc.selection.is_some(), "the selection survives a paste");
+    assert_eq!(app.doc.undo_len(), 1, "one paste = one undo step");
+    assert!(
+        app.status.contains("masked"),
+        "the status says it was masked, got {:?}",
+        app.status
+    );
+}
+
 /// Oversized content scales uniformly DOWN into the panel, never up.
 #[test]
 fn oversized_paste_scales_to_fit_the_panel() {

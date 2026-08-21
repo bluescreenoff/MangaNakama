@@ -312,6 +312,16 @@ pub fn clear_lifted(layer: &mut Layer, rect: [i32; 4], selection: Option<&Select
 /// must mirror what `lift_region` took, not whatever the selection has
 /// become while the float was open.
 ///
+/// `mask_to_selection` (owner 2026-08-21, paste into a selection): clamp what
+/// this commit WROTE back to `doc.selection`'s coverage, so a paste lands
+/// masked to the marching ants instead of splashing over the whole canvas.
+/// It reads the LIVE selection (not the lift-time one): the clamp is about
+/// where the pixels may land now, not about mirroring an earlier lift. The
+/// CALLER decides — the app passes `true` only for paste floats that stamp
+/// an existing layer; a paste that creates its own layer gets a
+/// non-destructive layer mask instead, and must NOT also clamp here or the
+/// coverage would apply twice (a feathered edge would square).
+///
 /// `resampled`: pass the GPU path's output when available
 /// (`mn-gpu Renderer::transform_region`) — a full destination pixel buffer
 /// with its bounds. Pass `None` to resample here on the CPU. Both paths use
@@ -322,6 +332,7 @@ pub fn commit_transform(
     xf: &Affine2,
     selection: Option<&Selection>,
     clear_source: bool,
+    mask_to_selection: bool,
     resampled: Option<(&[u16], [i32; 4])>,
 ) -> bool {
     let Some(inv) = xf.inverse() else {
@@ -414,6 +425,15 @@ pub fn commit_transform(
         }
     }
 
+    // 3. Paste into a selection: clamp the op's own writes back to the
+    //    selection's weighted coverage. The op is still open, so the
+    //    pre-images this needs are still recorded — outside the ants the
+    //    layer goes back to exactly what it held, inside a feathered band
+    //    the pasted pixels blend by coverage.
+    if mask_to_selection {
+        doc.mask_op_to_selection();
+    }
+
     doc.end_op()
 }
 
@@ -450,7 +470,7 @@ mod tests {
             (rect[1] + rect[3]) as f32 * 0.5,
         ];
         let xf = Affine2::scale_rotate_around(pivot, -1.0, 1.0, 0.0, [0.0, 0.0]);
-        assert!(commit_transform(&mut doc, &src, &xf, None, true, None));
+        assert!(commit_transform(&mut doc, &src, &xf, None, true, false, None));
 
         let read = |x: i32, y: i32| -> [u16; 4] {
             let ti = TileIdx::of_pixel(x, y);
@@ -524,7 +544,7 @@ mod tests {
         assert!(xf.inverse().is_none());
         let mut doc = doc_with_box(10, 10, 20, 20);
         let src = lift_region(&doc.layers[0], [10, 10, 20, 20], None);
-        assert!(!commit_transform(&mut doc, &src, &xf, None, true, None));
+        assert!(!commit_transform(&mut doc, &src, &xf, None, true, false, None));
         assert!(!doc.can_undo(), "refused transform pushes no undo");
     }
 
@@ -533,7 +553,7 @@ mod tests {
         let mut doc = doc_with_box(10, 10, 20, 20);
         let src = lift_region(&doc.layers[0], [10, 10, 20, 20], None);
         let xf = Affine2::scale_rotate_around([15.0, 15.0], 1.0, 1.0, 0.0, [100.0, 50.0]);
-        assert!(commit_transform(&mut doc, &src, &xf, None, true, None));
+        assert!(commit_transform(&mut doc, &src, &xf, None, true, false, None));
 
         assert_eq!(alpha_at(&doc, 15, 15), 0, "source cleared");
         assert_eq!(
@@ -558,7 +578,7 @@ mod tests {
         let mut doc = doc_with_box(64, 64, 96, 96); // 32px box
         let src = lift_region(&doc.layers[0], [64, 64, 96, 96], None);
         let xf = Affine2::scale_rotate_around([64.0, 64.0], 2.0, 2.0, 0.0, [0.0, 0.0]);
-        assert!(commit_transform(&mut doc, &src, &xf, None, true, None));
+        assert!(commit_transform(&mut doc, &src, &xf, None, true, false, None));
         // Pivot corner stays; the far corner is now ~64px out.
         assert_eq!(alpha_at(&doc, 65, 65), FIX15_ONE as u16);
         assert_eq!(
@@ -581,7 +601,7 @@ mod tests {
             std::f32::consts::FRAC_PI_2,
             [0.0, 0.0],
         );
-        assert!(commit_transform(&mut doc, &src, &xf, None, true, None));
+        assert!(commit_transform(&mut doc, &src, &xf, None, true, false, None));
         // After 90° cw around (110,105): the box is 10 wide, 20 tall.
         assert_eq!(alpha_at(&doc, 110, 105), FIX15_ONE as u16, "centre stays");
         assert_eq!(alpha_at(&doc, 112, 112), FIX15_ONE as u16, "now taller");
@@ -704,7 +724,7 @@ mod tests {
         // Integer translate: the inverse map lands on exact pixel centres
         // (the flip-is-exact proof), so expectations are closed-form.
         let xf = Affine2::scale_rotate_around([60.0, 60.0], 1.0, 1.0, 0.0, [64.0, 0.0]);
-        assert!(commit_transform(&mut doc, &src, &xf, Some(&sel), true, None));
+        assert!(commit_transform(&mut doc, &src, &xf, Some(&sel), true, false, None));
 
         let mut partial = 0;
         for x in 40..80 {
