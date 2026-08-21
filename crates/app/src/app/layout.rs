@@ -237,10 +237,13 @@ impl UiLayout {
         }
     }
 
-    /// The GPU dab switch (View menu). Saved only when it changed.
+    /// The GPU dab switch (View menu). Saved only when it changed — and
+    /// reaching it AT ALL is the user choosing, which is what makes the key
+    /// explicit from here on (`to_body` writes it only then).
     pub fn note_gpu_dabs(&mut self, on: bool) {
-        if self.gpu_dabs != on {
+        if self.gpu_dabs != on || !self.gpu_dabs_explicit {
             self.gpu_dabs = on;
+            self.gpu_dabs_explicit = true;
             self.dirty = true;
         }
     }
@@ -349,14 +352,25 @@ impl UiLayout {
     /// `from_body` completes.
     pub(super) fn to_body(&self) -> String {
         format!(
-            "left_w={:.0}\nright_w={:.0}\ndock_left={}\ndock_right={}\nprop_hidden={}\nwin={}\ngpu_dabs={}\nrecent_fonts={}\nmaterial_folders={}\nmaterial_uses={}\nquick_pins={}\nworkspaces={}\nworkspace_current={}\ntouch_gestures={}\ncolor_history={}\nauto_swatch={}\nreader_page={}\nguides_hidden={}\ngradients={}\nsub_tool_size_px={}\n",
+            "left_w={:.0}\nright_w={:.0}\ndock_left={}\ndock_right={}\nprop_hidden={}\nwin={}\n{}recent_fonts={}\nmaterial_folders={}\nmaterial_uses={}\nquick_pins={}\nworkspaces={}\nworkspace_current={}\ntouch_gestures={}\ncolor_history={}\nauto_swatch={}\nreader_page={}\nguides_hidden={}\ngradients={}\nsub_tool_size_px={}\n",
             self.left_w,
             self.right_w,
             self.dock_left,
             self.dock_right,
             self.prop_hidden,
             self.win,
-            self.gpu_dabs as u8,
+            // ABSENT unless the user actually chose: the tri-state IS the
+            // absence of this key (`gpu_dabs_explicit`), so writing it
+            // unconditionally forged a choice on the very first clean exit
+            // — after which `resolve_auto` saw an explicit "off", never
+            // spawned the measurement child, and the measured default
+            // could never happen on that machine again. This shipped: the
+            // owner's own ui.txt carried `gpu_dabs=0` he never typed.
+            if self.gpu_dabs_explicit {
+                format!("gpu_dabs={}\n", self.gpu_dabs as u8)
+            } else {
+                String::new()
+            },
             serde_json::to_string(&self.recent_fonts).unwrap_or_default(),
             serde_json::to_string(&self.material_folders).unwrap_or_default(),
             self.material_uses,
@@ -682,6 +696,41 @@ mod tests {
         assert!(!junk.gpu_dabs);
         junk.apply_kv("gpu_dabs=something-newer");
         assert!(!junk.gpu_dabs, "unknown values degrade to off, never on");
+    }
+
+    /// The tri-state survives a save. A layout the user never touched must
+    /// write NO `gpu_dabs=` line, because the absence of the key is the
+    /// only thing telling startup "he never chose — you may measure".
+    ///
+    /// Failed against the old code, which wrote `gpu_dabs=0` every time:
+    /// one clean exit forged an explicit "off", startup then honoured that
+    /// forged choice, the measurement child was never spawned again, and
+    /// the measured GPU default became unreachable on that machine — with
+    /// nothing anywhere saying so.
+    #[test]
+    fn an_untouched_gpu_dabs_key_is_not_written_back() {
+        let fresh = UiLayout::default();
+        let body = fresh.to_body();
+        assert!(
+            !body.contains("gpu_dabs="),
+            "an unchosen switch must not be written down: {body}"
+        );
+        // …and re-reading that body leaves the tri-state unset, so the
+        // measurement is still allowed to decide.
+        let mut back = UiLayout::default();
+        for line in body.lines() {
+            back.apply_kv(line);
+        }
+        assert!(!back.gpu_dabs_explicit, "a round trip must not forge a choice");
+
+        // Using the View-menu toggle IS the choice — even when it picks the
+        // value the layout already held (turning it off while it is off is
+        // still "I chose off", and must stop the auto path).
+        let mut chose_off = UiLayout::default();
+        chose_off.note_gpu_dabs(false);
+        assert!(chose_off.gpu_dabs_explicit);
+        assert!(chose_off.dirty, "the choice must reach the disk");
+        assert!(chose_off.to_body().contains("\ngpu_dabs=0\n"));
     }
 
     /// Round 34: the font list's recently-used row persists as a one-line

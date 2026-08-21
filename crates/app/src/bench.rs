@@ -28,10 +28,21 @@ const CLASSES: &[(&str, &str)] = &[
 
 const SAMPLES: usize = 60;
 
+/// Where the bench's presets come from. The RUNTIME brushes root first —
+/// the same resolver the app itself uses — because this runs in the shipped
+/// exe on a stranger's machine, where the compile-time `CARGO_MANIFEST_DIR`
+/// names a folder that only ever existed on the build machine. With the
+/// baked path alone the measurement child could never load a preset off a
+/// developer's disk: it failed, wrote no verdict, and every launch forever
+/// spawned another child to fail the same way, silently. The baked path
+/// stays as the fallback for `cargo test` runs from odd working directories.
 fn preset_path(rel: &str) -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../assets/brushes")
-        .join(rel)
+    match crate::app::brushes_root() {
+        Some(root) => root.join(rel),
+        None => std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/brushes")
+            .join(rel),
+    }
 }
 
 fn stroke(app: &mut App, x0: f32) {
@@ -236,6 +247,63 @@ pub fn resolve_auto(
     }
 }
 
+/// THIS adapter's stored measurement, or `None`. A verdict recorded against
+/// another GPU or an older driver reads as "not measured" — which is exactly
+/// what it is, and it is the same rule [`resolve_auto`] applies.
+pub fn measured_for(fingerprint: &str) -> Option<bool> {
+    match load_verdict() {
+        Some((fp, on)) if fp == fingerprint => Some(on),
+        _ => None,
+    }
+}
+
+/// One plain-language line: what the dab path is doing right now, and WHY.
+/// Preferences and the startup log print the SAME words from the same
+/// sources — the whole point is that "is my inking on the GPU?" has one
+/// answer, not a state the user has to infer from an unchecked menu item.
+///
+/// Pure, and deliberately so: every argument is read at the call site from
+/// the real authority (the live switch, adapter support, whether ui.txt
+/// carries a key the user himself set, and this adapter's stored
+/// measurement). There is no fourth store here to drift out of step.
+pub fn state_line(
+    on: bool,
+    supported: bool,
+    explicit: bool,
+    measured: Option<bool>,
+) -> &'static str {
+    if !supported {
+        return "GPU inking: off — this GPU cannot run it, so inking always uses the CPU";
+    }
+    if explicit {
+        return if on {
+            "GPU inking: on (set by hand, in the View menu)"
+        } else {
+            "GPU inking: off (set by hand, in the View menu)"
+        };
+    }
+    match measured {
+        Some(true) if on => "GPU inking: on — measured faster on this GPU",
+        Some(false) if !on => "GPU inking: off — measured slower on this GPU, so the CPU does the inking here",
+        // The measurement landed DURING this session (the background test
+        // finished after startup): it decides from the next start, so say
+        // that rather than claiming a state this session does not have.
+        Some(true) => "GPU inking: off for now — just measured faster on this GPU, and switches on the next time you start",
+        Some(false) => "GPU inking: on for now — just measured slower on this GPU, and switches off the next time you start",
+        None => "GPU inking: off — not measured yet; a short test runs in the background and its result applies the next time you start",
+    }
+}
+
+/// [`state_line`] for the live app, reading each half from its own source.
+pub fn state_line_for(app: &App) -> &'static str {
+    state_line(
+        app.gpu_dabs,
+        app.renderer.gpu_dabs_supported(),
+        app.layout.gpu_dabs_explicit,
+        measured_for(&app.renderer.adapter_line()),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -280,6 +348,42 @@ mod tests {
         );
         // Nothing stored: stay off, measure.
         assert_eq!(resolve_auto(None, None, fp), (false, true));
+    }
+
+    /// The user-facing state line: it must name the SAME authority
+    /// `resolve_auto` actually obeyed, and must never claim a state this
+    /// session does not have. Pinned because this line is the only thing
+    /// standing between the owner and "I don't see inking on the GPU at
+    /// all" — a wrong reason here is worse than no line.
+    #[test]
+    fn the_state_line_names_the_authority_that_decided() {
+        // Unsupported wins over everything — there is nothing to explain.
+        assert!(state_line(false, false, true, Some(true)).contains("cannot run it"));
+        // A hand-set choice is reported as a choice, never as a measurement.
+        assert!(state_line(true, true, true, Some(false)).contains("set by hand"));
+        assert!(state_line(false, true, true, Some(true)).contains("set by hand"));
+        // No choice: the measurement explains it, in the right direction.
+        assert!(state_line(true, true, false, Some(true)).contains("measured faster"));
+        assert!(state_line(false, true, false, Some(false)).contains("measured slower"));
+        // Nothing measured yet: say the test is running, not "it's off".
+        assert!(state_line(false, true, false, None).contains("not measured yet"));
+        // A measurement that landed mid-session must not claim this
+        // session's inking moved — it applies at the next start.
+        assert!(state_line(false, true, false, Some(true)).contains("next time you start"));
+        assert!(state_line(true, true, false, Some(false)).contains("next time you start"));
+        // No user-facing line may leak the internal vocabulary.
+        for l in [
+            state_line(false, false, false, None),
+            state_line(true, true, true, None),
+            state_line(true, true, false, Some(true)),
+            state_line(false, true, false, Some(false)),
+            state_line(false, true, false, None),
+        ] {
+            let l = l.to_ascii_lowercase();
+            for jargon in ["verdict", "fingerprint", "adapter", "dab", "rasteriz"] {
+                assert!(!l.contains(jargon), "jargon {jargon:?} leaked into {l:?}");
+            }
+        }
     }
 
     /// The verdict file: round trips, and a corrupt file reads as absent.

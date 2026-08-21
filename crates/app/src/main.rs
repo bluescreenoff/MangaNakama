@@ -265,16 +265,22 @@ fn main() {
         match bench::quick_verdict(cfg, 3) {
             Ok(v) => {
                 bench::store_verdict(&v);
-                println!(
-                    "[bench] verdict {} for {} ({})",
-                    if v.on { "ON" } else { "off" },
-                    v.fingerprint,
+                let msg = format!(
+                    "[bench] background measurement done: GPU inking {} on this GPU ({})",
+                    if v.on { "wins" } else { "loses" },
                     v.summary
                 );
+                println!("{msg}");
+                // Into the tester log too. This child is a GUI-subsystem
+                // process with nowhere for stdout to go, so without this
+                // line the whole measurement is invisible: the user sees
+                // neither that it ran nor what it decided.
+                testlog::line(&msg);
                 std::process::exit(0);
             }
             Err(e) => {
                 eprintln!("[bench] verdict failed: {e}");
+                testlog::line(&format!("[bench] background measurement failed: {e}"));
                 std::process::exit(3);
             }
         }
@@ -499,12 +505,24 @@ fn main() {
             "inking runs on the GPU: measured faster on this machine (View menu to change)",
         );
     }
+    // Whether the measurement child started, in words, for the log block
+    // below — a user whose GPU was never measured has to be able to see
+    // that the attempt happened (or why it could not).
+    let mut bench_note: Option<String> = None;
     if spawn_measurement && app.renderer.gpu_dabs_supported() {
         // Detached, windowless (GUI-subsystem exe), exits on its own. If it
         // dies the verdict file stays absent and the next launch retries.
-        if let Ok(exe) = std::env::current_exe() {
-            let _ = std::process::Command::new(exe).arg("--bench-verdict").spawn();
-        }
+        bench_note = Some(match std::env::current_exe() {
+            Ok(exe) => match std::process::Command::new(exe).arg("--bench-verdict").spawn() {
+                Ok(child) => format!(
+                    "[app] gpu-inking: measuring this GPU in the background (pid {}); \
+                     the result applies at the next start",
+                    child.id()
+                ),
+                Err(e) => format!("[app] gpu-inking: could not start the measurement: {e}"),
+            },
+            Err(e) => format!("[app] gpu-inking: could not locate this exe to measure: {e}"),
+        });
     }
     // PR-040: ask the PREVIOUS session's verdict before this session appends
     // its own banner to the same file — one line later and the question
@@ -513,7 +531,7 @@ fn main() {
 
     // The tester log's session banner — what a GitHub issue needs first
     // (README ▸ Testers): adapter identity, GPU-dab capability + routing.
-    testlog::begin_session(&[
+    let mut banner = vec![
         format!(
             "[app] version: {} ({})",
             env!("CARGO_PKG_VERSION"),
@@ -525,14 +543,22 @@ fn main() {
             app.renderer.gpu_dabs_supported(),
             app.gpu_dabs
         ),
+        // The same sentence Preferences shows, from the same function: the
+        // supported/enabled pair above says WHAT, this says WHY, and the
+        // two are read from one place so they cannot disagree.
+        format!("[app] {}", bench::state_line_for(&app)),
         format!("[app] dpi scale: {ppp:.2}"),
         format!("[app] flags: warp={} gpu_dabs={}", cli.warp, app.gpu_dabs),
-        // How to get this file to the dev — the log is its own instruction
-        // sheet, because nobody rereads a README when something breaks.
+    ];
+    banner.extend(bench_note);
+    // How to get this file to the dev — the log is its own instruction
+    // sheet, because nobody rereads a README when something breaks.
+    banner.push(
         "[log] safe to share as-is (no names, no paths). Send it to \
          github.com/bluescreenoff/MangaNakama/issues or bluescreen.off@gmail.com"
             .to_owned(),
-    ]);
+    );
+    testlog::begin_session(&banner);
     // Read the two preferences this function needs BEFORE the App moves into
     // the window's user data and stops being reachable by name.
     let autosave_ms = app.prefs.autosave_ms();
@@ -1098,7 +1124,14 @@ fn resolve_dialog(hwnd: HWND, cmd: AppCmd) -> Option<AppCmd> {
             }
         }
         AppCmd::ExportMnc => {
-            save_comic_dialog("Export Single File", &default_save_name()).map(AppCmd::ExportMncPath)
+            // Always .mnc: `default_save_name` picks by is_comic(), which on
+            // a single page suggested "untitled.ora" in a dialog whose whole
+            // point is the single-file comic (owner report, 2026-08-21).
+            let name = default_save_name();
+            let name = name
+                .strip_suffix(".ora")
+                .map_or(name.clone(), |s| format!("{s}.mnc"));
+            save_comic_dialog("Export Single File", &name).map(AppCmd::ExportMncPath)
         }
         AppCmd::ExportAllPagesGo => rfd::FileDialog::new()
             .set_title("Export All Pages (numbered PNGs)")

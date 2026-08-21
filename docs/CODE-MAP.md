@@ -121,7 +121,17 @@ The recurring failure shapes, in order of how often they have shipped:
   `gpu-verdict.txt` matching THIS adapter's fingerprint; else off + a
   one-shot `--bench-verdict` child measures for the next launch. An auto
   path must never overwrite the user's key — the verdict file and ui.txt
-  are separate authorities on purpose.
+  are separate authorities on purpose. **The tri-state is the ABSENCE of
+  the `gpu_dabs=` line, so `to_body` must not write the key until the user
+  has actually chosen** (`note_gpu_dabs`, the View-menu toggle, is the only
+  thing that makes it explicit). Writing it unconditionally is a silent
+  one-way door: the first clean exit forges "he chose off", startup honours
+  the forgery, the measurement child is never spawned again, and the
+  measured default becomes unreachable on that machine. That shipped once —
+  the owner's own ui.txt carried a `gpu_dabs=0` he never typed. Whatever
+  decided is stated in ONE place, `bench::state_line`, which Preferences and
+  the startup log both print; a new authority must appear there too or the
+  feature goes invisible again.
 - **Brush size is ONE absolute number in canvas px** (`ToolProps::size_px`,
   a dab diameter): the Size control, the `[`/`]` ladder and the live drag
   all write it, and only `Engine::set_size_px` converts. A second size

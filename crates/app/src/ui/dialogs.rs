@@ -643,6 +643,10 @@ pub(super) fn prefs_window(ctx: &egui::Context, app: &mut App) {
     let mut preset_pick: Option<String> = None;
     let autosave_before = app.prefs.autosave_min;
     let preset_now = app.prefs.new_preset_setup().name;
+    // Read before the window borrows `app.prefs`. Live rather than cached:
+    // the background measurement can land mid-session and the View-menu
+    // toggle can move under us, and a stale explanation is worse than none.
+    let gpu_line = crate::bench::state_line_for(app);
 
     egui::Window::new("Preferences")
         .open(&mut open)
@@ -852,6 +856,20 @@ pub(super) fn prefs_window(ctx: &egui::Context, app: &mut App) {
                     ui.end_row();
                 });
             ui.weak("Deeper history uses more memory. Lowering it drops the oldest steps now.");
+
+            // Read-only on purpose — the switch itself is the View menu's,
+            // and duplicating a control here would create a second place
+            // for it to disagree. What was missing was never a control: it
+            // was any way to SEE which authority decided, so an owner whose
+            // machine measured CPU-faster could tell "working as designed"
+            // from "broken and silent". Same sentence as the startup log.
+            pref_head(ui, "Performance");
+            ui.label(gpu_line);
+            ui.weak(
+                "Inking moves to the GPU only where a measurement on this machine says \
+                 it is faster; on many laptops the CPU wins and it stays off. Set it \
+                 by hand in the View menu, under GPU dab strokes.",
+            );
 
             ui.add_space(4.0);
             ui.separator();
