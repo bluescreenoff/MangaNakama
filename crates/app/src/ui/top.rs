@@ -603,6 +603,11 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
         // one flat menu — palette toggles, layout reset, and the registered
         // workspaces — no submenu hunting for either half.
         bar_menu(ui, "Workspace", |ui| {
+            if item(ui, "Command palette…", "Ctrl+K") {
+                crate::ui::open_command_palette(app);
+                ui.close();
+            }
+            ui.separator();
             ui.weak("closed palettes reopen in the right column");
             for p in crate::ui::dock::ALL {
                 let open = crate::ui::dock::is_open(app, p);

@@ -2478,6 +2478,45 @@ impl Renderer {
                     continue;
                 }
                 let lvl = cd + 1;
+                // FB-knockout: the folder's derived mat lies on the page
+                // just beneath the group — drawn into the parent target
+                // BEFORE the group blit, scaled by the folder's opacity
+                // (mirrors the CPU compositor's step 0). The mat IS this
+                // folder's display raster, so the (li, idx, false) texture
+                // key already holds it.
+                if layer.edge.is_some() && layer.opacity > 0.0 {
+                    let mat_tiles: Vec<TileIdx> = layer
+                        .edge_tiles()
+                        .map(|m| {
+                            regions
+                                .iter()
+                                .copied()
+                                .filter(|idx| m.contains_key(idx))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if !mat_tiles.is_empty() {
+                        let pass = open_pass!(target_of(cd));
+                        for idx in &mat_tiles {
+                            pass.draws.push(Draw {
+                                instance: instances.len() as u32,
+                                blend: 0,
+                                kind: DrawKind::Tile((li, *idx, false)),
+                            });
+                            instances.push(QuadInstance {
+                                tint: crate::TINT_NONE,
+                                fx: crate::FX_NONE,
+                                rect: rect_of(idx),
+                                mode: 1,
+                                opacity: layer.opacity.clamp(0.0, 1.0),
+                                blend_mode: 0,
+                            });
+                        }
+                        if d > 0 {
+                            drew_into[cd] = true;
+                        }
+                    }
+                }
                 if drew_into[lvl] {
                     if layer.mask_tiles().is_some() {
                         let pass = open_pass!(Target::Group(lvl));

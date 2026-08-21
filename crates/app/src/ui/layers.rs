@@ -429,17 +429,37 @@ pub(super) fn layer_property(ui: &mut egui::Ui, app: &mut App) {
     // which today is hand-inked. Non-destructive, and it follows the drawing
     // — draw more and the outline is round the new ink on the next frame.
     //
-    // Folders are excluded because `Document::set_edge` refuses them: a
-    // folder header composites an isolated group and has no alpha of its own.
-    if !app.doc.layers.get(i).is_some_and(|l| l.folder) {
+    // On a PLAIN folder the same effect is FB-knockout ("Knock out behind"):
+    // the outline grows from the union of the children's ink and lies just
+    // beneath the group — the hand-painted white mat, automated. Frame
+    // folders are excluded (`Document::set_edge` refuses them): their close
+    // already owns a panel mask and border ink.
+    if !app
+        .doc
+        .layers
+        .get(i)
+        .is_some_and(|l| l.folder && l.is_frame())
+    {
+        let is_folder = app.doc.layers.get(i).is_some_and(|l| l.folder);
         let edge = app.doc.layers.get(i).and_then(|l| l.edge);
         ui.horizontal(|ui| {
             let mut on = edge.is_some();
-            if ui
-                .checkbox(&mut on, "Border effect")
-                .on_hover_text(
+            let (label, tip) = if is_folder {
+                (
+                    "Knock out behind",
+                    "a mat grown round everything in this folder, laid just under \
+                     the group — the white backing behind balloons and SFX, redrawn \
+                     as the art changes",
+                )
+            } else {
+                (
+                    "Border effect",
                     "an outline grown round this layer's own alpha — nothing is painted",
                 )
+            };
+            if ui
+                .checkbox(&mut on, label)
+                .on_hover_text(tip)
                 .changed()
             {
                 app.edge_edit = None;

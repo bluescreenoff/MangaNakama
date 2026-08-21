@@ -669,9 +669,10 @@ pub fn load_from<R: Read + Seek>(source: R) -> Result<Document, OraError> {
         layer.through = layer.folder && e.through;
         layer.escape_frame = !layer.folder && e.escape;
         layer.tone = e.tone;
-        // A folder can carry no border effect (`Document::set_edge` refuses
-        // one) — a hand-edited or future file must not sneak one in.
-        layer.edge = e.edge.filter(|_| !layer.folder);
+        // FB-knockout: plain folders carry the effect (the group mat); a
+        // FRAME folder cannot (`Document::set_edge` refuses one) — a
+        // hand-edited or future file must not sneak one in.
+        layer.edge = e.edge.filter(|_| !(layer.folder && e.frames.is_some()));
 
         layer.label = e.label;
         layer.layer_colour = e.layer_colour;

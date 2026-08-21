@@ -492,6 +492,45 @@ fn cpu_matches_gpu_with_frame_folder_mask_and_clip() {
     assert_agrees(&mut r, &doc, "frame folder at 50%");
 }
 
+/// FB-knockout: a plain folder's mat (border effect grown from the union
+/// of children ink) draws just beneath the group on BOTH compositors,
+/// scales with the folder's opacity, and vanishes with the effect.
+#[test]
+fn cpu_matches_gpu_with_a_folder_knockout() {
+    let _serial = gpu_guard();
+    let Some(mut r) = renderer() else { return };
+
+    let mut doc = Document::new(128, 128);
+    for ty in 0..2 {
+        for tx in 0..2 {
+            fill_ramp(&mut doc, 0, TileIdx::new(tx, ty), [0.8, 0.3, 0.2]);
+        }
+    }
+    let fi = doc.add_folder_above(0, "grp");
+    let child = doc.add_layer_in_folder(fi, "ink").unwrap();
+    let hdr = doc.layers.len() - 1;
+    fill(&mut doc, child, TileIdx::new(0, 0), [0.1, 0.1, 0.9, 0.8]);
+    assert!(doc.set_edge(
+        hdr,
+        Some(mn_core::EdgeParams {
+            width_px: 5.0,
+            colour: [255, 255, 255],
+        })
+    ));
+    doc.refresh_derived(600);
+    assert_agrees(&mut r, &doc, "folder knockout");
+
+    doc.set_layer_opacity(hdr, 0.5);
+    doc.refresh_derived(600);
+    r.invalidate();
+    assert_agrees(&mut r, &doc, "folder knockout at 50%");
+
+    assert!(doc.set_edge(hdr, None));
+    doc.refresh_derived(600);
+    r.invalidate();
+    assert_agrees(&mut r, &doc, "knockout off");
+}
+
 /// FB-overflow: an escaped child re-seats above its frame folder header on
 /// BOTH compositors (the shared `composite_order` walk) — outside the panel
 /// mask, over the border ink, immune to the folder's opacity, and back to

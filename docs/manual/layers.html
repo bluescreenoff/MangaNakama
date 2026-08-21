@@ -370,8 +370,19 @@ the thickness.</div>
 <div class="quirk"><b>On a tone layer the keyline wraps the DOTS.</b> The
 effect is derived after the screentone, so it outlines what the layer
 shows rather than the grey you painted — each dot gets its own rim. The
-same is true of a live Fill layer. Folders refuse the effect outright:
-a folder has no alpha of its own to grow from, and the status bar says so.</div>
+same is true of a live Fill layer.</div>
+
+<h2>Knock out behind (folders)</h2>
+On a plain folder the same checkbox reads <i>Knock out behind</i> and does
+the job that is a hand-painted "White" layer in Clip Studio: a mat grown
+round the union of everything visible in the folder, laid just beneath
+the group — the white backing that keeps a balloon or an SFX legible over
+dark art. It re-derives as the art changes, dims with the folder's
+opacity, and hidden children leave no ghost. The colour chips work here
+too (white is the point, but a paper-cream mat is one click). Frame
+folders refuse it — their panel mask and border ink already own that
+close — and the half-transparent-ink rule above applies to the children's
+ink the same way.
 
 <h2>Layer colour, sub colour and the mono preview</h2>
 <div class="quirk"><b>Layer colour and sub colour are the two ends of one

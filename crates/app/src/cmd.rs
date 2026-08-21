@@ -3887,7 +3887,8 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 return;
             }
             let (mut ok, mut skip) = (0usize, 0usize);
-            for e in app.pages.iter_mut() {
+            let mut updated: Vec<(usize, Vec<u8>)> = Vec::new();
+            for (pi, e) in app.pages.iter().enumerate() {
                 let Some(b) = &e.bytes else { continue };
                 match mn_core::project::bytes_to_doc(b) {
                     Ok(mut d) => {
@@ -3896,7 +3897,7 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                                 l.visible = *v;
                             }
                             if let Ok(nb) = mn_core::project::doc_to_bytes(&d) {
-                                e.bytes = Some(nb);
+                                updated.push((pi, nb));
                                 ok += 1;
                             } else {
                                 skip += 1;
@@ -3907,6 +3908,17 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                     }
                     Err(_) => skip += 1,
                 }
+            }
+            // Rewritten bytes get a fresh page rev and a dropped thumbnail,
+            // or the Pages panel and the rev-keyed sharp preview keep
+            // serving the pre-comp look (batch agent's finding, this wave).
+            for (pi, nb) in updated {
+                let rev = app.page_rev_next();
+                let e = &mut app.pages[pi];
+                e.bytes = Some(nb);
+                e.rev = rev;
+                e.doc_rev = 0;
+                e.thumb = None;
             }
             // Restore the active-page invariant (bytes live in `doc`).
             app.pages[app.page_index].bytes = None;

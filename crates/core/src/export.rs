@@ -373,6 +373,32 @@ fn composite_size(
                             continue;
                         }
                         let lvl = cd + 1;
+                        // 0. FB-knockout: a plain folder's derived mat (the
+                        // border effect grown from the union of children
+                        // ink) lies on the page just beneath the group,
+                        // scaled by the folder's opacity. Frame folders
+                        // never carry one (set_edge refuses them).
+                        if layer.edge.is_some() && layer.opacity > 0.0 {
+                            if let Some(mt) = layer.edge_tiles().and_then(|m| m.get(&idx)) {
+                                let data = mt.data();
+                                for (p, dst) in accs[cd].iter_mut().enumerate() {
+                                    let o = p * 4;
+                                    let s = scale_opacity(
+                                        px_to_f32([
+                                            data[o],
+                                            data[o + 1],
+                                            data[o + 2],
+                                            data[o + 3],
+                                        ]),
+                                        layer.opacity,
+                                    );
+                                    if s[3] <= 0.0 {
+                                        continue;
+                                    }
+                                    *dst = blend_premul(crate::doc::Blend::Normal, s, *dst);
+                                }
+                            }
+                        }
                         // 1. Clip the group to the panels (frame folders).
                         if let Some(mask) = layer.mask_tiles() {
                             let cov = mask.get(&idx);
@@ -895,6 +921,67 @@ mod tests {
         doc.set_layer_visible(hi, false);
         let img = composite(&doc, Background::White);
         assert_eq!(img.get_pixel(64, 32).0, [255, 0, 0, 255]);
+    }
+
+    /// FB-knockout: a plain folder's Border effect becomes a mat laid just
+    /// beneath the group — white behind the children's ink, grown by the
+    /// width, dimmed with the folder's opacity, gone when the flag drops.
+    #[test]
+    fn folder_knockout_mats_behind_the_group() {
+        let mut doc = Document::new(128, 128);
+        for ty in 0..2 {
+            for tx in 0..2 {
+                fill_tile(&mut doc, 0, TileIdx::new(tx, ty), [1.0, 0.0, 0.0, 1.0]);
+            }
+        }
+        let fi = doc.add_folder_above(0, "chara");
+        let child = doc.add_layer_in_folder(fi, "ink").unwrap();
+        let hdr = doc.layers.len() - 1;
+        fill_tile(&mut doc, child, TileIdx::new(0, 0), [0.0, 0.0, 0.0, 1.0]);
+        assert!(doc.set_edge(
+            hdr,
+            Some(crate::edge::EdgeParams {
+                width_px: 4.0,
+                colour: [255, 255, 255],
+            })
+        ));
+        doc.refresh_derived(600);
+        let mats = doc.layers[hdr].edge_tiles().expect("mat derived");
+        assert!(
+            mats.contains_key(&TileIdx::new(1, 0)),
+            "mat spills into the neighbour tile: {:?}",
+            mats.keys().collect::<Vec<_>>()
+        );
+
+        let img = composite(&doc, Background::White);
+        assert_eq!(img.get_pixel(30, 30).0, [0, 0, 0, 255], "ink on top");
+        assert_eq!(
+            img.get_pixel(66, 30).0,
+            [255, 255, 255, 255],
+            "the mat rings the group's ink"
+        );
+        assert_eq!(
+            img.get_pixel(100, 100).0,
+            [255, 0, 0, 255],
+            "far away the backdrop stands"
+        );
+
+        // Folder opacity dims the mat with the group.
+        doc.set_layer_opacity(doc.layers.len() - 1, 0.5);
+        doc.refresh_derived(600);
+        let img = composite(&doc, Background::White);
+        let ring = img.get_pixel(66, 30).0;
+        assert!(
+            ring[0] > 200 && ring[1] > 100 && ring[1] < 200,
+            "half-strength mat over red: {ring:?}"
+        );
+
+        // Effect off: the ring is red backdrop again.
+        doc.set_layer_opacity(doc.layers.len() - 1, 1.0);
+        assert!(doc.set_edge(doc.layers.len() - 1, None));
+        doc.refresh_derived(600);
+        let img = composite(&doc, Background::White);
+        assert_eq!(img.get_pixel(66, 30).0, [255, 0, 0, 255]);
     }
 
     /// FB-overflow: the escape flag re-seats a child above its frame
