@@ -10,6 +10,36 @@
 <nav class="top"><a href="index.html">← manual</a></nav>
 <h1>Layers &amp; masks</h1>
 
+<h2>Selecting more than one row</h2>
+<div class="quirk"><b><kbd>Ctrl</kbd>+click a row adds or removes it;
+<kbd>Shift</kbd>+click takes the range from the active row.</b> A plain
+click on another row collapses the selection back to that one row.
+Selected rows share the highlight, but the <b>pen mark</b> still sits on
+exactly one of them — that is the row your brush writes to, and the row a
+command means when it says "the active layer". <kbd>Ctrl</kbd>+clicking
+the row that holds the pen hands the pen to another selected row rather
+than leaving the palette with no editing target, and the last remaining
+row cannot be deselected at all.</div>
+<div class="quirk warn"><b>Any structural change clears the
+multi-selection.</b> Add, delete, move or import a layer and the extra
+rows drop back to one. This is the same door the undo history goes
+through, for the same reason: the selection is a list of row
+<i>positions</i>, and those positions stop meaning what they meant the
+moment the stack shifts. Nothing is lost — re-pick the rows.</div>
+<div class="quirk warn"><b>"Selection from this layer's ink" now lives on
+the THUMBNAIL only.</b> <kbd>Ctrl</kbd>+click the thumbnail to load the
+layer's alpha as a selection; hold <kbd>Shift</kbd> to add,
+<kbd>Alt</kbd> to subtract, both to intersect, like every other selection
+gesture. <kbd>Ctrl</kbd>+click anywhere else on the row is the
+multi-select above. If the gesture in your fingers is
+<kbd>Ctrl</kbd>+click-the-row, it now does a different thing — aim at the
+26&nbsp;px thumbnail.</div>
+<div class="quirk"><b>Batch Layer Operations can read this selection.</b>
+Its "Which layers" row gained <b>Selected layers (N)</b> — the rows
+picked here. With nothing multi-selected it means the active layer alone,
+never nothing. Folder headers never match in any batch scope, so N can be
+smaller than the number of highlighted rows.</div>
+
 <h2>Blending modes</h2>
 <div class="quirk"><b>The list is not in Clip Studio's order.</b> Modes sit
 in the order they were built — Normal, Multiply, Screen, Add, Subtract
@@ -45,6 +75,37 @@ light, Hard mix, Divide, Darker color, Lighter color, Add, Subtract)
 are ours; a foreign editor falls back to Normal for those layers. Your
 own files reload correctly — this only affects handing a .ora to
 someone else.</div>
+
+<h2>Clipping, including to a folder</h2>
+<div class="quirk"><b>A layer can clip to a FOLDER, not just to a
+layer.</b> The base is the nearest row below at the same depth that is not
+itself clipped — and a sealed folder header counts, so the clipped layer
+is masked by the folder's combined ink. Group a base and its friends into
+a folder and the shading layer above keeps working instead of going
+loose. The folder itself never wears the clip flag: folders refuse
+it.</div>
+<div class="quirk warn"><b>A "Through" folder cannot be a clip base.</b>
+Through means the group has no isolated composite of its own — there is
+no combined ink to clip to — so the chain breaks there exactly as if
+nothing were below. The layer's clip flag is not cleared, it is
+<i>ignored</i>, and the palette's red clip bar beside the thumbnail goes
+grey to say so. Untick Through and the clip attaches itself.</div>
+<div class="quirk warn"><b>Hiding the folder hides the clipped layer's
+ink too.</b> A hidden folder is zero ink, and a clip to zero ink shows
+nothing. This differs from clipping to a hidden <i>layer</i>, whose
+pixels still exist under the eye — so the eye on a folder base is a much
+bigger switch than the eye on a layer base.</div>
+<div class="quirk"><b>The folder's opacity does not thin the layer
+clipped to it.</b> The base is the group's raw ink, taken before the
+folder's own opacity and blend mode are applied — the same rule a layer
+base follows. Turn a folder down to 20&nbsp;% and the layer clipped above
+it stays exactly as solid as it was.</div>
+<div class="quirk"><b>The status line tells you when a structure edit
+breaks or repairs a clip.</b> Move or delete something and you may see
+<i>"Shade": clip lost its base here — the flag is ignored (grey mark)</i>,
+or the matching re-attached note. That message is the whole point: a clip
+quietly losing its base is the "why is my art suddenly showing
+everywhere" bug, and it is now announced rather than discovered.</div>
 
 <h2>Mask editing is a mode that arms</h2>
 <div class="quirk warn"><b>Clicking a layer's mask square routes your
@@ -154,16 +215,34 @@ and the two do not interact.</div>
 
 <h2>The Correction menu</h2>
 <div class="quirk warn"><b>A correction is baked into the pixels.</b>
-Brightness/Contrast, Hue/Saturation/Luminosity, Posterization, Reverse
-gradient and Binarization rewrite the layer's pixels. It is one undo
-step while the file is open — but once you save and close, the original
-tones are gone. Duplicate the layer first if you might want them back.
-There is no correction layer you can re-open and re-edit.</div>
-<div class="quirk warn"><b>It corrects the ACTIVE layer, not what you
+Brightness/Contrast, Hue/Saturation/Luminosity, Posterization, Levels,
+Tone curve, Reverse gradient and Binarization rewrite the layer's pixels.
+It is one undo step while the file is open — but once you save and close,
+the original tones are gone. Duplicate the layer first if you might want
+them back. There is no correction layer you can re-open and
+re-edit.</div>
+<div class="quirk warn"><b>It corrects the SELECTED layers, not what you
 see.</b> The canvas shows every layer composited; a correction touches
-exactly one. Binarizing a page whose lineart sits above a white base
-changes the lineart layer only — the white stays white because it is a
+only the rows picked in the palette — the active layer alone unless you
+multi-selected. Binarizing a page whose lineart sits above a white base
+changes the lineart layer only; the white stays white because it is a
 different layer.</div>
+<div class="quirk"><b>Correcting several layers is ONE undo step, and the
+dialog says how many.</b> Pick the rows first (<kbd>Ctrl</kbd>+click,
+<kbd>Shift</kbd>+click), then open the correction: the line under the
+sliders reads "Applies to the N selected layers". Every layer gets the
+same numbers and one <kbd>Ctrl+Z</kbd> takes all of it back. The set is
+fixed when the dialog OPENS — you cannot change the palette selection
+while a preview is live, because nothing may touch the document then (see
+below).</div>
+<div class="quirk"><b>Layers that cannot take it are skipped
+silently.</b> Folders, vector layers, locked layers and layers with no
+pixels in reach of the selection are dropped from the set with no
+warning — they are not an error and they do not stop the others. The
+count in the dialog and the status line ("… applied to N layers") is the
+count that really got corrected, so a smaller number than the rows you
+highlighted is the app telling you which ones took. If none of them can,
+the status line says "nothing to correct" and no dialog opens.</div>
 <div class="quirk"><b>A selection bounds it.</b> With a selection
 active, pixels outside it are left byte-for-byte alone and a partly
 selected pixel gets a proportional amount of the correction — a feathered
@@ -185,6 +264,22 @@ untouched layer without closing the dialog.</div>
 <div class="quirk"><b>Reverse gradient applies immediately.</b> It has
 no settings, so there is no dialog and no preview — the menu item is the
 whole operation. Undo is the way back.</div>
+<div class="quirk"><b>Levels and Tone curve read 0..255, like Clip
+Studio.</b> Both new entries live in the same Correction menu and obey
+every rule above — baked pixels, live preview, selected layers, bounded
+by a selection, alpha untouched. Levels has an input black point, white
+point and gamma, then an output black and white point; the numbers are
+shown as 0..255 even though the engine works in floating point, so a
+value you know from CSP transfers straight across.</div>
+<div class="quirk"><b>The curve editor: drag a point, click empty space
+to add one, drag a point out of the box to delete it.</b> The two END
+points are pinned to the left and right edges and cannot be dragged off
+them — an unpinned end would flatten a whole tail of the range with
+nothing on screen explaining why. Points cannot be stacked on the same
+input value either; they keep a small gap so each one stays grabbable.
+<b>Reset curve</b> puts the straight diagonal back, and the faint
+diagonal drawn behind the curve is that untouched line, so "how far from
+nothing am I" stays readable.</div>
 <h2>Filtering the stack</h2>
 <div class="quirk warn"><b>You cannot drag rows to reorder while a
 filter is on.</b> With rows missing, a drop line drawn between two
