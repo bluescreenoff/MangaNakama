@@ -428,6 +428,26 @@ impl<Tab> DockState<Tab> {
         index
     }
 
+    // MN-PATCH #17 (MangaNakama, 2026-08-21): companion to `Tree::graft_at`.
+    // The docking-2 migration merges two legacy `DockState`s into one; their
+    // main trees graft into the merged tree, and their floating windows —
+    // whole surfaces, position and nesting included — move across here.
+
+    /// Move every floating-window surface of `other` into `self`, keeping
+    /// each window's own tree and [`WindowState`] intact.
+    pub fn absorb_windows(&mut self, other: DockState<Tab>) {
+        for surface in other.surfaces.into_iter().skip(1) {
+            if !surface.is_empty() {
+                let index = self.find_empty_surface_index();
+                if index.0 < self.surfaces.len() {
+                    self.surfaces[index.0] = surface;
+                } else {
+                    self.surfaces.push(surface);
+                }
+            }
+        }
+    }
+
     /// Finds the first empty surface index which may be used.
     ///
     /// **WARNING**: in cases where one isn't found, `SurfaceIndex(self.surfaces.len())` is used.

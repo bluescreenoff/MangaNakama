@@ -726,14 +726,14 @@ static TAPS: std::sync::Mutex<gesture::Taps> = std::sync::Mutex::new(gesture::Ta
 /// the `ppp` multiply. `None` = the palette is closed or hidden behind
 /// another tab, and a three-finger tap there is an ordinary redo.
 fn navigator_rect_px(app: &App, ppp: f32) -> Option<[f32; 4]> {
-    let leaf_rect = |dock: &crate::ui::dock::DockColumn| {
-        dock.iter_all_nodes().find_map(|(_, node)| {
-            let leaf = node.get_leaf()?;
-            (leaf.tabs.get(leaf.active.0) == Some(&crate::ui::dock::Palette::Navigator))
-                .then_some(leaf.rect)
-        })
-    };
-    let r = leaf_rect(&app.dock_left).or_else(|| leaf_rect(&app.dock_right))?;
+    let r = app.dock.iter_all_nodes().find_map(|(_, node)| {
+        let leaf = node.get_leaf()?;
+        (leaf.tabs.get(leaf.active.0)
+            == Some(&crate::ui::dock::Pane::Palette(
+                crate::ui::dock::Palette::Navigator,
+            )))
+        .then_some(leaf.rect)
+    })?;
     r.is_positive()
         .then(|| [r.min.x * ppp, r.min.y * ppp, r.max.x * ppp, r.max.y * ppp])
 }

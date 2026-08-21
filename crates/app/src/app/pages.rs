@@ -179,22 +179,10 @@ impl App {
             return;
         }
         if manga {
-            self.dock_left
-                .main_surface_mut()
-                .push_to_first_leaf(Palette::Pages);
+            // Never the canvas leaf: reopen() upholds the class rule.
+            crate::ui::dock::reopen(self, Palette::Pages);
         } else {
-            for dock in [&mut self.dock_left, &mut self.dock_right] {
-                loop {
-                    // (a plain `while let` pins the iterator's temporary
-                    // borrow through the body — remove_tab needs &mut.)
-                    let path = dock
-                        .iter_all_tabs()
-                        .find(|(_, t)| **t == Palette::Pages)
-                        .map(|(p, _)| p);
-                    let Some(path) = path else { break };
-                    dock.remove_tab(path);
-                }
-            }
+            crate::ui::dock::close_palette(self, Palette::Pages);
         }
     }
 

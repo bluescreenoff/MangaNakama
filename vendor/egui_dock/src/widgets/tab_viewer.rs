@@ -100,6 +100,16 @@ pub trait TabViewer {
         true
     }
 
+    /// MN-PATCH #16 (MangaNakama, 2026-08-21): may `tab` join an existing
+    /// leaf's tab BAR whose tabs are `dst_tabs`? Refusing only blocks the
+    /// tab-insert destinations — splitting beside that leaf stays allowed.
+    /// MangaNakama uses it to keep canvas panes and palette panes from
+    /// tabbing over each other (a palette tabbed over the canvas would bury
+    /// it). Default: any tab may join any leaf, upstream behaviour.
+    fn can_tab_into(&self, _tab: &Self::Tab, _dst_tabs: &[Self::Tab]) -> bool {
+        true
+    }
+
     /// Returns `true` if the horizontal and vertical scroll bars will be shown for `tab`.
     ///
     /// By default, both scroll bars are shown.

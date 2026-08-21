@@ -134,12 +134,6 @@ pub enum Icon {
     Stop,
     /// Drag handle: two columns of grip dots — "this row moves".
     Grip,
-    /// Palette-column collapse (`ui.rs`): a chevron pointing at the screen
-    /// edge the column folds towards, or back at the canvas once it is
-    /// folded away. Geometry, not `<`/`>` — the bundled fonts have no
-    /// pictographs and the owner's rule is no raw ascii glyphs in the UI.
-    ChevronLeft,
-    ChevronRight,
 }
 
 /// Paint `icon` to fill `r` (which should be square-ish), in `color`.
@@ -909,12 +903,6 @@ pub fn paint(p: &Painter, r: Rect, icon: Icon, color: Color32) {
                     p.circle_filled(pt(r, x, y), w * 0.075, color);
                 }
             }
-        }
-        Icon::ChevronLeft => {
-            p.line(poly(r, &[(0.62, 0.16), (0.32, 0.50), (0.62, 0.84)]), line);
-        }
-        Icon::ChevronRight => {
-            p.line(poly(r, &[(0.38, 0.16), (0.68, 0.50), (0.38, 0.84)]), line);
         }
     }
 }

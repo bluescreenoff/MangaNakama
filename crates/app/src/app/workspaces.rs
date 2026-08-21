@@ -17,8 +17,11 @@ const WS_DOCK_RIGHT: usize = 2;
 const WS_LEFT_W: usize = 3;
 const WS_RIGHT_W: usize = 4;
 const WS_PROP_HIDDEN: usize = 5;
-const WS_LEFT_COLLAPSED: usize = 6;
-const WS_RIGHT_COLLAPSED: usize = 7;
+// 6 and 7 were the column collapse flags — meaningless since docking 2
+// (the single tree has no column collapse), never reused.
+/// Docking 2: the whole tree as one JSON field. A workspace registered by
+/// an older build lacks it and migrates from fields 1..=4 at APPLY time.
+const WS_DOCK_TREE: usize = 8;
 
 impl App {
     /// One field of a workspace entry, or `""` when the entry is an older
@@ -40,13 +43,17 @@ impl App {
     pub fn workspace_register(&mut self, name: &str) {
         let entry = vec![
             name.to_string(),
-            crate::ui::dock::to_json(&self.dock_left),
-            crate::ui::dock::to_json(&self.dock_right),
-            format!("{:.0}", self.layout.left_w),
-            format!("{:.0}", self.layout.right_w),
+            // Fields 1..=4 stay EMPTY on a docking-2 register: the tree in
+            // field 8 is the layout. An older build applying this entry
+            // falls back to its default columns — graceful, not wrong.
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
             self.layout.prop_hidden.clone(),
-            u8::from(self.layout.left_collapsed).to_string(),
-            u8::from(self.layout.right_collapsed).to_string(),
+            String::new(),
+            String::new(),
+            crate::ui::dock::to_json_tree(&self.dock),
         ];
         if let Some(e) = self
             .workspaces
@@ -73,17 +80,30 @@ impl App {
             return false;
         };
         let f = |i| Self::ws_field(&e, i).to_string();
-        self.dock_left =
-            crate::ui::dock::from_json(&f(WS_DOCK_LEFT), crate::ui::dock::default_left);
-        self.dock_right =
-            crate::ui::dock::from_json(&f(WS_DOCK_RIGHT), crate::ui::dock::default_right);
-        self.layout.left_w = f(WS_LEFT_W).parse().unwrap_or(self.layout.left_w);
-        self.layout.right_w = f(WS_RIGHT_W).parse().unwrap_or(self.layout.right_w);
+        let tree = f(WS_DOCK_TREE);
+        self.dock = if !tree.is_empty() {
+            crate::ui::dock::from_json_tree(&tree)
+        } else {
+            // A pre-docking-2 workspace: fold its two columns around a
+            // canvas pane, exactly like the ui.txt migration (widths from
+            // fields 3/4 against a nominal window — fractions, so close
+            // enough; a drag away from exact).
+            let left = if f(WS_DOCK_LEFT).is_empty() {
+                crate::ui::dock::to_json(&crate::ui::dock::default_left())
+            } else {
+                f(WS_DOCK_LEFT)
+            };
+            let right = if f(WS_DOCK_RIGHT).is_empty() {
+                crate::ui::dock::to_json(&crate::ui::dock::default_right())
+            } else {
+                f(WS_DOCK_RIGHT)
+            };
+            let lw = f(WS_LEFT_W).parse().unwrap_or(186.0);
+            let rw = f(WS_RIGHT_W).parse().unwrap_or(208.0);
+            crate::ui::dock::merge_columns(&left, &right, lw, rw, 1280.0)
+                .unwrap_or_else(crate::ui::dock::default_tree)
+        };
         self.layout.prop_hidden = f(WS_PROP_HIDDEN);
-        // A pre-collapse workspace carries neither flag: it restores both
-        // columns EXPANDED, which is the state it was registered in.
-        self.layout.left_collapsed = f(WS_LEFT_COLLAPSED) == "1";
-        self.layout.right_collapsed = f(WS_RIGHT_COLLAPSED) == "1";
         self.workspace_current = name.to_string();
         self.persist();
         true

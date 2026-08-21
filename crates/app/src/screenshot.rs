@@ -316,16 +316,16 @@ pub fn run(
     // over the canvas — proves the floating surface renders and the column
     // tree reflows (what a manual tab-drag does interactively).
     if shot_dock {
-        use crate::ui::dock::Palette;
+        use crate::ui::dock::{Palette, Pane};
         let path = app
-            .dock_right
+            .dock
             .iter_all_tabs()
-            .find(|(_, t)| **t == Palette::Layers)
+            .find(|(_, t)| **t == Pane::Palette(Palette::Layers))
             .map(|(p, _)| p)
-            .expect("Layers tab in the default right column");
-        app.dock_right.remove_tab(path);
-        let si = app.dock_right.add_window(vec![Palette::Layers]);
-        if let Some(ws) = app.dock_right.get_window_state_mut(si) {
+            .expect("Layers tab in the default tree");
+        app.dock.remove_tab(path);
+        let si = app.dock.add_window(vec![Pane::Palette(Palette::Layers)]);
+        if let Some(ws) = app.dock.get_window_state_mut(si) {
             ws.set_position(egui::pos2(660.0, 280.0));
             ws.set_size(egui::vec2(250.0, 380.0));
         }
@@ -427,91 +427,92 @@ fn tile_sig(app: &App) -> u64 {
 /// Round-21 shipped `--shot-dock` driving the DockState API directly, which
 /// proved rendering but never the pointer pipeline — this closes that gap.
 pub fn dockdrag_e2e(cfg: GpuConfig) -> Result<(), String> {
-    use crate::ui::dock::Palette;
+    use crate::ui::dock::{Palette, Pane};
     let renderer = Renderer::new_headless(cfg).map_err(|e| e.to_string())?;
     let (w, h) = (1280u32, 860u32);
     let mut app = App::new(renderer, (w, h), 1.0);
     // Default layout regardless of any ui.txt beside the exe.
-    app.dock_left = crate::ui::dock::default_left();
-    app.dock_right = crate::ui::dock::default_right();
+    app.dock = crate::ui::dock::default_tree();
     frame(&mut app, w, h);
     frame(&mut app, w, h);
 
-    let leaf_of = |dock: &crate::ui::dock::DockColumn, p: Palette| -> Option<egui::Rect> {
-        dock.iter_all_tabs()
+    let leaf_of = |app: &App, p: Pane| -> Option<egui::Rect> {
+        app.dock
+            .iter_all_tabs()
             .find(|(_, t)| **t == p)
-            .and_then(|(path, _)| dock[path.node_path()].rect())
+            .and_then(|(path, _)| app.dock[path.node_path()].rect())
     };
 
     // A safe press point on a tab's TITLE (left end — the × close button owns
     // the right end, and the leaf's collapse button sits before the first
     // tab). Reads the tab's real interact rect back from egui, so the aim
     // follows whatever chrome precedes it.
-    let tab_point = |app: &App, area: &str, p: Palette| -> Option<egui::Pos2> {
-        let (dock, area) = if area.contains("left") {
-            (&app.dock_left, "mn.dock.left")
-        } else {
-            (&app.dock_right, "mn.dock.right")
-        };
-        let path = dock
+    let tab_point = |app: &App, p: Pane| -> Option<egui::Pos2> {
+        let path = app
+            .dock
             .iter_all_tabs()
             .find(|(_, t)| **t == p)
             .map(|(p, _)| p)?;
-        let id = egui::Id::new(area)
+        let id = egui::Id::new("mn.dock")
             .with((path.surface, "surface"))
             .with((path.node, "node"))
             .with((path.tab, "tab"));
         let r = app.shell.ctx.read_response(id)?.rect;
         Some(egui::pos2(r.left() + 10.0, r.center().y))
     };
+    let tool = Pane::Palette(Palette::Tool);
+    let layers = Pane::Palette(Palette::Layers);
 
     // --- 1. tear-off over the canvas --------------------------------------
-    let press = tab_point(&app, "left", Palette::Tool).expect("Tool tab press point");
-    drag(&mut app, w, h, press, egui::pos2(640.0, 430.0), 28);
-    let torn = app.dock_left.surfaces_count() > 1;
+    // Docking 2: the canvas is a LEAF now, so this release resolves as a
+    // tab-insert into it — which patch #16 vetoes and rewrites into a
+    // floating window at the pointer. Same gesture, same outcome as ever.
+    let canvas_rect = leaf_of(&app, Pane::Canvas).expect("canvas leaf rect");
+    let press = tab_point(&app, tool).expect("Tool tab press point");
+    drag(&mut app, w, h, press, canvas_rect.center(), 28);
+    let torn = app.dock.surfaces_count() > 1;
     println!(
-        "[e2e] dock tear-off over canvas: {torn} (left surfaces={})",
-        app.dock_left.surfaces_count()
+        "[e2e] dock tear-off over canvas: {torn} (surfaces={})",
+        app.dock.surfaces_count()
     );
 
     // --- 2. regroup: Tool tab onto the Sub Tool palette --------------------
     // (reset first so test 1's outcome cannot mask test 2)
-    app.dock_left = crate::ui::dock::default_left();
+    app.dock = crate::ui::dock::default_tree();
     frame(&mut app, w, h);
-    let sub = leaf_of(&app.dock_left, Palette::SubTool).expect("Sub Tool leaf rect");
-    let press = tab_point(&app, "left", Palette::Tool).expect("Tool tab press point");
+    let sub = leaf_of(&app, Pane::Palette(Palette::SubTool)).expect("Sub Tool leaf rect");
+    let press = tab_point(&app, tool).expect("Tool tab press point");
     // The icon overlay's CENTER button (Append) sits at the hovered leaf's
     // centre — releasing on the leaf body but off-button tears off instead.
-    let drop = sub.center();
-    drag(&mut app, w, h, press, drop, 20);
+    drag(&mut app, w, h, press, sub.center(), 20);
     let grouped = {
         let sub_node = app
-            .dock_left
+            .dock
             .iter_all_tabs()
-            .find(|(_, t)| **t == Palette::SubTool)
+            .find(|(_, t)| **t == Pane::Palette(Palette::SubTool))
             .map(|(p, _)| p.node_path())
             .expect("Sub Tool node");
-        let tabs: Vec<Palette> = app.dock_left[sub_node]
+        let tabs: Vec<Pane> = app.dock[sub_node]
             .tabs()
             .map(|t| t.to_vec())
             .unwrap_or_default();
         println!("[e2e] dock regroup: sub-tool node tabs = {tabs:?}");
-        tabs.contains(&Palette::Tool)
+        tabs.contains(&tool)
     };
     println!("[e2e] dock regroup onto sibling: {grouped}");
 
     // --- 3. move a floating window by its tab bar ---------------------------
     let si = {
         let path = app
-            .dock_right
+            .dock
             .iter_all_tabs()
-            .find(|(_, t)| **t == Palette::Layers)
+            .find(|(_, t)| **t == layers)
             .map(|(p, _)| p)
             .expect("Layers tab");
-        app.dock_right.remove_tab(path);
-        app.dock_right.add_window(vec![Palette::Layers])
+        app.dock.remove_tab(path);
+        app.dock.add_window(vec![layers])
     };
-    if let Some(ws) = app.dock_right.get_window_state_mut(si) {
+    if let Some(ws) = app.dock.get_window_state_mut(si) {
         ws.set_position(egui::pos2(560.0, 260.0));
         ws.set_size(egui::vec2(250.0, 360.0));
     }
@@ -521,17 +522,15 @@ pub fn dockdrag_e2e(cfg: GpuConfig) -> Result<(), String> {
     // tab into a NEW surface, so `si` can go stale across the gesture).
     let float_rect = |app: &App| -> egui::Rect {
         let path = app
-            .dock_right
+            .dock
             .iter_all_tabs()
-            .find(|(_, t)| **t == Palette::Layers)
+            .find(|(_, t)| **t == layers)
             .map(|(p, _)| p)
             .expect("floating Layers tab");
-        app.dock_right[path.node_path()]
-            .rect()
-            .expect("floating rect")
+        app.dock[path.node_path()].rect().expect("floating rect")
     };
     let before = float_rect(&app);
-    let press = tab_point(&app, "right", Palette::Layers).expect("floating Layers tab point");
+    let press = tab_point(&app, layers).expect("floating Layers tab point");
     let drop = egui::pos2(press.x + 90.0, press.y + 50.0);
     drag(&mut app, w, h, press, drop, 8);
     let after = float_rect(&app);
@@ -542,28 +541,31 @@ pub fn dockdrag_e2e(cfg: GpuConfig) -> Result<(), String> {
         before.min, after.min
     );
 
-    // --- 4. cross-column release: floats instead of panicking ----------------
-    // By design (v1) a tab dragged from one column and released over the
-    // OTHER column's leaves cannot merge — node indices don't translate
-    // between the two DockStates — so the foreign hover is ignored and the
-    // tear-off fallback fires: the palette FLOATS at the pointer. What must
-    // be true: no panic, and the tab survives as a floating window of its
-    // own column.
-    app.dock_left = crate::ui::dock::default_left();
+    // --- 4. the canvas pane never leaves the main surface -------------------
+    // Drag the Canvas tab and release over a palette leaf (vetoed insert, no
+    // float — the canvas may not live in a window) and then over the status
+    // bar (patch #3's no-leaf fallback, also barred). Both must snap back.
+    app.dock = crate::ui::dock::default_tree();
     frame(&mut app, w, h);
     frame(&mut app, w, h);
-    let layers = leaf_of(&app.dock_right, Palette::Layers).expect("Layers leaf rect");
-    let press = tab_point(&app, "left", Palette::Tool).expect("Tool tab press point");
-    let drop = layers.center();
-    drag(&mut app, w, h, press, drop, 24);
-    let floated = app.dock_left.surfaces_count() > 1;
-    println!("[e2e] dock cross-column release floats (no panic): {floated}");
+    let surfaces_before = app.dock.surfaces_count();
+    let layers_rect = leaf_of(&app, layers).expect("Layers leaf rect");
+    let press = tab_point(&app, Pane::Canvas).expect("Canvas tab press point");
+    drag(&mut app, w, h, press, layers_rect.center(), 24);
+    let press = tab_point(&app, Pane::Canvas).expect("Canvas tab still docked");
+    drag(&mut app, w, h, press, egui::pos2(640.0, h as f32 - 4.0), 24);
+    let canvas_docked = app
+        .dock
+        .iter_all_tabs()
+        .any(|(path, t)| *t == Pane::Canvas && path.surface.is_main())
+        && app.dock.surfaces_count() == surfaces_before;
+    println!("[e2e] canvas pane never floats: {canvas_docked}");
 
     verdicts(&[
         ("tear-off over canvas", torn),
         ("regroup onto sibling", grouped),
         ("move floating window", moved),
-        ("cross-column release floats", floated),
+        ("canvas pane never floats", canvas_docked),
     ])
 }
 
@@ -643,24 +645,33 @@ pub fn paneresize_e2e(cfg: GpuConfig) -> Result<(), String> {
     let mut app = App::new(renderer, (w, h), 1.0);
     // Default layout regardless of any ui.txt beside the exe, then reconcile
     // the Pages tab with the (plain-image) doc, exactly like the app does.
-    app.dock_left = crate::ui::dock::default_left();
-    app.dock_right = crate::ui::dock::default_right();
+    app.dock = crate::ui::dock::default_tree();
     app.sync_pages_palette();
-    app.layout.left_w = 186.0;
-    app.layout.right_w = 208.0;
     frame(&mut app, w, h);
     frame(&mut app, w, h);
 
-    // --- 1. drag the left column's right edge wider -------------------------
-    let before = app.layout.left_w;
-    let edge = egui::pos2(before, 300.0);
-    drag(&mut app, w, h, edge, egui::pos2(before + 60.0, 300.0), 14);
-    let after = app.layout.left_w;
+    // Docking 2: column resizing is egui_dock's separator between the left
+    // column's nodes and the canvas leaf. The Tool leaf's right edge sits on
+    // that separator; its width is the measure.
+    let tool_w = |app: &App| -> f32 {
+        app.dock
+            .iter_all_tabs()
+            .find(|(_, t)| **t == crate::ui::dock::Pane::Palette(crate::ui::dock::Palette::Tool))
+            .and_then(|(path, _)| app.dock[path.node_path()].rect())
+            .map_or(0.0, |r| r.width())
+    };
+
+    // --- 1. drag the column/canvas separator wider --------------------------
+    let before = tool_w(&app);
+    let edge = egui::pos2(before + 2.0, 300.0);
+    drag(&mut app, w, h, edge, egui::pos2(before + 62.0, 300.0), 14);
+    frame(&mut app, w, h);
+    let after = tool_w(&app);
     let widened = after > before + 40.0;
     println!("[e2e] pane drag-wider: {widened} ({before:.1} -> {after:.1})");
 
     // --- 2. hover all over the app; the width must hold ---------------------
-    let released = app.layout.left_w;
+    let released = tool_w(&app);
     let spots = [
         egui::pos2(640.0, 430.0),           // canvas centre
         egui::pos2(90.0, 120.0),            // over the Tool palette
@@ -676,8 +687,8 @@ pub fn paneresize_e2e(cfg: GpuConfig) -> Result<(), String> {
         let p = spots[k % spots.len()];
         app.shell.on_pointer_moved(p.x as i32, p.y as i32);
         frame(&mut app, w, h);
-        min_w = min_w.min(app.layout.left_w);
-        max_w = max_w.max(app.layout.left_w);
+        min_w = min_w.min(tool_w(&app));
+        max_w = max_w.max(tool_w(&app));
     }
     let stable = (max_w - min_w) <= 0.5 && (max_w - released) <= 0.5;
     println!(
@@ -685,10 +696,12 @@ pub fn paneresize_e2e(cfg: GpuConfig) -> Result<(), String> {
     );
 
     // --- 3. cursor band across the edge -------------------------------------
-    let e = app.layout.left_w;
+    // egui_dock's separator carries `extra_interact_width` (12pt total, our
+    // style) — the cursor must show across it, not only on an exact hit.
+    let e = tool_w(&app) + 2.0;
     let mut band = true;
     let mut report = Vec::new();
-    for dx in [-7.0f32, -5.0, -2.0, 0.0, 2.0, 5.0, 7.0] {
+    for dx in [-5.0f32, -2.0, 0.0, 2.0, 5.0] {
         app.shell.on_pointer_moved((e + dx) as i32, 300);
         frame(&mut app, w, h);
         let cur = app.shell.cursor;
@@ -705,7 +718,7 @@ pub fn paneresize_e2e(cfg: GpuConfig) -> Result<(), String> {
         }
     }
     println!(
-        "[e2e] pane cursor-band ±7pt: {band} ({})",
+        "[e2e] pane cursor-band ±5pt: {band} ({})",
         report.join(", ")
     );
 

@@ -11,6 +11,7 @@ use crate::dock_area::tab_removal::ForcedRemoval;
 use crate::tab_viewer::OnCloseResponse;
 use crate::{
     AllowedSplits, DockArea, Node, NodeIndex, OverlayType, Style, SurfaceIndex, TabDestination,
+    TabInsert,
     TabViewer,
     utils::{expand_to_pixel, fade_dock_style, map_to_pixel},
 };
@@ -83,6 +84,56 @@ impl<Tab> DockArea<'_, Tab> {
                     let style = self.style.as_ref().unwrap();
                     state.set_drag_and_drop(source, hover, ui.ctx(), style);
                     let tab_dst = self.show_drag_drop_overlay(ui, &mut state, tab_viewer);
+                    // MN-PATCH #16: the viewer may refuse a tab JOINING an
+                    // existing leaf's tab bar (`can_tab_into`) — canvas panes
+                    // and palettes never mix. Split destinations pass; only
+                    // the insert-as-tab ones are vetoed. A vetoed tab that
+                    // is allowed in windows FLOATS at the pointer instead
+                    // (dropping a palette over the canvas pane must keep
+                    // behaving like patch #3's tear-off); one that is not
+                    // (the canvas pane) drops to nothing and snaps back.
+                    // The veto sits here at the commit, where the source
+                    // and destination leaves can both be read immutably;
+                    // the hover overlay still highlights the vetoed tab
+                    // bar (cosmetic, accepted).
+                    let tab_dst = tab_dst.and_then(|dst| {
+                        let dst_node = match &dst {
+                            TabDestination::Node(
+                                path,
+                                TabInsert::Insert(_) | TabInsert::Append,
+                            ) => *path,
+                            _ => return Some(dst),
+                        };
+                        let dnd = state.dnd.as_ref().unwrap();
+                        let pointer = dnd.pointer;
+                        let src_rect = dnd.drag.rect;
+                        let TreeComponent::Tab(src_path) = dnd.drag.src else {
+                            return Some(dst);
+                        };
+                        let vetoed = {
+                            let src_tab = self.dock_state[src_path.node_path()]
+                                .get_leaf()
+                                .and_then(|l| l.tabs.get(src_path.tab.0));
+                            let dst_leaf = self.dock_state[dst_node].get_leaf();
+                            match (src_tab, dst_leaf) {
+                                (Some(t), Some(l)) => !tab_viewer.can_tab_into(t, &l.tabs),
+                                _ => false,
+                            }
+                        };
+                        if !vetoed {
+                            return Some(dst);
+                        }
+                        let floatable = self.dock_state[src_path.node_path()]
+                            .get_leaf_mut()
+                            .and_then(|l| l.tabs.get_mut(src_path.tab.0))
+                            .is_some_and(|t| tab_viewer.allowed_in_windows(t));
+                        floatable.then(|| {
+                            TabDestination::Window(Rect::from_min_size(
+                                pointer,
+                                src_rect.size(),
+                            ))
+                        })
+                    });
                     if ui.input(|i| i.pointer.primary_released())
                         && let Some(destination) = tab_dst
                     {
@@ -116,11 +167,21 @@ impl<Tab> DockArea<'_, Tab> {
                             "collections of tabs, like nodes and surfaces can't be docked (yet)"
                         )
                     };
-                    let rect = Rect::from_min_size(
-                        state.last_hover_pos.unwrap_or(Pos2::ZERO),
-                        source.rect.size(),
-                    );
-                    self.dock_state.move_tab(src, TabDestination::Window(rect));
+                    // MN-PATCH #16 addition: a tab barred from windows (the
+                    // canvas pane) never tears off — the drop simply snaps
+                    // back instead of producing a floating window the
+                    // viewer said may not exist.
+                    let floatable = self.dock_state[src.node_path()]
+                        .get_leaf_mut()
+                        .and_then(|l| l.tabs.get_mut(src.tab.0))
+                        .is_some_and(|t| tab_viewer.allowed_in_windows(t));
+                    if floatable {
+                        let rect = Rect::from_min_size(
+                            state.last_hover_pos.unwrap_or(Pos2::ZERO),
+                            source.rect.size(),
+                        );
+                        self.dock_state.move_tab(src, TabDestination::Window(rect));
+                    }
                 }
             }
             // MN-PATCH: a foreign drag (owned by the sibling DockArea): put

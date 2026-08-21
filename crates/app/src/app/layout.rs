@@ -12,19 +12,24 @@ use std::path::PathBuf;
 /// handed in by `App::sync_dock_layout` — egui_dock types stay out of this
 /// module so it keeps no dependency on them).
 pub struct UiLayout {
+    /// LEGACY since docking 2 (docs/DOCKING-2.md): the tree owns its own
+    /// split fractions now. Still read (they seed the migration) and still
+    /// written, frozen, for downgrade safety — like `dock_left` below.
     pub left_w: f32,
     pub right_w: f32,
-    /// The left / right palette column is folded away to a thin strip with an
-    /// expand chevron (`ui.rs`). **Default false (expanded)** and only a
-    /// literal `1` collapses — the `guides_hidden` rule: an older build's
-    /// ui.txt, an absent key and junk must never hide a working artist's
-    /// palettes. `left_w`/`right_w` keep the EXPANDED width while collapsed
-    /// (`note_widths` refuses to overwrite them), or the column would come
-    /// back 18pt wide forever after a restart.
+    /// LEGACY column-collapse flags, same rules as `left_w`. The docking-2
+    /// side collapse (the edge flap, phase 2) will get its own key.
     pub left_collapsed: bool,
     pub right_collapsed: bool,
+    /// LEGACY (docking 2): the pre-merge dock columns. Read-only feed for
+    /// the one-time migration into `dock_tree`, and still WRITTEN, frozen,
+    /// so a downgrade to an older build finds its layout where it left it.
     pub dock_left: String,
     pub dock_right: String,
+    /// The single dock tree (docs/DOCKING-2.md), one JSON line. Empty =
+    /// never saved by this build: startup migrates the legacy columns, or
+    /// falls back to the default tree.
+    pub dock_tree: String,
     /// Tool Property sections hidden from the compact palette, comma-joined
     /// (the full-properties window's eye toggles).
     pub prop_hidden: String,
@@ -151,6 +156,7 @@ impl Default for UiLayout {
             right_collapsed: false,
             dock_left: String::new(),
             dock_right: String::new(),
+            dock_tree: String::new(),
             prop_hidden: String::new(),
             win: String::new(),
             gpu_dabs: false,
@@ -233,44 +239,10 @@ impl WinGeom {
 }
 
 impl UiLayout {
-    /// A COLLAPSED column reports the width of its 18pt strip, which must not
-    /// become the persisted column width — restore it and the column comes
-    /// back as a strip that no longer has a body to expand into. The stored
-    /// (expanded) width wins for a collapsed side; only a live column may
-    /// move its own number.
-    pub fn note_widths(&mut self, left: f32, right: f32) {
-        let left = if self.left_collapsed {
-            self.left_w
-        } else {
-            left
-        };
-        let right = if self.right_collapsed {
-            self.right_w
-        } else {
-            right
-        };
-        if (left - self.left_w).abs() > 0.5 || (right - self.right_w).abs() > 0.5 {
-            self.left_w = left;
-            self.right_w = right;
-            self.dirty = true;
-        }
-    }
-
-    /// The palette columns' collapse switches. Saved only on change, like the
-    /// other view toggles above.
-    pub fn note_collapsed(&mut self, left: bool, right: bool) {
-        if self.left_collapsed != left || self.right_collapsed != right {
-            self.left_collapsed = left;
-            self.right_collapsed = right;
-            self.dirty = true;
-        }
-    }
-
-    /// The serialized dock columns, saved only when they changed.
-    pub fn note_docks(&mut self, left: &str, right: &str) {
-        if self.dock_left != left || self.dock_right != right {
-            self.dock_left = left.to_owned();
-            self.dock_right = right.to_owned();
+    /// The serialized dock tree, saved only when it changed.
+    pub fn note_dock_tree(&mut self, tree: &str) {
+        if self.dock_tree != tree {
+            self.dock_tree = tree.to_owned();
             self.dirty = true;
         }
     }
@@ -424,13 +396,14 @@ impl UiLayout {
     /// `from_body` completes.
     pub(super) fn to_body(&self) -> String {
         format!(
-            "left_w={:.0}\nright_w={:.0}\nleft_collapsed={}\nright_collapsed={}\ndock_left={}\ndock_right={}\nprop_hidden={}\nwin={}\n{}recent_fonts={}\nmaterial_folders={}\nmaterial_uses={}\nquick_pins={}\nworkspaces={}\nworkspace_current={}\ntouch_gestures={}\ncolor_history={}\nauto_swatch={}\nreader_page={}\nguides_hidden={}\ntest_stroke_hidden={}\ngradients={}\nsub_tool_size_px={}\nreferences={}\n",
+            "left_w={:.0}\nright_w={:.0}\nleft_collapsed={}\nright_collapsed={}\ndock_left={}\ndock_right={}\ndock_tree={}\nprop_hidden={}\nwin={}\n{}recent_fonts={}\nmaterial_folders={}\nmaterial_uses={}\nquick_pins={}\nworkspaces={}\nworkspace_current={}\ntouch_gestures={}\ncolor_history={}\nauto_swatch={}\nreader_page={}\nguides_hidden={}\ntest_stroke_hidden={}\ngradients={}\nsub_tool_size_px={}\nreferences={}\n",
             self.left_w,
             self.right_w,
             self.left_collapsed as u8,
             self.right_collapsed as u8,
             self.dock_left,
             self.dock_right,
+            self.dock_tree,
             self.prop_hidden,
             self.win,
             // ABSENT unless the user actually chose: the tri-state IS the
@@ -479,6 +452,7 @@ impl UiLayout {
             // One line each — JSON without newlines (serde_json compact).
             "dock_left" if !line.contains('\n') => self.dock_left = v.to_owned(),
             "dock_right" if !line.contains('\n') => self.dock_right = v.to_owned(),
+            "dock_tree" if !line.contains('\n') => self.dock_tree = v.to_owned(),
             "prop_hidden" => self.prop_hidden = v.trim().to_owned(),
             "win" => self.win = v.trim().to_owned(),
             "quick_pins" => self.quick_pins = v.trim().to_owned(),
@@ -757,63 +731,51 @@ mod tests {
         assert!(junk.references.is_empty());
     }
 
-    /// The palette columns' collapse switches round-trip through the real
-    /// ui.txt body, degrade towards SHOWN like `guides_hidden`, and — the
-    /// half that actually bites — a collapsed column's 18pt strip width may
-    /// never be persisted as the column width.
-    ///
-    /// Failed against a `note_widths` without the collapsed guard: `ui.rs`
-    /// hands it the width the panel was laid out at, so one collapsed frame
-    /// wrote `left_w=18`, and the column came back a permanent sliver with an
-    /// expand chevron that expanded to nothing.
+    /// Docking 2: the `dock_tree=` key round-trips through the ui.txt body,
+    /// the LEGACY keys (columns, widths, collapse flags) still parse — they
+    /// feed the migration — and they are still written back frozen, so a
+    /// downgrade to an older build finds its layout where it left it.
     #[test]
-    fn column_collapse_roundtrips_and_never_persists_the_strip_width() {
+    fn dock_tree_key_roundtrips_and_legacy_keys_survive() {
         let mut me = UiLayout::default();
-        assert!(!me.left_collapsed && !me.right_collapsed, "default: shown");
-        let (lw, rw) = (me.left_w, me.right_w);
-
-        me.note_collapsed(true, false);
-        assert!(me.dirty && me.left_collapsed && !me.right_collapsed);
-
-        // The laid-out strip width must NOT become the stored column width.
-        me.note_widths(18.0, rw);
-        assert!((me.left_w - lw).abs() < 0.5, "collapsed width was persisted");
-        // The live column beside it still moves freely.
-        me.note_widths(18.0, 260.0);
-        assert!((me.left_w - lw).abs() < 0.5 && (me.right_w - 260.0).abs() < 0.5);
-
+        assert!(me.dock_tree.is_empty(), "empty until the first save");
+        me.note_dock_tree(r#"{"fake":"tree"}"#);
+        assert!(me.dirty);
         let body = me.to_body();
-        assert!(body.contains("\nleft_collapsed=1\n"), "{body}");
-        assert!(body.contains("\nright_collapsed=0\n"), "{body}");
-        assert!(body.contains(&format!("left_w={lw:.0}\n")), "{body}");
+        assert!(body.contains("\ndock_tree={\"fake\":\"tree\"}\n"), "{body}");
 
         let back = UiLayout::from_body(&body);
-        assert!(back.left_collapsed && !back.right_collapsed);
-        assert!((back.left_w - lw).abs() < 0.5, "the expanded width survived");
+        assert_eq!(back.dock_tree, r#"{"fake":"tree"}"#);
         assert!(!back.dirty, "a fresh load is not a pending save");
-
-        // An unchanged switch must not re-dirty a clean layout.
+        // `note` with the same value must not re-dirty a clean layout.
         let mut back = back;
-        back.note_collapsed(true, false);
+        back.note_dock_tree(r#"{"fake":"tree"}"#);
         assert!(!back.dirty);
-        // Expanding again lets the width move.
-        back.note_collapsed(false, false);
-        back.note_widths(200.0, 260.0);
-        assert!((back.left_w - 200.0).abs() < 0.5);
 
-        // An older build's ui.txt has neither key, and junk degrades to shown.
-        let mut junk = UiLayout::default();
+        // Legacy keys from an older build parse AND write back verbatim —
+        // the migration reads them, an older exe still finds them.
+        let mut old = UiLayout::default();
         for line in [
-            "left_w=200",
-            "left_collapsed=0",
-            "left_collapsed=yes",
-            "right_collapsed=",
+            "left_w=240",
+            "right_w=260",
+            "left_collapsed=1",
+            "dock_left={\"legacy\":1}",
+            "dock_right={\"legacy\":2}",
         ] {
-            junk.apply_kv(line);
-            assert!(
-                !junk.left_collapsed && !junk.right_collapsed,
-                "{line} must not fold a palette column away"
-            );
+            old.apply_kv(line);
+        }
+        assert!((old.left_w - 240.0).abs() < 0.5);
+        assert!(old.left_collapsed);
+        assert_eq!(old.dock_left, "{\"legacy\":1}");
+        let body = old.to_body();
+        for expect in [
+            // (`left_w` is the first line of the body — no leading newline.)
+            "left_w=240\n",
+            "\nleft_collapsed=1\n",
+            "\ndock_left={\"legacy\":1}\n",
+            "\ndock_right={\"legacy\":2}\n",
+        ] {
+            assert!(body.contains(expect), "missing {expect}: {body}");
         }
     }
 

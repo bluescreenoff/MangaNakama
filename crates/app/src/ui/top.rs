@@ -618,7 +618,7 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 ui.close();
             }
             ui.separator();
-            ui.weak("closed palettes reopen in the right column");
+            ui.weak("closed palettes reopen beside Layers");
             for p in crate::ui::dock::ALL {
                 let open = crate::ui::dock::is_open(app, p);
                 if ui.checkbox(&mut open.clone(), p.title()).changed() && !open {
@@ -628,8 +628,7 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
             }
             let mut all_default = false;
             if ui.checkbox(&mut all_default, "Reset layout").changed() {
-                app.dock_left = crate::ui::dock::default_left();
-                app.dock_right = crate::ui::dock::default_right();
+                app.dock = crate::ui::dock::default_tree();
                 ui.close();
             }
             ui.separator();
@@ -1253,6 +1252,10 @@ fn caption_button(ui: &mut egui::Ui, app: &mut App, kind: Caption) {
 
 // --- document tab strip --------------------------------------------------
 
+/// The strip's height — the canvas pane body (ui/dock.rs) reserves exactly
+/// this above the canvas hole.
+pub(super) const DOC_TAB_H: f32 = 25.0;
+
 /// The document tab strip — ONE TAB PER OPEN DOCUMENT since 2026-08-19.
 ///
 /// It used to draw a single tab whose × set `close_requested`, i.e. quit the
@@ -1262,7 +1265,7 @@ fn caption_button(ui: &mut egui::Ui, app: &mut App, kind: Caption) {
 /// falls back to the app's own close flow (which still asks about unsaved
 /// work), because an editor with no document open has nothing to show.
 pub(super) fn doc_tab(ui: &mut egui::Ui, app: &mut App) {
-    let h = 25.0;
+    let h = DOC_TAB_H;
     let tabs = app.doc_tabs();
     let active = app.active_doc.min(tabs.len().saturating_sub(1));
     let (rect, _) =

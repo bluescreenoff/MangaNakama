@@ -245,6 +245,48 @@ torn out of its own window, the window's geometry gone.
 **Upstream-relevant:** arguably yes for any host that turns the window title
 bar off; the `owner`-id plumbing it sits beside is ours.
 
+### 16. Per-tab "may these share a tab bar" filter (`tab_viewer.rs`, `show/mod.rs`, 2026-08-21)
+
+**What:** new `TabViewer::can_tab_into(&self, tab, dst_tabs) -> bool`
+(default `true` = stock behaviour), consulted at the DROP COMMIT in
+`show/mod.rs`: a resolved `TabDestination::Node(_, Insert|Append)` whose
+destination leaf refuses the dragged tab is REWRITTEN — to a
+`TabDestination::Window` at the pointer when `allowed_in_windows` says the
+tab may float (dropping a palette over the canvas pane keeps behaving like
+patch #3's tear-off), else to `None` (the canvas pane snaps back). Split
+destinations, window drops and surface drops are never filtered. Patch #3's
+release-over-no-leaf tear-off is also gated on `allowed_in_windows` now: a
+tab the viewer barred from windows never floats from any path.
+
+**Why:** docking-2 makes the canvas a pane in the same tree as the
+palettes. A palette tabbed OVER the canvas leaf would bury the drawing
+surface behind a tab; a canvas tab joining a palette stack is equally
+wrong. Splitting beside either is exactly the layout feature, so only
+tab-bar joins are vetoed. Known cosmetic gap, accepted: the hover overlay
+still highlights the vetoed tab-bar target; the veto sits at the commit,
+where source and destination leaves can both be read immutably.
+
+**Upstream-relevant:** plausibly (a generic "tab classes" feature), though
+upstream would likely want the overlay suppressed too.
+
+### 17. Tree grafting + window absorption (`tree/mod.rs`, `dock_state/mod.rs`, 2026-08-21)
+
+**What:** `Tree::graft_at(at, &Tree)` — overwrite the subtree rooted at a
+node with a copy of another tree (heap-index-mapped copy; clears the old
+subtree first; grows the node vec by whole levels like `split()`); and
+`DockState::absorb_windows(DockState)` — move another state's floating
+`Surface::Window` entries across intact (tree, position and size).
+
+**Why:** the docking-2 ui.txt migration merges the two legacy dock COLUMNS
+into the single tree. `split()` only accepts leaf nodes as the new child,
+so there was no way to place an existing tree beside another; rebuilding
+by walking leaves would drop nested split geometry the user made. Node
+rects are stale after a graft — recomputed on the next laid-out frame,
+same as after deserialization.
+
+**Upstream-relevant:** yes in principle (tree composition is a real gap),
+but the API would need bikeshedding upstream.
+
 ## vendor/libmypaint — round 25 (2026-08-16): Krita-inspired dab modes
 
 ### 8. Hard stamp dabs (`mypaint-tiled-surface.c`)

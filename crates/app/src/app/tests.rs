@@ -4054,27 +4054,33 @@ fn workspaces_register_apply_reload_delete() {
         return;
     };
     let mut app = App::new(renderer, (600, 400), 1.0);
-    let dl0 = crate::ui::dock::to_json(&app.dock_left);
-    let w0 = app.layout.left_w;
+    let t0 = crate::ui::dock::to_json_tree(&app.dock);
     app.workspace_register("inking");
     assert_eq!(app.workspace_current, "inking");
     assert_eq!(app.workspaces.len(), 1);
-    assert_eq!(app.workspaces[0][1], dl0, "the dock snapshot rode along");
+    assert_eq!(app.workspaces[0][8], t0, "the dock snapshot rode along");
 
-    // Drag things around (widths + a rebuilt dock), then reload.
-    app.layout.left_w = w0 + 77.0;
+    // Rearrange the tree (close a palette), then reload restores it.
+    crate::ui::dock::close_palette(&mut app, crate::ui::dock::Palette::Tool);
+    assert!(!crate::ui::dock::is_open(
+        &app,
+        crate::ui::dock::Palette::Tool
+    ));
     app.workspace_reload();
     assert!(
-        (app.layout.left_w - w0).abs() < 0.5,
-        "reload restores the width"
+        crate::ui::dock::is_open(&app, crate::ui::dock::Palette::Tool),
+        "reload restores the tree"
     );
     // A second workspace; switching marks it current.
-    app.layout.left_w = w0 + 200.0;
+    crate::ui::dock::close_palette(&mut app, crate::ui::dock::Palette::Tool);
     app.workspace_register("rough");
     assert_eq!(app.workspaces.len(), 2);
     assert!(app.workspace_apply("inking"));
     assert_eq!(app.workspace_current, "inking");
-    assert!((app.layout.left_w - w0).abs() < 0.5);
+    assert!(crate::ui::dock::is_open(
+        &app,
+        crate::ui::dock::Palette::Tool
+    ));
     assert!(!app.workspace_apply("nope"), "unknown name refuses");
     // Re-register overwrites; delete clears current.
     app.workspace_register("rough");
@@ -4090,10 +4096,10 @@ fn workspaces_register_apply_reload_delete() {
 }
 
 /// A workspace entry is VARIABLE-LENGTH. It was a fixed six fields until the
-/// column-collapse round added two; a six-element line written by any earlier
-/// build must still load and apply, and applying it must restore both columns
-/// EXPANDED (the state it was registered in) rather than panicking on `e[6]`
-/// or silently dropping every saved workspace.
+/// column-collapse round added two, and docking 2 added the tree at index 8;
+/// a six-element line written by any earlier build must still load and
+/// apply — MIGRATING its two columns into the single tree — rather than
+/// panicking on `e[6]` or silently dropping every saved workspace.
 ///
 /// Failed against the old code twice over: `Vec<[String; 6]>` makes serde
 /// REJECT the eight-field line this build writes — one round trip through
@@ -4111,35 +4117,51 @@ fn workspace_entries_migrate_from_the_old_six_field_shape() {
     app.workspaces = serde_json::from_str(old).expect("an old line must still parse");
     assert_eq!(app.workspaces[0].len(), 6);
 
-    app.layout.left_collapsed = true;
-    app.layout.right_collapsed = true;
     assert!(app.workspace_apply("rough"), "the old entry still applies");
-    assert!((app.layout.left_w - 240.0).abs() < 0.5);
-    assert!((app.layout.right_w - 260.0).abs() < 0.5);
     assert_eq!(app.layout.prop_hidden, "Anti-aliasing");
-    assert!(
-        !app.layout.left_collapsed && !app.layout.right_collapsed,
-        "a pre-collapse workspace restores both columns expanded"
+    // Docking 2: applying a pre-tree workspace MIGRATES its two columns
+    // into the single tree — every default palette docked, one canvas pane.
+    assert!(crate::ui::dock::is_open(
+        &app,
+        crate::ui::dock::Palette::Tool
+    ));
+    assert_eq!(
+        app.dock
+            .iter_all_tabs()
+            .filter(|(_, t)| **t == crate::ui::dock::Pane::Canvas)
+            .count(),
+        1,
+        "the migrated workspace has exactly one canvas pane"
     );
 
-    // Re-registering under this build grows the entry, and the flags survive
-    // a full JSON round trip (what `ui.txt` actually carries).
-    app.layout.left_collapsed = true;
+    // Re-registering under this build grows the entry (field 8 = the tree),
+    // and it survives a full JSON round trip (what `ui.txt` carries).
+    crate::ui::dock::close_palette(&mut app, crate::ui::dock::Palette::Tool);
     app.workspace_register("rough");
     assert_eq!(app.workspaces.len(), 1, "re-register overwrites in place");
-    assert_eq!(app.workspaces[0].len(), 8);
+    assert_eq!(app.workspaces[0].len(), 9);
+    assert!(
+        !app.workspaces[0][8].is_empty(),
+        "the tree snapshot rode along"
+    );
     let line = serde_json::to_string(&app.workspaces).unwrap();
     app.workspaces = serde_json::from_str(&line).expect("the new line parses back");
-    app.layout.left_collapsed = false;
-    app.layout.right_collapsed = true;
+    crate::ui::dock::reopen(&mut app, crate::ui::dock::Palette::Tool);
     assert!(app.workspace_apply("rough"));
-    assert!(app.layout.left_collapsed, "left was registered collapsed");
-    assert!(!app.layout.right_collapsed, "right was registered expanded");
+    assert!(
+        !crate::ui::dock::is_open(&app, crate::ui::dock::Palette::Tool),
+        "Tool was registered closed"
+    );
 
     // A truncated / hand-mangled entry must degrade, never panic.
     app.workspaces = vec![vec!["stub".to_string()]];
     assert!(app.workspace_apply("stub"));
-    assert!(!app.layout.left_collapsed && !app.layout.right_collapsed);
+    assert!(
+        app.dock
+            .iter_all_tabs()
+            .any(|(_, t)| *t == crate::ui::dock::Pane::Canvas),
+        "even a stub entry lands on a tree with a canvas"
+    );
     app.workspace_delete("stub");
     assert!(app.workspaces.is_empty());
 }

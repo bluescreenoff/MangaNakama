@@ -891,10 +891,9 @@ pub struct App {
     pub docs: Vec<Option<DocSession>>,
     /// Which slot of `docs` is the live one.
     pub active_doc: usize,
-    /// The two dockable palette columns (ui/dock.rs) — left and right of the
-    /// canvas. Floating palettes live inside these states as extra surfaces.
-    pub dock_left: crate::ui::dock::DockColumn,
-    pub dock_right: crate::ui::dock::DockColumn,
+    /// The one dock tree (ui/dock.rs, docs/DOCKING-2.md): palettes AND the
+    /// canvas pane. Floating palettes live inside it as window surfaces.
+    pub dock: crate::ui::dock::DockTree,
 }
 
 /// The two-finger twist accumulator (see [`App::touch_twist`]). All the
@@ -1066,15 +1065,30 @@ impl App {
         };
         let shell = Shell::new(&renderer, ppp);
         let layout = UiLayout::load();
-        let dock_left = if layout.dock_left.is_empty() {
-            crate::ui::dock::default_left()
+        // Docking 2: the single tree, else the one-time migration of the
+        // legacy two-column layout, else the default. The legacy keys stay
+        // on disk untouched (downgrade safety); this build only writes
+        // `dock_tree=` from here on.
+        let dock = if !layout.dock_tree.is_empty() {
+            crate::ui::dock::from_json_tree(&layout.dock_tree)
+        } else if !layout.dock_left.is_empty() || !layout.dock_right.is_empty() {
+            let win_w = crate::app::layout::WinGeom::parse(&layout.win)
+                .map_or(1280.0, |g| (g.w as f32 / ppp).max(400.0));
+            // A side the old build never saved migrates as its default.
+            let l = if layout.dock_left.is_empty() {
+                crate::ui::dock::to_json(&crate::ui::dock::default_left())
+            } else {
+                layout.dock_left.clone()
+            };
+            let r = if layout.dock_right.is_empty() {
+                crate::ui::dock::to_json(&crate::ui::dock::default_right())
+            } else {
+                layout.dock_right.clone()
+            };
+            crate::ui::dock::merge_columns(&l, &r, layout.left_w, layout.right_w, win_w)
+                .unwrap_or_else(crate::ui::dock::default_tree)
         } else {
-            crate::ui::dock::from_json(&layout.dock_left, crate::ui::dock::default_left)
-        };
-        let dock_right = if layout.dock_right.is_empty() {
-            crate::ui::dock::default_right()
-        } else {
-            crate::ui::dock::from_json(&layout.dock_right, crate::ui::dock::default_right)
+            crate::ui::dock::default_tree()
         };
         let presets = scan_presets();
         println!("[ui] {} brush presets found", presets.len());
@@ -1269,8 +1283,7 @@ impl App {
             detail_open: false,
             prop_detail_open: false,
             prop_hidden: std::collections::BTreeSet::new(),
-            dock_left,
-            dock_right,
+            dock,
             brush_previews: HashMap::new(),
             preview_budget: 0,
             picker_hsv: [0.0, 0.0, 0.0],
@@ -1913,12 +1926,11 @@ impl App {
         self.doc_path = path;
     }
 
-    /// Hand the serialized dock columns to the layout for persistence (called
+    /// Hand the serialized dock tree to the layout for persistence (called
     /// at the end of every UI frame; string compare is the change check).
     pub fn sync_dock_layout(&mut self) {
-        let l = crate::ui::dock::to_json(&self.dock_left);
-        let r = crate::ui::dock::to_json(&self.dock_right);
-        self.layout.note_docks(&l, &r);
+        let t = crate::ui::dock::to_json_tree(&self.dock);
+        self.layout.note_dock_tree(&t);
         let hidden: Vec<&str> = self.prop_hidden.iter().map(|s| s.as_str()).collect();
         self.layout.note_prop_hidden(&hidden.join(","));
     }

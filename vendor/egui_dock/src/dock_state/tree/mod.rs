@@ -537,6 +537,58 @@ impl<Tab> Tree<Tab> {
         index
     }
 
+    // MN-PATCH #17 (MangaNakama, 2026-08-21): graft a whole tree into a node.
+    // `split()` above only accepts LEAF nodes as the new child, so there is no
+    // upstream way to place an existing tree beside another — which is exactly
+    // what the docking-2 ui.txt migration needs (the two legacy dock columns
+    // become subtrees of the single merged tree). The trees are binary heaps
+    // in a `Vec` (left(i) = 2i+1), so grafting is an index-mapped copy.
+
+    /// Overwrite the subtree rooted at `at` with a copy of `sub`'s whole
+    /// tree. Any nodes previously below `at` are cleared first. Node rects
+    /// are stale after this; they are recomputed on the next laid-out frame.
+    pub fn graft_at(&mut self, at: NodeIndex, sub: &Tree<Tab>)
+    where
+        Tab: Clone,
+    {
+        self.clear_subtree(at);
+        self.copy_from(at, sub, NodeIndex::root());
+        self.focused_node = None;
+    }
+
+    fn clear_subtree(&mut self, at: NodeIndex) {
+        if at.0 >= self.nodes.len() {
+            return;
+        }
+        self.nodes[at.0] = Node::Empty;
+        self.clear_subtree(at.left());
+        self.clear_subtree(at.right());
+    }
+
+    fn copy_from(&mut self, dst: NodeIndex, src: &Tree<Tab>, si: NodeIndex)
+    where
+        Tab: Clone,
+    {
+        let Some(node) = src.nodes.get(si.0).cloned() else {
+            return;
+        };
+        if node.is_empty() {
+            return;
+        }
+        if dst.0 >= self.nodes.len() {
+            // Same growth rule as `split()`: whole levels at a time.
+            let level = dst.level();
+            self.nodes
+                .resize_with((1 << (level + 1)) - 1, || Node::Empty);
+        }
+        let is_parent = node.is_parent();
+        self.nodes[dst.0] = node;
+        if is_parent {
+            self.copy_from(dst.left(), src, si.left());
+            self.copy_from(dst.right(), src, si.right());
+        }
+    }
+
     /// Immutably borrows a leaf node at the given path.
     ///
     /// Returns `Err` if the path is invalid or the node at the path is not a leaf.
