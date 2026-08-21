@@ -32,6 +32,7 @@ pub mod materials;
 mod pages;
 pub mod batch;
 pub mod pattern;
+pub(crate) mod tone_tool;
 pub(crate) mod vector_edit;
 pub mod prefs;
 pub(crate) mod reader;
@@ -236,6 +237,13 @@ pub struct App {
     pub export_all_split: bool,
     /// PM-053: also write the script dump beside the images.
     pub export_all_text: bool,
+    /// Print finishing: output resolution, `0` = the work's own (no
+    /// resample). Session-only, like every other field of this window.
+    pub export_all_dpi: u32,
+    /// Print finishing: the expression colour the exported files are
+    /// reduced to. `Colour` = untouched, which is what the run did before
+    /// finishing presets existed.
+    pub export_all_colour: mn_core::LayerExpression,
     /// TRIAGE 144: the Story Editor window + its per-page decoded docs
     /// (None = the active page, which edits the live document).
     pub story_open: bool,
@@ -609,6 +617,10 @@ pub struct App {
     /// Shift+Alt=Intersect — the owner's everyday path).
     pub sel_op: mn_core::SelectionOp,
     pub fill_opts: FillOpts,
+    /// What `fill_opts.auto` measured on the last fill — the Tool Property
+    /// shows it in place of the two numeric rows it drives. Session-only:
+    /// it describes one click's artwork, not a setting.
+    pub fill_auto: Option<mn_core::AutoFill>,
     /// Fill-tool sub tool: click / FI-003 enclose-and-fill / FI-004 lasso fill.
     pub fill_mode: FillMode,
     /// In-progress Enclose/Lasso fill drag, canvas coords. Same shape as
@@ -616,6 +628,9 @@ pub struct App {
     pub fill_drag: Option<Vec<(f32, f32)>>,
     /// Auto-select wand parameters (its own Tool Property, CSP-style).
     pub wand_opts: FillOpts,
+    /// The Tone tool's Tool Property: the screen to lay down, plus its own
+    /// copy of the flood options the click uses to find the region.
+    pub tone_opts: crate::cmd::ToneToolOpts,
     /// Frame-tool sub tool (divide-into-folder / divide-in-place / rectangle).
     pub frame_mode: FrameMode,
     /// Move-tool sub tool (hand pans, rotate spins the view).
@@ -1161,6 +1176,8 @@ impl App {
             export_all_to: 1,
             export_all_split: false,
             export_all_text: false,
+            export_all_dpi: 0,
+            export_all_colour: mn_core::LayerExpression::Colour,
             mask_show_area: false,
             tone_show_area: false,
             mask_edit: false,
@@ -1316,9 +1333,11 @@ impl App {
             select_mode: SelectMode::Rect,
             sel_op: mn_core::SelectionOp::Replace,
             fill_opts: FillOpts::default(),
+            fill_auto: None,
             fill_mode: FillMode::Click,
             fill_drag: None,
             wand_opts: FillOpts::default(),
+            tone_opts: crate::cmd::ToneToolOpts::default(),
             frame_mode: FrameMode::DivideFolder,
             pan_mode: PanMode::Hand,
             eyedrop_opts: EyedropOpts::default(),
@@ -1916,6 +1935,33 @@ impl App {
             .map(|p| p.dpi)
             .filter(|d| *d > 0)
             .unwrap_or(600)
+    }
+
+    /// The work's OWN print resolution, or `None` for a pixel canvas.
+    /// Unlike `tone_dpi` this must not invent 600: a canvas with no dpi
+    /// has nothing for an output dpi to be relative to, and guessing here
+    /// would silently downscale every export from such a work.
+    pub fn work_dpi(&self) -> Option<u32> {
+        self.page.as_ref().map(|p| p.dpi).filter(|d| *d > 0)
+    }
+
+    /// The export-all window's finishing draft, gathered from the three
+    /// fields that hold it. The picker derives its selection from this.
+    pub fn export_finish(&self) -> mn_core::export::ExportFinish {
+        mn_core::export::ExportFinish {
+            dpi: self.export_all_dpi,
+            colour: self.export_all_colour,
+            split_spreads: self.export_all_split,
+        }
+    }
+
+    /// Fill the finishing draft from a preset. Every field stays editable
+    /// afterwards — an edit simply stops matching and the picker reads
+    /// "Custom".
+    pub fn set_export_finish(&mut self, f: mn_core::export::ExportFinish) {
+        self.export_all_dpi = f.dpi;
+        self.export_all_colour = f.colour;
+        self.export_all_split = f.split_spreads;
     }
 
     /// Re-derive every tone layer's halftone raster. The render loop calls
@@ -3276,6 +3322,16 @@ impl App {
                 self.fill_drag = None;
                 self.set_status(self.fill_mode.label());
             }
+            Tool::Tone => {
+                // The Tone tool's sub tools are the screen shapes.
+                const M: [mn_core::tone::TonePattern; 9] = mn_core::tone::TonePattern::ALL;
+                let cur = M
+                    .iter()
+                    .position(|p| *p == self.tone_opts.tone.pattern)
+                    .unwrap_or(0);
+                self.tone_opts.tone.pattern = M[cycle(cur, M.len())];
+                self.set_status(self.tone_opts.tone.pattern.label());
+            }
             Tool::Wand => {
                 // The `,`/`.` sub-tool stepper flips the refer mode pair.
                 self.wand_opts.refer = match self.wand_opts.refer {
@@ -3763,6 +3819,12 @@ mod export_and_script_tests;
 
 #[cfg(test)]
 mod tone_round_tests;
+
+/// ROADMAP "further out": one-gesture screentone — the structure one click
+/// produces, the single undo press it costs, and the gap closing it
+/// inherits from the fill machinery.
+#[cfg(test)]
+mod tone_gesture_tests;
 
 #[cfg(test)]
 mod view_reset_and_tool_lock_tests;

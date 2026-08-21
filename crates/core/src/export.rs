@@ -592,6 +592,168 @@ pub fn save_png(doc: &Document, path: &Path, background: Background) -> image::I
     composite_for_export(doc, background).save(path)
 }
 
+// --- print finishing ---------------------------------------------------------
+
+/// The finishing decisions a submission target fixes: output resolution and
+/// expression colour. `dpi == 0` means "the work's own resolution, no
+/// resample" — the same `0 = no dpi` convention `PageSetup::dpi` uses.
+///
+/// Whether a spread leaves as two files lives on the export dialog
+/// (`export_all_split`) and is NOT duplicated here: one value, one home.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExportFinish {
+    pub dpi: u32,
+    pub colour: crate::doc::LayerExpression,
+    pub split_spreads: bool,
+}
+
+impl Default for ExportFinish {
+    /// Today's untouched Export All Pages run, byte for byte.
+    fn default() -> Self {
+        Self {
+            dpi: 0,
+            colour: crate::doc::LayerExpression::Colour,
+            split_spreads: false,
+        }
+    }
+}
+
+/// A named finish. `note` is the hover text — it carries WHY the numbers
+/// are these numbers, because a preset whose provenance is invisible gets
+/// second-guessed by every user who knows the norm.
+pub struct ExportPreset {
+    pub name: &'static str,
+    pub note: &'static str,
+    pub finish: ExportFinish,
+}
+
+/// The built-in print finishes.
+///
+/// The resolutions are the Japanese submission pair every magazine and
+/// doujin printer states: **monochrome 1-bit at 600 dpi, greyscale and
+/// colour at 350 dpi**. B4 vs B5 vs A4 is the WORK's page setup
+/// (`PageSetup::presets`), not an export decision — without a crop-to-trim
+/// the paper size changes nothing here, so naming a preset "B4" would be
+/// a lie with a number in it.
+///
+/// Every entry must be a DISTINCT triple: the picker reads the current
+/// draft back to find its name (`matching_preset`), so two presets with
+/// the same values would make one of them unreachable.
+pub const PRINT_PRESETS: &[ExportPreset] = &[
+    ExportPreset {
+        name: "Print mono 600 dpi (モノクロ二値)",
+        note: "commercial manuscript and doujinshi interiors: 1-bit at 600 dpi, \
+               spreads split into single pages",
+        finish: ExportFinish {
+            dpi: 600,
+            colour: crate::doc::LayerExpression::Mono,
+            split_spreads: true,
+        },
+    },
+    ExportPreset {
+        name: "Print grey 350 dpi (グレースケール)",
+        note: "the greyscale half of the same submission spec — tone-free \
+               shading, 350 dpi, spreads split",
+        finish: ExportFinish {
+            dpi: 350,
+            colour: crate::doc::LayerExpression::Grey,
+            split_spreads: true,
+        },
+    },
+    ExportPreset {
+        name: "Print colour 350 dpi (カラー)",
+        note: "colour pages and covers at the Japanese print norm; 300 dpi is \
+               the western print-on-demand equivalent",
+        finish: ExportFinish {
+            dpi: 350,
+            colour: crate::doc::LayerExpression::Colour,
+            split_spreads: true,
+        },
+    },
+    ExportPreset {
+        name: "Web full colour 150 dpi",
+        note: "screen delivery: full colour, roughly 1000–1500 px on the short \
+               edge, and a spread stays ONE image",
+        finish: ExportFinish {
+            dpi: 150,
+            colour: crate::doc::LayerExpression::Colour,
+            split_spreads: false,
+        },
+    },
+];
+
+/// Which built-in a draft currently spells, or `None` for "Custom".
+///
+/// The picker DERIVES its selection instead of storing an index, so
+/// editing any control flips it to Custom with no bookkeeping and no
+/// stale-index door to miss.
+pub fn matching_preset(finish: ExportFinish) -> Option<usize> {
+    PRINT_PRESETS.iter().position(|p| p.finish == finish)
+}
+
+/// The resample factor for a work at `work_dpi` finishing at `out_dpi`.
+///
+/// **Never above 1.0.** Upsampling to hit a printer's number invents
+/// detail that is not in the page; the honest answer to "600 dpi from a
+/// 350 dpi work" is 350 dpi, said out loud in the dialog.
+pub fn finish_scale(out_dpi: u32, work_dpi: Option<u32>) -> f32 {
+    match (out_dpi, work_dpi) {
+        (0, _) | (_, None) => 1.0,
+        (out, Some(work)) if work > 0 => (out as f32 / work as f32).min(1.0),
+        _ => 1.0,
+    }
+}
+
+/// One straight RGBA8 pixel reduced to grey or 1-bit, by the same rules
+/// `blend::expression_reduce` applies to premultiplied fix15 — the mean of
+/// the channels as the value, a 50 % threshold on BOTH value and alpha.
+/// (Pinned against it by `u8_reduce_agrees_with_the_fix15_preview`.)
+fn reduce_u8(p: [u8; 4], e: crate::doc::LayerExpression) -> [u8; 4] {
+    use crate::doc::LayerExpression as E;
+    if e == E::Colour {
+        return p;
+    }
+    let sum = p[0] as u32 + p[1] as u32 + p[2] as u32;
+    match e {
+        E::Colour => p,
+        E::Grey => {
+            let v = ((sum + 1) / 3) as u8;
+            [v, v, v, p[3]]
+        }
+        E::Mono => {
+            let a = if p[3] >= 128 { 255 } else { 0 };
+            let v = if sum * 2 >= 255 * 3 { a } else { 0 };
+            [v, v, v, a]
+        }
+    }
+}
+
+/// Apply a finish to one composited page image.
+///
+/// **Resample first, reduce colour last.** A 1-bit threshold taken before
+/// the downscale is immediately averaged back into grey by the filter, so
+/// the file that reaches the printer is not 1-bit at all — the order here
+/// is the whole correctness of the mono preset.
+pub fn finish_image(
+    img: image::RgbaImage,
+    scale: f32,
+    colour: crate::doc::LayerExpression,
+) -> image::RgbaImage {
+    let mut img = if scale < 1.0 {
+        let w = ((img.width() as f32 * scale).round() as u32).max(1);
+        let h = ((img.height() as f32 * scale).round() as u32).max(1);
+        image::imageops::resize(&img, w, h, image::imageops::FilterType::Lanczos3)
+    } else {
+        img
+    };
+    if colour != crate::doc::LayerExpression::Colour {
+        for px in img.pixels_mut() {
+            px.0 = reduce_u8(px.0, colour);
+        }
+    }
+    img
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1128,6 +1290,108 @@ mod tests {
         assert_eq!(img.dimensions(), (64, 64));
         assert_eq!(img.get_pixel(0, 0).0, [0, 255, 0, 255]);
         assert!(layer_image(&crate::doc::Layer::new("empty")).is_none());
+    }
+}
+
+#[cfg(test)]
+mod finish_tests {
+    use super::*;
+    use crate::doc::LayerExpression as E;
+
+    /// The picker reads the draft back to find its name, so identical
+    /// triples would hide a preset; and the default finish must still be
+    /// the run the export did before presets existed.
+    #[test]
+    fn print_presets_are_distinct_and_the_default_is_todays_run() {
+        for (i, a) in PRINT_PRESETS.iter().enumerate() {
+            for b in PRINT_PRESETS.iter().skip(i + 1) {
+                assert_ne!(
+                    a.finish, b.finish,
+                    "{} and {} would collide in the picker",
+                    a.name, b.name
+                );
+            }
+            assert_eq!(matching_preset(a.finish), Some(i), "{} is findable", a.name);
+        }
+        let d = ExportFinish::default();
+        assert_eq!(d.dpi, 0, "no resample");
+        assert_eq!(d.colour, E::Colour);
+        assert!(!d.split_spreads);
+        assert_eq!(matching_preset(d), None, "the default reads as Custom");
+    }
+
+    /// The u8 finish and the fix15 layer PREVIEW are one definition of
+    /// "grey" and "mono": drift here means the preview lies about what
+    /// the exported file will look like.
+    #[test]
+    fn u8_reduce_agrees_with_the_fix15_preview() {
+        for p in [
+            [0u8, 0, 0, 255],
+            [255, 255, 255, 255],
+            [200, 30, 30, 255],
+            [130, 130, 130, 255],
+            [120, 120, 120, 255],
+            [10, 240, 90, 255],
+        ] {
+            for e in [E::Grey, E::Mono] {
+                // Straight u8 -> premultiplied fix15 (alpha 255 here, so
+                // premultiplication is the identity scale).
+                let fix = |c: u8| (c as u32 * 32768 / 255) as u16;
+                let got = reduce_u8(p, e);
+                let want = crate::blend::expression_reduce(
+                    [fix(p[0]), fix(p[1]), fix(p[2]), fix(p[3])],
+                    e,
+                );
+                let back = |v: u16| ((v as u32 * 255 + 16384) / 32768) as u8;
+                for c in 0..3 {
+                    assert!(
+                        (got[c] as i32 - back(want[c]) as i32).abs() <= 1,
+                        "{p:?} {e:?} channel {c}: u8 {} vs fix15 {}",
+                        got[c],
+                        back(want[c])
+                    );
+                }
+                assert_eq!(got[3], back(want[3]), "{p:?} {e:?} alpha");
+            }
+        }
+    }
+
+    /// Downscale THEN threshold: a mono finish must land 1-bit at the
+    /// output size. Thresholding first and resampling after would hand
+    /// the printer a greyscale file that claims to be 1-bit.
+    #[test]
+    fn mono_finish_is_one_bit_after_the_resample() {
+        let mut img = image::RgbaImage::new(64, 64);
+        for (x, _y, px) in img.enumerate_pixels_mut() {
+            let v = (x * 4) as u8; // a soft ramp across the threshold
+            px.0 = [v, v, v, 255];
+        }
+        let out = finish_image(img.clone(), 0.5, E::Mono);
+        assert_eq!(out.dimensions(), (32, 32));
+        for px in out.pixels() {
+            assert!(
+                px.0[0] == 0 || px.0[0] == 255,
+                "a resampled grey survived the threshold: {:?}",
+                px.0
+            );
+        }
+        // Grey keeps its ramp; colour and an up-scale are both no-ops.
+        let grey = finish_image(img.clone(), 1.0, E::Grey);
+        assert!(grey.pixels().any(|p| p.0[0] != 0 && p.0[0] != 255));
+        assert_eq!(
+            finish_image(img.clone(), 2.0, E::Colour).dimensions(),
+            (64, 64)
+        );
+    }
+
+    /// The scale never exceeds 1.0, and a work with no dpi has nothing to
+    /// scale relative to.
+    #[test]
+    fn finish_scale_never_upsamples() {
+        assert_eq!(finish_scale(350, Some(600)), 350.0 / 600.0);
+        assert_eq!(finish_scale(600, Some(350)), 1.0, "no invented detail");
+        assert_eq!(finish_scale(0, Some(600)), 1.0, "0 = the work's own");
+        assert_eq!(finish_scale(350, None), 1.0, "a pixel canvas has no dpi");
     }
 }
 

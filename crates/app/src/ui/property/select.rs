@@ -140,14 +140,37 @@ pub(crate) fn sec_fill(ui: &mut egui::Ui, app: &mut App) {
         .show(ui, &mut tol)
         .changed();
     o.tolerance = tol / 100.0;
-    let mut gap = o.gap_close_px as f32;
-    changed |= ValueBar::new("Close gap", 0.0, 8.0)
-        .step(1.0)
-        .suffix(" px")
-        .show(ui, &mut gap)
+    // ROADMAP: the fill that measures gap and fringe itself. Opt-in — the
+    // two rows it drives go read-only underneath, showing what the last
+    // fill actually measured, so the numbers stay learnable.
+    changed |= ui
+        .checkbox(&mut o.auto, "Auto gap & fringe")
+        .on_hover_text(
+            "measure the lineart's own thickness at each click instead of dialling \
+             gap closing and area scaling by hand",
+        )
         .changed();
-    o.gap_close_px = gap as u32;
-    changed |= area_scaling_row(ui, &mut o);
+    if o.auto {
+        match app.fill_auto {
+            Some(a) => {
+                ui.weak(format!("Close gap: {} px — measured", a.gap_close_px));
+                ui.weak(format!("Area scaling: {:+} px — measured", a.expand_px));
+                ui.weak(format!("lines read ~{:.0} px thick", a.line_px));
+            }
+            None => {
+                ui.weak("Close gap and area scaling: measured at the next fill");
+            }
+        }
+    } else {
+        let mut gap = o.gap_close_px as f32;
+        changed |= ValueBar::new("Close gap", 0.0, 8.0)
+            .step(1.0)
+            .suffix(" px")
+            .show(ui, &mut gap)
+            .changed();
+        o.gap_close_px = gap as u32;
+        changed |= area_scaling_row(ui, &mut o);
+    }
     // CSP's fill 参照 block: what the flood samples, and whether draft
     // layers count.
     let mut pick: Option<mn_core::FillRefer> = None;

@@ -10,12 +10,13 @@ use super::widgets::icon_btn;
 
 // --- left column: Tool / Sub Tool / Tool Property palettes ---------------
 
-const STRIP_TOOLS: [(Tool, Icon); 15] = [
+const STRIP_TOOLS: [(Tool, Icon); 16] = [
     (Tool::Pen, Icon::Pen),
     (Tool::Eraser, Icon::Eraser),
     (Tool::Figure, Icon::Figure),
     (Tool::Gradient, Icon::Gradient),
     (Tool::Fill, Icon::Fill),
+    (Tool::Tone, Icon::Tone),
     (Tool::Select, Icon::Select),
     (Tool::SelPen, Icon::Select),
     (Tool::SelEraser, Icon::Eraser),
@@ -36,6 +37,9 @@ fn tool_key(t: Tool) -> &'static str {
         Tool::Figure => "F",
         Tool::Gradient => "V",
         Tool::Fill => "G",
+        // No key: the owner's CSP set has no spare letter, and main.rs's
+        // table is where one would go.
+        Tool::Tone => "",
         Tool::Select => "M",
         Tool::SelPen | Tool::SelEraser => "",
         Tool::Wand => "W",

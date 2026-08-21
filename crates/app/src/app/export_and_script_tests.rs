@@ -167,6 +167,97 @@ fn batch_export_defaults_are_unchanged() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// Print finishing: a preset fills all three finishing fields at once,
+/// the picker finds its own name back, and moving ANY of them reads as
+/// Custom — the picker stores no index, so there is nothing to go stale.
+#[test]
+fn export_preset_fills_the_draft_and_an_edit_reads_as_custom() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    let finish = |a: &App| mn_core::export::matching_preset(a.export_finish());
+    assert_eq!(finish(&app), None, "a fresh app is Custom, not a preset");
+    assert_eq!(app.export_all_dpi, 0);
+    assert_eq!(app.export_all_colour, mn_core::LayerExpression::Colour);
+
+    for (i, p) in mn_core::export::PRINT_PRESETS.iter().enumerate() {
+        crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::ExportAllPreset(i));
+        assert_eq!(app.export_all_dpi, p.finish.dpi, "{}", p.name);
+        assert_eq!(app.export_all_colour, p.finish.colour, "{}", p.name);
+        assert_eq!(app.export_all_split, p.finish.split_spreads, "{}", p.name);
+        assert_eq!(finish(&app), Some(i), "{} reads its own name back", p.name);
+    }
+
+    // One edit per field, each on its own, each flipping to Custom.
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::ExportAllPreset(0));
+    app.export_all_dpi += 1;
+    assert_eq!(finish(&app), None, "dpi edit -> Custom");
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::ExportAllPreset(0));
+    app.export_all_colour = mn_core::LayerExpression::Grey;
+    assert_eq!(finish(&app), None, "colour edit -> Custom");
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::ExportAllPreset(0));
+    app.export_all_split = !app.export_all_split;
+    assert_eq!(finish(&app), None, "split edit -> Custom");
+
+    // An index the preset list does not have leaves the draft alone.
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::ExportAllPreset(0));
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::ExportAllPreset(99));
+    assert_eq!(finish(&app), Some(0), "a stale index is ignored, not fatal");
+}
+
+/// The finish reaches the FILES: the output dpi resamples, and the mono
+/// reduce runs after it, so a downscaled checkerboard lands 1-bit rather
+/// than the mid-greys the filter produced.
+#[test]
+fn export_finish_resamples_then_thresholds() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    app.doc = mn_core::Document::new(64, 64);
+    app.page = Some(mn_core::PageSetup::presets().remove(1)); // B4 600 dpi
+    // A 1-px checkerboard of opaque black: any resample turns it grey.
+    let li = app.doc.add_layer("ink");
+    let tile = app.doc.layers[li].tile_mut(mn_core::TileIdx::new(0, 0));
+    for y in 0..64u32 {
+        for x in 0..64u32 {
+            if (x + y) % 2 == 0 {
+                tile.set_pixel(x as usize, y as usize, [0, 0, 0, mn_core::FIX15_ONE as u16]);
+            }
+        }
+    }
+
+    let dir = std::env::temp_dir().join(format!("mn-finish-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    app.export_all_dpi = 300; // half of the work's 600
+    app.export_all_colour = mn_core::LayerExpression::Mono;
+    crate::cmd::dispatch(
+        &mut app,
+        crate::cmd::AppCmd::ExportAllPagesPath(dir.clone()),
+    );
+    let img = image::open(dir.join("page-p001.png")).unwrap().to_rgba8();
+    assert_eq!(img.dimensions(), (32, 32), "300 dpi out of a 600 dpi work");
+    assert!(
+        img.pixels().all(|p| p.0[0] == 0 || p.0[0] == 255),
+        "a resampled grey survived the 1-bit finish"
+    );
+
+    // Untouched finishing fields leave the file exactly as it was.
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    app.export_all_dpi = 0;
+    app.export_all_colour = mn_core::LayerExpression::Colour;
+    crate::cmd::dispatch(
+        &mut app,
+        crate::cmd::AppCmd::ExportAllPagesPath(dir.clone()),
+    );
+    let img = image::open(dir.join("page-p001.png")).unwrap().to_rgba8();
+    assert_eq!(img.dimensions(), (64, 64), "0 dpi = the work's own size");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// PM-055: a spread leaves as two files — `a` first for the reader —
 /// and only when the toggle is on. Detection survives the runtime
 /// flag being absent: a canvas half again as wide as the work's own

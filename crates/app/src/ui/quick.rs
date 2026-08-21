@@ -40,6 +40,7 @@ pub fn command_index() -> Vec<(&'static str, &'static str, AppCmd)> {
         ("Pen", "Tools (P)", SetTool(Tool::Pen)),
         ("Eraser", "Tools (E)", SetTool(Tool::Eraser)),
         ("Fill", "Tools (G)", SetTool(Tool::Fill)),
+        ("Tone (one-click screentone)", "Tools", SetTool(Tool::Tone)),
         ("Auto select (wand)", "Tools (W)", SetTool(Tool::Wand)),
         ("Select", "Tools (M)", SetTool(Tool::Select)),
         ("Object", "Tools (O)", SetTool(Tool::Object)),

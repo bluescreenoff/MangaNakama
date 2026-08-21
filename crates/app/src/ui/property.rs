@@ -221,12 +221,14 @@ mod gradient;
 mod pen;
 mod select;
 mod text;
+mod tone;
 
 pub(crate) use frames_balloons::*;
 pub(crate) use gradient::*;
 pub(crate) use pen::*;
 pub(crate) use select::*;
 pub(crate) use text::*;
+pub(crate) use tone::*;
 
 // --- the section registry --------------------------------------------------
 
@@ -417,6 +419,23 @@ fn prop_sections_for_tool(app: &App) -> Vec<Section> {
                 id: "fill.guide",
                 title: "Guide",
                 body: sec_wand_guide,
+            },
+        ],
+        Tool::Tone => vec![
+            Section {
+                id: "tone.screen",
+                title: "Tone",
+                body: sec_tone,
+            },
+            Section {
+                id: "tone.region",
+                title: "Area detection",
+                body: sec_tone_region,
+            },
+            Section {
+                id: "tone.guide",
+                title: "Guide",
+                body: sec_tone_guide,
             },
         ],
         Tool::Wand => vec![

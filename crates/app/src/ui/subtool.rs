@@ -161,6 +161,28 @@ fn mode_sub_tools(ui: &mut egui::Ui, app: &mut App) {
                 app.push_cmd(AppCmd::SetFillMode(FillMode::Lasso));
             }
         }
+        Tool::Tone => {
+            // The nine screen shapes — the choice made BEFORE the click.
+            group_caption(ui, "Tone");
+            let mut pick = None;
+            for pat in mn_core::tone::TonePattern::ALL {
+                if mode_row(
+                    ui,
+                    app.tone_opts.tone.pattern == pat,
+                    Icon::Tone,
+                    pat.label(),
+                )
+                .clicked()
+                {
+                    pick = Some(pat);
+                }
+            }
+            if let Some(p) = pick {
+                let mut o = app.tone_opts;
+                o.tone.pattern = p;
+                app.push_cmd(AppCmd::SetToneOpts(o));
+            }
+        }
         Tool::Wand => {
             group_caption(ui, "Auto select");
             let refer = app.wand_opts.refer;

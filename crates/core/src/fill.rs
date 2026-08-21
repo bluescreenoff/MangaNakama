@@ -47,6 +47,25 @@ pub struct FillOpts {
     /// escapes into the margin cannot run all the way round the page.
     /// Defaults OFF — the behaviour every earlier build had.
     pub refer_border: bool,
+    /// Measure `gap_close_px` and `expand_px` from the lineart around the
+    /// click instead of taking them from the fields ([`measure_auto`]).
+    /// Defaults OFF: with it off every field above is honoured verbatim,
+    /// so a build that never touches the switch fills pixel-identically.
+    pub auto: bool,
+}
+
+/// What [`measure_auto`] read off the artwork, for the status line and the
+/// greyed-out Tool Property rows. `gap_close_px`/`expand_px` are the values
+/// the fill actually ran with.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AutoFill {
+    /// Median lineart thickness, in px, across the flooded area's boundary.
+    pub line_px: f32,
+    pub gap_close_px: u32,
+    pub expand_px: i32,
+    /// Boundary crossings the median came from — 0 never happens (a
+    /// measurement with no samples is reported as `None`, not as a guess).
+    pub samples: u32,
 }
 
 /// CSP fill/wand 参照 modes.
@@ -70,6 +89,7 @@ impl Default for FillOpts {
             refer: FillRefer::All,
             refer_drafts: true,
             refer_border: false,
+            auto: false,
         }
     }
 }
@@ -79,15 +99,56 @@ impl Default for FillOpts {
 /// [`magic_select`] (the Auto-select wand is a fill that selects instead of
 /// painting).
 pub fn flood_region(doc: &Document, seed: (i32, i32), opts: &FillOpts) -> Option<Vec<bool>> {
+    flood_region_measured(doc, seed, opts).map(|(region, _)| region)
+}
+
+/// [`flood_region`] plus what `opts.auto` measured (`None` when auto is off,
+/// or when the artwork gave nothing measurable and the manual numbers stood).
+/// One source composite for both the measuring pass and the real flood.
+pub fn flood_region_measured(
+    doc: &Document,
+    seed: (i32, i32),
+    opts: &FillOpts,
+) -> Option<(Vec<bool>, Option<AutoFill>)> {
     let (w, h) = (doc.size.0 as usize, doc.size.1 as usize);
     let (sx, sy) = seed;
     if sx < 0 || sy < 0 || sx as usize >= w || sy as usize >= h {
         return None;
     }
-    let n = w * h;
+    let src = source_pixels(doc, opts);
+    debug_assert_eq!(src.len(), w * h);
+    let start = sy as usize * w + sx as usize;
+    let (opts, auto) = resolve_with_src(&src, w, h, start, opts);
+    Some((region_from_src(&src, w, h, start, &opts), auto))
+}
 
-    // 1. Source pixels, straight RGB over white paper.
-    let src: Vec<[u8; 3]> = match opts.refer {
+/// Resolve `opts.auto` into concrete numbers without flooding for real —
+/// for callers that run several floods off one click (enclose-and-fill), so
+/// every flood in the gesture shares ONE measurement. Returns the options to
+/// use (always `auto: false`) and what was measured.
+pub fn resolve_auto(
+    doc: &Document,
+    seed: (i32, i32),
+    opts: &FillOpts,
+) -> (FillOpts, Option<AutoFill>) {
+    let (w, h) = (doc.size.0 as usize, doc.size.1 as usize);
+    let (sx, sy) = seed;
+    if !opts.auto || sx < 0 || sy < 0 || sx as usize >= w || sy as usize >= h {
+        return (
+            FillOpts {
+                auto: false,
+                ..*opts
+            },
+            None,
+        );
+    }
+    let src = source_pixels(doc, opts);
+    resolve_with_src(&src, w, h, sy as usize * w + sx as usize, opts)
+}
+
+/// 1. Source pixels, straight RGB over white paper.
+fn source_pixels(doc: &Document, opts: &FillOpts) -> Vec<[u8; 3]> {
+    match opts.refer {
         FillRefer::Active => active_over_white(doc),
         FillRefer::Reference => {
             // The reference SET (RF-001), composited bottom→top — the
@@ -107,15 +168,13 @@ pub fn flood_region(doc: &Document, seed: (i32, i32), opts: &FillOpts) -> Option
             .pixels()
             .map(|p| [p.0[0], p.0[1], p.0[2]])
             .collect(),
-    };
-    debug_assert_eq!(src.len(), n);
+    }
+}
 
-    // 2. Barrier mask from the seed colour.
-    let start = sy as usize * w + sx as usize;
-    let seed_px = src[start];
-    let tol = (opts.tolerance.clamp(0.0, 1.0) * 255.0) as i16;
-    let mut barrier: Vec<bool> = src
-        .iter()
+/// 2. Barrier mask from the seed colour: pixels farther than `tolerance`.
+fn barrier_from(src: &[[u8; 3]], seed_px: [u8; 3], tolerance: f32) -> Vec<bool> {
+    let tol = (tolerance.clamp(0.0, 1.0) * 255.0) as i16;
+    src.iter()
         .map(|p| {
             let d = (p[0] as i16 - seed_px[0] as i16)
                 .abs()
@@ -123,7 +182,20 @@ pub fn flood_region(doc: &Document, seed: (i32, i32), opts: &FillOpts) -> Option
                 .max((p[2] as i16 - seed_px[2] as i16).abs());
             d > tol
         })
-        .collect();
+        .collect()
+}
+
+/// Steps 2–5 against an already-sampled source. `opts.auto` is ignored here:
+/// resolution happens once, above.
+fn region_from_src(
+    src: &[[u8; 3]],
+    w: usize,
+    h: usize,
+    start: usize,
+    opts: &FillOpts,
+) -> Vec<bool> {
+    let n = w * h;
+    let mut barrier = barrier_from(src, src[start], opts.tolerance);
     let barrier_orig = barrier.clone();
 
     // 2b. FI-022: the page's outer perimeter counts as a drawn border line
@@ -149,59 +221,14 @@ pub fn flood_region(doc: &Document, seed: (i32, i32), opts: &FillOpts) -> Option
         barrier = dilate(&barrier, w, h);
     }
 
-    // Flood (4-connected BFS) over non-barrier.
-    let mut region = vec![false; n];
-    if !barrier[start] {
-        let mut queue = std::collections::VecDeque::from([start]);
-        region[start] = true;
-        while let Some(i) = queue.pop_front() {
-            let (x, y) = (i % w, i / w);
-            let mut push = |j: usize| {
-                if !region[j] && !barrier[j] {
-                    region[j] = true;
-                    queue.push_back(j);
-                }
-            };
-            if x > 0 {
-                push(i - 1);
-            }
-            if x + 1 < w {
-                push(i + 1);
-            }
-            if y > 0 {
-                push(i - w);
-            }
-            if y + 1 < h {
-                push(i + w);
-            }
-        }
+    // Flood (4-connected BFS) over non-barrier. A seed that landed on the
+    // FATTENED barrier means gap closing ate it: fall back to the seed's own
+    // contiguous same-colour blob, flooded against the real lines only.
+    let mut region = if barrier[start] {
+        flood(&barrier_orig, w, h, start)
     } else {
-        // Seed landed on (fattened) barrier — the gap-closing ate it. Fill just
-        // the seed's own contiguous same-colour blob without gap closing.
-        let mut queue = std::collections::VecDeque::from([start]);
-        region[start] = true;
-        while let Some(i) = queue.pop_front() {
-            let (x, y) = (i % w, i / w);
-            let mut push = |j: usize| {
-                if !region[j] && !barrier_orig[j] {
-                    region[j] = true;
-                    queue.push_back(j);
-                }
-            };
-            if x > 0 {
-                push(i - 1);
-            }
-            if x + 1 < w {
-                push(i + 1);
-            }
-            if y > 0 {
-                push(i - w);
-            }
-            if y + 1 < h {
-                push(i + w);
-            }
-        }
-    }
+        flood(&barrier, w, h, start)
+    };
 
     // 4. Recover the margin the fat barrier stole — but never cross real lines.
     for _ in 0..opts.gap_close_px {
@@ -225,7 +252,204 @@ pub fn flood_region(doc: &Document, seed: (i32, i32), opts: &FillOpts) -> Option
     for _ in 0..(-opts.expand_px).max(0) {
         region = erode(&region, w, h);
     }
-    Some(region)
+    region
+}
+
+/// 4-connected BFS over everything `blocked` does not mark.
+fn flood(blocked: &[bool], w: usize, h: usize, start: usize) -> Vec<bool> {
+    let mut region = vec![false; w * h];
+    let mut queue = std::collections::VecDeque::from([start]);
+    region[start] = true;
+    while let Some(i) = queue.pop_front() {
+        let (x, y) = (i % w, i / w);
+        let mut push = |j: usize| {
+            if !region[j] && !blocked[j] {
+                region[j] = true;
+                queue.push_back(j);
+            }
+        };
+        if x > 0 {
+            push(i - 1);
+        }
+        if x + 1 < w {
+            push(i + 1);
+        }
+        if y > 0 {
+            push(i - w);
+        }
+        if y + 1 < h {
+            push(i + w);
+        }
+    }
+    region
+}
+
+// --- auto gap & fringe ---------------------------------------------------
+//
+// The seven numeric options are the reason bucket fill is a tuning chore: the
+// two that actually change per drawing are gap closing and area scaling, and
+// both follow from ONE property of the artwork — how thick the lines are. So
+// measure that and derive them, instead of asking.
+
+/// A barrier run longer than this is not a line — it is ベタ, a filled panel,
+/// or the page margin. Such samples are dropped rather than averaged in.
+const MAX_LINE_PX: u32 = 64;
+
+/// Boundary crossings the median is taken over. Bounded so the measurement
+/// costs the same on a 600 px doodle and a 300 dpi B4 page.
+const MAX_SAMPLES: usize = 256;
+
+/// Measure the lineart thickness around the area `seed` falls in, and derive
+/// gap closing and area scaling from it. Ignores `opts.auto` — this IS the
+/// measurement; the flag only decides whether a fill calls it.
+///
+/// `None` when nothing measurable bounded the area (a blank canvas, or an
+/// area walled only by solid black): the caller then keeps the manual
+/// numbers rather than inventing one.
+pub fn measure_auto(doc: &Document, seed: (i32, i32), opts: &FillOpts) -> Option<AutoFill> {
+    let (w, h) = (doc.size.0 as usize, doc.size.1 as usize);
+    let (sx, sy) = seed;
+    if sx < 0 || sy < 0 || sx as usize >= w || sy as usize >= h {
+        return None;
+    }
+    let src = source_pixels(doc, opts);
+    measure_with_src(&src, w, h, sy as usize * w + sx as usize, opts)
+}
+
+fn measure_with_src(
+    src: &[[u8; 3]],
+    w: usize,
+    h: usize,
+    start: usize,
+    opts: &FillOpts,
+) -> Option<AutoFill> {
+    // The measuring flood is the raw one: gap closing and area scaling are
+    // exactly what is being decided, so neither may colour the region whose
+    // boundary decides them. FI-022's rim wall is off for the same reason —
+    // the page edge is not a stroke and must not be measured as one.
+    // The barrier is relative to the seed COLOUR, so a click on the lineart
+    // measures the paper between the strokes — the fill family's existing
+    // seed honesty (clicking ink floods ink), not a case to special-case.
+    let barrier = barrier_from(src, src[start], opts.tolerance);
+    let region = flood(&barrier, w, h, start);
+    let (line_px, samples) = median_line_px(&barrier, &region, w, h)?;
+    Some(AutoFill {
+        line_px,
+        // A gap where two strokes fail to meet is about one stroke wide, and
+        // step 3 seals gaps up to ~2× this — so one line width is the sane
+        // multiple. Capped at the manual slider's own range: a measured
+        // value the user cannot dial in by hand would be a lie in a
+        // read-only field, and past ~8 px the dilation passes get expensive.
+        gap_close_px: line_px.round().clamp(1.0, 8.0) as u32,
+        // The halo is the line's anti-aliased skirt, which scales with the
+        // pen. Half the line width is the honest ceiling: expansion is
+        // unconditional (step 5 crosses barriers), so anything ≥ half a line
+        // width walks through the line into the neighbouring area.
+        expand_px: ((line_px / 2.0).floor() as i32).clamp(1, 4),
+        samples,
+    })
+}
+
+fn resolve_with_src(
+    src: &[[u8; 3]],
+    w: usize,
+    h: usize,
+    start: usize,
+    opts: &FillOpts,
+) -> (FillOpts, Option<AutoFill>) {
+    let base = FillOpts {
+        auto: false,
+        ..*opts
+    };
+    if !opts.auto {
+        return (base, None);
+    }
+    match measure_with_src(src, w, h, start, opts) {
+        Some(a) => (
+            FillOpts {
+                gap_close_px: a.gap_close_px,
+                expand_px: a.expand_px,
+                ..base
+            },
+            Some(a),
+        ),
+        // Nothing measurable: the manual numbers stand, and the caller says
+        // so. Silently filling with invented values is the failure mode this
+        // feature exists to remove.
+        None => (base, None),
+    }
+}
+
+/// Median thickness of the barrier the region touches, plus the sample count.
+/// Each sample is one boundary pixel's THINNEST axis crossing: a scanline
+/// through a slanted line reads long, the perpendicular one reads true, and
+/// the minimum of the two available axes is the closer of the pair.
+fn median_line_px(barrier: &[bool], region: &[bool], w: usize, h: usize) -> Option<(f32, u32)> {
+    let mut boundary: Vec<usize> = Vec::new();
+    for (i, &r) in region.iter().enumerate() {
+        if !r {
+            continue;
+        }
+        let (x, y) = (i % w, i / w);
+        let touches = (x > 0 && barrier[i - 1])
+            || (x + 1 < w && barrier[i + 1])
+            || (y > 0 && barrier[i - w])
+            || (y + 1 < h && barrier[i + w]);
+        if touches {
+            boundary.push(i);
+        }
+    }
+    if boundary.is_empty() {
+        return None;
+    }
+    let stride = boundary.len().div_ceil(MAX_SAMPLES);
+    let mut runs: Vec<u32> = Vec::new();
+    for &i in boundary.iter().step_by(stride) {
+        let (x, y) = (i % w, i / w);
+        let thinnest = [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)]
+            .into_iter()
+            .filter_map(|(dx, dy)| barrier_run(barrier, w, h, x, y, dx, dy))
+            .min();
+        if let Some(t) = thinnest {
+            runs.push(t);
+        }
+    }
+    if runs.is_empty() {
+        return None;
+    }
+    runs.sort_unstable();
+    Some((runs[runs.len() / 2] as f32, runs.len() as u32))
+}
+
+/// Length of the unbroken barrier run starting one step from `(x, y)` along
+/// `(dx, dy)`. `None` when that step is not barrier at all, when the run
+/// leaves the canvas (an open edge measures nothing), or when it exceeds
+/// [`MAX_LINE_PX`].
+fn barrier_run(
+    barrier: &[bool],
+    w: usize,
+    h: usize,
+    x: usize,
+    y: usize,
+    dx: i32,
+    dy: i32,
+) -> Option<u32> {
+    let (mut cx, mut cy) = (x as i32 + dx, y as i32 + dy);
+    let mut len = 0u32;
+    loop {
+        if cx < 0 || cy < 0 || cx as usize >= w || cy as usize >= h {
+            return None;
+        }
+        if !barrier[cy as usize * w + cx as usize] {
+            return (len > 0).then_some(len);
+        }
+        len += 1;
+        if len > MAX_LINE_PX {
+            return None;
+        }
+        cx += dx;
+        cy += dy;
+    }
 }
 
 /// CSP Auto select (magic wand): flood from `seed` with the fill machinery —
@@ -249,11 +473,30 @@ pub fn magic_select(
 /// canvas-sized mask and how many CLOSED areas it holds (for the status
 /// line — floods wholly inside the subtracted outer space do not count);
 /// `None` when nothing enclosed was found.
-fn enclosed_pockets(doc: &Document, seeds: &[(i32, i32)], opts: &FillOpts) -> Option<(Vec<bool>, u32)> {
+fn enclosed_pockets(
+    doc: &Document,
+    seeds: &[(i32, i32)],
+    opts: &FillOpts,
+) -> Option<(Vec<bool>, u32)> {
     let (w, h) = (doc.size.0 as usize, doc.size.1 as usize);
     if w == 0 || h == 0 || seeds.is_empty() {
         return None;
     }
+    // Auto is measured ONCE for the whole gesture, from the first seed that
+    // lands on the page. Per-seed measurement would flood every pocket twice
+    // and — worse — let the outer set and the pockets disagree about which
+    // gaps are sealed, which is exactly the asymmetry FI-016 already had to
+    // be fixed for below.
+    let opts = &seeds
+        .iter()
+        .find(|&&(x, y)| x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h)
+        .map_or(
+            FillOpts {
+                auto: false,
+                ..*opts
+            },
+            |&s| resolve_auto(doc, s, opts).0,
+        );
     // The OUTER space: everything empty-reachable from the canvas edges.
     // CSP's semantics — you draw AROUND the drawing, and only the CLOSED
     // areas inside it select — so the region the path travels through is
@@ -352,7 +595,10 @@ pub fn enclose_and_fill(
     let Some((region, floods)) = enclosed_pockets(doc, seeds, opts) else {
         return (0, 0);
     };
-    (paint_region(doc, &region, color, "Enclose and fill"), floods)
+    (
+        paint_region(doc, &region, color, "Enclose and fill"),
+        floods,
+    )
 }
 
 /// Flood-fill from `seed` with `color` (straight RGB 0..1, painted opaque).
@@ -364,10 +610,20 @@ pub fn bucket_fill(
     color: [f32; 3],
     opts: &FillOpts,
 ) -> usize {
-    let Some(region) = flood_region(doc, seed, opts) else {
-        return 0;
+    bucket_fill_measured(doc, seed, color, opts).0
+}
+
+/// [`bucket_fill`] plus what `opts.auto` measured, for the status line.
+pub fn bucket_fill_measured(
+    doc: &mut Document,
+    seed: (i32, i32),
+    color: [f32; 3],
+    opts: &FillOpts,
+) -> (usize, Option<AutoFill>) {
+    let Some((region, auto)) = flood_region_measured(doc, seed, opts) else {
+        return (0, None);
     };
-    paint_region(doc, &region, color, "Fill")
+    (paint_region(doc, &region, color, "Fill"), auto)
 }
 
 /// Step 6 for every member of the fill family: write `color` opaquely into
@@ -600,11 +856,31 @@ mod tests {
     }
 
     fn paint(doc: &mut Document, x: i32, y: i32) {
+        paint_px(doc, x, y, INK);
+    }
+
+    fn paint_px(doc: &mut Document, x: i32, y: i32, px: [u16; 4]) {
         let idx = TileIdx::of_pixel(x, y);
         let (ox, oy) = idx.origin();
         doc.active_layer_mut()
             .tile_mut(idx)
-            .set_pixel((x - ox) as usize, (y - oy) as usize, INK);
+            .set_pixel((x - ox) as usize, (y - oy) as usize, px);
+    }
+
+    /// A rectangular outline `t` px THICK (drawn inward), with a `gap`-px
+    /// hole in the middle of the top band. The auto tests need lines whose
+    /// width is a known number, which the 1 px `draw_box_with_gap` cannot say.
+    fn draw_thick_box(doc: &mut Document, x0: i32, y0: i32, x1: i32, y1: i32, t: i32, gap: i32) {
+        let gap_from = (x0 + x1) / 2 - gap / 2;
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let d = (x - x0).min(x1 - x).min(y - y0).min(y1 - y);
+                let in_gap = (gap_from..gap_from + gap).contains(&x) && y - y0 < t;
+                if d < t && !in_gap {
+                    paint(doc, x, y);
+                }
+            }
+        }
     }
 
     fn px(doc: &Document, x: i32, y: i32) -> [u16; 4] {
@@ -950,6 +1226,169 @@ mod tests {
         assert!(wrote > 0);
         assert!(px(&doc, 70, 70)[3] > 0, "pocket inside the selection");
         assert_eq!(px(&doc, 170, 170)[3], 0, "pocket outside it stays clean");
+    }
+
+    /// ROADMAP auto mode, the whole premise: the two numbers follow from the
+    /// stroke width, so the same click on thin lineart and on thick lineart
+    /// must NOT resolve to the same options.
+    #[test]
+    fn auto_measures_thin_and_thick_lineart_apart() {
+        let opts = FillOpts {
+            auto: true,
+            ..Default::default()
+        };
+        let mut thin = Document::new(160, 160);
+        draw_thick_box(&mut thin, 20, 20, 140, 140, 1, 0);
+        let mut thick = Document::new(160, 160);
+        draw_thick_box(&mut thick, 20, 20, 140, 140, 6, 0);
+
+        let a = measure_auto(&thin, (80, 80), &opts).expect("thin lineart measured");
+        let b = measure_auto(&thick, (80, 80), &opts).expect("thick lineart measured");
+        assert_eq!(a.line_px, 1.0, "1 px outline reads as 1 px");
+        assert_eq!(b.line_px, 6.0, "6 px outline reads as 6 px");
+        assert!(
+            a.samples > 100 && b.samples > 100,
+            "the whole outline sampled"
+        );
+        assert_eq!((a.gap_close_px, a.expand_px), (1, 1));
+        assert_eq!((b.gap_close_px, b.expand_px), (6, 3));
+        assert!(
+            b.gap_close_px > a.gap_close_px && b.expand_px > a.expand_px,
+            "thicker lines must buy a wider gap close and a deeper tuck"
+        );
+        // And the options a fill actually runs with are those values.
+        let (resolved, note) = resolve_auto(&thick, (80, 80), &opts);
+        assert!(!resolved.auto, "resolution is one-shot");
+        assert_eq!((resolved.gap_close_px, resolved.expand_px), (6, 3));
+        assert_eq!(note, Some(b));
+
+        // Blank paper bounds nothing: measured as unmeasurable, never guessed.
+        let blank = Document::new(64, 64);
+        assert!(measure_auto(&blank, (10, 10), &opts).is_none());
+        let (kept, none) = resolve_auto(&blank, (10, 10), &opts);
+        assert!(none.is_none());
+        assert_eq!(
+            (kept.gap_close_px, kept.expand_px),
+            (opts.gap_close_px, opts.expand_px),
+            "unmeasurable keeps the manual numbers"
+        );
+    }
+
+    /// The halo case: a stroke with a soft edge leaves a pale rim between
+    /// the flood and the black core, and the manual 1 px default only eats
+    /// part of it. Auto sizes the tuck to the line it measured.
+    #[test]
+    fn auto_fringe_covers_the_antialiased_halo() {
+        // 4 px black core with a 2 px half-alpha skirt on the inside — the
+        // shape a real inked line has at print resolution.
+        let mut doc = Document::new(160, 160);
+        draw_thick_box(&mut doc, 20, 20, 140, 140, 4, 0);
+        let grey = [0, 0, 0, (FIX15_ONE / 2) as u16];
+        for y in 20..=140 {
+            for x in 20..=140 {
+                let d = (x - 20).min(140 - x).min(y - 20).min(140 - y);
+                if (4..6).contains(&d) {
+                    paint_px(&mut doc, x, y, grey);
+                }
+            }
+        }
+        let halo = (80, 24); // the outer of the two skirt rows
+
+        let manual = FillOpts::default();
+        assert_eq!(manual.expand_px, 1, "the shipped 1 px tuck");
+        assert!(bucket_fill(&mut doc, (80, 80), [1.0, 0.0, 0.0], &manual) > 0);
+        assert!(px(&doc, 80, 80)[0] > 0, "the area filled");
+        assert_eq!(
+            px(&doc, halo.0, halo.1)[0],
+            0,
+            "1 px of tuck leaves the outer skirt row showing — the halo"
+        );
+        doc.undo();
+
+        let (wrote, auto) = bucket_fill_measured(
+            &mut doc,
+            (80, 80),
+            [1.0, 0.0, 0.0],
+            &FillOpts {
+                auto: true,
+                ..manual
+            },
+        );
+        let a = auto.expect("the skirted line is measurable");
+        assert_eq!(a.line_px, 6.0, "core plus both skirt rows is the barrier");
+        assert_eq!(a.expand_px, 3, "half the line width, floored");
+        assert!(wrote > 0);
+        assert_eq!(
+            px(&doc, halo.0, halo.1)[0],
+            FIX15_ONE as u16,
+            "auto tucks the fill under the whole skirt"
+        );
+        assert_eq!(px(&doc, 5, 5)[3], 0, "and does not walk through the line");
+    }
+
+    /// The gap half, end to end: an 8 px break needs 4 px of closing, which
+    /// the shipped default (2) does not have and a 5 px line measures its
+    /// way to.
+    #[test]
+    fn auto_seals_a_gap_the_default_leaks_through() {
+        let mut doc = Document::new(200, 200);
+        draw_thick_box(&mut doc, 20, 20, 180, 180, 5, 8);
+        let manual = FillOpts::default();
+        assert_eq!(manual.gap_close_px, 2, "the shipped default");
+        let leaky = flood_region(&doc, (100, 100), &manual).expect("region");
+        assert!(
+            leaky[5 * 200 + 5],
+            "2 px of closing leaks through an 8 px gap"
+        );
+
+        let sealed = flood_region(
+            &doc,
+            (100, 100),
+            &FillOpts {
+                auto: true,
+                ..manual
+            },
+        )
+        .expect("region");
+        assert!(sealed[100 * 200 + 100], "the area itself still fills");
+        assert!(!sealed[5 * 200 + 5], "the measured gap close seals it");
+    }
+
+    /// Auto is a switch, not a rewrite: with it off every number is honoured
+    /// verbatim, so the behaviour `gap_closing_seals_a_leak` pinned before
+    /// auto existed must still hold pixel for pixel.
+    #[test]
+    fn manual_fill_is_untouched_by_the_auto_switch() {
+        assert!(!FillOpts::default().auto, "opt-in");
+        let mut doc = Document::new(256, 256);
+        draw_box_with_gap(&mut doc, 40, 40, 200, 200, 3);
+        let manual = FillOpts {
+            gap_close_px: 2,
+            expand_px: 0,
+            ..Default::default()
+        };
+        let sealed = flood_region(&doc, (120, 120), &manual).expect("region");
+        assert!(sealed[120 * 256 + 120], "inside filled");
+        assert!(!sealed[10 * 256 + 10], "gap sealed, no leak");
+
+        // Resolution with auto off is the identity, and measures nothing.
+        let (same, note) = resolve_auto(&doc, (120, 120), &manual);
+        assert!(note.is_none(), "auto off reports no measurement");
+        assert_eq!(same.gap_close_px, 2);
+        assert_eq!(same.expand_px, 0);
+        assert_eq!(
+            flood_region(&doc, (120, 120), &same).expect("region"),
+            sealed,
+            "the resolved options fill identically"
+        );
+
+        // A click ON the lineart still fills the lineart (the fill family's
+        // seed honesty) — auto must not turn that into a refusal.
+        let on_the_line = FillOpts {
+            auto: true,
+            ..manual
+        };
+        assert!(bucket_fill(&mut doc, (40, 120), [1.0, 0.0, 0.0], &on_the_line) > 0);
     }
 
     #[test]

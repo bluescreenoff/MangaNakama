@@ -531,6 +531,26 @@ fn subsample_path(pts: &[(f32, f32)], step: f32) -> Vec<(i32, i32)> {
     seeds
 }
 
+/// The auto-fill tail of a fill's status line. With auto off it is empty;
+/// with auto on it names what was measured, because a fill that silently
+/// chooses its own numbers teaches the user nothing and cannot be argued
+/// with when it gets one wrong.
+fn auto_note(opts: &mn_core::FillOpts, auto: Option<mn_core::AutoFill>) -> String {
+    if !opts.auto {
+        return String::new();
+    }
+    match auto {
+        Some(a) => format!(
+            " · auto: lines ~{:.0} px → close gap {} px, area {:+} px",
+            a.line_px, a.gap_close_px, a.expand_px
+        ),
+        None => format!(
+            " · auto found no lines to measure — kept close gap {} px, area {:+} px",
+            opts.gap_close_px, opts.expand_px
+        ),
+    }
+}
+
 /// Left-strip tools, CSP order.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tool {
@@ -542,6 +562,14 @@ pub enum Tool {
     /// CSP グラデ Gradient: drag a ramp between two colours.
     Gradient,
     Fill,
+    /// One-gesture screentone: ONE click floods the enclosed region under
+    /// the cursor (the Fill tool's own region machinery, gap closing and
+    /// all) and hands it to a LIVE tone layer as its window. It is its own
+    /// tool rather than a Fill sub tool because the Fill sub tools all
+    /// differ in how they AIM the same flood while sharing one Tool
+    /// Property; this one shares the aiming and needs the tone parameters
+    /// instead, which have no home in the Fill panel.
+    Tone,
     Select,
     /// CSP 選択ペン Selection pen: paint selection coverage with the
     /// active brush — release ADDS to the selection (SE-022 combine).
@@ -571,6 +599,7 @@ impl Tool {
             Tool::Figure => "Figure",
             Tool::Gradient => "Gradient",
             Tool::Fill => "Fill",
+            Tool::Tone => "Tone",
             Tool::Select => "Select",
             Tool::SelPen => "Select pen",
             Tool::SelEraser => "Select eraser",
@@ -718,6 +747,41 @@ impl FillMode {
             FillMode::Click => "Fill",
             FillMode::Enclose => "Enclose and fill",
             FillMode::Lasso => "Lasso fill",
+        }
+    }
+}
+
+/// The Tone tool's Tool Property: the screen it lays down, and how the
+/// click finds the region to lay it on.
+///
+/// `region` is a [`mn_core::FillOpts`] on purpose — the gesture runs the
+/// Fill tool's own `flood_region`, so tolerance / gap closing / area
+/// scaling / 参照 mean exactly what they mean under the bucket. It is a
+/// SEPARATE copy from `App::fill_opts`: the tone gesture wants gap closing
+/// cranked up (sketch lines leak) far more often than a flat fill does.
+#[derive(Clone, Copy, Debug)]
+pub struct ToneToolOpts {
+    /// The screen itself. `ToneParams::density` is not used: a live tone
+    /// layer's coverage is `ToneDensity::Specified(density)`, written by
+    /// `fill_layer::build_fill_tile`, so the field below is the one knob.
+    pub tone: mn_core::tone::ToneParams,
+    /// Ink coverage 0..=1 the screen prints at (CSP's tone density).
+    pub density: f32,
+    pub region: mn_core::FillOpts,
+}
+
+impl Default for ToneToolOpts {
+    fn default() -> Self {
+        Self {
+            tone: mn_core::tone::ToneParams::default(),
+            density: 1.0,
+            // Lineart that a bucket fill would leak through is the normal
+            // case for a tone gesture, so the default seals harder than
+            // `FillOpts::default()`'s 2 px.
+            region: mn_core::FillOpts {
+                gap_close_px: 3,
+                ..mn_core::FillOpts::default()
+            },
         }
     }
 }
@@ -896,6 +960,10 @@ pub enum SubTool {
     /// The three 参照 rows, which also return to the click sub tool.
     FillRefer(mn_core::FillRefer),
     Fill(FillMode),
+    /// The Tone tool's sub tools are the nine screen SHAPES — that is the
+    /// choice you make before the click, and the rest of the screen (LPI,
+    /// angle, density) is Tool Property.
+    Tone(mn_core::tone::TonePattern),
     Wand(mn_core::FillRefer),
     Select(SelectMode),
     Frame(FrameMode),
@@ -912,12 +980,22 @@ impl SubTool {
     /// Every sub tool the list offers, in the list's own order.
     pub const ALL: &'static [SubTool] = {
         use mn_core::FillRefer::{Active, All, Reference};
+        use mn_core::tone::TonePattern as P;
         &[
             SubTool::FillRefer(All),
             SubTool::FillRefer(Active),
             SubTool::FillRefer(Reference),
             SubTool::Fill(FillMode::Enclose),
             SubTool::Fill(FillMode::Lasso),
+            SubTool::Tone(P::Dots),
+            SubTool::Tone(P::Lines),
+            SubTool::Tone(P::Square),
+            SubTool::Tone(P::Ellipse),
+            SubTool::Tone(P::Lozenge),
+            SubTool::Tone(P::Cross),
+            SubTool::Tone(P::Noise),
+            SubTool::Tone(P::Asterisk),
+            SubTool::Tone(P::Star),
             SubTool::Wand(All),
             SubTool::Wand(Active),
             SubTool::Wand(Reference),
@@ -956,6 +1034,7 @@ impl SubTool {
     pub fn tool(self) -> Tool {
         match self {
             SubTool::FillRefer(_) | SubTool::Fill(_) => Tool::Fill,
+            SubTool::Tone(_) => Tool::Tone,
             SubTool::Wand(_) => Tool::Wand,
             SubTool::Select(_) => Tool::Select,
             SubTool::Frame(_) => Tool::Frame,
@@ -979,6 +1058,7 @@ impl SubTool {
             SubTool::Fill(FillMode::Click) => "Fill",
             SubTool::Fill(FillMode::Enclose) => "Enclose and fill",
             SubTool::Fill(FillMode::Lasso) => "Lasso fill",
+            SubTool::Tone(p) => p.label(),
             SubTool::Wand(All) => "Refer all layers",
             SubTool::Wand(Active) => "Refer editing layer only",
             SubTool::Wand(Reference) => "Refer reference layer",
@@ -1010,6 +1090,7 @@ impl SubTool {
     pub fn path(self) -> &'static str {
         match self {
             SubTool::FillRefer(_) | SubTool::Fill(_) => "Sub Tool ▸ Fill",
+            SubTool::Tone(_) => "Sub Tool ▸ Tone",
             SubTool::Wand(_) => "Sub Tool ▸ Auto select",
             SubTool::Select(_) => "Sub Tool ▸ Selection",
             SubTool::Frame(_) => "Sub Tool ▸ Frame border",
@@ -1450,6 +1531,10 @@ pub enum AppCmd {
     /// The options window's Export button: ask for the folder.
     ExportAllPagesGo,
     ExportAllPagesPath(PathBuf),
+    /// Fill the export window's finishing draft from
+    /// `mn_core::export::PRINT_PRESETS[i]`. Out of range is ignored — the
+    /// preset list is data, and a stale index must not panic the pump.
+    ExportAllPreset(usize),
     /// Open the Preferences window (Edit ▸ Preferences…). The payload is the
     /// section header to point at — the window has no tabs, so "open on the
     /// Performance page" is "open it with that header lit".
@@ -1910,6 +1995,13 @@ pub enum AppCmd {
     SetFillParams(usize, mn_core::FillKind),
     /// Pick the Fill tool's sub tool (click / enclose / lasso).
     SetFillMode(FillMode),
+    /// The one-gesture screentone (Tone tool): flood the enclosed region at
+    /// this canvas point and give a new live tone layer that region as its
+    /// window. Canvas coordinates.
+    ToneRegion(f32, f32),
+    /// The Tone tool's whole Tool Property, pushed as one value like
+    /// `SetFillOpts` — widgets edit a copy and send it back.
+    SetToneOpts(ToneToolOpts),
     /// FI-003 Enclose and fill: the Enclose drag's freehand path
     /// (canvas-space points, subsampled in the arm). Every closed area the
     /// path encloses takes the drawing colour in ONE undo step.
@@ -2986,13 +3078,22 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             // PM-050: the options window opens FIRST now (prefix, page
             // range, split spreads, script dump), and every field is
             // seeded so an untouched Export writes exactly the files it
-            // has always written, under exactly the old names.
+            // has always written, under exactly the old names. The
+            // FINISH is deliberately not reseeded: the prefix belongs to
+            // the work, the finish belongs to where you send it, and
+            // re-picking the same preset every page run is the annoyance
+            // presets exist to remove.
             app.export_all_prefix = default_export_stem(app);
             app.export_all_from = 1;
             app.export_all_to = app.pages.len().max(1) as i32;
             app.export_all_open = true;
         }
         AppCmd::ExportAllPagesGo => {}
+        AppCmd::ExportAllPreset(i) => {
+            if let Some(p) = mn_core::export::PRINT_PRESETS.get(i) {
+                app.set_export_finish(p.finish);
+            }
+        }
         AppCmd::ExportAllPagesPath(dir) => match app.stash_current_page() {
             Err(e) => app.set_error(e),
             Ok(()) => {
@@ -3035,6 +3136,14 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 };
                 let total = last.saturating_sub(first) + 1;
                 let dpi = app.tone_dpi();
+                // Print finishing. The tone screen still rasterizes at the
+                // WORK's dpi above and is resampled with everything else —
+                // deriving it at the output dpi instead would change the
+                // dot pitch the page was drawn against.
+                let scale = mn_core::export::finish_scale(app.export_all_dpi, app.work_dpi());
+                let colour = app.export_all_colour;
+                let finish =
+                    |img: image::RgbaImage| mn_core::export::finish_image(img, scale, colour);
                 let mut ok = 0usize;
                 let mut files = 0usize;
                 for (i, e) in app.pages.iter().enumerate() {
@@ -3062,10 +3171,10 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                                 // the RIGHT one in a right-bound work.
                                 let (h1, h2) = if rtl { (right, left) } else { (left, right) };
                                 for (tag, half) in [("a", &h1), ("b", &h2)] {
-                                    let img = mn_core::export::composite_for_export(
+                                    let img = finish(mn_core::export::composite_for_export(
                                         half,
                                         d.paper_export_background(),
-                                    );
+                                    ));
                                     let path = dir.join(format!("{prefix}-p{:03}{tag}.png", i + 1));
                                     if img.save(&path).is_ok() {
                                         files += 1;
@@ -3074,10 +3183,10 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                                 ok += 1;
                             }
                             None => {
-                                let img = mn_core::export::composite_for_export(
+                                let img = finish(mn_core::export::composite_for_export(
                                     &d,
                                     d.paper_export_background(),
-                                );
+                                ));
                                 let path = dir.join(format!("{prefix}-p{:03}.png", i + 1));
                                 if img.save(&path).is_ok() {
                                     ok += 1;
@@ -3094,6 +3203,15 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 let mut extra = String::new();
                 if files != ok {
                     extra.push_str(&format!(" ({files} files)"));
+                }
+                // A finish that changed the pixels says so: a silent
+                // downscale is the one export result nobody can spot by
+                // looking at the file names.
+                if scale < 1.0 {
+                    extra.push_str(&format!(" @{}%", (scale * 100.0).round() as i32));
+                }
+                if let Some(n) = colour.ora_name() {
+                    extra.push_str(&format!(" {n}"));
                 }
                 if want_text {
                     let body = app.script_dump();
@@ -4398,6 +4516,10 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 FillMode::Lasso => "lasso fill: drag the shape to paint",
             });
         }
+        AppCmd::ToneRegion(x, y) => crate::app::tone_tool::tone_region(app, x, y),
+        AppCmd::SetToneOpts(o) => {
+            app.tone_opts = o;
+        }
         AppCmd::EncloseFill { pts } => {
             app.refresh_tones();
             // Same subsampling as the SE-020 shrink drag: one seed every
@@ -4405,10 +4527,19 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             // that land in a pocket it already has.
             let seeds = subsample_path(&pts, 4.0);
             let color = app.active_color();
-            let (n, pockets) =
-                mn_core::fill::enclose_and_fill(&mut app.doc, &seeds, color, &app.fill_opts);
+            // One measurement for the whole lasso, from its first seed —
+            // the pockets and the outer set must agree on the numbers.
+            let first = seeds.first().copied().unwrap_or((0, 0));
+            let (opts, auto) = mn_core::fill::resolve_auto(&app.doc, first, &app.fill_opts);
+            if app.fill_opts.auto {
+                app.fill_auto = auto;
+            }
+            let (n, pockets) = mn_core::fill::enclose_and_fill(&mut app.doc, &seeds, color, &opts);
             app.set_status(if n > 0 {
-                format!("{pockets} closed areas filled ({n} px)")
+                format!(
+                    "{pockets} closed areas filled ({n} px){}",
+                    auto_note(&app.fill_opts, auto)
+                )
             } else {
                 "nothing enclosed — drag right around the areas to fill".into()
             });
@@ -5968,6 +6099,7 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                     dispatch(app, AppCmd::SetFillMode(FillMode::Click));
                 }
                 SubTool::Fill(m) => dispatch(app, AppCmd::SetFillMode(m)),
+                SubTool::Tone(p) => app.tone_opts.tone.pattern = p,
                 SubTool::Wand(r) => app.wand_opts.refer = r,
                 SubTool::Select(m) => dispatch(app, AppCmd::SetSelectMode(m)),
                 SubTool::Frame(m) => {
@@ -6236,9 +6368,13 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             app.refresh_tones();
             let color = app.active_color();
             let opts = app.fill_opts;
-            let n = mn_core::fill::bucket_fill(&mut app.doc, (x as i32, y as i32), color, &opts);
+            let (n, auto) =
+                mn_core::fill::bucket_fill_measured(&mut app.doc, (x as i32, y as i32), color, &opts);
+            if opts.auto {
+                app.fill_auto = auto;
+            }
             if n > 0 {
-                app.set_status(format!("filled {n} px"));
+                app.set_status(format!("filled {n} px{}", auto_note(&opts, auto)));
             }
             app.mark_dirty();
         }

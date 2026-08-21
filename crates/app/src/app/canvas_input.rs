@@ -474,6 +474,11 @@ impl App {
                     FillMode::Click => self.push_cmd(AppCmd::Fill(cx, cy)),
                 }
             }
+            Tool::Tone => {
+                // One click, one live tone layer — no drag state to keep.
+                let (cx, cy) = self.viewport.to_canvas(x, y);
+                self.push_cmd(AppCmd::ToneRegion(cx, cy));
+            }
             Tool::Wand => {
                 let (cx, cy) = self.viewport.to_canvas(x, y);
                 // The combine op is decided AT THE CLICK (held modifiers

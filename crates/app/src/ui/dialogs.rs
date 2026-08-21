@@ -1677,10 +1677,26 @@ pub(super) fn spread_window(ctx: &egui::Context, app: &mut App) {
     }
 }
 
+/// Export-finish colour names. CSP's 表現色 wording, in English, with the
+/// bit depth spelled out for the one that changes the file's nature.
+fn colour_label(e: mn_core::LayerExpression) -> &'static str {
+    match e {
+        mn_core::LayerExpression::Colour => "Full colour",
+        mn_core::LayerExpression::Grey => "Grey",
+        mn_core::LayerExpression::Mono => "Monochrome (1-bit)",
+    }
+}
+
 /// PM-050/051/053/054/055: the Export All Pages options — file prefix,
 /// page range, split spreads, and CSP's "write text to file" toggle. The
 /// name preview is the point of the dialog: the owner can SEE that the
 /// defaults still write `<work>-p001.png` before he commits to a folder.
+///
+/// ROADMAP "print-finishing presets": the Finish picker on top writes the
+/// output dpi, the expression colour and split-spreads in one pick. It
+/// stores no index — the selection is DERIVED from those three fields
+/// (`matching_preset`), so any edit below reads as "Custom" for free and
+/// there is no stale index to invalidate.
 pub(super) fn export_all_window(ctx: &egui::Context, app: &mut App) {
     if !app.export_all_open {
         return;
@@ -1689,6 +1705,11 @@ pub(super) fn export_all_window(ctx: &egui::Context, app: &mut App) {
     let mut go = false;
     let mut cancel = false;
     let pages = app.pages.len().max(1) as i32;
+    let mut preset_pick: Option<usize> = None;
+    let presets = mn_core::export::PRINT_PRESETS;
+    let active = mn_core::export::matching_preset(app.export_finish());
+    let work_dpi = app.work_dpi();
+    let page_px = app.doc.size;
     egui::Window::new("Export All Pages")
         .open(&mut open)
         .resizable(false)
@@ -1698,6 +1719,33 @@ pub(super) fn export_all_window(ctx: &egui::Context, app: &mut App) {
                 .num_columns(2)
                 .spacing([10.0, 5.0])
                 .show(ui, |ui| {
+                    // The finishing preset leads: it is the one control
+                    // that moves the others.
+                    ui.label("Finish");
+                    egui::ComboBox::from_id_salt("mn.exportall.preset")
+                        .width(240.0)
+                        .selected_text(match active {
+                            Some(i) => presets[i].name,
+                            None => "Custom",
+                        })
+                        .show_ui(ui, |ui| {
+                            for (i, p) in presets.iter().enumerate() {
+                                if ui
+                                    .selectable_label(active == Some(i), p.name)
+                                    .on_hover_text(p.note)
+                                    .clicked()
+                                {
+                                    preset_pick = Some(i);
+                                }
+                            }
+                        })
+                        .response
+                        .on_hover_text(
+                            "Custom is not a choice you make — it is what the picker \
+                             reads once you edit a control below",
+                        );
+                    ui.end_row();
+
                     ui.label("File prefix");
                     ui.add(
                         egui::TextEdit::singleline(&mut app.export_all_prefix)
@@ -1737,6 +1785,42 @@ pub(super) fn export_all_window(ctx: &egui::Context, app: &mut App) {
                     ui.checkbox(&mut app.export_all_text, "")
                         .on_hover_text("the whole chapter's dialogue, in reading order, as a .txt");
                     ui.end_row();
+
+                    ui.label("Output");
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut app.export_all_dpi)
+                                .range(0..=1200)
+                                .speed(10)
+                                .suffix(" dpi"),
+                        )
+                        .on_hover_text("0 = the work's own resolution, no resample");
+                        match work_dpi {
+                            Some(d) => ui.weak(format!("work is {d} dpi")),
+                            None => ui.weak("no page setup — nothing to scale against"),
+                        };
+                    });
+                    ui.end_row();
+
+                    ui.label("Colour");
+                    egui::ComboBox::from_id_salt("mn.exportall.colour")
+                        .width(160.0)
+                        .selected_text(colour_label(app.export_all_colour))
+                        .show_ui(ui, |ui| {
+                            for e in [
+                                mn_core::LayerExpression::Colour,
+                                mn_core::LayerExpression::Grey,
+                                mn_core::LayerExpression::Mono,
+                            ] {
+                                ui.selectable_value(&mut app.export_all_colour, e, colour_label(e));
+                            }
+                        })
+                        .response
+                        .on_hover_text(
+                            "the finish is applied AFTER the resample, so a 1-bit \
+                             export is 1-bit at the size it ships",
+                        );
+                    ui.end_row();
                 });
             ui.add_space(4.0);
             let prefix = {
@@ -1753,6 +1837,23 @@ pub(super) fn export_all_window(ctx: &egui::Context, app: &mut App) {
                 format!("{prefix}-p001.png, {prefix}-p002.png, …")
             };
             ui.label(egui::RichText::new(sample).weak().size(11.0));
+            // Say the finish in pixels. "350 dpi" means nothing until you
+            // can see what it does to this page, and a request the work
+            // cannot honour (no upsampling) has to be visible BEFORE the
+            // folder pick, not inferred from the files afterwards.
+            let scale = mn_core::export::finish_scale(app.export_all_dpi, work_dpi);
+            let out_px = (
+                ((page_px.0 as f32 * scale).round() as u32).max(1),
+                ((page_px.1 as f32 * scale).round() as u32).max(1),
+            );
+            let mut size_line = format!(
+                "this page {}×{} px → {}×{} px",
+                page_px.0, page_px.1, out_px.0, out_px.1
+            );
+            if app.export_all_dpi > 0 && work_dpi.is_some_and(|d| app.export_all_dpi > d) {
+                size_line.push_str(" — the work is coarser than that; export never upsamples");
+            }
+            ui.label(egui::RichText::new(size_line).weak().size(11.0));
             ui.label(
                 egui::RichText::new(
                     "Page numbers in the filename are the page's own — exporting 5 to 8 \
@@ -1771,6 +1872,9 @@ pub(super) fn export_all_window(ctx: &egui::Context, app: &mut App) {
                 }
             });
         });
+    if let Some(i) = preset_pick {
+        app.push_cmd(AppCmd::ExportAllPreset(i));
+    }
     app.export_all_open = open && !go && !cancel;
     if go {
         app.push_cmd(crate::cmd::AppCmd::ExportAllPagesGo);
