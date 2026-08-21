@@ -15,17 +15,30 @@ pub(super) fn batch_window(ctx: &egui::Context, app: &mut App) {
         .default_pos(egui::pos2(320.0, 120.0))
         .show(ctx, |ui| {
             ui.label("Which layers");
+            // Count the palette selection the same way the scope does, so
+            // the label never promises rows the scope would drop.
+            let picked = app
+                .doc
+                .multi_targets()
+                .into_iter()
+                .filter(|&i| app.doc.layers.get(i).is_some_and(|l| !l.folder))
+                .count();
+            let selected = format!("Selected layers ({picked})");
             ui.horizontal(|ui| {
                 for (s, label) in [
                     (BatchScope::AllLayers, "All"),
                     (BatchScope::FolderChildren, "Active folder's children"),
                     (BatchScope::Prefix, "Name starts with"),
+                    (BatchScope::Selected, selected.as_str()),
                 ] {
                     if ui.selectable_label(app.batch.scope == s, label).clicked() {
                         app.batch.scope = s;
                     }
                 }
             });
+            if app.batch.scope == BatchScope::Selected {
+                ui.weak("the rows picked in the Layers palette (Ctrl+click, Shift+click) — with none picked, just the active layer");
+            }
             if app.batch.scope == BatchScope::Prefix {
                 ui.add(
                     egui::TextEdit::singleline(&mut app.batch.prefix)

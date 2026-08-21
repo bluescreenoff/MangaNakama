@@ -20,6 +20,10 @@ pub enum BatchScope {
     FolderChildren,
     /// Layers whose name starts with the typed prefix.
     Prefix,
+    /// The palette's multi-selection (active row + Ctrl/Shift-picked rows).
+    /// With nothing multi-selected that is just the active layer, which is
+    /// what CSP means by "the selection" of one row.
+    Selected,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -88,6 +92,12 @@ impl App {
                     })
                     .collect()
             }
+            BatchScope::Selected => self
+                .doc
+                .multi_targets()
+                .into_iter()
+                .filter(|&i| self.doc.layers.get(i).is_some_and(|l| !l.folder))
+                .collect(),
         }
     }
 
@@ -262,6 +272,40 @@ mod tests {
         app.doc.set_active(f);
         app.batch.scope = BatchScope::FolderChildren;
         assert_eq!(names(&app, &app.batch_matches()), vec!["inner"]);
+    }
+
+    /// The palette multi-selection is a scope of its own: exactly the
+    /// picked rows, folder headers dropped like every other scope, and an
+    /// empty multi-selection meaning the active layer alone.
+    #[test]
+    fn selected_scope_follows_the_palette() {
+        let Some(mut app) = app() else { return };
+        let names = |app: &App, idxs: &[usize]| -> Vec<String> {
+            idxs.iter().map(|&i| app.doc.layers[i].name.clone()).collect()
+        };
+        let idx = |app: &App, n: &str| app.doc.layers.iter().position(|l| l.name == n).unwrap();
+        app.batch.scope = BatchScope::Selected;
+
+        // Two of the three ordinary layers, Ctrl+click style.
+        let (a, b) = (idx(&app, "Panel a"), idx(&app, "Panel b"));
+        app.doc.set_active(a);
+        assert!(app.doc.toggle_multi(b));
+        assert_eq!(names(&app, &app.batch_matches()), vec!["Panel a", "Panel b"]);
+
+        // A folder header in the selection is not a match.
+        let f = idx(&app, "F");
+        assert!(app.doc.toggle_multi(f));
+        assert!(app.doc.multi_targets().contains(&f), "header really is selected");
+        assert_eq!(
+            names(&app, &app.batch_matches()),
+            vec!["Panel a", "Panel b"],
+            "folder headers never match"
+        );
+
+        // Nothing multi-selected = the active layer alone.
+        app.doc.set_active(idx(&app, "base"));
+        assert!(app.doc.layer_multi.is_empty());
+        assert_eq!(names(&app, &app.batch_matches()), vec!["base"]);
     }
 
     #[test]
