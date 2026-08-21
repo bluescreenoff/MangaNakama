@@ -433,6 +433,10 @@ impl App {
             pages += 1;
             layers += n;
         }
+        // Restore the active-page invariant (bytes live in `doc`) — the
+        // stash above parked a copy; leaving it invites a stale read
+        // (CompApplyAllPages restores it the same way).
+        self.pages[self.page_index].bytes = None;
         self.mark_pages_dirty();
         self.mark_dirty();
         let mut s = format!("; {layers} more layers on {pages} other pages (saved directly)");

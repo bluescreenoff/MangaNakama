@@ -271,6 +271,8 @@ impl App {
             pages += 1;
             items += page_items;
         }
+        // Restore the active-page invariant (bytes live in `doc`).
+        self.pages[self.page_index].bytes = None;
         self.mark_pages_dirty();
         (pages, items)
     }

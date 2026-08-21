@@ -383,6 +383,11 @@ too (white is the point, but a paper-cream mat is one click). Frame
 folders refuse it — their panel mask and border ink already own that
 close — and the half-transparent-ink rule above applies to the children's
 ink the same way.
+<div class="quirk warn"><b>Layered PSD export does not carry the mat.</b>
+Like every derived effect it is display state, not a layer; PNG export
+and the reader show it, a PSD hand-off does not. If the studio file
+needs the white backing, paint it onto a real layer first (the mat shows
+you exactly where).</div>
 
 <h2>Layer colour, sub colour and the mono preview</h2>
 <div class="quirk"><b>Layer colour and sub colour are the two ends of one
