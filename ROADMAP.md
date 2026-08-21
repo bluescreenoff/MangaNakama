@@ -66,13 +66,25 @@ Roughly in order. None of this is promised by a date.
    background benchmark decides, never a blanket default. Still CPU-only:
    smudge combined with wash (the sampler would have to read the in-flight
    wash buffer) and the spectral-paint / colorize / posterize presets.
-2. **A small scripting surface.** The batch half shipped (Layer > Batch
+2. **Tonal correction across multiple selected layers.** Select several
+   layers and apply one tonal correction (brightness/contrast, hue/
+   saturation, levels, tone curve) to all of them in a single operation —
+   one dialog, one undo step. Clip Studio added this in its 5.0; it is the
+   difference between correcting a page and correcting a layer at a time.
+3. **Clipping that survives structure edits.** The scenario catalog is
+   `docs/CLIPPING-SCENARIOS.md`; the guardrails already landed (an insert
+   can no longer silently re-base a clip run). What remains is the feature
+   half: **clip to a folder** (a layer above a folder clips to the group's
+   combined ink — both compositors, CPU and GPU, in agreement) and the
+   palette/status feedback when a clip flag has no base and is being
+   ignored.
+4. **A small scripting surface.** The batch half shipped (Layer > Batch
    operations: rename/renumber by pattern, apply/clear tone as one undo
    step, export a PNG per layer — scoped by all/folder/name-prefix).
    What remains is the scripting surface proper, if real use ever asks
    for more than the dialog covers.
-3. **HDR / linear-light colour.**
-4. **The manual, kept honest.** Static HTML beside the executable exists;
+5. **HDR / linear-light colour.**
+6. **The manual, kept honest.** Static HTML beside the executable exists;
    its job is the quirks — the interlocks you would otherwise discover by
    having something silently do nothing — and it grows with every round.
 

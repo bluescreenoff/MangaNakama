@@ -2466,7 +2466,31 @@ impl Document {
     /// Insert a new empty layer directly above `index` (same depth — a
     /// sibling) and make it active. Returns the new layer's index. Clears the
     /// undo history.
+    /// The top of the clip run riding `index`: the last CONSECUTIVE clipped
+    /// (same depth, non-folder) layer above it — `index` itself when nothing
+    /// rides. From a mid-run member it finds the same top, so an insert
+    /// relative to any member of the run lands outside it.
+    pub fn clip_run_top(&self, index: usize) -> usize {
+        let Some(l) = self.layers.get(index) else {
+            return index;
+        };
+        let mut j = index;
+        while let Some(n) = self.layers.get(j + 1) {
+            if n.depth != l.depth || n.folder || !n.clip {
+                break;
+            }
+            j += 1;
+        }
+        j
+    }
+
     pub fn add_layer_above(&mut self, index: usize, name: impl Into<String>) -> usize {
+        // docs/CLIPPING-SCENARIOS.md: a plain insert INSIDE a clip run would
+        // silently re-base the members above it onto the new empty layer —
+        // everything clipped goes invisible. Hop above the run instead; a
+        // layer meant to join the run still can (clip resolves through the
+        // members to the same base wherever it sits in the run).
+        let index = self.clip_run_top(index);
         let at = (index + 1).min(self.layers.len());
         let mut l = Layer::new(name);
         l.depth = self.layers.get(index).map(|x| x.depth).unwrap_or(0);
@@ -4157,7 +4181,7 @@ mod mask_tests {
         assert!(doc.layers[0].mask.is_some(), "delete undone");
     }
 
-    /// LM-001: the starter mask is all-visible.    /// LM-001: the starter mask is all-visible.
+    /// LM-001: the starter mask is all-visible.
     #[test]
     fn starter_mask_is_all_visible() {
         let mut doc = Document::new(128, 128);
@@ -4169,6 +4193,7 @@ mod mask_tests {
         let img = composite(&doc, Background::Transparent);
         assert_eq!(img.get_pixel(5, 5).0[3], 255, "blank mask hides nothing");
     }
+
 }
 
 #[cfg(test)]
@@ -5118,6 +5143,31 @@ mod tests {
         // The bottom root layer has nothing below it at its depth.
         assert!(doc.set_layer_clip(0, true));
         assert_eq!(doc.clip_bases()[0], None, "no base -> flag ignored");
+    }
+
+    /// docs/CLIPPING-SCENARIOS.md #1/#2: a new layer added from the base —
+    /// or from any member — of a clip run lands ABOVE the run, never inside
+    /// it. Inside, the run would silently re-base onto the new empty layer
+    /// and every clipped member would go invisible.
+    #[test]
+    fn new_layer_hops_above_the_clip_run() {
+        let mut doc = Document::new(64, 64);
+        let base = doc.add_layer("Base");
+        let c1 = doc.add_layer("Clip 1");
+        doc.set_layer_clip(c1, true);
+        let c2 = doc.add_layer("Clip 2");
+        doc.set_layer_clip(c2, true);
+        doc.set_active(base);
+        let n = doc.add_layer("Pasted");
+        assert_eq!(n, c2 + 1, "insert hops above the whole run");
+        let bases = doc.clip_bases();
+        assert_eq!(bases[c1], Some(base), "run keeps its base");
+        assert_eq!(bases[c2], Some(base));
+        // From a mid-run member: same landing spot.
+        doc.set_active(c1);
+        let m = doc.add_layer("Mid add");
+        assert_eq!(m, c2 + 1, "mid-run insert lands just above the run");
+        assert_eq!(doc.clip_bases()[c1], Some(base));
     }
 
     #[test]
