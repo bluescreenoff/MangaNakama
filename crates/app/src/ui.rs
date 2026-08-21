@@ -54,6 +54,8 @@ use crate::app::App;
 pub fn build(ui: &mut egui::Ui, app: &mut App) {
     // One brush preview generated per frame: startup trickles, never hitches.
     app.preview_budget = 1;
+    // Same rule for the docking-2 page panes' display textures.
+    app.page_pane_budget = 1;
     // Same rule for reference images (thumbnails and viewer textures share
     // the budget): a board of forty photos loads over forty frames instead of
     // decoding all of them the first time the palette is shown.

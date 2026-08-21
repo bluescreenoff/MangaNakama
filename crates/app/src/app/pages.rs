@@ -48,6 +48,14 @@ pub struct PageEntry {
     /// only — no pixel decode). The reader's 1:1 moiré view needs each
     /// page's TRUE size; a combined spread is a wider page.
     pub canvas: Option<(u32, u32)>,
+    /// Docking 2 phase 2: the display-size texture a PAGE PANE renders
+    /// (ui/dock.rs). Deliberately SEPARATE from `prev_tex`: that one is
+    /// keyed to the Pages palette's cell size, and a pane at 800px sharing
+    /// it would fight the palette's 180px cell over the >25%-drift rule,
+    /// re-minting every frame forever.
+    pub pane_tex: Option<egui::TextureHandle>,
+    pub pane_tex_px: f32,
+    pub pane_tex_rev: u64,
 }
 
 impl PageEntry {
@@ -75,6 +83,9 @@ impl PageEntry {
             prev_tex_px: 0.0,
             prev_tex_rev: 0,
             canvas: None,
+            pane_tex: None,
+            pane_tex_px: 0.0,
+            pane_tex_rev: 0,
         }
     }
 }
@@ -214,6 +225,9 @@ impl App {
             prev_tex_px: 0.0,
             prev_tex_rev: 0,
             canvas: None,
+            pane_tex: None,
+            pane_tex_px: 0.0,
+            pane_tex_rev: 0,
         }
     }
 

@@ -207,36 +207,12 @@ fn pages_body(ui: &mut egui::Ui, app: &mut App) {
                         && let Some(gray) = app.preview_for(i)
                     {
                         prev_budget -= 1;
-                        let (gw, gh) = gray.dimensions();
-                        let (dw, dh) = (tw.round().max(1.0) as u32, th.round().max(1.0) as u32);
-                        let mut ci = egui::ColorImage::new(
-                            [dw as usize, dh as usize],
-                            vec![egui::Color32::WHITE; (dw * dh) as usize],
-                        );
-                        for y in 0..dh {
-                            // Bilinear source position of this display px.
-                            let sy = (y as f32 + 0.5) * gh as f32 / dh as f32 - 0.5;
-                            let y0 = sy.floor().max(0.0).min(gh as f32 - 1.0) as u32;
-                            let y1 = (y0 + 1).min(gh - 1);
-                            let fy = (sy - y0 as f32).clamp(0.0, 1.0);
-                            for x in 0..dw {
-                                let sx = (x as f32 + 0.5) * gw as f32 / dw as f32 - 0.5;
-                                let x0 = sx.floor().max(0.0).min(gw as f32 - 1.0) as u32;
-                                let x1 = (x0 + 1).min(gw - 1);
-                                let fx = (sx - x0 as f32).clamp(0.0, 1.0);
-                                let s = |xx: u32, yy: u32| gray.get_pixel(xx, yy)[0] as f32;
-                                let v = (s(x0, y0) * (1.0 - fx) * (1.0 - fy)
-                                    + s(x1, y0) * fx * (1.0 - fy)
-                                    + s(x0, y1) * (1.0 - fx) * fy
-                                    + s(x1, y1) * fx * fy)
-                                    .round() as u8;
-                                ci[(x as usize, y as usize)] = egui::Color32::from_gray(v);
-                            }
-                        }
-                        app.pages[i].prev_tex = Some(ui.ctx().load_texture(
+                        app.pages[i].prev_tex = Some(super::preview::mint_gray_tex(
+                            ui.ctx(),
+                            &gray,
+                            tw.round().max(1.0) as u32,
+                            th.round().max(1.0) as u32,
                             format!("mn.page.prev.{i}"),
-                            ci,
-                            egui::TextureOptions::LINEAR,
                         ));
                         app.pages[i].prev_tex_px = th;
                         app.pages[i].prev_tex_rev = app.pages[i].rev;
@@ -305,6 +281,13 @@ fn pages_body(ui: &mut egui::Ui, app: &mut App) {
                     if resp.clicked() && !selected {
                         app.push_cmd(AppCmd::SelectPage(i));
                     }
+                    // Docking 2 phase 2: a page beside the canvas.
+                    resp.context_menu(|ui| {
+                        if ui.button("Open in a pane").clicked() {
+                            app.push_cmd(AppCmd::OpenPageInPane(i));
+                            ui.close();
+                        }
+                    });
                     if resp.drag_started() {
                         egui::DragAndDrop::set_payload(ui.ctx(), PageDrag(i));
                     }

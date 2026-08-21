@@ -48,15 +48,24 @@ pub enum Palette {
     References,
 }
 
-/// One pane of the dock tree: a palette, or the canvas itself. Serialized
-/// into `ui.txt` (`dock_tree=`) — the variant tags are the persisted API.
+/// One pane of the dock tree: a palette, the canvas, or a page view.
+/// Serialized into `ui.txt` (`dock_tree=`) — the variant tags are the
+/// persisted API.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Pane {
     Palette(Palette),
-    /// The drawing surface. Phase 1 (docs/DOCKING-2.md): exactly one, it
-    /// follows the active document, and the document tab strip is drawn
-    /// inside its body. Phase 2 gives every open page its own canvas pane.
+    /// THE drawing surface. Exactly one, it follows the active document,
+    /// and the document tab strip is drawn inside its body.
     Canvas,
+    /// Docking 2 phase 2: a live-updating view of one page of the OPEN
+    /// work, arrangeable like any pane — `page 1 | tools | page 2 |
+    /// layers | page 3` is this. Clicking it makes that page current on
+    /// the Canvas pane (one live page is a load-bearing invariant:
+    /// parked pages are bytes, and the target machine has an iGPU — see
+    /// docs/DOCKING-2.md). Index-bound: after a reorder or in a different
+    /// work it simply shows whatever page holds that index now, and an
+    /// index past the work's end says so instead of vanishing.
+    PageView { page: usize },
 }
 
 pub const ALL: [Palette; 16] = [
@@ -143,11 +152,18 @@ impl Palette {
 }
 
 impl Pane {
-    fn title(self) -> &'static str {
+    fn title(self) -> String {
         match self {
-            Pane::Palette(p) => p.title(),
-            Pane::Canvas => "Canvas",
+            Pane::Palette(p) => p.title().to_string(),
+            Pane::Canvas => "Canvas".to_string(),
+            Pane::PageView { page } => format!("p.{}", page + 1),
         }
+    }
+
+    /// Canvas-class panes share tab bars with each other and never with
+    /// palettes (patch #16's rule).
+    fn is_canvas_class(self) -> bool {
+        matches!(self, Pane::Canvas | Pane::PageView { .. })
     }
 }
 
@@ -415,18 +431,20 @@ impl TabViewer for Viewer<'_> {
         match tab {
             Pane::Palette(p) => p.body(ui, self.app),
             Pane::Canvas => canvas_pane_body(ui, self.app),
+            Pane::PageView { page } => page_view_body(ui, self.app, *page),
         }
     }
 
     fn closeable(&mut self, tab: &mut Pane) -> bool {
-        // The app always shows a canvas; the pane cannot close (phase 1 —
-        // with pages-as-panes, closing becomes the document close flow).
+        // The app always shows a canvas; THE canvas pane cannot close.
+        // Page views are just views — they close freely.
         !matches!(tab, Pane::Canvas)
     }
 
     /// The canvas never floats: a floating egui window is a non-background
     /// layer, so `Shell::owns_pointer` would hand every pen event inside it
-    /// to egui and the canvas would go permanently deaf.
+    /// to egui and the canvas would go permanently deaf. A page VIEW is an
+    /// ordinary egui widget (preview + click), so it may float.
     fn allowed_in_windows(&self, tab: &mut Pane) -> bool {
         !matches!(tab, Pane::Canvas)
     }
@@ -437,14 +455,13 @@ impl TabViewer for Viewer<'_> {
         !matches!(tab, Pane::Canvas)
     }
 
-    /// Canvas tabs and palette tabs never share a tab bar (patch #16): a
-    /// palette tabbed over the canvas buries the drawing surface. Splitting
-    /// beside either class is the layout feature and stays free.
+    /// Canvas-class tabs (canvas + page views) and palette tabs never share
+    /// a tab bar (patch #16): a palette tabbed over the canvas buries the
+    /// drawing surface. Splitting beside either class is the layout feature
+    /// and stays free.
     fn can_tab_into(&self, tab: &Pane, dst_tabs: &[Pane]) -> bool {
-        let canvas = matches!(tab, Pane::Canvas);
-        dst_tabs
-            .iter()
-            .all(|t| matches!(t, Pane::Canvas) == canvas)
+        let canvas = tab.is_canvas_class();
+        dst_tabs.iter().all(|t| t.is_canvas_class() == canvas)
     }
 
     /// The bodies decide their own scrolling; a dock-level scroll would
@@ -473,6 +490,171 @@ fn canvas_pane_body(ui: &mut egui::Ui, app: &mut App) {
     app.shell.set_canvas_rect_points(hole);
     super::overlay::canvas_overlay(ui, app, hole);
     super::launcher::selection_launcher(ui, app, hole);
+}
+
+/// A page-view pane: the page fitted to the pane, live-updating (parked
+/// pages re-render from their sharp preview when their revision moves; the
+/// CURRENT page is already live on the Canvas pane and shows its live
+/// thumbnail here). One click makes the page current on the Canvas pane —
+/// through `AppCmd::SelectPage`, i.e. the ordinary page-switch door with
+/// its stash/decode and cache resets; nothing here installs state by hand.
+fn page_view_body(ui: &mut egui::Ui, app: &mut App, page: usize) {
+    let avail = ui.available_rect_before_wrap();
+    let caption_h = 16.0;
+    if page >= app.pages.len() {
+        // A layout can outlive the work that shaped it (restart, another
+        // work, deleted pages): say so instead of vanishing the pane.
+        ui.painter().text(
+            avail.center(),
+            egui::Align2::CENTER_CENTER,
+            format!("No page {} in this work", page + 1),
+            egui::FontId::proportional(12.0),
+            theme::TEXT_WEAK,
+        );
+        return;
+    }
+
+    let current = page == app.page_index;
+    let img_rect = egui::Rect::from_min_max(
+        avail.min,
+        egui::pos2(avail.max.x, (avail.max.y - caption_h).max(avail.min.y)),
+    );
+
+    // The texture: the current page's live thumb (already minted every
+    // revision for the Pages palette), else this pane's OWN display-size
+    // texture from the sharp preview — separate from the palette's
+    // `prev_tex`, whose size follows the palette cell (`pane_tex` doc).
+    let aspect = {
+        let (w, h) = app.pages[page]
+            .canvas
+            .or_else(|| {
+                current.then_some((app.doc.size.0, app.doc.size.1))
+            })
+            .unwrap_or((1, 1));
+        h.max(1) as f32 / w.max(1) as f32
+    };
+    let fit_w = (img_rect.width().min(img_rect.height() / aspect)).max(1.0);
+    let fit = egui::Rect::from_center_size(
+        img_rect.center(),
+        egui::vec2(fit_w, fit_w * aspect),
+    );
+
+    if !current {
+        let e = &app.pages[page];
+        let stale = e.pane_tex.is_none()
+            || e.pane_tex_rev != e.rev
+            || (fit.width() - e.pane_tex_px).abs() > e.pane_tex_px * 0.25;
+        if stale
+            && app.page_pane_budget > 0
+            && let Some(gray) = app.preview_for(page)
+        {
+            app.page_pane_budget -= 1;
+            let tex = super::preview::mint_gray_tex(
+                ui.ctx(),
+                &gray,
+                fit.width().round() as u32,
+                fit.height().round() as u32,
+                format!("mn.page.pane.{page}"),
+            );
+            let e = &mut app.pages[page];
+            e.pane_tex = Some(tex);
+            e.pane_tex_px = fit.width();
+            e.pane_tex_rev = e.rev;
+        }
+    }
+    let e = &app.pages[page];
+    let tex = if current {
+        e.thumb.as_ref()
+    } else {
+        e.pane_tex.as_ref().or(e.prev_tex.as_ref()).or(e.thumb.as_ref())
+    };
+    match tex {
+        Some(t) => {
+            ui.painter().image(
+                t.id(),
+                fit,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+        }
+        None => {
+            ui.painter().rect_filled(fit, 2.0, egui::Color32::WHITE);
+        }
+    }
+    ui.painter().rect_stroke(
+        fit,
+        0.0,
+        egui::Stroke::new(1.0, theme::BORDER),
+        egui::StrokeKind::Outside,
+    );
+
+    let caption = if current {
+        format!("page {} — editing on the canvas", page + 1)
+    } else {
+        format!("page {}", page + 1)
+    };
+    ui.painter().text(
+        egui::pos2(avail.center().x, avail.max.y - caption_h * 0.5),
+        egui::Align2::CENTER_CENTER,
+        caption,
+        egui::FontId::proportional(11.0),
+        if current {
+            theme::TEXT
+        } else {
+            theme::TEXT_WEAK
+        },
+    );
+
+    if !current {
+        let resp = ui.interact(
+            avail,
+            ui.id().with(("mn.page.pane.act", page)),
+            egui::Sense::click(),
+        );
+        if resp.hovered() {
+            ui.painter().rect_stroke(
+                fit,
+                0.0,
+                egui::Stroke::new(1.5, theme::ACCENT),
+                egui::StrokeKind::Outside,
+            );
+        }
+        let resp = resp.on_hover_text("Click to edit this page on the canvas");
+        if resp.clicked() {
+            app.push_cmd(crate::cmd::AppCmd::SelectPage(page));
+        }
+    }
+}
+
+/// Open (or focus) a page-view pane for `page`. A new pane splits off the
+/// canvas leaf's right side — beside where the eye already is; from there
+/// the user drags it wherever the layout wants it.
+pub fn open_page_pane(app: &mut App, page: usize) {
+    let pane = Pane::PageView { page };
+    let existing = app
+        .dock
+        .iter_all_tabs()
+        .find(|(_, t)| **t == pane)
+        .map(|(path, _)| path);
+    if let Some(path) = existing {
+        let _ = app.dock.set_active_tab(path);
+        app.dock.set_focused_node_and_surface(path.node_path());
+        return;
+    }
+    let canvas = app
+        .dock
+        .iter_all_nodes()
+        .find_map(|(path, node)| {
+            (path.surface.is_main()
+                && node
+                    .get_leaf()
+                    .is_some_and(|l| l.tabs.contains(&Pane::Canvas)))
+            .then_some(path.node)
+        })
+        .unwrap_or(NodeIndex::root());
+    app.dock
+        .main_surface_mut()
+        .split_right(canvas, 0.55, vec![pane]);
 }
 
 /// Theme the dock chrome to the app's tokens. NOTE: egui_dock's own
@@ -771,6 +953,77 @@ mod tests {
                 .filter(|(_, t)| **t == Pane::Canvas)
                 .count(),
             1
+        );
+    }
+
+    /// Phase 2: page-view panes ride the tree, round-trip serde, class
+    /// with the canvas (never with palettes), and `open_page_pane` focuses
+    /// an existing pane instead of stacking duplicates.
+    #[test]
+    fn page_view_panes_serde_class_and_dedupe() {
+        let mut tree = default_tree();
+        let canvas = tree
+            .iter_all_nodes()
+            .find_map(|(path, node)| {
+                (path.surface.is_main()
+                    && node
+                        .get_leaf()
+                        .is_some_and(|l| l.tabs.contains(&Pane::Canvas)))
+                .then_some(path.node)
+            })
+            .expect("canvas leaf");
+        tree.main_surface_mut()
+            .split_right(canvas, 0.5, vec![Pane::PageView { page: 2 }]);
+
+        let back = from_json_tree(&to_json_tree(&tree));
+        assert!(
+            back.iter_all_tabs()
+                .any(|(_, t)| *t == Pane::PageView { page: 2 }),
+            "a page view survives the ui.txt round trip"
+        );
+        assert_eq!(
+            back.iter_all_tabs()
+                .filter(|(_, t)| **t == Pane::Canvas)
+                .count(),
+            1,
+            "the page view is NOT deduped away as a second canvas"
+        );
+
+        // Class rules (what `Viewer::can_tab_into` keys on): page views
+        // tab with the canvas, never with palettes.
+        let pv = Pane::PageView { page: 0 };
+        assert!(pv.is_canvas_class() && Pane::Canvas.is_canvas_class());
+        assert!(!Pane::Palette(Palette::Layers).is_canvas_class());
+    }
+
+    /// `open_page_pane` focuses an existing pane for the page instead of
+    /// stacking duplicates, and distinct pages get distinct panes.
+    #[test]
+    fn open_page_pane_focuses_instead_of_duplicating() {
+        let Some(renderer) = crate::app::headless_renderer() else {
+            return;
+        };
+        let mut app = App::new(renderer, (800, 600), 1.0);
+        app.dock = default_tree();
+        let count = |app: &App, page: usize| {
+            app.dock
+                .iter_all_tabs()
+                .filter(|(_, t)| **t == Pane::PageView { page })
+                .count()
+        };
+        open_page_pane(&mut app, 1);
+        assert_eq!(count(&app, 1), 1, "the pane opened");
+        open_page_pane(&mut app, 1);
+        assert_eq!(count(&app, 1), 1, "reopening focuses, never duplicates");
+        open_page_pane(&mut app, 2);
+        assert_eq!(count(&app, 2), 1, "another page gets its own pane");
+        assert_eq!(
+            app.dock
+                .iter_all_tabs()
+                .filter(|(_, t)| **t == Pane::Canvas)
+                .count(),
+            1,
+            "the canvas pane is untouched by page panes"
         );
     }
 

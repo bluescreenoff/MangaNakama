@@ -1295,6 +1295,9 @@ pub enum AppCmd {
     NewComicCreate,
     // --- pages --------------------------------------------------------------
     SelectPage(usize),
+    /// Docking 2 phase 2: open (or focus) a page-view pane for page `i` —
+    /// the page beside the canvas, click-to-edit (ui/dock.rs).
+    OpenPageInPane(usize),
     /// PM-021: keyboard page navigation — first/last/previous/next.
     PageFirst,
     PageLast,
@@ -2613,6 +2616,10 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
 
         // --- pages ----------------------------------------------------------
         AppCmd::SelectPage(i) => app.switch_page(i),
+        AppCmd::OpenPageInPane(i) => {
+            crate::ui::dock::open_page_pane(app, i);
+            app.set_status(format!("page {} opened in a pane — click it to edit", i + 1));
+        }
         // PM-021/022: navigation with end-of-chapter guards — switching
         // itself goes through switch_page (stash + decode + fit).
         AppCmd::PageFirst => app.switch_page(0),
@@ -3179,6 +3186,9 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                                         prev_tex_px: 0.0,
                                         prev_tex_rev: 0,
                                         canvas: None,
+                                        pane_tex: None,
+                                        pane_tex_px: 0.0,
+                                        pane_tex_rev: 0,
                                     })
                                     .collect();
                                 app.page_index = 0;

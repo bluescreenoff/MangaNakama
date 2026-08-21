@@ -524,6 +524,9 @@ pub struct App {
     /// Preview generations left this frame (reset in `ui::build`) — startup
     /// trickles one per frame instead of hitching.
     pub preview_budget: u32,
+    /// Page-pane texture mints left this frame (docking 2 page views;
+    /// reset in `ui::build`) — same trickle rule as the previews above.
+    pub page_pane_budget: u32,
     /// Color panel HSV state; hue/saturation survive grayscale RGB values.
     pub picker_hsv: [f32; 3],
     pub picker_rgb_cache: [f32; 3],
@@ -1286,6 +1289,7 @@ impl App {
             dock,
             brush_previews: HashMap::new(),
             preview_budget: 0,
+            page_pane_budget: 0,
             picker_hsv: [0.0, 0.0, 0.0],
             picker_rgb_cache: [0.0, 0.0, 0.0],
             hex_edit: String::new(),

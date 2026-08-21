@@ -149,18 +149,29 @@ click-to-activate is an egui button in the pane body).
 
 Each phase ships pushed, suite green, on its own.
 
-1. **One tree.** `DockState<Pane>` replaces both columns; ONE canvas pane
-   (`page: None`, follows active doc); doc strip stays (drawn INSIDE the
-   canvas pane body, above the hole). Migration + workspaces + Tab/Shift+Tab
-   behavior + Workspace menu reopen/reset updated. Vendor patches #15/#16.
-   Known limit from part 14 (collapsing hides torn-off floats) dies here:
-   floats are surfaces of the ONE tree, nothing hides them.
-2. **Panes are pages.** Canvas panes per doc + per page, preview rendering
-   for inactive panes, click-to-activate, doc strip deleted, Pages palette
-   "open in pane", close flows. Side collapse → edge flap.
-3. **Polish round** after owner eye test: drag a page thumbnail into the
-   tree, preview resolution upgrade for large inactive panes, per-pane view
-   state (remember zoom/pan per pane) if the owner asks.
+1. **One tree — SHIPPED (`6824153`).** `DockState<Pane>` replaces both
+   columns; ONE canvas pane, non-closable, never floatable; doc strip
+   drawn INSIDE the canvas pane body, above the hole. Migration +
+   workspaces + Workspace menu reopen/reset updated. Vendor patches #16
+   (can_tab_into + float gating; #15 was unnecessary — upstream's
+   `clear_background` already existed) and #17 (graft/absorb). The
+   part-14 known limit (collapsing hides torn-off floats) died here.
+2. **Panes are pages — SHIPPED (v2 shape).** `Pane::PageView{page}`: a
+   live-updating view of one page of the open work, opened from the
+   Pages palette ("Open in a pane"), closable and floatable, canvas-class
+   for tab-bar purposes. Parked pages render from their sharp preview
+   into a pane-sized texture (own cache beside the palette's, budgeted
+   one mint per frame); the CURRENT page shows its live thumb and the
+   caption says it is on the canvas. ONE click activates a page through
+   `AppCmd::SelectPage` — the ordinary switch door. Deliberate deviation
+   from the original phase-2 sketch: THE canvas pane and the doc strip
+   stay (one live drawing surface is the honest model — parked pages are
+   bytes, one iGPU); the strip dissolving into per-document canvas tabs
+   moves to phase 3, if the owner wants it after using this.
+3. **Polish round** after owner eye test: side collapse → the edge FLAP
+   (part-15 owner sketch — still owed), doc strip dissolving into
+   per-document canvas tabs, drag a page thumbnail into the tree, preview
+   resolution upgrade for large panes, per-pane view state if asked.
 
 ## Traps to carry forward
 

@@ -26,6 +26,46 @@ const CH: u32 = (PREVIEW_H * 2) as u32;
 /// Light ink on the panel's dark field.
 const INK: [f32; 3] = [0.84, 0.84, 0.87];
 
+/// Mint a display-size texture from a gray page preview, bilinear on the
+/// CPU. Shared by the Pages palette's sharp cell tier and the docking-2
+/// page panes (ui/dock.rs) — each keeps its OWN texture cache because they
+/// want different sizes of the same page.
+pub fn mint_gray_tex(
+    ctx: &egui::Context,
+    gray: &image::GrayImage,
+    dw: u32,
+    dh: u32,
+    name: String,
+) -> egui::TextureHandle {
+    let (gw, gh) = gray.dimensions();
+    let (dw, dh) = (dw.max(1), dh.max(1));
+    let mut ci = egui::ColorImage::new(
+        [dw as usize, dh as usize],
+        vec![egui::Color32::WHITE; (dw * dh) as usize],
+    );
+    for y in 0..dh {
+        // Bilinear source position of this display px.
+        let sy = (y as f32 + 0.5) * gh as f32 / dh as f32 - 0.5;
+        let y0 = sy.floor().max(0.0).min(gh as f32 - 1.0) as u32;
+        let y1 = (y0 + 1).min(gh - 1);
+        let fy = (sy - y0 as f32).clamp(0.0, 1.0);
+        for x in 0..dw {
+            let sx = (x as f32 + 0.5) * gw as f32 / dw as f32 - 0.5;
+            let x0 = sx.floor().max(0.0).min(gw as f32 - 1.0) as u32;
+            let x1 = (x0 + 1).min(gw - 1);
+            let fx = (sx - x0 as f32).clamp(0.0, 1.0);
+            let s = |xx: u32, yy: u32| gray.get_pixel(xx, yy)[0] as f32;
+            let v = (s(x0, y0) * (1.0 - fx) * (1.0 - fy)
+                + s(x1, y0) * fx * (1.0 - fy)
+                + s(x0, y1) * (1.0 - fx) * fy
+                + s(x1, y1) * fx * fy)
+                .round() as u8;
+            ci[(x as usize, y as usize)] = egui::Color32::from_gray(v);
+        }
+    }
+    ctx.load_texture(name, ci, egui::TextureOptions::LINEAR)
+}
+
 /// Render one preset's preview, or `None` when the preset will not load.
 pub fn generate(ctx: &egui::Context, path: &Path) -> Option<egui::TextureHandle> {
     let img = generate_image(path)?;
