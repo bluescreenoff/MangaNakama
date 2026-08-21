@@ -27,7 +27,8 @@ they honestly map, tips stamped and rotating per dab), GIMP `.gbr`/`.gih`,
 Krita `.kpp` (dynamics), and Clip Studio `.sut` (your own sub tools — read
 directly, no export ceremony beyond CSP's own). Your own marks become a
 brush too: lasso them and register the selection as a stamp tip, tuned
-with a live test stroke.
+with a live test stroke — and your own presets rename, duplicate and
+delete from the sub tool list itself.
 
 **Canvas and layers.** A tiled canvas at print resolution with a GPU
 compositor (layer blending, group flattening, tile upload, display) and a
@@ -104,19 +105,12 @@ every multi-step official recipe is a feature opportunity.
    the attempt and the numbers are recorded in the code) and the
    spectral-paint presets (the pigment-mixing math is float-heavy and
    needs its own parity tolerance before it is worth porting).
-2. **Brushes and materials without ceremony.** The capture half is in:
-   lasso marks on the canvas and Edit ▸ Register selection as brush tip
-   turns them into a stamp brush (group "Mine", selected immediately, the
-   live test stroke shows it), and the Materials palette's register-layer
-   button is already selection-scoped. Remaining: edit and organise
-   presets in place — rename, delete, duplicate, reorder — instead of a
-   file-manager tour.
-3. **A small scripting surface.** Batch operations now cover rename,
+2. **A small scripting surface.** Batch operations now cover rename,
    tone, draft, layer colour and blend over name patterns (`*` wildcards)
    — on one page or every page in the work. The scripting surface proper
    waits until real use asks for more than the dialog covers.
-4. **HDR / linear-light colour.**
-5. **The manual, kept honest.** Static HTML beside the executable exists;
+3. **HDR / linear-light colour.**
+4. **The manual, kept honest.** Static HTML beside the executable exists;
    its job is the quirks — the interlocks you would otherwise discover by
    having something silently do nothing — and it grows with every round.
 
