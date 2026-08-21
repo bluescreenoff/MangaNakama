@@ -766,7 +766,7 @@ dependencies = [
 
 [[package]]
 name = "mn-app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "egui",
  "egui-wgpu",
@@ -785,7 +785,7 @@ dependencies = [
 
 [[package]]
 name = "mn-brush"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cc",
  "image",
@@ -795,7 +795,7 @@ dependencies = [
 
 [[package]]
 name = "mn-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "image",
  "quick-xml",
@@ -806,7 +806,7 @@ dependencies = [
 
 [[package]]
 name = "mn-gpu"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
  "image",
@@ -819,7 +819,7 @@ dependencies = [
 
 [[package]]
 name = "mn-text"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "mn-core",
  "windows",
