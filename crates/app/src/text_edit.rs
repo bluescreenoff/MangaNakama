@@ -159,6 +159,122 @@ impl App {
         self.doc.layers.get(ed.layer)?.texts()?.texts.get(ed.index)
     }
 
+    /// TX-styles: re-stamp `style` onto every current-page item carrying
+    /// its name — shape each restyled item, then commit per layer through
+    /// `set_texts` (raster + undo), the whole page wrapped into ONE undo
+    /// press. Returns the number of items restyled.
+    pub fn apply_text_style_current(&mut self, style: &mn_core::text::TextStyle) -> usize {
+        let dpi = self.doc_dpi();
+        let mut groups = 0usize;
+        let mut items = 0usize;
+        for li in 0..self.doc.layers.len() {
+            let hit = |t: &mn_core::text::TextItem| t.style.as_deref() == Some(style.name.as_str());
+            if !self
+                .doc
+                .layers
+                .get(li)
+                .and_then(|l| l.texts())
+                .is_some_and(|ts| ts.texts.iter().any(hit))
+            {
+                continue;
+            }
+            // ORA-loaded layers may still be cache-less: warm BEFORE the
+            // clone or the re-raster drops the untouched sprites too.
+            self.warm_texts(li);
+            let Some(ts) = self.doc.layers.get(li).and_then(|l| l.texts()) else {
+                continue;
+            };
+            let mut ts = ts.clone();
+            let Self {
+                doc, text_engine, ..
+            } = self;
+            let Some(engine) = text_engine.as_ref() else {
+                return items;
+            };
+            for item in ts.texts.iter_mut().filter(|t| hit(t)) {
+                style.apply(item);
+                item.cache = engine.render(item, dpi).ok().flatten();
+                items += 1;
+            }
+            if doc.set_texts(li, ts) {
+                groups += 1;
+            }
+        }
+        if groups > 1 {
+            self.doc.wrap_recent("Text style", groups);
+        }
+        items
+    }
+
+    /// TX-styles, the chapter-wide half: push the live document's style
+    /// list onto every OTHER page and re-style their items. Same round
+    /// trip (and the same honesty) as batch: other pages are saved
+    /// directly, undo covers the open page only. Returns (pages, items).
+    pub fn apply_text_styles_other_pages(&mut self) -> (usize, usize) {
+        if self.stash_current_page().is_err() {
+            return (0, 0);
+        }
+        let dpi = self.doc_dpi();
+        let styles = self.doc.text_styles.clone();
+        let (mut pages, mut items) = (0usize, 0usize);
+        for i in 0..self.pages.len() {
+            if i == self.page_index {
+                continue;
+            }
+            let Some(bytes) = self.pages[i].bytes.as_deref() else {
+                continue;
+            };
+            let Ok(mut doc) = mn_core::project::bytes_to_doc(bytes) else {
+                continue;
+            };
+            doc.text_styles = styles.clone();
+            let mut page_items = 0usize;
+            for li in 0..doc.layers.len() {
+                let Some(ts) = doc.layers.get(li).and_then(|l| l.texts()) else {
+                    continue;
+                };
+                let mut ts = ts.clone();
+                let mut touched = false;
+                // A decoded page has NO caches: shape every item, or the
+                // re-raster would erase the sprites styles never touched.
+                let Some(engine) = self.text_engine.as_ref() else {
+                    return (pages, items);
+                };
+                for item in ts.texts.iter_mut() {
+                    if let Some(s) = item
+                        .style
+                        .as_deref()
+                        .and_then(|n| styles.iter().find(|s| s.name == n))
+                    {
+                        s.apply(item);
+                        touched = true;
+                        page_items += 1;
+                    }
+                    item.cache = engine.render(item, dpi).ok().flatten();
+                }
+                if touched {
+                    doc.set_texts(li, ts);
+                }
+            }
+            if page_items == 0 {
+                continue;
+            }
+            let Ok(nb) = mn_core::project::doc_to_bytes(&doc) else {
+                continue;
+            };
+            let rev = self.page_rev_next();
+            let e = &mut self.pages[i];
+            e.bytes = Some(nb);
+            e.rev = rev;
+            e.doc_rev = 0;
+            e.thumb = None;
+            pages += 1;
+            items += page_items;
+        }
+        self.mark_pages_dirty();
+        (pages, items)
+    }
+
     /// Fill missing sprite caches on a text layer (ORA-loaded layers have
     /// none). Must run before the first edit — see `Document::warm_text_caches`.
     pub fn warm_texts(&mut self, layer: usize) {
@@ -338,6 +454,12 @@ impl App {
         let mut item = TextItem::new(origin, font, self.text_size_pt, color, self.text_vertical);
         item.outline_px = self.mm_to_px(self.text_outline_mm).max(0.0);
         item.outline_color = self.text_outline_color;
+        // TX-styles: new text carries the picked work style (the palette
+        // already synced the defaults when it was picked).
+        item.style = self
+            .text_style_new
+            .clone()
+            .filter(|n| self.doc.text_styles.iter().any(|s| &s.name == n));
         // Round-34 typography defaults ride along (CSP: palette values apply
         // to new text).
         item.align = self.text_align;

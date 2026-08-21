@@ -341,6 +341,7 @@ impl App {
             tcy: Vec::new(),
             auto_tcy: 0,
             fonts: Vec::new(),
+            style: None,
             cache: None,
         }
     }

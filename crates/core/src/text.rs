@@ -280,6 +280,78 @@ pub struct RenderedText {
     pub rgba: Vec<u8>,
 }
 
+/// A named work-level text style (TX-styles, crawl TOP-15 #3): the
+/// typography dialogue / thought / shout / narration items share. Editing
+/// a style re-styles every item carrying its name — CSP's own tutorial
+/// warns that changing the font size mid-chapter means going back over
+/// every page by hand; the style IS the fix. Placement, rotation,
+/// orientation and per-range runs stay the item's own business.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TextStyle {
+    pub name: String,
+    /// Empty = the style does not pin a family (items keep their font).
+    #[serde(default)]
+    pub font: String,
+    /// Point size at the document dpi. The UI talks Q as well
+    /// (1 Q = 0.25 mm ⇒ 1 Q ≈ 0.7087 pt): JP dialogue convention is 18–20 Q.
+    pub size_pt: f32,
+    pub color: [u8; 3],
+    /// フチ width in canvas px, 0 = none.
+    #[serde(default)]
+    pub outline_px: f32,
+    #[serde(default = "white")]
+    pub outline_color: [u8; 3],
+    #[serde(default)]
+    pub letter_spacing_pt: f32,
+    #[serde(default)]
+    pub line_spacing: LineSpacing,
+}
+
+/// 1 Q = 0.25 mm, in points (1 pt = 1/72 in = 25.4/72 mm).
+pub const PT_PER_Q: f32 = 0.25 / 25.4 * 72.0;
+
+impl TextStyle {
+    /// Stamp this style's typography onto an item and drop its sprite (the
+    /// caller re-shapes). The item now carries the style's name.
+    pub fn apply(&self, item: &mut TextItem) {
+        item.style = Some(self.name.clone());
+        if !self.font.is_empty() {
+            item.font = self.font.clone();
+        }
+        item.size_pt = self.size_pt;
+        item.color = self.color;
+        item.outline_px = self.outline_px;
+        item.outline_color = self.outline_color;
+        item.letter_spacing_pt = self.letter_spacing_pt;
+        item.line_spacing = self.line_spacing;
+        item.cache = None;
+    }
+
+    /// The fresh-work set, JP-convention sizes. No font is pinned — the
+    /// first font the user gives a style sticks from then on.
+    pub fn defaults() -> Vec<TextStyle> {
+        let base = |name: &str, q: f32| TextStyle {
+            name: name.into(),
+            font: String::new(),
+            size_pt: q * PT_PER_Q,
+            color: [0, 0, 0],
+            outline_px: 0.0,
+            outline_color: [255, 255, 255],
+            letter_spacing_pt: 0.0,
+            line_spacing: LineSpacing::Percent(150.0),
+        };
+        vec![
+            base("Dialogue", 20.0),
+            base("Thought", 18.0),
+            TextStyle {
+                line_spacing: LineSpacing::Auto,
+                ..base("Shout", 28.0)
+            },
+            base("Narration", 16.0),
+        ]
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TextItem {
     pub text: String,
@@ -348,6 +420,11 @@ pub struct TextItem {
     /// which `tcy` alone decides. See [`Self::auto_tcy_runs`].
     #[serde(default)]
     pub auto_tcy: u8,
+    /// TX-styles: the work style this item follows; editing that style
+    /// re-styles every item carrying its name, chapter-wide. `None` =
+    /// free-styled, which is every item written before styles existed.
+    #[serde(default)]
+    pub style: Option<String>,
     /// Shaped sprite, filled by the app's text engine. Never serialized;
     /// deliberately excluded from equality.
     #[serde(skip)]
@@ -382,6 +459,7 @@ impl PartialEq for TextItem {
             && self.fonts == other.fonts
             && self.tcy == other.tcy
             && self.auto_tcy == other.auto_tcy
+            && self.style == other.style
     }
 }
 
@@ -552,6 +630,7 @@ impl TextItem {
             fonts: Vec::new(),
             tcy: Vec::new(),
             auto_tcy: 0,
+            style: None,
             cache: None,
         }
     }

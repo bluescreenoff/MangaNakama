@@ -2,7 +2,7 @@
 //! Sub Tool Detail wrench window, and the F1 Diagnostics HUD.
 
 use super::property::{Section, brush_sliders, prop_sections};
-use super::theme::ValueBar;
+use super::theme::{self, ValueBar};
 use crate::app::App;
 use crate::cmd::AppCmd;
 use mn_core::PageSetup;
@@ -2223,5 +2223,154 @@ pub(super) fn workspace_window(ctx: &egui::Context, app: &mut App) {
             app.workspace_register(&name);
             app.set_status(format!("workspace registered: {name}"));
         }
+    }
+}
+
+/// TX-styles: the work's named text styles. Edits live in a draft; Apply
+/// commits one style through `TextStyleUpsert` (this page reflows, one
+/// undo press); the footer button pushes every style to every page.
+pub(super) fn text_styles_window(ctx: &egui::Context, app: &mut App) {
+    use mn_core::text::{LineSpacing, PT_PER_Q, TextStyle};
+    if !app.text_styles_open {
+        if !app.styles_draft.is_empty() {
+            app.styles_draft.clear();
+        }
+        return;
+    }
+    if app.styles_draft.is_empty() {
+        app.styles_draft = if app.doc.text_styles.is_empty() {
+            TextStyle::defaults()
+        } else {
+            app.doc.text_styles.clone()
+        };
+    }
+    let mut draft = std::mem::take(&mut app.styles_draft);
+    let mut open = true;
+    let mut apply: Option<usize> = None;
+    let mut delete: Option<usize> = None;
+    let mut all_pages = false;
+    let mut add = false;
+    let tool_font = app.text_font.clone();
+    egui::Window::new("Text styles")
+        .open(&mut open)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, -30.0))
+        .show(ctx, |ui| {
+            ui.weak(
+                "Every text can follow a named style. Apply re-styles this page \
+                 (one undo); the bottom button re-styles the whole work.",
+            );
+            for (i, s) in draft.iter_mut().enumerate() {
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(&mut s.name).desired_width(96.0));
+                    let font_label = if s.font.is_empty() {
+                        "font: (keep each text's)".to_owned()
+                    } else {
+                        format!("font: {}", s.font)
+                    };
+                    let fresp = ui.button(font_label).on_hover_text(
+                        "click: pin the text tool's current font — right-click: unpin",
+                    );
+                    if fresp.clicked() {
+                        s.font = tool_font.clone();
+                    }
+                    if fresp.secondary_clicked() {
+                        s.font.clear();
+                    }
+                    if ui.button("Apply").on_hover_text("save + reflow this page").clicked() {
+                        apply = Some(i);
+                    }
+                    if ui.small_button("✕").clicked() {
+                        delete = Some(i);
+                    }
+                });
+                ui.horizontal(|ui| {
+                    let mut q = s.size_pt / PT_PER_Q;
+                    if theme::ValueBar::new("Size", 8.0, 60.0)
+                        .decimals(1)
+                        .suffix(" Q")
+                        .width(150.0)
+                        .show(ui, &mut q)
+                        .changed()
+                    {
+                        s.size_pt = q * PT_PER_Q;
+                    }
+                    ui.weak(format!("= {:.1} pt", s.size_pt));
+                    let spacing_label = match s.line_spacing {
+                        LineSpacing::Auto => "line: auto".to_owned(),
+                        LineSpacing::Percent(p) => format!("line: {p:.0} %"),
+                        LineSpacing::Pt(p) => format!("line: {p:.1} pt"),
+                    };
+                    egui::ComboBox::from_id_salt(("mn.style.line", i))
+                        .width(96.0)
+                        .selected_text(spacing_label)
+                        .show_ui(ui, |ui| {
+                            if ui.selectable_label(false, "auto").clicked() {
+                                s.line_spacing = LineSpacing::Auto;
+                            }
+                            for p in [125.0, 150.0, 175.0, 200.0] {
+                                if ui.selectable_label(false, format!("{p:.0} %")).clicked() {
+                                    s.line_spacing = LineSpacing::Percent(p);
+                                }
+                            }
+                        });
+                });
+            }
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("New style").clicked() {
+                    add = true;
+                }
+                if ui
+                    .button("Re-style every page in the work")
+                    .on_hover_text(
+                        "saves all styles, then re-styles every other page DIRECTLY — \
+                         undo covers this page only",
+                    )
+                    .clicked()
+                {
+                    all_pages = true;
+                }
+            });
+        });
+    if let Some(i) = apply {
+        let s = draft[i].clone();
+        if s.name.trim().is_empty() {
+            app.set_status("a style needs a name");
+        } else {
+            app.push_cmd(crate::cmd::AppCmd::TextStyleUpsert(s));
+        }
+    }
+    if let Some(i) = delete {
+        let s = draft.remove(i);
+        if !s.name.trim().is_empty() {
+            app.push_cmd(crate::cmd::AppCmd::TextStyleDelete(s.name));
+        }
+    }
+    if add {
+        draft.push(TextStyle {
+            name: format!("Style {}", draft.len() + 1),
+            font: String::new(),
+            size_pt: 20.0 * PT_PER_Q,
+            color: [0, 0, 0],
+            outline_px: 0.0,
+            outline_color: [255, 255, 255],
+            letter_spacing_pt: 0.0,
+            line_spacing: LineSpacing::Percent(150.0),
+        });
+    }
+    if all_pages {
+        for s in &draft {
+            if !s.name.trim().is_empty() {
+                app.push_cmd(crate::cmd::AppCmd::TextStyleUpsert(s.clone()));
+            }
+        }
+        app.push_cmd(crate::cmd::AppCmd::TextStyleAllPages);
+    }
+    app.styles_draft = draft;
+    if !open {
+        app.text_styles_open = false;
+        app.styles_draft.clear();
     }
 }

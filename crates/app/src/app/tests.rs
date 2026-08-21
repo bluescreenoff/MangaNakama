@@ -2147,6 +2147,76 @@ fn gpu_dabs_toggle_command_pipeline() {
     );
 }
 
+/// TX-styles: editing a work style re-styles every item carrying its
+/// name on the page in ONE undo press, and leaves free text alone.
+#[test]
+fn text_style_edit_reflows_the_page_as_one_undo() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    if app.text_engine.is_none() {
+        println!("[test] SKIP: no text engine");
+        return;
+    }
+    let type_one = |app: &mut App, at: [f32; 2], style: Option<&str>, s: &str| {
+        app.text_style_new = style.map(str::to_owned);
+        app.start_new_text(at, None);
+        for u in s.encode_utf16() {
+            app.text_char(u);
+        }
+        app.commit_text_edit();
+    };
+    type_one(&mut app, [40.0, 40.0], Some("Dialogue"), "ab");
+    type_one(&mut app, [140.0, 40.0], Some("Dialogue"), "cd");
+    type_one(&mut app, [240.0, 40.0], None, "ef");
+
+    let snapshot = |app: &App| -> Vec<(f32, Option<String>)> {
+        app.doc
+            .layers
+            .iter()
+            .filter_map(|l| l.texts())
+            .flat_map(|ts| ts.texts.iter().map(|t| (t.size_pt, t.style.clone())))
+            .collect()
+    };
+    let before = snapshot(&app);
+    assert_eq!(
+        before.iter().filter(|(_, s)| s.as_deref() == Some("Dialogue")).count(),
+        2,
+        "two texts follow the style: {before:?}"
+    );
+    let free_size = before
+        .iter()
+        .find(|(_, s)| s.is_none())
+        .expect("one free text")
+        .0;
+
+    let mut style = app
+        .doc
+        .text_styles
+        .iter()
+        .find(|s| s.name == "Dialogue")
+        .expect("default styles seeded")
+        .clone();
+    style.size_pt = 33.0;
+    crate::cmd::dispatch(&mut app, AppCmd::TextStyleUpsert(style));
+    let after = snapshot(&app);
+    for (pt, s) in &after {
+        if s.as_deref() == Some("Dialogue") {
+            assert_eq!(*pt, 33.0, "styled text reflowed");
+        } else {
+            assert_eq!(*pt, free_size, "free text untouched");
+        }
+    }
+
+    crate::cmd::dispatch(&mut app, AppCmd::Undo);
+    assert_eq!(
+        snapshot(&app),
+        before,
+        "one undo press takes the whole restyle back"
+    );
+}
+
 /// Round 34: the Tool Property typography rows (align / frame position /
 /// character spacing / line spacing / strikethrough) apply LIVE to the
 /// item being edited — no per-change history — and the whole session
@@ -4413,6 +4483,7 @@ fn story_fields_move_across_pages() {
         tcy: Vec::new(),
         auto_tcy: 0,
         fonts: Vec::new(),
+        style: None,
         cache: None,
     };
     let l0 = app.doc.add_text_layer(
@@ -4510,6 +4581,7 @@ fn story_same_page_move_is_refused() {
         tcy: Vec::new(),
         auto_tcy: 0,
         fonts: Vec::new(),
+        style: None,
         cache: None,
     };
     let l0 = app.doc.add_text_layer(
@@ -5170,6 +5242,7 @@ fn story_editor_creates_splits_merges() {
         tcy: Vec::new(),
         auto_tcy: 0,
         fonts: Vec::new(),
+        style: None,
         cache: None,
     };
     let l0 = app.doc.add_text_layer(
@@ -5256,6 +5329,7 @@ fn story_editor_writes_replaces_and_restyles() {
                 ruby_style: Default::default(),
                 tcy: Vec::new(),
                 auto_tcy: 0,
+                style: None,
                 cache: None,
             }],
         });

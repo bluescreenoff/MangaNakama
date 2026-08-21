@@ -1170,6 +1170,11 @@ pub struct Document {
     /// on every page; a length mismatch refuses on apply rather than
     /// guessing. Persisted as `mnc-comps` on the ORA image element.
     pub comps: Vec<LayerComp>,
+    /// TX-styles: the work's named text styles (dialogue / thought / …).
+    /// Seeded with JP-convention defaults on a new document; persists as
+    /// one `mnc-textstyles` attr on the ORA image element (mnc-comps'
+    /// pattern). Items reference styles by NAME (`TextItem::style`).
+    pub text_styles: Vec<crate::text::TextStyle>,
     /// PA-001: the paper under the stack. Drive it with `set_paper_colour`
     /// (undoable) / `set_paper_visible` (view state, like a layer's eye).
     pub paper: Paper,
@@ -1299,6 +1304,7 @@ impl Document {
             mask_op_snapshot: None,
             pending_op_label: None,
             comps: Vec::new(),
+            text_styles: crate::text::TextStyle::defaults(),
             paper: Paper::default(),
             rulers: crate::ruler::Rulers::default(),
         }

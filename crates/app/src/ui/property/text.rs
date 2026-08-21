@@ -573,6 +573,81 @@ pub(crate) fn sec_text_edge(ui: &mut egui::Ui, app: &mut App) {
     });
 }
 
+/// TX-styles: the WORK style row — pick a named style (Dialogue, Thought…)
+/// for the selected text, or set the new-text defaults from one; Styles…
+/// opens the manager where editing a style reflows the chapter.
+pub(crate) fn sec_text_workstyle(ui: &mut egui::Ui, app: &mut App) {
+    let target = crate::text_edit::property_target(app);
+    let current: Option<String> = target.and_then(|(li, ti)| {
+        app.doc
+            .layers
+            .get(li)?
+            .texts()?
+            .texts
+            .get(ti)?
+            .style
+            .clone()
+    });
+    ui.horizontal(|ui| {
+        let shown = current
+            .clone()
+            .or_else(|| app.text_style_new.clone())
+            .unwrap_or_else(|| "(none)".into());
+        egui::ComboBox::from_id_salt("mn.text.workstyle")
+            .width(118.0)
+            .selected_text(shown)
+            .show_ui(ui, |ui| {
+                let names: Vec<String> =
+                    app.doc.text_styles.iter().map(|s| s.name.clone()).collect();
+                for n in names {
+                    let picked = current.as_deref() == Some(n.as_str());
+                    if ui.selectable_label(picked, &n).clicked() && !picked {
+                        if let Some((li, ti)) = target {
+                            app.push_cmd(crate::cmd::AppCmd::TextStyleAssign {
+                                layer: li,
+                                item: ti,
+                                name: Some(n.clone()),
+                            });
+                        }
+                        // Either way the style becomes the new-text default.
+                        if let Some(s) =
+                            app.doc.text_styles.iter().find(|s| s.name == n).cloned()
+                        {
+                            if !s.font.is_empty() {
+                                app.text_font = s.font.clone();
+                            }
+                            app.text_size_pt = s.size_pt;
+                            app.text_letter_pt = s.letter_spacing_pt;
+                            app.text_line = s.line_spacing;
+                            app.text_style_new = Some(n.clone());
+                        }
+                    }
+                }
+                ui.separator();
+                if ui.selectable_label(false, "(none)").clicked() {
+                    if let Some((li, ti)) = target
+                        && current.is_some()
+                    {
+                        app.push_cmd(crate::cmd::AppCmd::TextStyleAssign {
+                            layer: li,
+                            item: ti,
+                            name: None,
+                        });
+                    }
+                    app.text_style_new = None;
+                }
+            })
+            .response
+            .on_hover_text(
+                "the work style this text follows — edit the style and every \
+                 balloon carrying it reflows, chapter-wide",
+            );
+        if ui.button("Styles…").clicked() {
+            app.text_styles_open = true;
+        }
+    });
+}
+
 pub(crate) fn sec_text_guide(ui: &mut egui::Ui, app: &mut App) {
     ui.weak(if app.text_editing() {
         "typing… Esc commits (one undo step)"

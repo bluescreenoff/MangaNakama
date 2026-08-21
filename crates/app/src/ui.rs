@@ -40,7 +40,7 @@ use color::picker_sync;
 use dialogs::{
     adjust_window, canvas_size_window, detail_window, export_all_window, feedback_window,
     filter_window, gen_lines_window, goto_page_window, hud, new_doc_window, prefs_window,
-    property_detail_window, spread_window, story_window, work_settings_window, workspace_window,
+    property_detail_window, spread_window, story_window, text_styles_window, work_settings_window, workspace_window,
 };
 use dock::column;
 use overlay::canvas_overlay;
@@ -136,6 +136,7 @@ pub fn build(ui: &mut egui::Ui, app: &mut App) {
     gen_lines_window(ui.ctx(), app);
     filter_window(ui.ctx(), app);
     workspace_window(ui.ctx(), app);
+    text_styles_window(ui.ctx(), app);
     detail_window(ui.ctx(), app);
     property_detail_window(ui.ctx(), app);
     feedback_window(ui.ctx(), app);

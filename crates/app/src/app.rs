@@ -762,6 +762,11 @@ pub struct App {
     pub text_frame_align: FrameAlign,
     pub text_letter_pt: f32,
     pub text_line: LineSpacing,
+    /// TX-styles: the work style newly created text will carry.
+    pub text_style_new: Option<String>,
+    /// TX-styles editor window + its working copy (dropped on close).
+    pub text_styles_open: bool,
+    pub styles_draft: Vec<mn_core::text::TextStyle>,
     /// Auto 縦中横 for new text (TX-062): the longest alphanumeric run that
     /// stands upright by itself, 0 = off. 2 out of the box — a page number
     /// or a 22時 is the case this exists for, and CSP ships the same number.
@@ -1326,6 +1331,9 @@ impl App {
             text_frame_align: FrameAlign::default(),
             text_letter_pt: 0.0,
             text_line: LineSpacing::default(),
+            text_style_new: None,
+            text_styles_open: false,
+            styles_draft: Vec::new(),
             text_auto_tcy: 2,
             font_search: String::new(),
             font_picker_open: false,

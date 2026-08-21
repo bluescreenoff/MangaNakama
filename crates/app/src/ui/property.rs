@@ -238,6 +238,11 @@ pub(crate) struct Section {
     pub body: fn(&mut egui::Ui, &mut App),
 }
 
+const SEC_WORKSTYLE: Section = Section {
+    id: "text.workstyle",
+    title: "Text style",
+    body: sec_text_workstyle,
+};
 const SEC_FONT: Section = Section {
     id: "text.font",
     title: "Font",
@@ -315,6 +320,7 @@ fn prop_sections_for_tool(app: &App) -> Vec<Section> {
                 }]
             } else if app.text_sel.is_some() {
                 vec![
+                    SEC_WORKSTYLE,
                     SEC_FONT,
                     SEC_DIR,
                     SEC_STYLE,
@@ -357,6 +363,7 @@ fn prop_sections_for_tool(app: &App) -> Vec<Section> {
             }
         }
         Tool::Text => vec![
+            SEC_WORKSTYLE,
             SEC_FONT,
             SEC_DIR,
             SEC_STYLE,

@@ -1657,6 +1657,22 @@ pub enum AppCmd {
     // --- text ---------------------------------------------------------------
     /// Commit a text layer's items (Object-tool move/resize/rotate, or an
     /// editing session's single undo step).
+    /// TX-styles: create/update a named work text style and re-style every
+    /// current-page item carrying its name (one undo press).
+    TextStyleUpsert(mn_core::text::TextStyle),
+    /// TX-styles: forget a style; items keep their look, their reference
+    /// clears (they become free-styled).
+    TextStyleDelete(String),
+    /// TX-styles: push the work's styles onto every OTHER page (saved
+    /// directly — undo covers the open page only, like batch).
+    TextStyleAllPages,
+    /// TX-styles: attach (or detach, `None`) a style to one text item,
+    /// restyling it to match.
+    TextStyleAssign {
+        layer: usize,
+        item: usize,
+        name: Option<String>,
+    },
     TextCommit {
         layer: usize,
         texts: mn_core::TextSet,
@@ -3793,6 +3809,97 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             }
         }
 
+        AppCmd::TextStyleUpsert(style) => {
+            match app.doc.text_styles.iter_mut().find(|s| s.name == style.name) {
+                Some(s) => *s = style.clone(),
+                None => app.doc.text_styles.push(style.clone()),
+            }
+            let n = app.apply_text_style_current(&style);
+            app.doc.touch();
+            app.set_status(if n > 0 {
+                format!("style \"{}\": {n} text(s) on this page restyled", style.name)
+            } else {
+                format!("style \"{}\" saved — no text on this page uses it yet", style.name)
+            });
+            app.mark_dirty();
+        }
+        AppCmd::TextStyleDelete(name) => {
+            app.doc.text_styles.retain(|s| s.name != name);
+            // Items keep their look; only the reference clears, layer by
+            // layer through the normal text door so it undoes cleanly.
+            let mut groups = 0usize;
+            for li in 0..app.doc.layers.len() {
+                let hit = app
+                    .doc
+                    .layers
+                    .get(li)
+                    .and_then(|l| l.texts())
+                    .is_some_and(|ts| {
+                        ts.texts.iter().any(|t| t.style.as_deref() == Some(name.as_str()))
+                    });
+                if !hit {
+                    continue;
+                }
+                app.warm_texts(li);
+                let Some(ts) = app.doc.layers.get(li).and_then(|l| l.texts()) else {
+                    continue;
+                };
+                let mut ts = ts.clone();
+                for t in ts.texts.iter_mut() {
+                    if t.style.as_deref() == Some(name.as_str()) {
+                        t.style = None;
+                    }
+                }
+                if app.doc.set_texts(li, ts) {
+                    groups += 1;
+                }
+            }
+            if groups > 1 {
+                app.doc.wrap_recent("Forget text style", groups);
+            }
+            app.doc.touch();
+            app.set_status(format!("style \"{name}\" forgotten — text keeps its look"));
+            app.mark_dirty();
+        }
+        AppCmd::TextStyleAllPages => {
+            let (pages, items) = app.apply_text_styles_other_pages();
+            app.set_status(format!(
+                "styles pushed to the whole work: {items} text(s) on {pages} other page(s) \
+                 restyled (saved directly — undo covers this page only)"
+            ));
+            app.mark_dirty();
+        }
+        AppCmd::TextStyleAssign { layer, item, name } => {
+            let style = name
+                .as_deref()
+                .and_then(|n| app.doc.text_styles.iter().find(|s| s.name == n))
+                .cloned();
+            let Some(ts) = app.doc.layers.get(layer).and_then(|l| l.texts()) else {
+                return;
+            };
+            if item >= ts.texts.len() {
+                return;
+            }
+            app.warm_texts(layer);
+            let mut ts = app.doc.layers[layer].texts().unwrap().clone();
+            match (&name, style) {
+                (Some(_), Some(s)) => {
+                    let dpi = app.doc_dpi();
+                    s.apply(&mut ts.texts[item]);
+                    if let Some(engine) = app.text_engine.as_ref() {
+                        ts.texts[item].cache = engine.render(&ts.texts[item], dpi).ok().flatten();
+                    }
+                }
+                _ => ts.texts[item].style = None,
+            }
+            if app.doc.set_texts(layer, ts) {
+                app.set_status(match &name {
+                    Some(n) => format!("text follows style \"{n}\""),
+                    None => "text detached from its style".into(),
+                });
+                app.mark_dirty();
+            }
+        }
         AppCmd::TextCommit { layer, texts } => {
             if app.doc.set_texts(layer, texts) {
                 app.mark_dirty();

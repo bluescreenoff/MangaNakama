@@ -26,6 +26,7 @@ fn dump_item(text: &str, cx: f32, cy: f32) -> mn_core::text::TextItem {
         tcy: Vec::new(),
         auto_tcy: 0,
         fonts: Vec::new(),
+        style: None,
         cache: None,
     }
 }

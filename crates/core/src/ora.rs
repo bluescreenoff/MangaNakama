@@ -299,7 +299,17 @@ pub fn save_to_with<W: Write + Seek>(
     }
 
     zw.start_file("stack.xml", deflated)?;
-    zw.write_all(stack_xml(doc.size.0, doc.size.1, &entries, &doc.comps, doc.paper).as_bytes())?;
+    zw.write_all(
+        stack_xml(
+            doc.size.0,
+            doc.size.1,
+            &entries,
+            &doc.comps,
+            &doc.text_styles,
+            doc.paper,
+        )
+        .as_bytes(),
+    )?;
 
     // 3. mergedimage.png — the flattened document, alpha preserved. SCREEN
     // semantics (drafts included): this image is also the Pages-panel
@@ -427,6 +437,7 @@ fn stack_xml(
     h: u32,
     entries: &[LayerEntry],
     comps: &[crate::doc::LayerComp],
+    styles: &[crate::text::TextStyle],
     paper: crate::doc::Paper,
 ) -> String {
     let mut s = String::with_capacity(256 + entries.len() * 160);
@@ -437,6 +448,11 @@ fn stack_xml(
         && let Ok(j) = serde_json::to_string(comps)
     {
         s.push_str(&format!(" mnc-comps=\"{}\"", xml_escape(&j)));
+    }
+    // TX-styles ride the same way — ALWAYS written (an emptied list must
+    // not read back as "old file, seed the defaults again").
+    if let Ok(j) = serde_json::to_string(styles) {
+        s.push_str(&format!(" mnc-textstyles=\"{}\"", xml_escape(&j)));
     }
     // PA-001: the paper rides the image element too — it belongs to the
     // document, not to any layer. Both attrs are OMITTED at the default
@@ -645,10 +661,15 @@ pub fn load_from<R: Read + Seek>(source: R) -> Result<Document, OraError> {
         f.read_to_string(&mut s)?;
         s
     };
-    let (w, h, parsed, comps, paper) = parse_stack_xml(&xml)?;
+    let (w, h, parsed, comps, styles, paper) = parse_stack_xml(&xml)?;
 
     let mut doc = Document::new(w.max(1), h.max(1));
     doc.paper = paper;
+    // TX-styles: absent attr = a pre-styles file, seed the defaults
+    // (Document::new already did); present = the file's word, even empty.
+    if let Some(s) = styles {
+        doc.text_styles = s;
+    }
     doc.layers.clear();
 
     // stack.xml is top-first; push in reverse so layers[0] is the bottom.
@@ -1006,9 +1027,18 @@ fn parse_tile_list(s: &str) -> Vec<TileIdx> {
 /// groups load as folders too). A child tagged `mnc-folder-raster` is our own
 /// saved fallback raster of a frame folder — it is skipped, the vectors on
 /// the stack element rebuild it.
-fn parse_stack_xml(
-    xml: &str,
-) -> Result<(u32, u32, Vec<ParsedLayer>, Vec<crate::doc::LayerComp>, Paper), OraError> {
+type ParsedStack = (
+    u32,
+    u32,
+    Vec<ParsedLayer>,
+    Vec<crate::doc::LayerComp>,
+    // TX-styles: `None` = the attr is absent (a pre-styles file) and the
+    // loader seeds the defaults; `Some(vec![])` = deliberately emptied.
+    Option<Vec<crate::text::TextStyle>>,
+    Paper,
+);
+
+fn parse_stack_xml(xml: &str) -> Result<ParsedStack, OraError> {
     use quick_xml::events::Event;
 
     let mut reader = quick_xml::Reader::from_str(xml);
@@ -1016,6 +1046,7 @@ fn parse_stack_xml(
 
     let (mut w, mut h) = (0u32, 0u32);
     let mut comps: Vec<crate::doc::LayerComp> = Vec::new();
+    let mut styles: Option<Vec<crate::text::TextStyle>> = None;
     // PA-001: absent attrs mean the default paper, which is what every file
     // written before PA-001 says.
     let mut paper = Paper::default();
@@ -1068,6 +1099,12 @@ fn parse_stack_xml(
                 if let Some(j) = get("mnc-comps") {
                     if let Ok(c) = serde_json::from_str::<Vec<crate::doc::LayerComp>>(j) {
                         comps = c;
+                    }
+                }
+                // TX-styles: doc-level named text styles.
+                if let Some(j) = get("mnc-textstyles") {
+                    if let Ok(s) = serde_json::from_str::<Vec<crate::text::TextStyle>>(j) {
+                        styles = Some(s);
                     }
                 }
                 // PA-001: doc-level paper on the image element. An
@@ -1181,7 +1218,7 @@ fn parse_stack_xml(
     if w == 0 || h == 0 {
         return Err(OraError("stack.xml has no image size".into()));
     }
-    Ok((w, h, layers, comps, paper))
+    Ok((w, h, layers, comps, styles, paper))
 }
 
 #[cfg(test)]
@@ -1620,6 +1657,43 @@ mod tests {
         );
     }
 
+    /// TX-styles ride the image element (`mnc-textstyles`) and items keep
+    /// their style names; an EMPTIED list must read back empty, not
+    /// re-seed the defaults.
+    #[test]
+    fn text_styles_roundtrip() {
+        let mut doc = Document::new(96, 96);
+        assert!(!doc.text_styles.is_empty(), "new docs seed defaults");
+        doc.text_styles[0].size_pt = 31.5;
+        doc.text_styles[0].font = "Antique".into();
+        let mut item =
+            crate::text::TextItem::new([10.0, 10.0], "Gothic".into(), 12.0, [0, 0, 0], true);
+        item.style = Some(doc.text_styles[0].name.clone());
+        doc.add_text_layer(
+            "Dialogue",
+            crate::text::TextSet { texts: vec![item] },
+        );
+
+        let back = roundtrip(&doc);
+        assert_eq!(back.text_styles, doc.text_styles, "styles survived");
+        assert_eq!(
+            back.layers
+                .last()
+                .and_then(|l| l.texts())
+                .and_then(|ts| ts.texts[0].style.clone()),
+            Some(doc.text_styles[0].name.clone()),
+            "the item still names its style"
+        );
+
+        let mut none = Document::new(64, 64);
+        none.text_styles.clear();
+        let back = roundtrip(&none);
+        assert!(
+            back.text_styles.is_empty(),
+            "an emptied list stays empty (attr always written)"
+        );
+    }
+
     /// FB-overflow rides the file (`mnc-escape`), non-folder rows only.
     #[test]
     fn escape_flag_roundtrips() {
@@ -1716,7 +1790,7 @@ mod tests {
     <layer name="odd &amp; quoted" src="data/b.png" composite-op="svg:plus-lighter" visibility="hidden"></layer>
   </stack>
 </image>"#;
-        let (w, h, layers, _comps, paper) = parse_stack_xml(xml).unwrap();
+        let (w, h, layers, _comps, _styles, paper) = parse_stack_xml(xml).unwrap();
         assert_eq!((w, h), (100, 50));
         assert_eq!(
             paper,
