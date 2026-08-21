@@ -22,6 +22,7 @@ mod materials;
 mod navigator;
 mod overlay;
 mod pages;
+mod batch;
 mod pattern;
 mod property;
 mod reader;
@@ -121,6 +122,7 @@ pub fn build(ui: &mut egui::Ui, app: &mut App) {
     canvas_size_window(ui.ctx(), app);
     prefs_window(ui.ctx(), app);
     pattern::pattern_window(ui.ctx(), app);
+    batch::batch_window(ui.ctx(), app);
     adjust_window(ui.ctx(), app);
     goto_page_window(ui.ctx(), app);
     spread_window(ui.ctx(), app);

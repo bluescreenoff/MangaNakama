@@ -1332,6 +1332,11 @@ pub enum AppCmd {
     /// Vector inking (docs/VECTOR-INKING.md): a raster layer that RECORDS
     /// its strokes as editable geometry beside the pixels.
     AddVectorLayer,
+    /// Batch layer operations (app/batch.rs): open, apply, export.
+    BatchOpsOpen,
+    BatchApply,
+    BatchExportPngs,
+    BatchExportPngsPath(PathBuf),
     /// Delete the Object tool's selected recorded stroke (Del).
     VectorDelete { stroke: usize },
     /// New empty folder above the active layer (CSP layer-palette button).
@@ -3155,6 +3160,20 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             app.renderer.invalidate();
             app.set_status("vector layer: strokes record as editable geometry");
             app.mark_dirty();
+        }
+        AppCmd::BatchOpsOpen => {
+            app.batch.open = true;
+        }
+        AppCmd::BatchApply => {
+            let s = app.batch_apply();
+            app.set_status(s);
+        }
+        AppCmd::BatchExportPngs => {
+            // Resolved to BatchExportPngsPath by `main::pump_commands`.
+        }
+        AppCmd::BatchExportPngsPath(dir) => {
+            let s = app.batch_export_pngs(&dir);
+            app.set_status(s);
         }
         AppCmd::VectorDelete { stroke } => {
             let li = app.doc.active;

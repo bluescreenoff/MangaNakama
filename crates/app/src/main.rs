@@ -1115,6 +1115,10 @@ fn resolve_dialog(hwnd: HWND, cmd: AppCmd) -> Option<AppCmd> {
             .set_title("Export One Image Set Per Layer Comp")
             .pick_folder()
             .map(AppCmd::CompExportAllPath),
+        AppCmd::BatchExportPngs => rfd::FileDialog::new()
+            .set_title("Export layer PNGs into…")
+            .pick_folder()
+            .map(AppCmd::BatchExportPngsPath),
         AppCmd::ExportPsd => {
             let name = current()
                 .and_then(|p| {

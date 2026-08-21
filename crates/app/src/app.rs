@@ -27,6 +27,7 @@ mod lasso_tests;
 mod layout;
 pub mod materials;
 mod pages;
+pub mod batch;
 pub mod pattern;
 pub(crate) mod vector_edit;
 pub mod prefs;
@@ -434,6 +435,8 @@ pub struct App {
     /// User preferences (`prefs.txt` beside the exe — deliberately NOT
     /// `ui.txt`, which is the file people delete to fix a wrecked dock).
     pub prefs: Prefs,
+    /// Batch layer operations dialog state (`app/batch.rs`). Session-only.
+    pub batch: batch::BatchOps,
     /// Pattern Studio window state (`app/pattern.rs`). Session-only.
     pub pattern: pattern::PatternStudio,
     /// Vector inking (docs/VECTOR-INKING.md): the in-flight stroke's
@@ -1292,6 +1295,7 @@ impl App {
             recent_fonts: layout.recent_fonts.clone(),
             layout,
             prefs,
+            batch: batch::BatchOps::default(),
             pattern: pattern::PatternStudio::default(),
             vector_capture: None,
             vector_sel: None,

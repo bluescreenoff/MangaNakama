@@ -66,9 +66,11 @@ Roughly in order. None of this is promised by a date.
    background benchmark decides, never a blanket default. Still CPU-only:
    smudge combined with wash (the sampler would have to read the in-flight
    wash buffer) and the spectral-paint / colorize / posterize presets.
-2. **Recordable actions, and a small scripting surface.** The real pain is
-   batch operations over layers — rename, renumber, apply tone, export — not
-   macro recording for its own sake.
+2. **A small scripting surface.** The batch half shipped (Layer > Batch
+   operations: rename/renumber by pattern, apply/clear tone as one undo
+   step, export a PNG per layer — scoped by all/folder/name-prefix).
+   What remains is the scripting surface proper, if real use ever asks
+   for more than the dialog covers.
 3. **HDR / linear-light colour.**
 4. **The manual, kept honest.** Static HTML beside the executable exists;
    its job is the quirks — the interlocks you would otherwise discover by

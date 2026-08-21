@@ -2031,6 +2031,18 @@ impl Document {
                 self.rulers = rulers;
                 Some(inverse)
             }
+            UndoGroup::Compound(groups) => {
+                // Members swap in order; the inverse carries them REVERSED
+                // so redo replays forward. Members cannot fail here for the
+                // same reason any group's layer lookup cannot: a structure
+                // change would have cleared the history.
+                let mut inverses = Vec::with_capacity(groups.len());
+                for g in groups {
+                    inverses.push(self.swap_group(g)?);
+                }
+                inverses.reverse();
+                Some(UndoGroup::Compound(inverses))
+            }
         }
     }
 
@@ -3151,6 +3163,40 @@ impl Document {
         self.clear_history();
         self.touch();
         true
+    }
+
+    /// Batch: one tone change across many layers as ONE undo step
+    /// (`UndoGroup::Compound` of the individual `Tones` groups). Layers
+    /// that refuse (folders, vector kinds, already-equal) are skipped;
+    /// returns how many changed. Zero changes push nothing.
+    pub fn set_tone_many(
+        &mut self,
+        indices: &[usize],
+        tone: Option<crate::tone::ToneParams>,
+    ) -> usize {
+        let mut members = Vec::new();
+        for &i in indices {
+            let Some(l) = self.layers.get_mut(i) else {
+                continue;
+            };
+            if l.folder || l.is_vector() || l.tone == tone {
+                continue;
+            }
+            let before = l.tone;
+            l.tone = tone;
+            l.tone_tiles = None;
+            members.push(UndoGroup::Tones {
+                layer: i,
+                tone: before,
+            });
+        }
+        let n = members.len();
+        if n > 0 {
+            self.history
+                .push_labeled("Batch tone", UndoGroup::Compound(members));
+            self.touch();
+        }
+        n
     }
 
     pub fn rename_layer(&mut self, index: usize, name: impl Into<String>) -> bool {

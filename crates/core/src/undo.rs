@@ -116,6 +116,13 @@ pub enum UndoGroup {
         tiles: Vec<(TileIdx, Option<Arc<Tile>>)>,
         strokes: crate::stroke_set::StrokeSet,
     },
+    /// A TRANSACTION: several groups, one user gesture, one undo press
+    /// (batch layer operations). Swapping swaps the members in order and
+    /// the inverse carries them REVERSED, so redo replays forward again.
+    /// Document-level for [`UndoGroup::layer`] purposes — safe because a
+    /// layer-STRUCTURE change clears the whole history (the enum's doc
+    /// comment), so member indices cannot outlive their meaning.
+    Compound(Vec<UndoGroup>),
     /// PA-001: the paper colour before the change. The only DOCUMENT-level
     /// group — it belongs to no layer, which is why [`UndoGroup::layer`]
     /// returns an `Option`. The paper's EYE is not in here on purpose: it is
@@ -140,6 +147,7 @@ impl UndoGroup {
             | UndoGroup::VectorStroke { tiles, .. }
             | UndoGroup::VectorEdit { tiles, .. }
             | UndoGroup::VectorSet { tiles, .. } => tiles.len(),
+            UndoGroup::Compound(groups) => groups.iter().map(UndoGroup::tile_count).sum(),
             UndoGroup::Frames { .. }
             | UndoGroup::Balloons { .. }
             | UndoGroup::Texts { .. }
@@ -167,7 +175,7 @@ impl UndoGroup {
             | UndoGroup::VectorStroke { layer, .. }
             | UndoGroup::VectorEdit { layer, .. }
             | UndoGroup::VectorSet { layer, .. } => Some(*layer),
-            UndoGroup::Paper { .. } | UndoGroup::Rulers { .. } => None,
+            UndoGroup::Compound(..) | UndoGroup::Paper { .. } | UndoGroup::Rulers { .. } => None,
         }
     }
 }
