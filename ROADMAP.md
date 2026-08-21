@@ -47,8 +47,14 @@ tab beside the Layers palette records sequences of layer commands (new
 layer/folder/frame folder, rename, border effect, layer colour, tone,
 blur, select above/below) and replays them — one press to run, one undo
 to take the whole run back, steps toggleable per run like Clip Studio's;
-a fresh install ships with starter actions. Ctrl+K opens a command
-palette over every command and every brush. A layer inside a frame
+a fresh install ships with starter actions, and sequences are editable
+by hand (add a step at any position, edit its parameters inline, drag to
+reorder, duplicate, delete). Structural layer operations — new layer,
+delete, move, duplicate, merge, divide — are ordinary undo steps; the
+undo history survives them instead of being wiped. Ctrl+K opens a
+search-everything palette: every command, brush, sub tool, auto action,
+material, layer, page, recent file, text style, manual topic and saved
+workspace, with VSCode-style sigil filters. A layer inside a frame
 folder can burst out of the panel (drawn over the border, outside the
 mask, panel stays editable), and a plain folder's border effect doubles
 as "knock out behind" — the white mat under balloons and SFX, generated
