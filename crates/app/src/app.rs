@@ -406,6 +406,11 @@ pub struct App {
     /// (and that folder's own header). Matches nothing when the active
     /// layer sits in no frame folder — the count row says so.
     pub layer_filter_this_frame: bool,
+    /// The filter row hides behind the palette's funnel button; closing
+    /// resets every filter control so nothing narrows invisibly.
+    pub layer_filter_open: bool,
+    /// Only rows whose OWN label is exactly this standard swatch colour.
+    pub layer_filter_label: Option<[u8; 3]>,
     /// Material bank (TRIAGE 133): folders (shipped starter first, then
     /// user-added), scanned items, lazy thumbnails, use counters, the
     /// palette's search + sort + tiling state.
@@ -1230,6 +1235,8 @@ impl App {
             layer_filter_ref_only: false,
             layer_filter_no_draft: false,
             layer_filter_this_frame: false,
+            layer_filter_open: false,
+            layer_filter_label: None,
             material_search: String::new(),
             material_sort_uses: false,
             material_tile: false,

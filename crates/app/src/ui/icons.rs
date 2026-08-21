@@ -90,6 +90,8 @@ pub enum Icon {
     Reference,
     /// Layer flags: draft layer (red-X, CSP 下書き).
     Draft,
+    /// Layers palette: the row-filter funnel toggle.
+    Funnel,
     /// Figure tool: a diagonal straight line between two endpoint dots.
     Figure,
     /// Figure ▸ rectangle.
@@ -660,6 +662,12 @@ pub fn paint(p: &Painter, r: Rect, icon: Icon, color: Color32) {
             // X just outside the box's top-right corner.
             p.line(poly(r, &[(0.76, 0.12), (0.94, 0.30)]), thin);
             p.line(poly(r, &[(0.94, 0.12), (0.76, 0.30)]), thin);
+        }
+        Icon::Funnel => {
+            // The classic funnel: wide mouth tapering into a stem.
+            p.line(poly(r, &[(0.12, 0.18), (0.88, 0.18)]), thin);
+            p.line(poly(r, &[(0.12, 0.18), (0.42, 0.54), (0.42, 0.86)]), thin);
+            p.line(poly(r, &[(0.88, 0.18), (0.58, 0.54), (0.58, 0.86)]), thin);
         }
         Icon::SelDrawOutside => {
             // Selection box with a pen stroke crossing its border: the

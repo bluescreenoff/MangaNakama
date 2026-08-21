@@ -600,6 +600,10 @@ pub(crate) struct LayerFilter {
     kind: LayerFilterKind,
     ref_only: bool,
     no_draft: bool,
+    /// Only rows wearing exactly this palette colour — their OWN label,
+    /// not one inherited from a folder (the inherited tint is display
+    /// convenience; the label is what the artist assigned).
+    label: Option<[u8; 3]>,
     /// SL-003: the active layer's frame folder block (header included).
     frame_scope: Option<std::ops::Range<usize>>,
     /// The scope was ASKED for — with `frame_scope` None that means the
@@ -641,6 +645,11 @@ impl LayerFilter {
         if self.no_draft && l.draft {
             return false;
         }
+        if let Some(c) = self.label
+            && l.label != Some(c)
+        {
+            return false;
+        }
         match &self.frame_scope {
             Some(r) => r.contains(&i),
             None => !self.frame_scope_wanted,
@@ -671,6 +680,7 @@ pub(crate) fn build_filter(app: &App) -> Option<LayerFilter> {
         && app.layer_filter_kind == LayerFilterKind::All
         && !app.layer_filter_ref_only
         && !app.layer_filter_no_draft
+        && app.layer_filter_label.is_none()
         && !wanted
     {
         return None;
@@ -680,6 +690,7 @@ pub(crate) fn build_filter(app: &App) -> Option<LayerFilter> {
         kind: app.layer_filter_kind,
         ref_only: app.layer_filter_ref_only,
         no_draft: app.layer_filter_no_draft,
+        label: app.layer_filter_label,
         frame_scope: wanted
             .then(|| active_frame_folder(&app.doc, app.doc.active))
             .flatten()
@@ -916,6 +927,30 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
             if icon_btn(ui, Icon::Trash, cmd_s, false, true, "Delete layer").clicked() {
                 app.push_cmd(AppCmd::RemoveLayer);
             }
+            // The funnel: the filter row hides behind it (audit leftover —
+            // most sessions never filter, so the row was dead height).
+            // Closing RESETS every control: a filter narrowing the list
+            // from behind a closed funnel would read as lost layers.
+            if icon_btn(
+                ui,
+                Icon::Funnel,
+                cmd_s,
+                app.layer_filter_open,
+                true,
+                "Filter rows (closing clears the filter)",
+            )
+            .clicked()
+            {
+                app.layer_filter_open = !app.layer_filter_open;
+                if !app.layer_filter_open {
+                    app.layer_search.clear();
+                    app.layer_filter_kind = LayerFilterKind::All;
+                    app.layer_filter_ref_only = false;
+                    app.layer_filter_no_draft = false;
+                    app.layer_filter_this_frame = false;
+                    app.layer_filter_label = None;
+                }
+            }
         });
     });
 
@@ -923,31 +958,65 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
     // already lists the stack rather than a second window listing it
     // again): name substring beside a type + property dropdown. Same
     // shape as the Material palette's search row.
-    ui.horizontal(|ui| {
-        let w = (ui.available_width() - 94.0).clamp(44.0, 150.0);
-        ui.add(
-            egui::TextEdit::singleline(&mut app.layer_search)
-                .hint_text("filter")
-                .desired_width(w),
-        )
-        .on_hover_text("show only layers whose name contains this (SL-004)");
-        egui::ComboBox::from_id_salt("mn.layers.filter")
-            .width(84.0)
-            .selected_text(app.layer_filter_kind.label())
-            .show_ui(ui, |ui| {
-                for k in LayerFilterKind::ALL {
-                    ui.selectable_value(&mut app.layer_filter_kind, k, k.label());
-                }
-                ui.separator();
-                ui.checkbox(&mut app.layer_filter_ref_only, "reference only");
-                ui.checkbox(&mut app.layer_filter_no_draft, "hide drafts");
-                ui.checkbox(&mut app.layer_filter_this_frame, "this frame folder")
-                    .on_hover_text(
-                        "only the koma folder holding the active layer — the one that earns its keep on a 200-layer page",
-                    );
-            });
-    });
-    ui.add_space(1.0);
+    if app.layer_filter_open {
+        ui.horizontal(|ui| {
+            let w = (ui.available_width() - 94.0).clamp(44.0, 150.0);
+            ui.add(
+                egui::TextEdit::singleline(&mut app.layer_search)
+                    .hint_text("filter")
+                    .desired_width(w),
+            )
+            .on_hover_text("show only layers whose name contains this (SL-004)");
+            egui::ComboBox::from_id_salt("mn.layers.filter")
+                .width(84.0)
+                .selected_text(app.layer_filter_kind.label())
+                .show_ui(ui, |ui| {
+                    for k in LayerFilterKind::ALL {
+                        ui.selectable_value(&mut app.layer_filter_kind, k, k.label());
+                    }
+                    ui.separator();
+                    ui.checkbox(&mut app.layer_filter_ref_only, "reference only");
+                    ui.checkbox(&mut app.layer_filter_no_draft, "hide drafts");
+                    ui.checkbox(&mut app.layer_filter_this_frame, "this frame folder")
+                        .on_hover_text(
+                            "only the koma folder holding the active layer — the one that earns its keep on a 200-layer page",
+                        );
+                    ui.separator();
+                    // Layer colour as a filter: the six standard swatches.
+                    // A custom-picked label matches none of them — the
+                    // swatch is the query, exact by design.
+                    ui.horizontal(|ui| {
+                        for c in LABEL_COLORS {
+                            let sel = app.layer_filter_label == Some(c);
+                            let (r, resp) = ui.allocate_exact_size(
+                                egui::vec2(16.0, 16.0),
+                                egui::Sense::click(),
+                            );
+                            ui.painter().rect_filled(
+                                r,
+                                3.0,
+                                egui::Color32::from_rgb(c[0], c[1], c[2]),
+                            );
+                            if sel {
+                                ui.painter().rect_stroke(
+                                    r,
+                                    3.0,
+                                    egui::Stroke::new(2.0, theme::TEXT_STRONG),
+                                    egui::StrokeKind::Inside,
+                                );
+                            }
+                            if resp
+                                .on_hover_text("only rows with this palette colour")
+                                .clicked()
+                            {
+                                app.layer_filter_label = if sel { None } else { Some(c) };
+                            }
+                        }
+                    });
+                });
+        });
+        ui.add_space(1.0);
+    }
 
     refresh_layer_thumbs(ui.ctx(), app);
 
@@ -1340,8 +1409,13 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
         // folders wear their own panelled-folder icon, plain folders flip
         // open/closed with the disclosure state.
         let thumb_h = if row.folder { 26.0 } else { 32.0 };
+        // Pixel-snap the slot: a fractional row centre puts the 32 px
+        // bitmap on half-pixels and bilinear sampling smears a 1 px lip
+        // along one edge (the audit's "thumbnail lip").
+        let ppp = p.ctx().pixels_per_point();
+        let snap = |v: f32| (v * ppp).round() / ppp;
         let tr = egui::Rect::from_min_size(
-            egui::pos2(thumb_left, cy - thumb_h * 0.5),
+            egui::pos2(snap(thumb_left), snap(cy - thumb_h * 0.5)),
             egui::vec2(32.0, thumb_h),
         );
         if row.folder {
@@ -1956,9 +2030,30 @@ mod tests {
             kind,
             ref_only: false,
             no_draft: false,
+            label: None,
             frame_scope: None,
             frame_scope_wanted: false,
         }
+    }
+
+    /// The colour filter matches a row's OWN label exactly — an unlabelled
+    /// row and a differently-labelled row both drop.
+    #[test]
+    fn filter_matches_by_label_colour() {
+        let mut d = stack();
+        let blue = LABEL_COLORS[0];
+        let red = LABEL_COLORS[1];
+        d.layers[0].label = Some(blue);
+        let mut f = plain(LayerFilterKind::All, "");
+        f.label = Some(blue);
+        let hits: Vec<usize> = (0..d.layers.len()).filter(|&i| f.passes(&d, i)).collect();
+        assert_eq!(hits, vec![0], "only the blue-labelled row");
+        f.label = Some(red);
+        assert_eq!(
+            (0..d.layers.len()).filter(|&i| f.passes(&d, i)).count(),
+            0,
+            "no red rows anywhere"
+        );
     }
 
     /// A stack with one of each thing the filter can name.
@@ -2092,6 +2187,7 @@ mod tests {
             kind: LayerFilterKind::All,
             ref_only: false,
             no_draft: false,
+            label: None,
             frame_scope: Some(block.clone()),
             frame_scope_wanted: true,
         };
@@ -2112,6 +2208,7 @@ mod tests {
             kind: LayerFilterKind::All,
             ref_only: false,
             no_draft: false,
+            label: None,
             frame_scope: None,
             frame_scope_wanted: true,
         };

@@ -328,6 +328,17 @@ input value either; they keep a small gap so each one stays grabbable.
 diagonal drawn behind the curve is that untouched line, so "how far from
 nothing am I" stays readable.</div>
 <h2>Filtering the stack</h2>
+<div class="quirk"><b>The filter row hides behind the funnel button, and
+closing the funnel CLEARS the filter.</b> Most sessions never filter, so
+the row only takes its height while you are using it. Closing it resets
+every control — name, type, properties, colour — deliberately: a filter
+still narrowing the stack from behind a closed funnel would read as
+layers gone missing.</div>
+<div class="quirk"><b>A layer colour can be the filter.</b> In the
+filter dropdown, click one of the six standard swatches to show only
+rows wearing exactly that label. It matches the label a row was GIVEN,
+not a tint inherited from its folder, and a custom colour mixed in the
+full picker matches no swatch — the swatch is the query.</div>
 <div class="quirk warn"><b>You cannot drag rows to reorder while a
 filter is on.</b> With rows missing, a drop line drawn between two
 visible rows would land the layer somewhere you cannot see, so the
