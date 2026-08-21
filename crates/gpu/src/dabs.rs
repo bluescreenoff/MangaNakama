@@ -113,8 +113,13 @@ const ZERO_TILE: [u16; 64 * 64 * 4] = [0; 64 * 64 * 4];
 /// Tiles a dab touches — the C's `floor(floor(x ± r_fringe) / 64)` range,
 /// with div_euclid because Rust `/` truncates toward zero (negative tile
 /// coordinates would be wrong).
-pub fn dab_tiles(d: &mn_core::dab::DabParams) -> impl Iterator<Item = TileIdx> {
-    let fringe = d.radius + 1.0;
+pub fn dab_tiles(d: &mn_core::dab::DabParams, stamp: bool) -> impl Iterator<Item = TileIdx> {
+    // #10 amendment 3: an anchored stamp rotates a square — sqrt(2) reach.
+    let fringe = if stamp {
+        d.radius * std::f32::consts::SQRT_2 + 1.0
+    } else {
+        d.radius + 1.0
+    };
     let x0 = (d.x - fringe).floor().div_euclid(64.0) as i32;
     let x1 = (d.x + fringe).floor().div_euclid(64.0) as i32;
     let y0 = (d.y - fringe).floor().div_euclid(64.0) as i32;
@@ -548,9 +553,10 @@ impl crate::Renderer {
         // document bounds. Without this the GPU path materialises tiles the CPU
         // path never would, and the stroke-end readback commits them.
         let (ex, ey) = doc.tile_extent();
+        let stamp = texture.is_some_and(|(_, _, a)| a);
         let dirty: BTreeSet<TileIdx> = dabs
             .iter()
-            .flat_map(dab_tiles)
+            .flat_map(|d| dab_tiles(d, stamp))
             .filter(|i| i.x >= 0 && i.y >= 0 && i.x < ex && i.y < ey)
             .collect();
         if dirty.is_empty() {

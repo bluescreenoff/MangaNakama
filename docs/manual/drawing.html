@@ -133,11 +133,13 @@ editing re-renders ONLY what the layer remembers: ink that got onto a
 vector layer any other way (paste, fill) disappears at the first edit.
 Keep pasted material on ordinary layers.</div>
 
-<h2>Importing brushes (.abr, .gbr, .gih)</h2>
+<h2>Importing brushes (.abr, .sut, .kpp, .gbr, .gih)</h2>
 <div class="quirk"><b>Imported brushes land in the group
 <code>imported</code>, and a set imported twice is suffixed rather than
 overwritten.</b> <b>File ▸ Import Brushes</b> reads Photoshop
-<code>.abr</code> and GIMP <code>.gbr</code>/<code>.gih</code>: each tip
+<code>.abr</code>, Clip Studio sub tools exported as <code>.sut</code>,
+Krita <code>.kpp</code> (dynamics; Krita keeps the tip in a separate
+resource) and GIMP <code>.gbr</code>/<code>.gih</code>: each tip
 becomes a grayscale texture the Tool Property texture picker lists, each
 brush a preset in <code>imported/</code>. Import a set whose name is
 already taken and it arrives as <code>&lt;set&gt;-2</code> — so the copy
@@ -151,10 +153,18 @@ roundness — is baked into the texture bitmap, which for a static value is
 exact rather than approximate. Photoshop's computed (parametric round)
 brushes, which used to be dropped, come in as presets with their hardness,
 roundness and angle.</div>
+<div class="quirk"><b>A sampled tip IS the dab's shape.</b> An imported
+stamp brush lays its tip image down as the dab's coverage — corners and
+all, rotating with the stroke when the file asks for it — rather than
+texturing a round dab. And a set authored at a huge size (some Painter
+sets save kilo-pixel tips) imports with its default size capped at 300 px;
+the authored size is noted in the preset's description, and the Size
+control still goes anywhere.</div>
 <div class="quirk warn"><b>What could NOT be translated is written into
 the preset's description, after “Not translated:”.</b> Fade, tilt and
-direction controllers, per-dab angle jitter (our texture tips do not
-rotate per dab), wet edges, airbrush build-up, dual brush, colour dynamics
+direction controllers, per-dab angle jitter (stamps rotate with the
+stroke's direction, but random per-dab angle has no equivalent), wet
+edges, airbrush build-up, dual brush, colour dynamics
 and pattern texture have no equivalent here. Rather than drawing
 differently and saying nothing, each one is named in the description of
 the preset it belongs to. <span class="why">The same convention the Clip

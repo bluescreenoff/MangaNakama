@@ -169,7 +169,18 @@ fn write_sampled(
     let natural = w.max(h) as f64;
     let (settings, extras, notes, translated) = match info {
         Some(i) => {
-            let (s, extras, notes) = translate(i, i.diameter_px.unwrap_or(natural));
+            // The desc diameter is honest but a terrible DEFAULT past a
+            // point: Painter-style sets author kilo-pixel tips, and a brush
+            // that selects at 985 px reads as broken (owner's eye test).
+            // The preset size is only a default — the ladder still goes
+            // anywhere — so cap it and say so.
+            let authored = i.diameter_px.unwrap_or(natural);
+            let (s, extras, mut notes) = translate(i, authored.min(MAX_DEFAULT_PX));
+            if authored > MAX_DEFAULT_PX {
+                notes.push(format!(
+                    "authored at {authored:.0} px (default capped at {MAX_DEFAULT_PX:.0})"
+                ));
+            }
             (s, extras, notes, true)
         }
         None => (
@@ -211,7 +222,15 @@ fn write_computed(
     hardness_pct: f64,
     sum: &mut ImportSummary,
 ) {
-    let (mut settings, extras, notes) = translate(info, info.diameter_px.unwrap_or(20.0));
+    // Same default-size cap as sampled tips (a 2000 px round brush is a
+    // legal file and a useless default).
+    let authored = info.diameter_px.unwrap_or(20.0);
+    let (mut settings, extras, mut notes) = translate(info, authored.min(MAX_DEFAULT_PX));
+    if authored > MAX_DEFAULT_PX {
+        notes.push(format!(
+            "authored at {authored:.0} px (default capped at {MAX_DEFAULT_PX:.0})"
+        ));
+    }
     set_base(&mut settings, "hardness", (hardness_pct / 100.0).clamp(0.05, 1.0));
     // Roundness R% = the dab squashed to R% of its diameter → engine ratio.
     let ratio = (100.0 / info.roundness_pct).clamp(1.0, 10.0);
@@ -290,6 +309,10 @@ pub(super) fn write_brush(
 // ---------------------------------------------------------------------------
 
 /// The engine's radius is `exp(radius_logarithmic)` — ln, NOT log2.
+/// The largest DEFAULT size an import may select at. Only the default: the
+/// authored size is preserved in a note and the Size control goes anywhere.
+pub(super) const MAX_DEFAULT_PX: f64 = 300.0;
+
 pub(super) fn rlog(diameter_px: f64) -> f64 {
     (diameter_px / 2.0).max(0.5).ln().clamp(-2.0, 6.2)
 }

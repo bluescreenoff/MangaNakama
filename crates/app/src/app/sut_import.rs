@@ -29,7 +29,7 @@
 //! or a feature column set) is a "Not translated:" note, never a silent
 //! difference.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use mn_brush::sut::{SRC_PRESSURE, SRC_RANDOM, SRC_TILT, SRC_VELOCITY, SutBrush, SutEffector};
 use serde_json::json;
@@ -45,7 +45,16 @@ pub fn write_sut_import(root: &Path, b: &SutBrush, set_name: &str) -> ImportSumm
     let mut notes: Vec<String> = Vec::new();
     let p = |k: &str, dflt: f64| b.params.get(k).copied().unwrap_or(dflt);
 
-    let diameter = p("BrushSize", 20.0).max(0.2);
+    let authored = p("BrushSize", 20.0).max(0.2);
+    // Same default-size cap as .abr imports (abr::MAX_DEFAULT_PX): the
+    // authored size is a note, the Size control still goes anywhere.
+    let diameter = authored.min(super::abr::MAX_DEFAULT_PX);
+    if authored > super::abr::MAX_DEFAULT_PX {
+        notes.push(format!(
+            "authored at {authored:.0} px (default capped at {:.0})",
+            super::abr::MAX_DEFAULT_PX
+        ));
+    }
     let mut settings = base_settings(diameter);
     spacing_settings(
         &mut settings,
@@ -266,6 +275,7 @@ fn drives_any(e: &SutEffector) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use std::collections::BTreeMap;
 
     fn brush(params: &[(&str, f64)]) -> SutBrush {
@@ -364,6 +374,57 @@ mod tests {
             .collect();
         assert!(notes.iter().any(|n| n == "spray"));
         assert!(notes.iter().any(|n| n == "flow by random"));
+        std::fs::remove_dir_all(root.parent().unwrap()).ok();
+    }
+
+    /// PATCHES.md #13 (local-only fixture; skip where absent): the owner's
+    /// spotty-tip brush 不気味線 改 froze the app at the first dabs. The tip
+    /// texture's hard black speckle made per-pixel ink/zero alternation, the
+    /// C RLE dab-mask buffer overflowed its smooth-profile size and smashed
+    /// the stack, and `end_atomic` then walked ~268 million garbage "dirty
+    /// tiles" — the freeze — before the access violation. A CURVED stroke is
+    /// load-bearing: a straight horizontal one leaves the speckle aligned
+    /// well enough that the old bound happened to survive.
+    #[test]
+    fn spotty_sut_tip_strokes_without_queue_corruption() {
+        use mn_core::{Document, PenSample, StrokeSink};
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../brush/tests/data");
+        let Ok(bytes) = std::fs::read(dir.join("sut_freeze.sut")) else {
+            return;
+        };
+        let b = mn_brush::sut::parse_sut(&bytes, "freeze").unwrap();
+        let root = tmp_root("freeze");
+        assert_eq!(write_sut_import(&root, &b, "freeze").imported, 1);
+        let myb = read_myb(&root, "freeze-1");
+        let mut brush =
+            mn_brush::MyBrush::load(&root.join("imported").join("freeze-1.myb")).unwrap();
+        let name = myb["mn-texture"].as_str().expect("tip texture imported");
+        brush.set_texture(Some(mn_brush::load_texture(&root, name).expect("texture loads")));
+        let mut doc = Document::new(1024, 1024);
+        brush.begin(&mut doc);
+        for i in 0..=300u32 {
+            let a = f64::from(i) * 0.13;
+            brush.sample(
+                &mut doc,
+                PenSample {
+                    x: 450.0 + (a.sin() * 320.0) as f32,
+                    y: 350.0 + ((a * 0.7).cos() * 250.0) as f32,
+                    pressure: 0.6,
+                    tilt_x: 0.0,
+                    tilt_y: 0.0,
+                    t_ms: f64::from(i) * 8.0,
+                },
+            );
+        }
+        brush.end(&mut doc);
+        // Corruption showed up as ink queued absurdly far from the stroke;
+        // a clean run stays inside the canvas the samples actually covered.
+        let (x, y, w, h) = doc.active_layer().tile_bounds().expect("stroke painted");
+        assert!(
+            x >= -128 && y >= -128 && x + w as i32 <= 1152 && y + h as i32 <= 1152,
+            "ink far outside the stroke area: bounds {:?}",
+            (x, y, w, h)
+        );
         std::fs::remove_dir_all(root.parent().unwrap()).ok();
     }
 

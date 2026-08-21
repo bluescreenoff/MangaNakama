@@ -295,6 +295,26 @@ square the stamp is over (opacity 0), never wrapped. `.myb` keys:
 `gpu_dab_parity_dab_anchored_stamps` (C → CPU repair → GPU ≤1 quantum on
 a curved stroke with per-dab angles).
 
+**AMENDMENT 3 (2026-08-21, pure stamp):** in dab-anchored mode the tip mask
+**IS the coverage** — `render_dab_mask` no longer multiplies the radial
+profile (or the hard-dab disc) into an anchored stamp; opacity is the
+bilinear tip sample alone. The owner's `.abr` eye test proved the old
+compose wrong: every stamp rendered as a giant disc with tip texture only
+at its edges, because the profile dominated (Photoshop/CSP treat a sampled
+tip as the dab's SHAPE, not as a texture on a disc). With the profile gone
+the stamp's corners must survive rotation, so every `radius + 1` fringe
+becomes `radius * sqrt(2) + 1` **in anchored mode only** (`render_dab_mask`
+bbox, `draw_dab_internal` tile queue, `update_dirty_bbox`; mirrored in
+`cpu_raster::dab_tiles`/`rasterize_dabs` and `dab.wgsl`'s cull +
+`gpu::dabs::dab_tiles` — all three implementations change together or the
+parity tests catch it). `get_color`'s smudge-sampling kernel keeps the
+disc fringe (a sampling weight, not visible ink). Companion import fix:
+`.abr`/`.sut` default sizes cap at `MAX_DEFAULT_PX` (300) with an honest
+"authored at N px" note — Painter-style sets author kilo-pixel tips and a
+brush that *selects* at 985 px reads as broken. Pins:
+`anchored_stamp_mask_is_the_coverage` (corner at ~1.24 r inks full, one px
+outside the square is dry) plus the amendment-2 parity pair still ≤1.
+
 ### 11. Record mode for GPU dab compositing (`mypaint-tiled-surface.c`, round 27)
 
 **What:** `draw_dab_internal` gains a tap after its early-outs and clamps
@@ -369,6 +389,24 @@ bit-identical to the pre-extension signature. Rust seam:
 path at flip off vs on; without the negation the mirrored doc motion
 reads ≈180° through a steep DIRECTION→Size curve and the dabs collapse
 ~5×).
+
+### 13. RLE dab-mask buffer sized for its true worst case (`mypaint-tiled-surface.c`, 2026-08-21)
+
+Upstream sizes the per-tile RLE opacity mask at
+`TILE^2 + 2*TILE` `uint16_t`s, which assumes long runs — fine for every
+smooth radial profile, and wrong the day #10 amendment 2 let a texture
+mask BE the coverage. The encoding costs one entry per inked pixel plus
+two per zero-run; a tip texture with hard black speckle (the owner's
+不気味線 改 .sut) alternates ink/zero often enough that a single tile
+needs up to `3/2 * TILE^2 + 2` entries. The overflow ran off the end of
+a STACK array in `process_tile`/`get_color`, corrupting the operation
+queue — observed as `end_atomic` claiming ~268 million dirty tiles and
+grinding for minutes ("app stops responding at the first dabs"), then
+STATUS_ACCESS_VIOLATION. Both local `mask` arrays now use the worst-case
+bound (16 KB of stack, still trivial). `rr_mask` keeps the old size: its
+writes are index-bounded, not run-length. Pinned by
+`spotty_sut_tip_strokes_without_queue_corruption` in mn-app (real
+fixture, skip-if-absent), verified crashing against the old bound.
 
 ### Companion Rust side (`crates/brush/src/mybrush.rs`)
 

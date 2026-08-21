@@ -462,3 +462,66 @@ fn gpu_dab_parity_dab_anchored_stamps() {
     println!("[test] dab-anchored stamp repair parity: max diff {max}, over 1: {over}");
     assert!(max <= 1, "repair parity bar is <= 1, got {max}");
 }
+
+/// #10 amendment 3: PURE STAMP. In dab-anchored mode the tip mask IS the
+/// coverage — no radial profile — and the stamp's square is not clipped to
+/// the dab's disc. An all-ink mask must therefore ink the square's CORNER
+/// (diagonal distance ~1.24r, where the old profile was already zero), at
+/// full strength (where the old gaussian would have faded). Runs on the
+/// repair rasterizer: explicit dab centre, no engine placement noise; the
+/// C and GPU agree with it via the parity tests above.
+#[test]
+fn anchored_stamp_mask_is_the_coverage() {
+    let all_ink = std::sync::Arc::new(mn_brush::TextureMask {
+        name: "ink".into(),
+        size: 16,
+        data: std::sync::Arc::new(vec![255u8; 16 * 16]),
+    });
+    let dab = mn_core::dab::DabParams {
+        x: 100.0,
+        y: 100.0,
+        radius: 16.0,
+        color: [0, 0, 0],
+        alpha: 1.0,
+        opaque: 1.0,
+        hardness: 0.8,
+        aspect_ratio: 1.0,
+        angle: 0.0,
+        lock_alpha: 0.0,
+        paint: 0.0,
+        tex_off: [0, 0],
+        tex_angle: 0.0,
+    };
+    let mut doc = Document::default();
+    doc.begin_op();
+    mn_brush::rasterize_dabs(
+        &mut doc,
+        0,
+        &[dab],
+        false,
+        Some((all_ink.data.as_slice(), all_ink.size, true)),
+    );
+    doc.end_op();
+    let alpha_at = |x: i32, y: i32| -> u16 {
+        let idx = mn_core::TileIdx::of_pixel(x, y);
+        doc.layers[0]
+            .tile(idx)
+            .map(|t| {
+                let (ox, oy) = idx.origin();
+                t.pixel((x - ox) as usize, (y - oy) as usize)[3]
+            })
+            .unwrap_or(0)
+    };
+    // Corner of the stamp square: (114, 114) is 14,14 from centre —
+    // diagonal 19.8 px > radius 16, rr = 1.53, profile = 0 in the old code.
+    let corner = alpha_at(114, 114);
+    assert!(
+        corner > 30_000,
+        "stamp corner must be (near) full ink, got {corner}"
+    );
+    // Mid-edge, just inside the square: full strength, not a gaussian tail.
+    let edge = alpha_at(114, 100);
+    assert!(edge > 30_000, "stamp edge must be full ink, got {edge}");
+    // One px outside the square on the axis: over.
+    assert_eq!(alpha_at(117, 100), 0, "outside the stamp square is dry");
+}

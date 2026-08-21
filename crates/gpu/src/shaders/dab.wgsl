@@ -201,7 +201,9 @@ fn main(
         // (r_fringe = radius + 1, as the C's tile-range math).
         let lx = d.x - f32(tile.ox);
         let ly = d.y - f32(tile.oy);
-        let fringe = d.radius + 1.0;
+        // #10 amendment 3: an anchored stamp rotates a square — sqrt(2) reach.
+        let stamp = tile.tex_size > 0u && (tile.flags & 2u) != 0u;
+        let fringe = select(d.radius + 1.0, d.radius * 1.41421356 + 1.0, stamp);
         if (lx + fringe < f32(bx) || lx - fringe > f32(bx + 4) ||
             ly + fringe < f32(by) || ly - fringe > f32(by + 4))
         {
@@ -210,7 +212,9 @@ fn main(
         for (var i = 0u; i < 16u; i++) {
             let x = bx + i32(i % 4u);
             let y = by + i32(i / 4u);
-            var opa = mask_of(d, lx, ly, x, y, hard);
+            // #10 amendment 3: PURE STAMP — anchored mode takes coverage
+            // from the tip sample alone; no radial profile, no hard disc.
+            var opa = select(mask_of(d, lx, ly, x, y, hard), 1.0, stamp);
             // Texture tips (#0.1) — the C's canvas-anchored multiply, exact
             // order: profile f32 × mask/255 BEFORE the u16 quantization. The
             // mod mirrors C's truncating % plus the negative fixup; scroll

@@ -398,7 +398,13 @@ void render_dab_mask (uint16_t * mask,
     float cs=cos(angle_rad);
     float sn=sin(angle_rad);
 
-    const float r_fringe = radius + 1.0f; // +1.0 should not be required, only to be sure
+    /* mnc (#10 amendment 3): a dab-anchored stamp covers the dab's ROTATED
+     * bounding square, whose corners reach radius*sqrt(2) — the disc fringe
+     * clipped them off. Everywhere else keeps upstream's radius + 1. */
+    const float r_fringe =
+        (mnc_brush_texture_size() > 0 && mnc_brush_texture_anchor_dab() > 0)
+            ? radius * 1.41421356f + 1.0f
+            : radius + 1.0f; // +1.0 should not be required, only to be sure
     int x0 = floor (x - r_fringe);
     int y0 = floor (y - r_fringe);
     int x1 = floor (x + r_fringe);
@@ -456,6 +462,13 @@ void render_dab_mask (uint16_t * mask,
      * runs once per (dab x tile) and a mid-dab advance would seam. */
     const int tex_size = mnc_brush_texture_size();
     const unsigned char *tex = tex_size > 0 ? mnc_brush_texture_data() : NULL;
+    /* mnc (#10 amendment 3): PURE STAMP — in dab-anchored mode the tip mask
+     * IS the coverage. The radial profile multiplied in before made every
+     * stamp a disc with texture only at its edges (the owner's .abr eye
+     * test); Photoshop/CSP treat a sampled tip as the dab's shape, full
+     * stop. So anchored dabs skip the profile (and the hard-dab disc) and
+     * take opacity from the bilinear tip sample alone. */
+    const int tex_stamp = tex && mnc_brush_texture_anchor_dab() > 0;
 
     skip += y0*MYPAINT_TILE_SIZE;
     for (int yp = y0; yp <= y1; yp++) {
@@ -469,7 +482,9 @@ void render_dab_mask (uint16_t * mask,
          * pixel's distance INSIDE the edge in px; a 1px ramp around it is
          * full-coverage ink with an anti-aliased boundary, the Krita/CSP
          * pen look the gaussian falloff cannot reach at any hardness. */
-        float opa = (mnc_brush_hard_dab() > 0.0f)
+        float opa = tex_stamp
+            ? 1.0f
+            : (mnc_brush_hard_dab() > 0.0f)
             ? CLAMP(radius*(1.0f-rr) + 0.5f, 0.0f, 1.0f)
             : calculate_opa(rr, hardness,
                           segment1_offset, segment1_slope,
@@ -641,7 +656,13 @@ process_tile_internal(
         return;
     }
 
-    uint16_t mask[MYPAINT_TILE_SIZE*MYPAINT_TILE_SIZE+2*MYPAINT_TILE_SIZE];
+    /* mnc (PATCHES.md #13): the RLE mask's true worst case is an ink pixel
+     * and a zero-run alternating per pixel — 3 entries per 2 pixels plus the
+     * terminator, not the smooth-profile TILE^2+2*TILE upstream sized for.
+     * A spotty texture tip (dab-anchored stamp with hard black regions)
+     * produces exactly that pattern and overflowed this stack array,
+     * corrupting the operation queue (owner's .sut "freeze at first dabs"). */
+    uint16_t mask[MYPAINT_TILE_SIZE*MYPAINT_TILE_SIZE*3/2+2];
 
     while (op) {
         process_op(rgba_p, mask, tile_index.x, tile_index.y, op);
@@ -655,7 +676,12 @@ void
 update_dirty_bbox(MyPaintRectangle *bbox, OperationDataDrawDab *op)
 {
     int bb_x, bb_y, bb_w, bb_h;
-    float r_fringe = op->radius + 1.0f; // +1.0 should not be required, only to be sure
+    /* mnc (#10 amendment 3): anchored stamps rotate a square — sqrt(2) reach.
+     * Called at draw time only, so the thread-locals are the dab's own. */
+    float r_fringe =
+        (mnc_brush_texture_size() > 0 && mnc_brush_texture_anchor_dab() > 0)
+            ? op->radius * 1.41421356f + 1.0f
+            : op->radius + 1.0f; // +1.0 should not be required, only to be sure
     bb_x = floor (op->x - r_fringe);
     bb_y = floor (op->y - r_fringe);
     bb_w = floor (op->x + r_fringe) - bb_x + 1;
@@ -751,7 +777,11 @@ gboolean draw_dab_internal (
     }
 
     // Determine the tiles influenced by operation, and queue it for processing for each tile
-    float r_fringe = radius + 1.0f; // +1.0 should not be required, only to be sure
+    /* mnc (#10 amendment 3): anchored stamps rotate a square — sqrt(2) reach. */
+    float r_fringe =
+        (mnc_brush_texture_size() > 0 && mnc_brush_texture_anchor_dab() > 0)
+            ? radius * 1.41421356f + 1.0f
+            : radius + 1.0f; // +1.0 should not be required, only to be sure
 
     int tx1 = floor(floor(x - r_fringe) / MYPAINT_TILE_SIZE);
     int tx2 = floor(floor(x + r_fringe) / MYPAINT_TILE_SIZE);
@@ -877,7 +907,8 @@ void get_color_internal
         }
 
         // first, we calculate the mask (opacity for each pixel)
-        uint16_t mask[MYPAINT_TILE_SIZE*MYPAINT_TILE_SIZE+2*MYPAINT_TILE_SIZE];
+        /* mnc (PATCHES.md #13): worst-case RLE size — see process_tile. */
+        uint16_t mask[MYPAINT_TILE_SIZE*MYPAINT_TILE_SIZE*3/2+2];
 
         /* mnc (#0.1): get_color runs immediately at draw time, so the
          * accumulator's current value IS this dab's offset. */
