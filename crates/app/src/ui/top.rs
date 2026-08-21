@@ -210,6 +210,16 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 app.push_cmd(AppCmd::CropSelection);
                 ui.close();
             }
+            if ui
+                .add_enabled(
+                    has_sel,
+                    egui::Button::new("Register selection as brush tip").shortcut_text(""),
+                )
+                .clicked()
+            {
+                app.push_cmd(AppCmd::RegisterBrushFromSelection);
+                ui.close();
+            }
             ui.separator();
             if item(ui, "Preferences…", "") {
                 app.push_cmd(AppCmd::OpenPrefs(None));

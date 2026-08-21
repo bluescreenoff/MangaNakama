@@ -1393,6 +1393,10 @@ pub enum AppCmd {
     /// MT-020 raster half: register the active layer (selection-scoped) as
     /// an image material.
     MaterialRegisterLayer,
+    /// ROADMAP "brushes without ceremony", capture half: the selection's ink
+    /// on the active layer becomes a pure-stamp brush preset (group "mine")
+    /// and is selected for immediate tuning.
+    RegisterBrushFromSelection,
     /// Row 151's bulk half: copy a folder's images into the bank.
     MaterialImportFolder(PathBuf),
     PageSplitApply {
@@ -2613,6 +2617,11 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             app.goto_page_open = false;
             let n = n.clamp(1, app.pages.len().max(1));
             app.switch_page(n - 1);
+        }
+        AppCmd::RegisterBrushFromSelection => {
+            // Sets its own status lines (success names the brush, failure
+            // says what was missing).
+            app.register_brush_from_selection();
         }
         AppCmd::MaterialRegisterLayer => match app.material_register_layer() {
             Some((p, name)) => {

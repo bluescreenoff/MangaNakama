@@ -131,6 +131,7 @@ pub fn write_gimp_import(root: &Path, brushes: &[GbrBrush], set_name: &str) -> I
         }
         let ok = write_brush(
             root,
+            "imported",
             &set_name,
             i + 1,
             &b.name,
@@ -197,6 +198,7 @@ fn write_sampled(
     let desc = format!("Sampled tip imported from a Photoshop brush set ({tips_total} tips)");
     let ok = write_brush(
         root,
+        "imported",
         set,
         n,
         &name,
@@ -246,7 +248,7 @@ fn write_computed(
     }
     let name = info.name.clone().unwrap_or_else(|| format!("{set}-round-{n}"));
     let desc = "Round brush imported from a Photoshop brush set".to_string();
-    let ok = write_brush(root, set, n, &name, None, settings, extras, desc, &notes);
+    let ok = write_brush(root, "imported", set, n, &name, None, settings, extras, desc, &notes);
     sum.imported += ok as usize;
     if ok {
         sum.translated += 1;
@@ -254,10 +256,14 @@ fn write_computed(
     }
 }
 
-/// Write one texture (optional) + preset pair. Returns success.
+/// Write one texture (optional) + preset pair into `root/<group>/`. Returns
+/// success. `group` is both the subdirectory and the preset's `"group"`
+/// field: "imported" for every file import, "mine" for tips captured off
+/// the canvas (Edit ▸ Register selection as brush tip).
 #[allow(clippy::too_many_arguments)] // a builder for one call site is noise
 pub(super) fn write_brush(
     root: &Path,
+    group: &str,
     set: &str,
     n: usize,
     name: &str,
@@ -267,11 +273,15 @@ pub(super) fn write_brush(
     mut description: String,
     notes: &[String],
 ) -> bool {
+    let _ = std::fs::create_dir_all(root.join(group));
+    if mask.is_some() {
+        let _ = std::fs::create_dir_all(root.join("textures"));
+    }
     let slug = format!("{set}-{n}");
     let mut preset = json!({
         "comment": "MyPaint brush file",
         "name": name,
-        "group": "imported",
+        "group": group,
         "settings": settings,
         "version": 3
     });
@@ -297,7 +307,7 @@ pub(super) fn write_brush(
         description.push_str(&notes.join("; "));
     }
     preset["description"] = json!(description);
-    let path = root.join("imported").join(format!("{slug}.myb"));
+    let path = root.join(group).join(format!("{slug}.myb"));
     serde_json::to_string_pretty(&preset)
         .ok()
         .and_then(|text| std::fs::write(&path, text).ok())
@@ -516,7 +526,7 @@ fn dyn_label(g: &DynGroup) -> String {
 // ---------------------------------------------------------------------------
 
 /// Crop to the tight ink bounding box. `None` = blank tip.
-fn tight_crop(gray: &[u8], w: u32, h: u32) -> Option<(Vec<u8>, u32, u32)> {
+pub(super) fn tight_crop(gray: &[u8], w: u32, h: u32) -> Option<(Vec<u8>, u32, u32)> {
     let (w, h) = (w as usize, h as usize);
     let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0usize, 0usize);
     for y in 0..h {

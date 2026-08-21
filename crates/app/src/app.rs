@@ -19,6 +19,7 @@ mod diag;
 mod engine;
 mod frames;
 mod kpp_import;
+mod make_brush;
 mod sut_import;
 /// TRIAGE 36 (`L-001`/`L-002` magnetic lasso) and 38 (`S-001` layer pick),
 /// end to end through the real pointer path. Its own file so app.rs does not

@@ -25,7 +25,9 @@ Stroke stabilization, input resampling, a per-sensor curve editor, and brush
 import from four ecosystems — Photoshop `.abr` (dynamics translated as far as
 they honestly map, tips stamped and rotating per dab), GIMP `.gbr`/`.gih`,
 Krita `.kpp` (dynamics), and Clip Studio `.sut` (your own sub tools — read
-directly, no export ceremony beyond CSP's own).
+directly, no export ceremony beyond CSP's own). Your own marks become a
+brush too: lasso them and register the selection as a stamp tip, tuned
+with a live test stroke.
 
 **Canvas and layers.** A tiled canvas at print resolution with a GPU
 compositor (layer blending, group flattening, tile upload, display) and a
@@ -102,9 +104,13 @@ every multi-step official recipe is a feature opportunity.
    the attempt and the numbers are recorded in the code) and the
    spectral-paint presets (the pigment-mixing math is float-heavy and
    needs its own parity tolerance before it is worth porting).
-2. **Brushes and materials without ceremony.** Lasso marks on the canvas
-   and "make brush" / "make material" from them; tune with a live test
-   stroke; edit and organise in place instead of a register-material tour.
+2. **Brushes and materials without ceremony.** The capture half is in:
+   lasso marks on the canvas and Edit ▸ Register selection as brush tip
+   turns them into a stamp brush (group "Mine", selected immediately, the
+   live test stroke shows it), and the Materials palette's register-layer
+   button is already selection-scoped. Remaining: edit and organise
+   presets in place — rename, delete, duplicate, reorder — instead of a
+   file-manager tour.
 3. **A small scripting surface.** Batch operations now cover rename,
    tone, draft, layer colour and blend over name patterns (`*` wildcards)
    — on one page or every page in the work. The scripting surface proper

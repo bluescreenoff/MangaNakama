@@ -155,6 +155,7 @@ pub fn write_sut_import(root: &Path, b: &SutBrush, set_name: &str) -> ImportSumm
     let desc = "Imported from a Clip Studio sub tool (.sut)".to_string();
     let ok = write_brush(
         root,
+        "imported",
         &set_name,
         1,
         &b.name,

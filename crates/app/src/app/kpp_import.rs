@@ -90,6 +90,7 @@ pub(super) fn write_kpp_import(root: &Path, preset: &KppPreset, set_name: &str) 
     let mut sum = ImportSummary::default();
     let ok = write_brush(
         root,
+        "imported",
         &set,
         1,
         name,

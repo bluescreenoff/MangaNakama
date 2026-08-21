@@ -171,6 +171,27 @@ the preset it belongs to. <span class="why">The same convention the Clip
 Studio import uses — a brush that lies about what it kept is worse than a
 brush that lists what it lost.</span></div>
 
+<h2>Make a brush from your own marks</h2>
+<div class="quirk"><b>Lasso marks on the canvas, then Edit ▸ Register
+selection as brush tip.</b> The selection's ink on the active layer
+becomes a stamp brush in the sub tool list's <b>Mine</b> group, selected
+immediately so the test stroke shows it — the marks repeat along the
+stroke, clearly separated by default. Tune size and spacing in Tool
+Property like any other brush. A feathered (blurred) selection fades the
+tip's edge.</div>
+<div class="quirk"><b>Transparent layer: the tip is the ink's opacity.
+Opaque artwork: the tip is its darkness.</b> Marks drawn on a
+transparent layer register by their alpha. If the selected area is
+effectively fully opaque — ink on a white flat — alpha would be a solid
+rectangle, so the darkness becomes the tip instead: the black stroke,
+not the paper. <span class="why">Both readings match what the marks look
+like; a solid square brush from a white background would match what the
+bytes look like.</span></div>
+<div class="quirk"><b>Registering a material from a selection needs no
+special command.</b> The Materials palette's register-layer button is
+already selection-scoped: with a selection up it registers just that
+part of the layer.</div>
+
 <h2>Materials and tiling patterns</h2>
 <div class="quirk"><b>Right-click a material cell to tag it; the one
 search box matches names AND tags.</b> There is no second field and no
@@ -475,6 +496,18 @@ session state.</span></div>
 outside the selection is byte-untouched by a flip or transform commit —
 deliberately unlike CSP's never-fixed 2016 transform bug that destroyed
 neighbouring content.</div>
+<div class="quirk"><b>The launcher can let strokes escape the
+selection.</b> The pen-crossing-a-box button in the selection launcher
+toggles "allow drawing outside" for the current selection: with it on,
+brush and eraser strokes land outside the ants too — handy for patching
+a gap in lineart mid-way through building a multi-part selection,
+without throwing the parts away. It frees <em>strokes only</em>: Fill,
+Delete, gradients, filters and pastes still clamp to the selection no
+matter what. Every new selection (including any grow/shrink/invert/
+combine) starts clamped again. <span class="why">The default is the
+safe one — the toggle exists for the thirty seconds you need it, and a
+rebuilt selection forgetting it means a stray stroke can never
+contaminate work you did an hour later.</span></div>
 <div class="quirk"><b>Reset is not the same as Esc.</b> The Reset button
 in Tool Property puts the float back to the size, angle and position it
 was lifted at and <em>stays in the transform</em>; <kbd>Esc</kbd> leaves

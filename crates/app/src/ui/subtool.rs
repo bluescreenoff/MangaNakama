@@ -414,13 +414,16 @@ fn brush_sub_tools(ui: &mut egui::Ui, app: &mut App) {
                     .and_then(|d| d.file_name())
                     .and_then(|n| n.to_str())
                 {
+                    // The artist's own captures lead the list.
+                    Some("mine") => "Mine",
                     Some("csp") => "CSP",
                     Some("krita") => "Krita",
                     Some("classic") => "Classic",
+                    Some("imported") => "Imported",
                     _ => "Other",
                 }
             };
-            for group in ["CSP", "Krita", "Classic", "Other"] {
+            for group in ["Mine", "CSP", "Krita", "Classic", "Imported", "Other"] {
                 let rows: Vec<(usize, String, PathBuf)> = app
                     .presets
                     .iter()

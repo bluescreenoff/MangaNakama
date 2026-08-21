@@ -132,6 +132,11 @@ pub fn command_index() -> Vec<(&'static str, &'static str, AppCmd)> {
             MaterialRegisterLayer,
         ),
         (
+            "Register selection as brush tip",
+            "Edit",
+            RegisterBrushFromSelection,
+        ),
+        (
             "Convert brightness to opacity",
             "Layer",
             BrightnessToOpacity,
