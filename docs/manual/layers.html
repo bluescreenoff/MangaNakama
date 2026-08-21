@@ -142,6 +142,21 @@ live, straight into the coverage field, so the ordinary layer recording
 never saw them; the bracket that makes this work has to be opened at pen
 DOWN, before the first dab.</span></div>
 
+<h2>Layer Comps</h2>
+<div class="quirk"><b>A comp records the whole presentation, not just the
+eyes.</b> Capturing a comp snapshots every layer's visibility, opacity,
+blend mode and layer colour; applying one writes all of them back and is
+ONE undo press. A comp you saved with an older build recorded only
+visibility — applying it still changes only visibility, never "resets"
+the properties it predates. <span class="why">Absent means "this comp
+does not touch that property"; anything else would snap every layer's
+opacity to 100% the first time an old file met a new build, with nothing
+saying why.</span></div>
+<div class="quirk"><b>"Last document state" is not an undo step.</b> The
+pinned row returns to the state before the last comp application (all
+properties, same as the comp wrote), but deliberately records nothing
+itself — it IS the return-to-before affordance.</div>
+
 <h2>Auto Actions</h2>
 <div class="quirk"><b>The Auto Actions tab records layer commands and
 replays them as one press.</b> ＋ action, then the record dot on it, then

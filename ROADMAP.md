@@ -34,7 +34,10 @@ delete from the sub tool list itself.
 compositor (layer blending, group flattening, tile upload, display) and a
 software-adapter fallback that is the *same* code path, not a second
 implementation. Fifteen blend modes with the CPU and GPU results pinned equal
-by tests. Layer masks, layer colour tint, reference layers, layer comps,
+by tests. Layer masks, layer colour tint, reference layers, layer comps
+(recording visibility, opacity, blend mode and layer colour — one press to
+apply, one undo to take back; comps saved by older builds still restore
+exactly what they recorded),
 selections (rectangle, lasso, wand, brush-painted selection pen/eraser, quick
 mask), transform and flip, and undo throughout. Layers multi-select in the
 palette (Ctrl+click toggles, Shift+click ranges), and tonal correction —
@@ -57,7 +60,12 @@ delete, move, duplicate, merge, divide — are ordinary undo steps; the
 undo history survives them instead of being wiped. Ctrl+K opens a
 search-everything palette: every command, brush, sub tool, auto action,
 material, layer, page, recent file, text style, manual topic and saved
-workspace, with VSCode-style sigil filters. A layer inside a frame
+workspace, with VSCode-style sigil filters. The whole window is ONE dock
+tree and the canvas is a pane in it like any palette: split, tab and
+rearrange everything freely, tear palettes off into floating windows — the
+canvas pane itself always stays docked and can never be closed or buried
+(pages of a work opening side by side, with tool columns between them, is
+the next step of the same build — see `docs/DOCKING-2.md`). A layer inside a frame
 folder can burst out of the panel (drawn over the border, outside the
 mask, panel stays editable), and a plain folder's border effect doubles
 as "knock out behind" — the white mat under balloons and SFX, generated
@@ -76,7 +84,10 @@ edit the style once and every balloon on every page reflows); speed lines and
 focus lines as live objects (focus point, radii, angle and density stay
 editable on-canvas after placement); a reference-images palette with
 free-floating viewers and Alt+click colour picking; a story editor;
-multi-page work folders with a page manager and scalable page previews; print
+multi-page work folders with a page manager and scalable page previews; a
+work's page size can change after creation — anchored, optionally across
+every page in one pass, with new pages following the new size (the decision
+Clip Studio makes irreversible); print
 preflight; and a chapter reader with right-to-left spreads, fullscreen, and an
 edit-and-return round trip.
 
@@ -121,9 +132,7 @@ a fill tool that measures gap and fringe itself instead of seven numeric
 options, "make brush from selection" with generated variation, instances
 (place one drawing on many pages, edit once), one-gesture screentone
 application, perspective rulers that explain themselves plus a fisheye
-curvature slider, print-finishing presets, changing a work's page size
-after creation (Clip Studio makes that decision irreversible; ours should
-not), and layer comps that store more than visibility.
+curvature slider, and print-finishing presets.
 
 Very low priority, recorded so it is not re-proposed: fitting perspective
 rulers to an existing drawing's strokes. The fitting math is tractable;

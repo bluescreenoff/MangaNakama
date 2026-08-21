@@ -27,6 +27,17 @@ step.</b> Story text, binding direction, print margins, expression and
 spine changes from Manga ▸ Work Settings write immediately — they are
 not in the undo history at all (CSP's own dialog warns the same about
 its multi-page settings).</div>
+<div class="quirk warn"><b>A work's page size CAN change after creation —
+and for the other pages it cannot be undone.</b> Work Settings ▸ "Resize
+existing pages…" (or Edit ▸ Change Canvas Size with "Apply to every page
+of the work" ticked) moves every page to the new size, content pinned to
+the anchor you choose, never resampled — ink outside the new bounds is
+cropped away. The OPEN page goes through the normal canvas door; every
+other page is rewritten directly, so undo does not reach it — the dialog
+says so before you commit. Spreads take double the width, and the work's
+default size moves too, so pages you add later match. <span
+class="why">Clip Studio makes this decision irreversible at creation;
+ours is movable, at the price of one honest warning.</span></div>
 
 <h2>The reader</h2>
 <div class="quirk"><b>Flags and the last-read screen persist per
