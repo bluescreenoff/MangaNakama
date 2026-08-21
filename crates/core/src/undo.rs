@@ -123,6 +123,21 @@ pub enum UndoGroup {
     /// layer-STRUCTURE change clears the whole history (the enum's doc
     /// comment), so member indices cannot outlive their meaning.
     Compound(Vec<UndoGroup>),
+    /// A whole-STACK snapshot: the layer vec and active index as they were
+    /// before an action-sequence run (recordable actions replay through the
+    /// normal commands, and any structural step clears the history — this
+    /// group, pushed after the run onto the cleared history, is what makes
+    /// the whole run one undo press). `Arc`-cheap like `duplicate_layer`:
+    /// a tile only becomes a copy when someone later paints on it.
+    /// Document-level; `tile_count` reports 0 (the snapshot is handles, not
+    /// pixel copies). **Swapping does NOT stamp tile revisions** — restored
+    /// tiles keep their old, LOWER revisions and the GPU cache uploads only
+    /// on newer, so the app's Undo/Redo arms must `renderer.invalidate()`
+    /// when one of these moves (peek: `Document::next_undo_is_structure`).
+    Structure {
+        layers: Vec<crate::doc::Layer>,
+        active: usize,
+    },
     /// PA-001: the paper colour before the change. The only DOCUMENT-level
     /// group — it belongs to no layer, which is why [`UndoGroup::layer`]
     /// returns an `Option`. The paper's EYE is not in here on purpose: it is
@@ -155,6 +170,7 @@ impl UndoGroup {
             | UndoGroup::Tones { .. }
             | UndoGroup::Edges { .. }
             | UndoGroup::Paper { .. }
+            | UndoGroup::Structure { .. }
             | UndoGroup::Rulers { .. } => 0,
         }
     }
@@ -175,7 +191,10 @@ impl UndoGroup {
             | UndoGroup::VectorStroke { layer, .. }
             | UndoGroup::VectorEdit { layer, .. }
             | UndoGroup::VectorSet { layer, .. } => Some(*layer),
-            UndoGroup::Compound(..) | UndoGroup::Paper { .. } | UndoGroup::Rulers { .. } => None,
+            UndoGroup::Compound(..)
+            | UndoGroup::Paper { .. }
+            | UndoGroup::Structure { .. }
+            | UndoGroup::Rulers { .. } => None,
         }
     }
 }
@@ -287,6 +306,18 @@ impl History {
     /// `Document::clear_history`, the one place all of them meet.
     pub fn note_op(&mut self) {
         self.ops += 1;
+    }
+
+    /// The group the next `undo` would swap, unswapped. The Structure
+    /// variant's invalidation door (see its doc comment) needs to know
+    /// BEFORE the swap happens.
+    pub fn peek_undo(&self) -> Option<&UndoGroup> {
+        self.undo.last()
+    }
+
+    /// Same, for the next `redo`.
+    pub fn peek_redo(&self) -> Option<&UndoGroup> {
+        self.redo.last()
     }
 
     pub fn pop_undo(&mut self) -> Option<UndoGroup> {

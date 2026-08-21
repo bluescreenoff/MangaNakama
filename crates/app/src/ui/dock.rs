@@ -38,9 +38,11 @@ pub enum Palette {
     History,
     QuickAccess,
     LayerComps,
+    /// Recordable action sequences (CSP Auto Action).
+    Actions,
 }
 
-pub const ALL: [Palette; 14] = [
+pub const ALL: [Palette; 15] = [
     Palette::Tool,
     Palette::SubTool,
     Palette::ToolProperty,
@@ -55,6 +57,7 @@ pub const ALL: [Palette; 14] = [
     Palette::History,
     Palette::QuickAccess,
     Palette::LayerComps,
+    Palette::Actions,
 ];
 
 impl Palette {
@@ -74,6 +77,7 @@ impl Palette {
             Palette::QuickAccess => "Quick Access",
             Palette::LayerComps => "Layer Comps",
             Palette::Materials => "Materials",
+            Palette::Actions => "Auto Actions",
         }
     }
 
@@ -112,6 +116,7 @@ impl Palette {
                     Palette::History => super::history::history_palette(ui, app),
                     Palette::QuickAccess => super::quick::quick_palette(ui, app),
                     Palette::LayerComps => super::comps::comps_palette(ui, app),
+                    Palette::Actions => super::actions::actions_palette(ui, app),
                 }
             });
     }
@@ -137,11 +142,15 @@ pub fn default_left() -> DockColumn {
     dock
 }
 
-/// The default right column: (Color | Color Set) above Layers.
+/// The default right column: (Color | Color Set) above (Layers | Auto
+/// Actions) — the actions tab sits beside Layers like CSP's.
 pub fn default_right() -> DockColumn {
     let mut dock = DockState::new(vec![Palette::Color, Palette::ColorSet]);
-    dock.main_surface_mut()
-        .split_below(NodeIndex::root(), 0.5, vec![Palette::Layers]);
+    dock.main_surface_mut().split_below(
+        NodeIndex::root(),
+        0.5,
+        vec![Palette::Layers, Palette::Actions],
+    );
     dock
 }
 

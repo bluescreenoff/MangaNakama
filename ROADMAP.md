@@ -42,7 +42,11 @@ a paste that stamps the active layer clamps to the ants (feather and all),
 and a paste that arrives as its own layer wears the selection as a layer
 mask you can remove. A layer above a sealed folder clips to the group's
 combined ink, and clipping survives structure edits — the palette greys a
-clip flag that lost its base and the status line says so.
+clip flag that lost its base and the status line says so. An Auto Actions
+tab beside the Layers palette records sequences of layer commands (new
+layer/folder/frame folder, rename, border effect, layer colour, tone,
+blur, select above/below) and replays them — one press to run, one undo
+to take the whole run back, steps toggleable per run like Clip Studio's.
 
 **Manga.** Frame folders and panel division with automatic reading-order
 numbering plus an on-canvas reading-path overlay; balloons with editable
@@ -75,18 +79,13 @@ Roughly in order. None of this is promised by a date.
    background benchmark decides, never a blanket default. Still CPU-only:
    smudge combined with wash (the sampler would have to read the in-flight
    wash buffer) and the spectral-paint / colorize / posterize presets.
-2. **Recordable action sequences.** CSP Auto-Action parity: record a
-   sequence of layer-management steps (new layer/folder/frame folder,
-   rename, border effect, layer colour, tone, blur, …), store it, replay
-   it as one undo step — a tab beside the Layers palette. The batch
-   dialog covers the flat cases; recorded sequences are the real ask.
-3. **A small scripting surface.** The batch half shipped (Layer > Batch
+2. **A small scripting surface.** The batch half shipped (Layer > Batch
    operations: rename/renumber by pattern, apply/clear tone as one undo
    step, export a PNG per layer — scoped by all/folder/name-prefix).
    What remains is the scripting surface proper, if real use ever asks
    for more than the dialog covers.
-4. **HDR / linear-light colour.**
-5. **The manual, kept honest.** Static HTML beside the executable exists;
+3. **HDR / linear-light colour.**
+4. **The manual, kept honest.** Static HTML beside the executable exists;
    its job is the quirks — the interlocks you would otherwise discover by
    having something silently do nothing — and it grows with every round.
 

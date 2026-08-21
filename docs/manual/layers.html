@@ -125,6 +125,31 @@ live, straight into the coverage field, so the ordinary layer recording
 never saw them; the bracket that makes this work has to be opened at pen
 DOWN, before the first dab.</span></div>
 
+<h2>Auto Actions</h2>
+<div class="quirk"><b>The Auto Actions tab records layer commands and
+replays them as one press.</b> ＋ action, then ● on it, then work the
+Layers palette: new layer/folder/frame folder, rename, border effect,
+layer colour, sub colour, screentone, Gaussian blur, and select
+above/below all land as steps. ■ stops. ▶ replays the sequence on
+whatever layer is active; each step has a checkbox, so a stored
+sequence can run with parts switched off. Actions live in
+<code>actions.json</code> beside the executable — deleting
+<code>ui.txt</code> to fix a dock layout does not touch them.</div>
+<div class="quirk"><b>One run, one undo press.</b> A run that creates
+layers or folders replaces your undo history with a single step named
+after the action — the same rule any new layer already follows, at run
+size. A run of only non-structural steps (tone, border, blur, rename)
+stacks one step on TOP of your history instead, and everything before
+it stays undoable. (A run of nothing but renames pushes no step at all
+— renames are not undoable here, run-wrapped or not.)</div>
+<div class="quirk warn"><b>Recording only hears commands aimed at the
+active layer.</b> Steps carry no layer numbers — replay follows
+whatever is active, like Clip Studio's. Clicking a different row while
+recording is therefore NOT recorded; move with select above/below
+(which are steps) if the sequence needs to walk the stack. Zooming,
+brushwork and everything outside the layer commands above never
+record.</div>
+
 <h2>What undo does not cover</h2>
 <div class="quirk warn"><b>Baking a mask leaves the mask outside the
 undo bracket.</b> Layer ▸ Layer Mask ▸ Apply commits the mask into the

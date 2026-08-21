@@ -1686,6 +1686,68 @@ impl Document {
         true
     }
 
+    /// Recordable actions, the non-structural face: bundle the newest `n`
+    /// history steps into ONE labelled step. Members are collected
+    /// newest-first, which IS the swap order `Compound` needs (undo unwinds
+    /// the run backwards; the reversed inverse replays it forward on redo).
+    /// Safe for the usual reason: these members are non-structural by
+    /// construction (a structural step would have cleared the history and
+    /// the caller takes the `push_structure` road instead).
+    pub fn wrap_recent(&mut self, label: &str, n: usize) -> bool {
+        if n == 0 {
+            return false;
+        }
+        let mut members = Vec::with_capacity(n);
+        for _ in 0..n {
+            match self.history.pop_undo() {
+                Some(g) => members.push(g),
+                None => break,
+            }
+        }
+        if members.is_empty() {
+            return false;
+        }
+        // `push_compound` unwraps a single member — a one-step run reads
+        // in the History palette exactly like the step itself would.
+        self.push_compound(label, members)
+    }
+
+    /// Recordable actions: make a whole replayed run ONE undo press. The
+    /// caller cloned `layers` and noted `active` BEFORE replaying; whatever
+    /// the run pushed or cleared since is superseded by the snapshot pair
+    /// (pre-run stack in the group, post-run stack live), so the history is
+    /// cleared first and this group lands alone.
+    pub fn push_structure(&mut self, label: &str, before: Vec<Layer>, active_before: usize) {
+        self.clear_history();
+        self.history.push_labeled(
+            label,
+            UndoGroup::Structure {
+                layers: before,
+                active: active_before,
+            },
+        );
+        self.touch();
+    }
+
+    /// True when the next undo would move a [`UndoGroup::Structure`] — the
+    /// app must fully invalidate the GPU tile cache around that swap
+    /// (restored tiles keep their old, lower revisions; the cache uploads
+    /// only on newer).
+    pub fn next_undo_is_structure(&self) -> bool {
+        matches!(
+            self.history.peek_undo(),
+            Some(UndoGroup::Structure { .. })
+        )
+    }
+
+    /// Same door, redo side.
+    pub fn next_redo_is_structure(&self) -> bool {
+        matches!(
+            self.history.peek_redo(),
+            Some(UndoGroup::Structure { .. })
+        )
+    }
+
     /// Vector inking (docs/VECTOR-INKING.md): close the open op as ONE
     /// stroke group — the tile pre-images AND the recorded geometry, so a
     /// single undo takes back both. An empty gesture spends nothing; a
@@ -2083,6 +2145,21 @@ impl Document {
                 }
                 inverses.reverse();
                 Some(UndoGroup::Compound(inverses))
+            }
+            UndoGroup::Structure { mut layers, active } => {
+                // Wholesale stack swap. NO tile revisions are stamped (see
+                // the variant's doc comment — the app invalidates the GPU
+                // cache when this group moves).
+                std::mem::swap(&mut self.layers, &mut layers);
+                let active_before = self.active;
+                self.active = active.min(self.layers.len().saturating_sub(1));
+                // The multi-selection is index-keyed; a stack swap is
+                // exactly the shift it must not survive.
+                self.layer_multi.clear();
+                Some(UndoGroup::Structure {
+                    layers,
+                    active: active_before,
+                })
             }
         }
     }
@@ -5287,6 +5364,45 @@ mod tests {
         // The bottom root layer has nothing below it at its depth.
         assert!(doc.set_layer_clip(0, true));
         assert_eq!(doc.clip_bases()[0], None, "no base -> flag ignored");
+    }
+
+    /// Recordable actions: `push_structure` makes a replayed run — however
+    /// many structural and pixel steps it contained — ONE undo press, and
+    /// redo re-applies the run's whole result.
+    #[test]
+    fn structure_snapshot_is_one_undo_press_for_a_whole_run() {
+        let mut doc = Document::new(64, 64);
+        doc.begin_op();
+        doc.layers[0].tile_mut(TileIdx::new(0, 0)).data_mut()[0] = 123;
+        doc.end_op();
+        let before = doc.layers.clone();
+        let active_before = doc.active;
+        // The "run": a structural step (clears history) then a pixel step
+        // (pushes its own group) — both superseded by the snapshot pair.
+        doc.add_layer("SFX");
+        let li = doc.active;
+        doc.begin_op();
+        doc.layers[li].tile_mut(TileIdx::new(0, 0)).data_mut()[0] = 77;
+        doc.end_op();
+        doc.push_structure("Create SFX Layer", before, active_before);
+        assert_eq!(doc.undo_labels().len(), 1, "the run's step stands alone");
+        assert_eq!(doc.undo_labels()[0], "Create SFX Layer");
+        assert!(doc.undo());
+        assert_eq!(doc.layers.len(), 1, "stack restored wholesale");
+        assert_eq!(doc.active, active_before);
+        assert_eq!(
+            doc.layers[0].tile_arc(TileIdx::new(0, 0)).unwrap().data()[0],
+            123,
+            "pre-run pixels intact"
+        );
+        assert!(doc.redo());
+        assert_eq!(doc.layers.len(), 2, "redo re-applies the run");
+        assert_eq!(doc.layers[1].name, "SFX");
+        assert_eq!(
+            doc.layers[1].tile_arc(TileIdx::new(0, 0)).unwrap().data()[0],
+            77,
+            "run-created pixels return"
+        );
     }
 
     /// docs/CLIPPING-SCENARIOS.md 2a: a layer above a folder clips to the

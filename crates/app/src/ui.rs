@@ -6,6 +6,7 @@
 //! routes on it. Widgets never mutate app state directly — they push
 //! [`AppCmd`]s.
 
+mod actions;
 mod comps;
 mod history;
 pub mod icons;

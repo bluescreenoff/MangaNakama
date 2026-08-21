@@ -1334,6 +1334,11 @@ pub enum AppCmd {
     AddVectorLayer,
     /// Batch layer operations (app/batch.rs): open, apply, export.
     BatchOpsOpen,
+    /// Recordable actions: replay the palette's action `idx` as one undo
+    /// press (`app::actions`).
+    ActionRun(usize),
+    /// Arm/disarm live recording into action `idx`.
+    ActionRecordToggle(usize),
     BatchApply,
     BatchExportPngs,
     BatchExportPngsPath(PathBuf),
@@ -1934,6 +1939,15 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
     // picture. Snapshot which clipped layers are dangling; the tail of
     // this function compares and reports.
     let clip_before = clip_dangling_by_name(&app.doc);
+    // Recordable actions: the recorder taps the stream HERE, before the
+    // match consumes the command. Nothing records during a replay (a run
+    // would eat itself), and index-carrying commands record only when
+    // aimed at the ACTIVE layer — steps are index-free by design.
+    let rec_step = if app.action_recording.is_some() && !app.action_running {
+        crate::app::actions::ActionStep::from_cmd(&cmd, app.doc.active)
+    } else {
+        None
+    };
     match cmd {
         // --- history ------------------------------------------------------
         // No `renderer.invalidate()`: undo stamps a fresh revision on every
@@ -1946,6 +1960,11 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             let tones_before: Vec<_> = app.doc.layers.iter().map(|l| l.tone).collect();
             let masks_before = mask_sig(app);
             let rulers_before = app.doc.rulers.clone();
+            // A Structure swap (recordable-action run) restores tiles at
+            // their OLD revisions — the cache uploads only on newer, so the
+            // swap needs the full rebuild plus the index-keyed resets a
+            // layer-stack change implies.
+            let structural = app.doc.next_undo_is_structure();
             if app.doc.undo() {
                 resync_rulers(app, &rulers_before);
                 // Vector selection indexes into a set undo just reshaped.
@@ -1960,8 +1979,11 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 // and folds the mask into the upload, so a mask that moved
                 // over unchanged pixels needs the full rebuild — the same
                 // door every other mask edit goes through.
-                if mask_sig(app) != masks_before {
+                if structural || mask_sig(app) != masks_before {
                     app.renderer.invalidate();
+                }
+                if structural {
+                    app.layer_thumbs.clear();
                 }
                 // Undo can remove the active layer's mask (e.g. undo of its
                 // creation) — audit H1: armed mask-edit must not survive it.
@@ -1974,6 +1996,7 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             let tones_before: Vec<_> = app.doc.layers.iter().map(|l| l.tone).collect();
             let masks_before = mask_sig(app);
             let rulers_before = app.doc.rulers.clone();
+            let structural = app.doc.next_redo_is_structure();
             if app.doc.redo() {
                 resync_rulers(app, &rulers_before);
                 app.vector_sel = None;
@@ -1983,8 +2006,11 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                         app.renderer.evict_layer(li);
                     }
                 }
-                if mask_sig(app) != masks_before {
+                if structural || mask_sig(app) != masks_before {
                     app.renderer.invalidate();
+                }
+                if structural {
+                    app.layer_thumbs.clear();
                 }
                 app.disarm_mask_edit_if_unmasked();
                 app.mark_dirty();
@@ -3185,6 +3211,12 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
         AppCmd::BatchExportPngsPath(dir) => {
             let s = app.batch_export_pngs(&dir);
             app.set_status(s);
+        }
+        AppCmd::ActionRun(idx) => {
+            app.action_run(idx);
+        }
+        AppCmd::ActionRecordToggle(idx) => {
+            app.action_record_toggle(idx);
         }
         AppCmd::VectorDelete { stroke } => {
             let li = app.doc.active;
@@ -5900,6 +5932,15 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
     // closed) — after the command, so new/open/add/delete page all reconcile.
     app.sync_pages_palette();
     report_clip_changes(app, &clip_before);
+    // Recordable actions: append the tapped step after the command ran, so
+    // a recorded sequence reads in execution order.
+    if let (Some(idx), Some(step)) = (app.action_recording, rec_step) {
+        if let Some(a) = app.actions.get_mut(idx) {
+            a.steps.push(crate::app::actions::StepRow { step, on: true });
+            app.actions_save();
+            app.mark_dirty();
+        }
+    }
 }
 
 /// docs/CLIPPING-SCENARIOS.md 5b support: `(name, dangling)` for every

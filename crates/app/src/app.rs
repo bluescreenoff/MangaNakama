@@ -11,6 +11,7 @@
 //! already implements App methods outside this file.
 
 mod abr;
+pub mod actions;
 mod adjust;
 pub(crate) mod canvas_input;
 mod comps;
@@ -293,6 +294,18 @@ pub struct App {
     /// Shift+click ranges). Empty = none — LC-013's export treats empty
     /// as "all comps" (CSP's rule).
     pub comp_multi: Vec<usize>,
+    /// Recordable action sequences (`app::actions`), loaded from
+    /// actions.json beside the exe; saved on every change.
+    pub actions: Vec<actions::Action>,
+    /// Which action the palette has open (its steps show below the list).
+    pub action_selected: Option<usize>,
+    /// Recording target: dispatch appends recordable commands as steps
+    /// while this is armed.
+    pub action_recording: Option<usize>,
+    /// True while a replay runs — the recorder must not eat the replay.
+    pub action_running: bool,
+    /// Inline rename in the Auto Actions palette (index, draft).
+    pub action_renaming: Option<(usize, String)>,
     pub comp_last_state: Vec<bool>,
     pub comp_name_draft: String,
     /// LC-006: layers added after a snapshot default to visible.
@@ -1094,6 +1107,11 @@ impl App {
             workspace_open: false,
             comp_selected: None,
             comp_multi: Vec::new(),
+            actions: Vec::new(),
+            action_selected: None,
+            action_recording: None,
+            action_running: false,
+            action_renaming: None,
             comp_last_state: Vec::new(),
             comp_name_draft: String::new(),
             comp_added_visible: true,
@@ -1401,6 +1419,8 @@ impl App {
             .filter(|s| !s.is_empty())
             .map(|s| s.to_owned())
             .collect();
+        // Recorded action sequences (actions.json beside the exe).
+        app.actions_load();
         app
     }
 

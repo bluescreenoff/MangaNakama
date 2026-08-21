@@ -57,6 +57,15 @@ The recurring failure shapes, in order of how often they have shipped:
   and rides the same door: `clear_history()` clears it. A new structural
   path that skips `clear_history` would leave BOTH the undo indices and
   the multi-selection stale — don't skip it.
+- Recordable actions (`app::actions`) replay through `cmd::dispatch`,
+  NEVER straight at the `Document` — the command arms carry the cache
+  doors (evictions, thumbnail resets, frame renumbering) a bypass would
+  skip. A structural run wraps in `UndoGroup::Structure` (whole-stack
+  snapshot); its swap does NOT stamp tile revisions, and the cache
+  uploads only on NEWER, so the Undo/Redo arms `renderer.invalidate()`
+  when `next_undo_is_structure`/`next_redo_is_structure` says one is
+  about to move. A new history-driving path must keep that peek-first
+  shape.
 - Vector layers (docs/VECTOR-INKING.md): a recorded stroke's pixels and
   its geometry ride ONE `UndoGroup::VectorStroke` — `end_op_vector_stroke`
   closes the op, never `end_op` + a separate record. Replay has two hard
