@@ -261,7 +261,9 @@ pub enum LayerKind {
 /// Tiles are `Arc`-shared so undo snapshots (a later agent) are Arc clones, and
 /// the write path goes through `Arc::make_mut` for copy-on-write.
 /// A layer mask (TRIAGE 138, LM-005's ALPHA scale): per-pixel coverage in
-/// the tile ALPHA channel (fix15; full = visible, absent tile = hidden).
+/// the tile ALPHA channel (fix15; full = visible, absent tile = VISIBLE —
+/// unmasked, the rule both compositors and the bake share; a mask only has
+/// tiles where the layer had ink when it was created).
 /// Any brush will edit it (part 2); soft brush ⇒ soft mask, automatically.
 #[derive(Clone, Debug, Default)]
 pub struct LayerMask {
@@ -1380,7 +1382,13 @@ impl Document {
             let tile = l.tile_mut(ti);
             let d = tile.data_mut();
             for p in 0..d.len() / 4 {
-                let m = cov.map(|c| c.data()[p * 4 + 3] as u32).unwrap_or(0);
+                // An ABSENT mask tile is VISIBLE — that is what both
+                // compositors render (export.rs LM-005, gpu/lib.rs), and
+                // mask tiles only exist where the layer had ink when the
+                // mask was made. `unwrap_or(0)` here silently DELETED any
+                // ink painted after that: shown on screen, erased by the
+                // bake. Bake must match the screen.
+                let m = cov.map(|c| c.data()[p * 4 + 3] as u32).unwrap_or(32768);
                 if m == 32768 {
                     continue;
                 }
@@ -4194,6 +4202,39 @@ mod mask_tests {
         assert_eq!(img.get_pixel(5, 5).0[3], 255, "blank mask hides nothing");
     }
 
+    /// The bake matches the screen. A mask only has tiles where the layer
+    /// had ink at creation; ink painted AFTER lands in tiles the mask never
+    /// covers, which both compositors render VISIBLE. Apply-mask used to
+    /// treat those absent tiles as coverage 0 and silently DELETE that ink
+    /// — shown one moment, gone after the bake. Verified failing against
+    /// the old `unwrap_or(0)`.
+    #[test]
+    fn bake_keeps_ink_painted_after_the_mask_was_made() {
+        let mut doc = Document::new(192, 128);
+        doc.begin_op();
+        let t = doc.layers[0].tile_mut(TileIdx::new(0, 0));
+        t.set_pixel(5, 5, [32768, 0, 0, 32768]);
+        doc.end_op();
+        assert!(doc.mask_selection_blank(0), "mask over tile (0,0) only");
+
+        // New ink in a tile the mask has no entry for.
+        doc.begin_op();
+        let t = doc.layers[0].tile_mut(TileIdx::new(2, 0));
+        t.set_pixel(10, 5, [0, 32768, 0, 32768]);
+        doc.end_op();
+        let before = composite(&doc, Background::Transparent);
+        assert_eq!(before.get_pixel(138, 5).0[3], 255, "on screen before");
+
+        assert!(doc.mask_apply_bake(0));
+        assert!(doc.layers[0].mask.is_none(), "bake consumed the mask");
+        let after = composite(&doc, Background::Transparent);
+        assert_eq!(after.get_pixel(5, 5).0[3], 255, "masked-visible ink kept");
+        assert_eq!(
+            after.get_pixel(138, 5).0[3],
+            255,
+            "ink painted after the mask must survive the bake"
+        );
+    }
 }
 
 #[cfg(test)]
