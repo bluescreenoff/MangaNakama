@@ -927,6 +927,33 @@ fn pump_commands(hwnd: HWND) {
         with_app(hwnd, |a| dispatch(a, AppCmd::Autosave));
     }
 
+    // The References palette's "Add images…" button. Like every other file
+    // dialog it is resolved HERE, not inside the UI build: a dialog pumps the
+    // message queue, which re-enters the wndproc, and `App::render` holds a
+    // `&mut App` for the whole frame (docs/ARCHITECTURE.md).
+    if with_app(hwnd, |a| std::mem::take(&mut a.refs.want_add)).unwrap_or(false) {
+        let picked = rfd::FileDialog::new()
+            .set_title("Add reference images")
+            .add_filter(
+                "Images",
+                &["png", "jpg", "jpeg", "bmp", "tif", "tiff", "webp", "gif"],
+            )
+            .pick_files();
+        if let Some(files) = picked {
+            with_app(hwnd, |a| {
+                let added = a.refs.add(files);
+                let lines = a.refs.to_lines();
+                a.layout.note_references(&lines);
+                a.set_status(match added {
+                    0 => "already in the References palette".to_owned(),
+                    1 => "1 reference added".to_owned(),
+                    n => format!("{n} references added"),
+                });
+                a.mark_dirty();
+            });
+        }
+    }
+
     // Custom title bar: start a window move (the system modal loop pumps
     // messages — WM_PAINT re-enters the wndproc — so it must run HERE, with
     // no `&mut App` alive up the stack). End egui's drag first: the move

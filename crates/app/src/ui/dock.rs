@@ -40,9 +40,12 @@ pub enum Palette {
     LayerComps,
     /// Recordable action sequences (CSP Auto Action).
     Actions,
+    /// Reference images: the list palette; each image opens its own free
+    /// floating viewer window (`ui/refs.rs`).
+    References,
 }
 
-pub const ALL: [Palette; 15] = [
+pub const ALL: [Palette; 16] = [
     Palette::Tool,
     Palette::SubTool,
     Palette::ToolProperty,
@@ -58,6 +61,7 @@ pub const ALL: [Palette; 15] = [
     Palette::QuickAccess,
     Palette::LayerComps,
     Palette::Actions,
+    Palette::References,
 ];
 
 impl Palette {
@@ -78,6 +82,7 @@ impl Palette {
             Palette::LayerComps => "Layer Comps",
             Palette::Materials => "Materials",
             Palette::Actions => "Auto Actions",
+            Palette::References => "References",
         }
     }
 
@@ -117,6 +122,7 @@ impl Palette {
                     Palette::QuickAccess => super::quick::quick_palette(ui, app),
                     Palette::LayerComps => super::comps::comps_palette(ui, app),
                     Palette::Actions => super::actions::actions_palette(ui, app),
+                    Palette::References => super::refs::references_palette(ui, app),
                 }
             });
     }

@@ -12,6 +12,7 @@ mod history;
 pub mod icons;
 pub mod preview;
 mod quick;
+pub mod refs;
 pub mod theme;
 
 mod color;
@@ -52,6 +53,10 @@ use crate::app::App;
 pub fn build(ui: &mut egui::Ui, app: &mut App) {
     // One brush preview generated per frame: startup trickles, never hitches.
     app.preview_budget = 1;
+    // Same rule for reference images (thumbnails and viewer textures share
+    // the budget): a board of forty photos loads over forty frames instead of
+    // decoding all of them the first time the palette is shown.
+    app.refs.budget = 1;
     picker_sync(app);
 
     // The reader REPLACES the whole UI while open (owner top item
@@ -140,6 +145,8 @@ pub fn build(ui: &mut egui::Ui, app: &mut App) {
     detail_window(ui.ctx(), app);
     property_detail_window(ui.ctx(), app);
     feedback_window(ui.ctx(), app);
+    // Reference viewers: free floating windows, one per open reference.
+    refs::reference_windows(ui.ctx(), app);
     hud(ui.ctx(), app);
     // Last, so the Ctrl+K overlay floats over every palette and dialog.
     quick::command_palette(ui.ctx(), app);

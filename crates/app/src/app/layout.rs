@@ -49,6 +49,13 @@ pub struct UiLayout {
     /// Material use counters (frequency-of-use sorting): full path →
     /// count, JSON on one line.
     pub material_uses: String,
+    /// The References palette's list (`ui/refs.rs`), absolute paths — a JSON
+    /// string array on one line, so a path with a comma, a quote or a
+    /// backslash survives verbatim. A path whose file has since been renamed
+    /// STAYS in the list: the palette shows it as a missing placeholder, and
+    /// silently dropping a reference board because a folder moved is the
+    /// complaint this feature exists to answer.
+    pub references: Vec<String>,
     /// Quick Access pins (UI-050), labels joined with U+001F.
     pub quick_pins: String,
     /// Named workspaces (UI-060): one JSON line, [[name, dock_left,
@@ -136,6 +143,7 @@ impl Default for UiLayout {
             recent_fonts: Vec::new(),
             material_folders: Vec::new(),
             material_uses: String::new(),
+            references: Vec::new(),
             quick_pins: String::new(),
             workspaces: String::new(),
             workspace_current: String::new(),
@@ -281,6 +289,15 @@ impl UiLayout {
         }
     }
 
+    /// The References palette's list — saved only on change, like the
+    /// material folders above.
+    pub fn note_references(&mut self, paths: &[String]) {
+        if self.references != paths {
+            self.references = paths.to_vec();
+            self.dirty = true;
+        }
+    }
+
     pub fn note_materials(&mut self, folders: &[String], uses: &str) {
         let f: Vec<String> = folders.to_vec();
         if self.material_folders != f || self.material_uses != uses {
@@ -367,7 +384,7 @@ impl UiLayout {
     /// `from_body` completes.
     pub(super) fn to_body(&self) -> String {
         format!(
-            "left_w={:.0}\nright_w={:.0}\ndock_left={}\ndock_right={}\nprop_hidden={}\nwin={}\n{}recent_fonts={}\nmaterial_folders={}\nmaterial_uses={}\nquick_pins={}\nworkspaces={}\nworkspace_current={}\ntouch_gestures={}\ncolor_history={}\nauto_swatch={}\nreader_page={}\nguides_hidden={}\ntest_stroke_hidden={}\ngradients={}\nsub_tool_size_px={}\n",
+            "left_w={:.0}\nright_w={:.0}\ndock_left={}\ndock_right={}\nprop_hidden={}\nwin={}\n{}recent_fonts={}\nmaterial_folders={}\nmaterial_uses={}\nquick_pins={}\nworkspaces={}\nworkspace_current={}\ntouch_gestures={}\ncolor_history={}\nauto_swatch={}\nreader_page={}\nguides_hidden={}\ntest_stroke_hidden={}\ngradients={}\nsub_tool_size_px={}\nreferences={}\n",
             self.left_w,
             self.right_w,
             self.dock_left,
@@ -400,6 +417,7 @@ impl UiLayout {
             self.test_stroke_hidden as u8,
             self.gradients.replace('\n', ""),
             serde_json::to_string(&self.sub_tool_size_px).unwrap_or_default(),
+            serde_json::to_string(&self.references).unwrap_or_default(),
         )
     }
 
@@ -467,6 +485,14 @@ impl UiLayout {
             }
             "material_uses" if !line.contains('\n') => {
                 self.material_uses = v.to_owned();
+            }
+            // The References list (JSON string array, one line). A mangled
+            // line costs the list and nothing else — the palette then starts
+            // empty, which is recoverable; half-parsed paths are not.
+            "references" if !line.contains('\n') => {
+                if let Ok(f) = serde_json::from_str::<Vec<String>>(v) {
+                    self.references = f;
+                }
             }
             // `G-011`: the gradient set, one JSON line.
             "gradients" if !line.contains('\n') => self.gradients = v.to_owned(),
@@ -625,6 +651,64 @@ mod tests {
         junk.apply_kv(r#"sub_tool_size_px={"a.myb":0,"b.myb":999999,"d.myb":24}"#);
         assert_eq!(junk.sub_tool_size_px.len(), 1, "only the sane entry lands");
         assert_eq!(junk.sub_tool_size_px.get("d.myb"), Some(&24.0));
+    }
+
+    /// The References palette's list survives save→load through the real
+    /// body, and — the half that matters — it survives paths that would
+    /// break a comma- or U+001F-joined line: a Windows path is full of
+    /// backslashes, a photo's file name is allowed a comma, a quote and a
+    /// newline, and none of that may cost the user the rest of his board.
+    /// The escaping is JSON's, which is why the list is a JSON array and not
+    /// a joined string like `quick_pins`.
+    #[test]
+    fn references_roundtrip_and_escape_through_the_body() {
+        let mut me = UiLayout::default();
+        assert!(me.references.is_empty(), "nothing until the user adds one");
+
+        let paths: Vec<String> = [
+            r#"D:\refs\hands, feet\a "quote".png"#,
+            r"C:\Users\Max\参考\手.png",
+            "/mnt/share/ref\nnewline.png",
+        ]
+        .map(str::to_string)
+        .to_vec();
+        me.note_references(&paths);
+        assert!(me.dirty);
+
+        let body = me.to_body();
+        assert_eq!(
+            body.lines().filter(|l| l.starts_with("references=")).count(),
+            1,
+            "one line, whatever the paths contain: {body}"
+        );
+        assert!(
+            !body.contains("newline.png\n") || body.contains(r"ref\nnewline.png"),
+            "a newline inside a path must be ESCAPED, not written raw: {body}"
+        );
+
+        let back = UiLayout::from_body(&body);
+        assert_eq!(back.references, paths, "every path verbatim");
+        assert!(!back.dirty, "a fresh load is not a pending save");
+
+        // `note` with the same list must not re-dirty a clean layout.
+        let mut back = back;
+        back.note_references(&paths);
+        assert!(!back.dirty);
+
+        // An emptied list is a real state (the user forgot every reference).
+        back.note_references(&[]);
+        assert!(back.dirty);
+        assert!(UiLayout::from_body(&back.to_body()).references.is_empty());
+
+        // Junk costs the list and nothing else; an older build's ui.txt has
+        // no such key and simply starts empty.
+        let mut junk = UiLayout::default();
+        junk.apply_kv("references=[not json");
+        assert!(junk.references.is_empty());
+        junk.apply_kv("references=\"scalar\"");
+        assert!(junk.references.is_empty());
+        junk.apply_kv("left_w=200");
+        assert!(junk.references.is_empty());
     }
 
     #[test]

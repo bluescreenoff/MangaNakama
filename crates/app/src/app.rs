@@ -412,6 +412,11 @@ pub struct App {
     /// different material, so it can never write one material's tags onto
     /// another's.
     pub material_tag_edit: Option<(std::path::PathBuf, String)>,
+    /// The References palette (`ui/refs.rs`): the persisted path list, the
+    /// lazily loaded textures, and the open viewer windows. One field because
+    /// the halves only make sense together — the list is what persists, the
+    /// viewers and textures are the session.
+    pub refs: crate::ui::refs::RefBank,
     /// Navigator (CV-036): sticky fit — keep re-fitting the page on every
     /// window resize until toggled off.
     pub fit_sticky: bool,
@@ -1200,6 +1205,7 @@ impl App {
             material_size: MaterialPasteSize::default(),
             material_order: MaterialLayerOrder::default(),
             material_tag_edit: None,
+            refs: crate::ui::refs::RefBank::from_layout(&layout.references),
             fit_sticky: false,
             ruler_pending: None,
             symmetric_lines: 2,
@@ -3604,7 +3610,7 @@ fn scan_textures(root: Option<&Path>) -> Vec<String> {
 /// it panics. Without `MN_WARP` — a developer's machine, where the adapter
 /// really can be absent — the skip stands.
 #[cfg(test)]
-fn headless_renderer() -> Option<mn_gpu::Renderer> {
+pub(crate) fn headless_renderer() -> Option<mn_gpu::Renderer> {
     let warp = std::env::var("MN_WARP").is_ok();
     match mn_gpu::Renderer::new_headless(mn_gpu::GpuConfig {
         force_fallback: warp,

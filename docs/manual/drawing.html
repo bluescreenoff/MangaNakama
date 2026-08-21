@@ -217,6 +217,38 @@ every other registered material. It lands in your own materials folder,
 or in a <code>materials-mine</code> beside the exe if you have not added
 one.</div>
 
+<h2>Reference images</h2>
+<p>The <b>References</b> palette (Workspace ▸ References) is a list:
+<i>Add images…</i> picks photos or scans, and each row is a thumbnail you
+click to open that image in its own floating window. Open as many as you
+like — they are free windows, so three references can sit over the canvas
+at once, wherever you drag them. Inside a viewer: <b>drag</b> pans,
+<b>the wheel</b> zooms around the cursor, <b>−</b>/<b>＋</b> step the zoom,
+<b>Fit</b> goes back to fit-to-window, and <kbd>Alt</kbd>+click (or the
+<b>◉</b> toggle, then a plain click) takes the colour under the cursor
+into your drawing colour — the same pick the canvas eyedropper makes, so
+it joins the Recent strip and obeys the auto-register switch too.</p>
+<div class="quirk"><b>The list is remembered, the windows are not.</b>
+Your reference board is still there next launch; the viewers you had open
+are not, because windows that reopen themselves over the canvas every
+morning are a nuisance rather than a feature. Click a row and it is back.
+<span class="why">The list lives in <code>ui.txt</code> as one escaped
+line, so a path with a comma or a quote in it survives.</span></div>
+<div class="quirk warn"><b>A renamed or moved file stays in the list as a
+missing placeholder — it does not vanish.</b> The row goes amber with a
+crossed-out thumbnail and the tooltip names the path it was looking for,
+so you can find what moved (or unplug-and-replug the drive) instead of
+wondering which reference you have lost. <b>✕</b> forgets a row when you
+mean it.</div>
+<div class="quirk"><b>Big references are downscaled, once.</b> A viewer's
+texture caps at 4096 px on the long edge and the decoded image is dropped
+the moment it is uploaded, so a folder of 6000 px photos does not eat the
+memory the brush engine needs. Colour picks come from a small copy taken
+with nearest-neighbour sampling, so a picked colour is a real pixel of the
+file and never a blend of two. Images load <em>one per frame</em>: a board
+of forty references trickles in rather than freezing the moment you open
+the palette.</div>
+
 <h2>Locking a sub tool</h2>
 <p>The padlock beside the wrench in <b>Tool Property</b> pins the sub
 tool you are on — for the pen you spent an afternoon calibrating and
