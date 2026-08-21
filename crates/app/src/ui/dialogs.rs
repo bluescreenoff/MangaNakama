@@ -983,7 +983,18 @@ pub(super) fn adjust_window(ctx: &egui::Context, app: &mut App) {
             if matches!(adj, mn_core::Adjust::Binarize { .. }) {
                 ui.weak("Transparent pixels stay transparent; alpha is not touched.");
             }
-            ui.weak("Applies to the ACTIVE layer only, inside the selection if there is one.");
+            // TC-013: the target set was fixed when the dialog opened.
+            let n = app
+                .adjust_preview
+                .as_ref()
+                .map_or(1, |p| p.targets.len().max(1));
+            if n > 1 {
+                ui.weak(format!(
+                    "Applies to the {n} selected layers, inside the selection if there is one."
+                ));
+            } else {
+                ui.weak("Applies to the ACTIVE layer only, inside the selection if there is one.");
+            }
             ui.add_space(2.0);
             ui.checkbox(&mut live, "Preview").on_hover_text(
                 "Off shows the layer untouched — the 'before' half, without closing this.",

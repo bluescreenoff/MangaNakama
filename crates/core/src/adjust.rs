@@ -320,34 +320,51 @@ impl Document {
         self.touch();
     }
 
-    /// Apply a correction to the **active** layer as ONE undo step, clipped
-    /// to the selection when there is one. False when the layer refuses, has
-    /// no pixels in reach, or the correction is a no-op.
-    ///
-    /// Deliberately takes no layer index: `begin_op` arms the layer that is
-    /// active, and a correction written to some other index would record its
-    /// undo against the wrong layer.
+    /// Apply a correction to the **active** layer as ONE undo step. False
+    /// when the layer refuses, has no pixels in reach, or the correction is
+    /// a no-op. The single-layer face of [`Self::apply_adjust_many`].
     pub fn apply_adjust(&mut self, adj: &Adjust) -> bool {
-        if adj.is_identity() {
-            return false;
-        }
         let li = self.active;
-        let snap = self.adjust_snapshot(li);
-        if snap.is_empty() {
-            return false;
+        self.apply_adjust_many(adj, &[li]) > 0
+    }
+
+    /// Apply one correction to several layers as ONE undo step (TC-013:
+    /// `UndoGroup::Compound` of per-layer `Tiles` groups — the CSP 5.0
+    /// "correct the page, not a layer at a time" operation), clipped to the
+    /// selection when there is one. Layers that refuse (folder / vector /
+    /// locked / no pixels in reach) are skipped. Returns how many layers
+    /// were corrected; zero pushes nothing.
+    pub fn apply_adjust_many(&mut self, adj: &Adjust, indices: &[usize]) -> usize {
+        if adj.is_identity() {
+            return 0;
         }
         let sel = self.selection.clone();
-        self.begin_op();
-        for (idx, orig) in &snap {
-            let mask = sel.as_ref().and_then(|s| s.tile_mask(*idx));
-            let src = orig.data().to_vec();
-            let data = self.layers[li].tile_mut(*idx).data_mut();
-            correct_tile(data, &src, adj, mask);
+        let mut members = Vec::new();
+        for &li in indices {
+            let snap = self.adjust_snapshot(li);
+            if snap.is_empty() {
+                continue;
+            }
+            // `begin_op_on`, not `begin_op`: only one of these layers is
+            // active, and recording into "whichever layer happened to be
+            // active" is the documented art-loss shape (CODE-MAP, undo).
+            self.begin_op_on(li);
+            for (idx, orig) in &snap {
+                let mask = sel.as_ref().and_then(|s| s.tile_mask(*idx));
+                let src = orig.data().to_vec();
+                let data = self.layers[li].tile_mut(*idx).data_mut();
+                correct_tile(data, &src, adj, mask);
+            }
+            // No `mask_op_to_selection`: the coverage blend is already in
+            // `correct_tile` and unselected tiles were never in `snap`.
+            // No `mask_op_to_alpha` either — see the module note.
+            if let Some(g) = self.end_op_take() {
+                members.push(g);
+            }
         }
-        // No `mask_op_to_selection`: the coverage blend is already in
-        // `correct_tile` and unselected tiles were never in `snap`.
-        // No `mask_op_to_alpha` either — see the module note.
-        self.end_op()
+        let n = members.len();
+        self.push_compound(adj.label(), members);
+        n
     }
 }
 
@@ -616,5 +633,58 @@ mod tests {
             .data()
             .to_vec();
         assert_eq!(previewed, committed);
+    }
+
+    // --- TC-013: several layers, one step --------------------------------
+
+    #[test]
+    fn many_corrects_selected_layers_as_one_compound_step() {
+        let mut doc = Document::new(128, 128);
+        put(&mut doc, 0, 10, 10, [0.6, 0.6, 0.6, 1.0]);
+        let l2 = doc.add_layer("L2");
+        put(&mut doc, l2, 10, 10, [0.2, 0.2, 0.2, 1.0]);
+        let locked = doc.add_layer("locked");
+        put(&mut doc, locked, 10, 10, [0.8, 0.8, 0.8, 1.0]);
+        doc.layers[locked].lock = true;
+        // A refusing layer (locked) and a bare index are skipped, not fatal.
+        let n = doc.apply_adjust_many(&Adjust::Invert, &[0, l2, locked, 99]);
+        assert_eq!(n, 2, "two layers corrected, locked + bogus skipped");
+        assert!(near(get(&doc, 0, 10, 10)[0], 0.4));
+        assert!(near(get(&doc, l2, 10, 10)[0], 0.8));
+        assert!(near(get(&doc, locked, 10, 10)[0], 0.8), "locked untouched");
+        assert_eq!(doc.undo_labels().len(), 1, "ONE step for the whole set");
+        assert!(doc.undo());
+        assert!(near(get(&doc, 0, 10, 10)[0], 0.6), "undo restores layer 0");
+        assert!(near(get(&doc, l2, 10, 10)[0], 0.2), "and layer 2");
+        assert!(doc.redo());
+        assert!(near(get(&doc, 0, 10, 10)[0], 0.4), "redo replays layer 0");
+        assert!(near(get(&doc, l2, 10, 10)[0], 0.8), "and layer 2");
+    }
+
+    #[test]
+    fn multi_selection_gestures_and_the_structural_door() {
+        let mut doc = Document::new(64, 64);
+        let l1 = doc.add_layer("b");
+        let l2 = doc.add_layer("c");
+        assert_eq!(doc.active, l2);
+        // Ctrl+click toggles and hands over the pen; Shift+click ranges.
+        assert!(doc.toggle_multi(0));
+        assert_eq!((doc.active, doc.layer_multi.clone()), (0, vec![l2]));
+        assert!(doc.range_multi(l2));
+        assert_eq!(doc.layer_multi, vec![l1, l2], "range spans, pen stays");
+        assert_eq!(doc.multi_targets(), vec![0, l1, l2]);
+        // Toggling the ACTIVE row off moves the pen to a remaining row.
+        assert!(doc.toggle_multi(0));
+        assert!(doc.active != 0 && !doc.layer_multi.contains(&doc.active));
+        // A plain selection collapses the set.
+        assert!(doc.set_active(l1));
+        assert!(doc.layer_multi.is_empty());
+        assert_eq!(doc.multi_targets(), vec![l1]);
+        // The structural door: index-shifting ops clear the selection with
+        // the history (the invariant Compound leans on covers both).
+        doc.toggle_multi(l2);
+        assert!(!doc.layer_multi.is_empty());
+        doc.add_layer("d");
+        assert!(doc.layer_multi.is_empty(), "structural op cleared it");
     }
 }

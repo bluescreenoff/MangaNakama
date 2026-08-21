@@ -999,6 +999,9 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
             continue;
         }
         let selected = i == active;
+        // TC-013: multi-selected rows share the selection fill; the editing
+        // pen (below) still marks only the active row, like CSP.
+        let multi = selected || app.doc.layer_multi.contains(&i);
 
         // Inline rename replaces the row with a text edit.
         if matches!(&app.renaming, Some((ri, _)) if *ri == i) {
@@ -1043,11 +1046,13 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
             .on_hover_text("show/hide — Alt+click solos this layer");
         // Discoverability (r102 audit): the row's two power gestures had
         // no surface — hover carries them now.
-        let resp = resp
-            .on_hover_text("Ctrl+click: selection from this layer's ink · double-click: rename");
+        let resp = resp.on_hover_text(
+            "Ctrl+click: add/remove from the selected layers · Shift+click: select range · \
+             Ctrl+click the thumbnail: selection from this layer's ink · double-click: rename",
+        );
 
         let p = ui.painter();
-        if selected {
+        if multi {
             p.rect_filled(rect, 2.0, theme::SEL_ROW);
         } else if resp.hovered() {
             p.rect_filled(rect, 2.0, theme::HOVER);
@@ -1392,13 +1397,24 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
         } else if resp.double_clicked() {
             app.renaming = Some((i, row.name.clone()));
         } else if resp.clicked() && ui.input(|i| i.modifiers.ctrl) {
-            // SE-011: Ctrl+click a layer row selects its alpha — the
-            // most-used selection action in any layered app (CSP does not
-            // make the layer active either). Modifiers combine with the
-            // current selection like every other selection gesture.
-            let m = ui.input(|i| i.modifiers);
-            let op = crate::cmd::effective_sel_op(m.shift, m.alt, app.sel_op);
-            app.push_cmd(AppCmd::SelectFromLayer(i, op));
+            // SE-011 vs TC-013, CSP's own split: Ctrl+click on the THUMBNAIL
+            // selects the layer's alpha (modifiers combine with the current
+            // selection like every other selection gesture); Ctrl+click
+            // anywhere else on the row toggles it in the multi-selection.
+            let on_thumb = ui
+                .ctx()
+                .pointer_interact_pos()
+                .is_some_and(|pos| tr.contains(pos));
+            if on_thumb {
+                let m = ui.input(|i| i.modifiers);
+                let op = crate::cmd::effective_sel_op(m.shift, m.alt, app.sel_op);
+                app.push_cmd(AppCmd::SelectFromLayer(i, op));
+            } else {
+                app.push_cmd(AppCmd::ToggleLayerMulti(i));
+            }
+        } else if resp.clicked() && ui.input(|i| i.modifiers.shift) {
+            // TC-013: range-select between the active row and this one.
+            app.push_cmd(AppCmd::RangeLayerMulti(i));
         } else if resp.clicked() {
             // `SelectLayer` clears the Paper highlight, but a click on the
             // row that is ALREADY active pushes no command — so clear it

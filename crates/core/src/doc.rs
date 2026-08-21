@@ -1120,6 +1120,13 @@ pub const DEFAULT_SIZE: (u32, u32) = (2048, 2048);
 pub struct Document {
     pub layers: Vec<Layer>,
     pub active: usize,
+    /// Palette multi-selection (TC-013): rows selected BESIDE `active`,
+    /// sorted, never containing `active` itself. Session-only, like the
+    /// rulers. Cleared by `clear_history` — the structural ops that could
+    /// let these indices go stale are exactly the ones that clear the
+    /// history, so the one door covers both (the `Compound` safety
+    /// argument, reused).
+    pub layer_multi: Vec<usize>,
     pub size: (u32, u32),
     /// Bumped whenever a stroke ends; lets the shell invalidate cheaply.
     pub revision: u64,
@@ -1264,6 +1271,7 @@ impl Document {
         Self {
             layers: vec![Layer::new("Layer 1")],
             active: 0,
+            layer_multi: Vec::new(),
             size: (width, height),
             revision: next_revision(),
             selection: None,
@@ -1649,6 +1657,31 @@ impl Document {
         };
         self.history
             .push_labeled(&label, UndoGroup::Tiles { layer: li, tiles });
+        self.touch();
+        true
+    }
+
+    /// Close the open op and hand back its `Tiles` group WITHOUT pushing:
+    /// a multi-layer loop (`apply_adjust_many`) collects one per layer and
+    /// pushes them as ONE step via [`Self::push_compound`]. `None` when no
+    /// op was open or nothing was touched.
+    pub fn end_op_take(&mut self) -> Option<UndoGroup> {
+        let (li, _label, tiles) = self.take_op()?;
+        Some(UndoGroup::Tiles { layer: li, tiles })
+    }
+
+    /// Push already-collected groups as ONE labelled undo step. A single
+    /// member skips the `Compound` wrapper (identical history to the op
+    /// having pushed itself). Index drift cannot bite for the same reason
+    /// `set_tone_many` is safe: every index-shifting op clears the history.
+    pub fn push_compound(&mut self, label: &str, mut members: Vec<UndoGroup>) -> bool {
+        match members.len() {
+            0 => return false,
+            1 => self.history.push_labeled(label, members.pop().unwrap()),
+            _ => self
+                .history
+                .push_labeled(label, UndoGroup::Compound(members)),
+        }
         self.touch();
         true
     }
@@ -2093,6 +2126,9 @@ impl Document {
     /// Throw the history away (file load, or a change undo cannot express).
     pub fn clear_history(&mut self) {
         self.cancel_op();
+        // The palette multi-selection is index-keyed; everything that
+        // shifts indices comes through here (see `layer_multi`'s note).
+        self.layer_multi.clear();
         self.history.clear();
         // PR-041: the structural layer ops (add, delete, reorder, import)
         // are the ones that come through here INSTEAD of pushing a group,
@@ -3241,13 +3277,71 @@ impl Document {
     }
 
     /// Select the active layer. Out-of-range indices are rejected.
+    ///
+    /// A plain selection collapses the palette multi-selection (CSP: any
+    /// non-modified click or keyboard move leaves one row selected) — the
+    /// gesture methods below manage `active` directly instead.
     pub fn set_active(&mut self, index: usize) -> bool {
         if index >= self.layers.len() {
             return false;
         }
         self.active = index;
+        self.layer_multi.clear();
         self.touch();
         true
+    }
+
+    /// TC-013 Ctrl+click: toggle `index` in the palette multi-selection.
+    /// Toggling a row ON also makes it the editing target (CSP moves the
+    /// pen); toggling the ACTIVE row off hands the target to the nearest
+    /// remaining selected row. The last selected row cannot be toggled off.
+    pub fn toggle_multi(&mut self, index: usize) -> bool {
+        if index >= self.layers.len() {
+            return false;
+        }
+        if index == self.active {
+            // Deselect the target: someone else must take the pen.
+            let Some(pos) = self
+                .layer_multi
+                .iter()
+                .rposition(|&m| m < index)
+                .or(if self.layer_multi.is_empty() { None } else { Some(0) })
+            else {
+                return false; // the only selected row stays selected
+            };
+            self.active = self.layer_multi.remove(pos);
+        } else if let Some(pos) = self.layer_multi.iter().position(|&m| m == index) {
+            self.layer_multi.remove(pos);
+        } else {
+            self.layer_multi.push(self.active);
+            self.active = index;
+            self.layer_multi.retain(|&m| m != index);
+            self.layer_multi.sort_unstable();
+        }
+        self.touch();
+        true
+    }
+
+    /// TC-013 Shift+click: select the contiguous range between the active
+    /// row and `index`; the active row keeps the pen. Replaces any prior
+    /// multi-selection, like CSP's range gesture.
+    pub fn range_multi(&mut self, index: usize) -> bool {
+        if index >= self.layers.len() {
+            return false;
+        }
+        let (lo, hi) = (self.active.min(index), self.active.max(index));
+        self.layer_multi = (lo..=hi).filter(|&i| i != self.active).collect();
+        self.touch();
+        true
+    }
+
+    /// The rows a "selected layers" operation targets: the active layer
+    /// plus the multi-selection, bottom-to-top. Never empty.
+    pub fn multi_targets(&self) -> Vec<usize> {
+        let mut t = self.layer_multi.clone();
+        t.push(self.active);
+        t.sort_unstable();
+        t
     }
 
     /// Set layer opacity (clamped 0..1) and publish a new document revision —

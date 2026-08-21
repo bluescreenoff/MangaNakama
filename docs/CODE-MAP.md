@@ -48,7 +48,15 @@ The recurring failure shapes, in order of how often they have shipped:
   already self-healing: `fill_stamp` carries the mask revision.)
 - One user gesture = one undo step. If your feature loops a per-item
   command, bracket it; N undo presses for one action is a bug (and a
-  partial undo of a multi-part edit leaves mismatched state).
+  partial undo of a multi-part edit leaves mismatched state). For a
+  multi-LAYER gesture the shape is: `begin_op_on(li)` … `end_op_take()`
+  per layer, then ONE `push_compound` (see `apply_adjust_many`) — safe
+  against index drift only because every index-shifting op clears the
+  history.
+- The palette multi-selection (`Document::layer_multi`) is index-keyed
+  and rides the same door: `clear_history()` clears it. A new structural
+  path that skips `clear_history` would leave BOTH the undo indices and
+  the multi-selection stale — don't skip it.
 - Vector layers (docs/VECTOR-INKING.md): a recorded stroke's pixels and
   its geometry ride ONE `UndoGroup::VectorStroke` — `end_op_vector_stroke`
   closes the op, never `end_op` + a separate record. Replay has two hard

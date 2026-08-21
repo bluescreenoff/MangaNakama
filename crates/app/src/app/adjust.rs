@@ -22,38 +22,44 @@ use crate::app::App;
 
 /// The pixels a live preview overwrote, and where they came from.
 pub struct AdjustPreview {
-    /// The layer the snapshot was taken from. Nothing may change the active
-    /// layer while a preview is live (see the module note), so this is also
-    /// the layer Apply commits to — it is stored to make the restore correct
-    /// even if that ever stopped being true.
-    pub layer: usize,
-    /// The dialog's Preview checkbox. Off puts the untouched layer back on
+    /// Per-target restore points: each selected layer with its pre-image
+    /// tiles (Arc handles — no pixels were copied). The set was taken from
+    /// the palette selection when the dialog opened; nothing may change
+    /// that selection while a preview is live (see the module note), so
+    /// these are also the layers Apply commits to.
+    pub targets: Vec<(usize, Vec<(TileIdx, Arc<Tile>)>)>,
+    /// The dialog's Preview checkbox. Off puts the untouched layers back on
     /// screen without closing the dialog — the "before" of before/after,
     /// which is the only way to judge a binarization threshold.
     pub live: bool,
     /// What is actually painted into the document right now; `None` = the
     /// original pixels. A UI frame that changed nothing costs nothing.
     pub painted: Option<Adjust>,
-    /// Arc handles to the pre-images — no pixels were copied to make this.
-    pub tiles: Vec<(TileIdx, Arc<Tile>)>,
 }
 
 impl App {
-    /// Open a correction dialog and take the preview's restore point.
+    /// Open a correction dialog and take the preview's restore points —
+    /// one per selected layer that has pixels in reach (TC-013).
     pub fn adjust_begin(&mut self, adj: Adjust) {
         self.adjust_preview_revert();
-        let layer = self.doc.active;
-        let tiles = self.doc.adjust_snapshot(layer);
-        if tiles.is_empty() {
-            self.set_status("nothing to correct — this layer has no pixels in reach");
+        let targets: Vec<_> = self
+            .doc
+            .multi_targets()
+            .into_iter()
+            .filter_map(|li| {
+                let tiles = self.doc.adjust_snapshot(li);
+                (!tiles.is_empty()).then_some((li, tiles))
+            })
+            .collect();
+        if targets.is_empty() {
+            self.set_status("nothing to correct — no selected layer has pixels in reach");
             return;
         }
         self.adjust_draft = Some(adj);
         self.adjust_preview = Some(AdjustPreview {
-            layer,
+            targets,
             live: true,
             painted: None,
-            tiles,
         });
         self.mark_dirty();
     }
@@ -77,8 +83,10 @@ impl App {
         if p.painted == want {
             return;
         }
-        let (layer, tiles) = (p.layer, p.tiles.clone());
-        self.doc.preview_adjust(layer, &tiles, want.as_ref());
+        let targets = p.targets.clone();
+        for (layer, tiles) in &targets {
+            self.doc.preview_adjust(*layer, tiles, want.as_ref());
+        }
         if let Some(p) = self.adjust_preview.as_mut() {
             p.painted = want;
         }
@@ -93,7 +101,9 @@ impl App {
             return false;
         };
         if p.painted.is_some() {
-            self.doc.preview_adjust(p.layer, &p.tiles, None);
+            for (layer, tiles) in &p.targets {
+                self.doc.preview_adjust(*layer, tiles, None);
+            }
             self.mark_dirty();
         }
         true
@@ -109,15 +119,31 @@ impl App {
         let Some(adj) = self.adjust_draft else {
             return;
         };
+        // The layers the preview snapshotted are the layers to commit to —
+        // the palette selection cannot have moved while the dialog was open
+        // (dispatch's head guard), but taking them from the preview makes
+        // the commit correct even if that ever stopped being true.
+        let layers: Vec<usize> = self
+            .adjust_preview
+            .as_ref()
+            .map(|p| p.targets.iter().map(|(li, _)| *li).collect())
+            .unwrap_or_default();
         self.adjust_preview_revert();
-        self.doc.set_op_label(adj.label());
-        if self.doc.apply_adjust(&adj) {
-            self.set_status(format!("{} applied", adj.label()));
-            self.mark_dirty();
-        } else if adj.is_identity() {
-            self.set_status("nothing to apply — every slider is at rest");
-        } else {
-            self.set_status("nothing to correct (needs an unlocked raster layer with pixels)");
+        match self.doc.apply_adjust_many(&adj, &layers) {
+            0 if adj.is_identity() => {
+                self.set_status("nothing to apply — every slider is at rest");
+            }
+            0 => {
+                self.set_status("nothing to correct (needs an unlocked raster layer with pixels)");
+            }
+            1 => {
+                self.set_status(format!("{} applied", adj.label()));
+                self.mark_dirty();
+            }
+            n => {
+                self.set_status(format!("{} applied to {n} layers", adj.label()));
+                self.mark_dirty();
+            }
         }
     }
 }
@@ -247,6 +273,32 @@ mod tests {
         app.begin_stroke(PointerKind::Mouse);
         assert!(app.stroke.is_none(), "the stroke must not have opened");
         assert!(app.adjust_preview.is_some(), "and the dialog stays open");
+    }
+
+    #[test]
+    fn multi_selection_previews_and_commits_every_selected_layer() {
+        // TC-013: two layers in the palette selection — the preview paints
+        // both, Apply bakes both as ONE undo step, undo restores both.
+        let Some(mut app) = headless() else {
+            println!("[test] SKIP: no usable adapter");
+            return;
+        };
+        seed(&mut app, 0.6); // layer 0
+        dispatch(&mut app, AppCmd::AddLayer);
+        seed(&mut app, 0.2); // layer 1, active after AddLayer
+        assert!(app.doc.toggle_multi(0), "layer 0 joins the selection");
+        assert_eq!(app.doc.multi_targets(), vec![0, 1]);
+        app.adjust_begin(Adjust::Invert);
+        app.adjust_preview_sync();
+        assert!((read(&app, 0) - 0.4).abs() < 0.002, "preview on layer 0");
+        assert!((read(&app, 1) - 0.8).abs() < 0.002, "preview on layer 1");
+        app.adjust_commit();
+        assert!((read(&app, 0) - 0.4).abs() < 0.002, "applied once to 0");
+        assert!((read(&app, 1) - 0.8).abs() < 0.002, "applied once to 1");
+        assert_eq!(app.doc.undo_labels().len(), 1, "ONE step for the set");
+        assert!(app.doc.undo());
+        assert!((read(&app, 0) - 0.6).abs() < 0.002, "undo restores 0");
+        assert!((read(&app, 1) - 0.2).abs() < 0.002, "undo restores 1");
     }
 
     #[test]

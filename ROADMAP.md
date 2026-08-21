@@ -33,7 +33,10 @@ software-adapter fallback that is the *same* code path, not a second
 implementation. Fifteen blend modes with the CPU and GPU results pinned equal
 by tests. Layer masks, layer colour tint, reference layers, layer comps,
 selections (rectangle, lasso, wand, brush-painted selection pen/eraser, quick
-mask), transform and flip, and undo throughout.
+mask), transform and flip, and undo throughout. Layers multi-select in the
+palette (Ctrl+click toggles, Shift+click ranges), and tonal correction —
+brightness/contrast, hue/saturation, posterize, invert, binarize — applies
+across every selected layer as a single dialog and a single undo step.
 
 **Manga.** Frame folders and panel division with automatic reading-order
 numbering plus an on-canvas reading-path overlay; balloons with editable
@@ -66,25 +69,26 @@ Roughly in order. None of this is promised by a date.
    background benchmark decides, never a blanket default. Still CPU-only:
    smudge combined with wash (the sampler would have to read the in-flight
    wash buffer) and the spectral-paint / colorize / posterize presets.
-2. **Tonal correction across multiple selected layers.** Select several
-   layers and apply one tonal correction (brightness/contrast, hue/
-   saturation, levels, tone curve) to all of them in a single operation —
-   one dialog, one undo step. Clip Studio added this in its 5.0; it is the
-   difference between correcting a page and correcting a layer at a time.
-3. **Clipping that survives structure edits.** The scenario catalog is
+2. **Levels and tone curve.** The two corrections the tonal-correction
+   family still lacks (the multi-layer application above already handles
+   whatever corrections exist).
+3. **Paste into a selection.** With a selection active, paste should land
+   already masked to it — the pasted layer arrives wearing the selection
+   as its mask instead of splashing over the whole canvas.
+4. **Clipping that survives structure edits.** The scenario catalog is
    `docs/CLIPPING-SCENARIOS.md`; the guardrails already landed (an insert
    can no longer silently re-base a clip run). What remains is the feature
    half: **clip to a folder** (a layer above a folder clips to the group's
    combined ink — both compositors, CPU and GPU, in agreement) and the
    palette/status feedback when a clip flag has no base and is being
    ignored.
-4. **A small scripting surface.** The batch half shipped (Layer > Batch
+5. **A small scripting surface.** The batch half shipped (Layer > Batch
    operations: rename/renumber by pattern, apply/clear tone as one undo
    step, export a PNG per layer — scoped by all/folder/name-prefix).
    What remains is the scripting surface proper, if real use ever asks
    for more than the dialog covers.
-5. **HDR / linear-light colour.**
-6. **The manual, kept honest.** Static HTML beside the executable exists;
+6. **HDR / linear-light colour.**
+7. **The manual, kept honest.** Static HTML beside the executable exists;
    its job is the quirks — the interlocks you would otherwise discover by
    having something silently do nothing — and it grows with every round.
 

@@ -1354,6 +1354,12 @@ pub enum AppCmd {
     },
     RenameLayer(usize, String),
     SelectLayer(usize),
+    /// TC-013 Ctrl+click on a palette row: toggle it in the multi-selection
+    /// (toggling ON moves the editing pen there, like CSP).
+    ToggleLayerMulti(usize),
+    /// TC-013 Shift+click: multi-select the contiguous range between the
+    /// active row and this one; the pen stays put.
+    RangeLayerMulti(usize),
     /// LF-002: set a folder Through (children stop isolating) — presentation-
     /// only like visibility, composites live.
     SetFolderThrough(usize, bool),
@@ -4546,6 +4552,24 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 // picked on — carried across, it would light an unrelated
                 // stroke on the next vector layer with enough strokes.
                 app.vector_sel = None;
+                app.mark_dirty();
+            }
+        }
+        AppCmd::ToggleLayerMulti(i) => {
+            app.commit_text_edit();
+            app.paper_selected = false;
+            // Toggling ON (or the active row OFF) moves the editing target,
+            // so the same hygiene as SelectLayer applies.
+            if app.doc.toggle_multi(i) {
+                app.disarm_mask_edit_if_unmasked();
+                app.vector_sel = None;
+                app.mark_dirty();
+            }
+        }
+        AppCmd::RangeLayerMulti(i) => {
+            app.commit_text_edit();
+            app.paper_selected = false;
+            if app.doc.range_multi(i) {
                 app.mark_dirty();
             }
         }
