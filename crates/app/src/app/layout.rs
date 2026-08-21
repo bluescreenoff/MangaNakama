@@ -92,6 +92,11 @@ pub struct UiLayout {
     /// vanish. Persisted, unlike the Tab hides, because it is a workspace
     /// preference rather than a panic button.
     pub guides_hidden: bool,
+    /// The brush panel's LIVE test stroke is folded away. **Default false
+    /// (shown)** — the strip is the answer to tuning sixteen parameter pages
+    /// blind, so an absent key and any junk value both leave it visible; only
+    /// a literal `1` folds it, the `guides_hidden` rule.
+    pub test_stroke_hidden: bool,
     /// `G-011`/`G-012`: the saved gradient set, `mn_core::GradientSet`'s
     /// item list as one JSON line. Empty = never saved, and startup seeds
     /// the starter set; `[]` is a user who deleted every gradient and is
@@ -139,6 +144,7 @@ impl Default for UiLayout {
             auto_swatch: false,
             reader_page: 0,
             guides_hidden: false,
+            test_stroke_hidden: false,
             gradients: String::new(),
             sub_tool_size_px: BTreeMap::new(),
             dirty: false,
@@ -318,6 +324,15 @@ impl UiLayout {
         }
     }
 
+    /// The brush panel's test-stroke fold. Saved only on change, like the
+    /// two switches above.
+    pub fn note_test_stroke_hidden(&mut self, hidden: bool) {
+        if self.test_stroke_hidden != hidden {
+            self.test_stroke_hidden = hidden;
+            self.dirty = true;
+        }
+    }
+
     /// `G-011`/`G-012`: the gradient set, as `GradientSet::to_json`.
     pub fn note_gradients(&mut self, json: &str) {
         if self.gradients != json {
@@ -352,7 +367,7 @@ impl UiLayout {
     /// `from_body` completes.
     pub(super) fn to_body(&self) -> String {
         format!(
-            "left_w={:.0}\nright_w={:.0}\ndock_left={}\ndock_right={}\nprop_hidden={}\nwin={}\n{}recent_fonts={}\nmaterial_folders={}\nmaterial_uses={}\nquick_pins={}\nworkspaces={}\nworkspace_current={}\ntouch_gestures={}\ncolor_history={}\nauto_swatch={}\nreader_page={}\nguides_hidden={}\ngradients={}\nsub_tool_size_px={}\n",
+            "left_w={:.0}\nright_w={:.0}\ndock_left={}\ndock_right={}\nprop_hidden={}\nwin={}\n{}recent_fonts={}\nmaterial_folders={}\nmaterial_uses={}\nquick_pins={}\nworkspaces={}\nworkspace_current={}\ntouch_gestures={}\ncolor_history={}\nauto_swatch={}\nreader_page={}\nguides_hidden={}\ntest_stroke_hidden={}\ngradients={}\nsub_tool_size_px={}\n",
             self.left_w,
             self.right_w,
             self.dock_left,
@@ -382,6 +397,7 @@ impl UiLayout {
             self.auto_swatch as u8,
             self.reader_page,
             self.guides_hidden as u8,
+            self.test_stroke_hidden as u8,
             self.gradients.replace('\n', ""),
             serde_json::to_string(&self.sub_tool_size_px).unwrap_or_default(),
         )
@@ -427,6 +443,8 @@ impl UiLayout {
             // absent key all leave the guides SHOWN — the direction that
             // cannot lose a manga artist's crop marks.
             "guides_hidden" => self.guides_hidden = v.trim() == "1",
+            // Same direction of failure: only `1` folds the test stroke away.
+            "test_stroke_hidden" => self.test_stroke_hidden = v.trim() == "1",
             // `1` requests on, anything else off — the round-32 rule,
             // restored by the round-34 revert (default-off until TODO #0.1
             // + an on-hardware benchmark number justify the flip).
@@ -856,6 +874,33 @@ mod tests {
         for line in ["guides_hidden=0", "guides_hidden=yes", "guides_hidden="] {
             junk.apply_kv(line);
             assert!(!junk.guides_hidden, "{line} must not hide the guides");
+        }
+    }
+
+    /// The brush panel's test-stroke fold rides the same rules: it round-trips
+    /// through the body, and every way of being unreadable leaves the strip
+    /// SHOWN — a preview nobody can find is the bug the feature exists to fix.
+    #[test]
+    fn test_stroke_fold_roundtrips_and_degrades_to_shown() {
+        let mut me = UiLayout::default();
+        assert!(!me.test_stroke_hidden, "default: the strip is shown");
+        me.note_test_stroke_hidden(true);
+        let body = me.to_body();
+        assert!(body.contains("\ntest_stroke_hidden=1\n"), "{body}");
+
+        let mut back = UiLayout::default();
+        for line in body.lines() {
+            back.apply_kv(line);
+        }
+        assert!(back.test_stroke_hidden, "the saved body restores the fold");
+        back.dirty = false;
+        back.note_test_stroke_hidden(true);
+        assert!(!back.dirty, "an unchanged fold must not re-dirty ui.txt");
+
+        let mut junk = UiLayout::default();
+        for line in ["test_stroke_hidden=0", "test_stroke_hidden=no", "left_w=200"] {
+            junk.apply_kv(line);
+            assert!(!junk.test_stroke_hidden, "{line} must not fold the strip");
         }
     }
 }

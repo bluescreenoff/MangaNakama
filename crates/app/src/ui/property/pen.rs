@@ -47,9 +47,61 @@ pub(crate) fn pen_property(ui: &mut egui::Ui, app: &mut App) {
         });
     });
     ui.add_space(1.0);
+    test_stroke_strip(ui, app);
     brush_sliders(ui, app);
     group_caption(ui, "Dynamics");
     dynamics_editor(ui, app);
+}
+
+/// The LIVE test stroke: one S-curve with a synthesized pressure ramp, re-inked
+/// with the current preset and its live overrides whenever any of them moves.
+///
+/// CSP's own answer to "what does this do?" is sixteen collapsed parameter
+/// pages and a canvas to scribble on; this is the scribble, in the panel, on a
+/// throwaway document — the artwork is never touched (see
+/// [`crate::ui::preview::test_stroke_image`], which builds a FRESH engine per
+/// render for the libmypaint-state reason recorded in docs/CODE-MAP.md).
+pub(crate) fn test_stroke_strip(ui: &mut egui::Ui, app: &mut App) {
+    let hidden = app.layout.test_stroke_hidden;
+    ui.horizontal(|ui| {
+        if icon_btn(
+            ui,
+            if hidden { Icon::EyeOff } else { Icon::Eye },
+            13.0,
+            false,
+            true,
+            if hidden {
+                "Show the live test stroke"
+            } else {
+                "Hide the live test stroke"
+            },
+        )
+        .clicked()
+        {
+            app.layout.note_test_stroke_hidden(!hidden);
+        }
+        ui.weak("Test stroke");
+        // A brush wider than the strip is shown zoomed OUT, and says so — a
+        // preview at an unstated scale is worse than no preview.
+        let k = crate::ui::preview::test_stroke_scale(app.props_current.size_px);
+        if k > 1 && !hidden {
+            ui.weak(format!("1:{k}"));
+        }
+    });
+    if hidden {
+        return;
+    }
+    let w = ui.available_width();
+    let tex = app.test_stroke_tex(w);
+    let size = tex.size_vec2();
+    ui.add(egui::Image::new(&tex).fit_to_exact_size(size))
+        .on_hover_text(
+            "The current brush on scrap paper: an S-curve with pressure \
+ramping 0 → full → 0. Every control below re-inks it, so a value can be judged \
+without drawing on the page. A brush too wide for the strip is zoomed out — \
+the caption says by how much.",
+        );
+    ui.add_space(2.0);
 }
 
 /// Krita per-sensor curve editor: pick a dynamic and the sensor that drives
