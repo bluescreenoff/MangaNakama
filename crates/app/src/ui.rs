@@ -32,6 +32,10 @@ mod tools;
 mod top;
 mod widgets;
 
+/// The Ctrl+K door, for `main::shortcut` (the overlay itself lives in
+/// `ui/quick.rs`, next to the index it searches).
+pub use quick::open_command_palette;
+
 use color::picker_sync;
 use dialogs::{
     adjust_window, canvas_size_window, detail_window, export_all_window, feedback_window,
@@ -136,6 +140,8 @@ pub fn build(ui: &mut egui::Ui, app: &mut App) {
     property_detail_window(ui.ctx(), app);
     feedback_window(ui.ctx(), app);
     hud(ui.ctx(), app);
+    // Last, so the Ctrl+K overlay floats over every palette and dialog.
+    quick::command_palette(ui.ctx(), app);
 
     app.sync_dock_layout();
     app.layout.save_if_dirty();

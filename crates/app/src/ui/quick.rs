@@ -5,7 +5,16 @@
 //! button, not CSP's long-press (mouse-first); sets (UI-051), the tile/list
 //! view modes (UI-053) and the settings dialog (UI-054) are deferred with
 //! reasons — one flat set of pins first.
+//!
+//! The same index also feeds the **command palette** (Ctrl+K) at the bottom
+//! of this file: the docked palette is the one you leave open, the overlay is
+//! the one you summon. CSP's own answer to "too many clicks" is a hardware
+//! remote; this is ours, and it reaches the brush presets too — half of what
+//! anyone hunts for is a sub tool, not a menu item.
 
+use std::path::PathBuf;
+
+use super::theme;
 use crate::app::App;
 use crate::cmd::{AppCmd, Tool};
 
@@ -138,6 +147,14 @@ pub fn command_index() -> Vec<(&'static str, &'static str, AppCmd)> {
 
 /// The palette body: pinned favorites + the search field + live results.
 pub fn quick_palette(ui: &mut egui::Ui, app: &mut App) {
+    // The overlay's own door, for anyone who never learns the chord.
+    if ui
+        .small_button("Command palette…  Ctrl+K")
+        .on_hover_text("the same search, floating over the canvas — brushes included")
+        .clicked()
+    {
+        open_command_palette(app);
+    }
     // Favorites row (UI-050): click runs, ✕ unpins.
     if !app.quick_pins.is_empty() {
         ui.horizontal_wrapped(|ui| {
@@ -227,6 +244,248 @@ fn find_entry(key: &str) -> Option<(&'static str, &'static str, AppCmd)> {
         .find(|(label, _, _)| *label == key)
 }
 
+// --- command palette (Ctrl+K) -------------------------------------------
+
+/// Rows the overlay shows at once. Ten is the whole point of the feature:
+/// a list you read, not a list you scroll.
+const PALETTE_ROWS: usize = 10;
+/// How many labels the session remembers for the empty-query ordering.
+const PALETTE_RECENTS: usize = 12;
+
+/// One runnable row: what it is called, where it lives (weak text on the
+/// right) and the command it pushes. Brush rows carry `SelectBrush` — the
+/// very command the Sub Tool list pushes, so a pick made here and a pick
+/// made there are the same event.
+#[derive(Clone)]
+pub struct Entry {
+    pub label: String,
+    pub path: &'static str,
+    pub cmd: AppCmd,
+}
+
+/// Everything the palette can run: `command_index()` first, then one row per
+/// brush preset. Taking the presets as an argument rather than reading `App`
+/// is what makes the whole search testable.
+pub fn palette_entries(presets: &[(String, PathBuf)]) -> Vec<Entry> {
+    command_index()
+        .into_iter()
+        .map(|(label, path, cmd)| Entry {
+            label: label.to_owned(),
+            path,
+            cmd,
+        })
+        .chain(presets.iter().map(|(name, p)| Entry {
+            label: name.clone(),
+            path: "Sub Tool ▸ Brush",
+            cmd: AppCmd::SelectBrush(p.clone()),
+        }))
+        .collect()
+}
+
+/// How well one entry answers `q` (already trimmed and lowercased), lower is
+/// better; `None` is "not a match at all". The ladder is deliberate: a
+/// prefix beats a word start beats a substring beats the menu path beats a
+/// scattered-letter fuzzy hit, so typing `pen` puts the Pen tool above
+/// "Perspective ruler" without any per-command tuning.
+fn palette_score(e: &Entry, q: &str) -> Option<u32> {
+    let label = e.label.to_lowercase();
+    if label.starts_with(q) {
+        return Some(0);
+    }
+    if label.split_whitespace().any(|w| w.starts_with(q)) {
+        return Some(1);
+    }
+    if label.contains(q) {
+        return Some(2);
+    }
+    if e.path.to_lowercase().contains(q) {
+        return Some(3);
+    }
+    // Fuzzy last resort: the query's letters in order, anywhere ("dupl" or
+    // "dpl" both find "Duplicate layer").
+    let mut rest = label.chars();
+    if q.chars().all(|c| rest.any(|h| h == c)) {
+        return Some(4);
+    }
+    None
+}
+
+/// The palette's whole search, as a pure function: indices into `entries`,
+/// best first, at most `limit`. An EMPTY query is not "no results" — it is
+/// the recents list, most recent first, then the index's own order, which is
+/// what makes Ctrl+K, Enter a repeat of the last thing you did.
+pub fn palette_filter(
+    entries: &[Entry],
+    query: &str,
+    recents: &[String],
+    limit: usize,
+) -> Vec<usize> {
+    let q = query.trim().to_lowercase();
+    let mut hits: Vec<(u32, usize, usize)> = entries
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| {
+            let score = if q.is_empty() {
+                0
+            } else {
+                palette_score(e, &q)?
+            };
+            let recent = recents
+                .iter()
+                .position(|r| *r == e.label)
+                .unwrap_or(usize::MAX);
+            Some((score, recent, i))
+        })
+        .collect();
+    hits.sort_unstable();
+    hits.into_iter().take(limit).map(|(_, _, i)| i).collect()
+}
+
+/// Summon the overlay (Ctrl+K, and the docked palette's header button).
+pub fn open_command_palette(app: &mut App) {
+    app.cmdpal_open = true;
+    app.cmdpal_query.clear();
+    app.cmdpal_sel = 0;
+    app.mark_dirty();
+}
+
+fn close_command_palette(app: &mut App) {
+    app.cmdpal_open = false;
+    app.cmdpal_query.clear();
+    app.cmdpal_sel = 0;
+    app.mark_dirty();
+}
+
+/// The floating overlay itself. Drawn from `ui::build` after the dialogs, so
+/// it sits over the canvas and the palettes both.
+pub fn command_palette(ctx: &egui::Context, app: &mut App) {
+    if !app.cmdpal_open {
+        return;
+    }
+    // The navigation keys are read BEFORE the field is built. A focused
+    // `TextEdit` reacts to arrows and Enter but does not drain the frame's
+    // event queue, so both halves see the same press — reading them after
+    // would work too, but this keeps the decision above the drawing.
+    let (up, down, enter, esc) = ctx.input(|i| {
+        (
+            i.key_pressed(egui::Key::ArrowUp),
+            i.key_pressed(egui::Key::ArrowDown),
+            i.key_pressed(egui::Key::Enter),
+            i.key_pressed(egui::Key::Escape),
+        )
+    });
+    if esc {
+        close_command_palette(app);
+        return;
+    }
+
+    let entries = palette_entries(&app.presets);
+    let hits = palette_filter(
+        &entries,
+        &app.cmdpal_query,
+        &app.cmdpal_recent,
+        PALETTE_ROWS,
+    );
+    if hits.is_empty() {
+        app.cmdpal_sel = 0;
+    } else {
+        let n = hits.len();
+        if down {
+            app.cmdpal_sel += 1;
+        }
+        if up {
+            app.cmdpal_sel += n - 1; // wrap backwards without underflowing
+        }
+        app.cmdpal_sel %= n; // wraps, and re-clamps a selection the filter shortened
+    }
+    let mut run: Option<Entry> = hits
+        .get(app.cmdpal_sel)
+        .filter(|_| enter)
+        .map(|&i| entries[i].clone());
+
+    let width = (ctx.content_rect().width() * 0.5).clamp(340.0, 560.0);
+    egui::Area::new(egui::Id::new("mn.cmdpal"))
+        .order(egui::Order::Foreground)
+        .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 90.0))
+        .show(ctx, |ui| {
+            let shadow = ui.style().visuals.window_shadow;
+            egui::Frame::new()
+                .fill(theme::PANEL)
+                .stroke(egui::Stroke::new(1.0, theme::BORDER))
+                .corner_radius(6.0)
+                .inner_margin(egui::Margin::same(8))
+                .shadow(shadow)
+                .show(ui, |ui| {
+                    ui.set_width(width);
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut app.cmdpal_query)
+                            .hint_text("Run a command or pick a brush…")
+                            .desired_width(f32::INFINITY),
+                    );
+                    // Focus on open — and back again if a click let it go,
+                    // but never stolen from whatever else the user focused.
+                    if ctx.memory(|m| m.focused().is_none()) {
+                        resp.request_focus();
+                    }
+                    if resp.changed() {
+                        app.cmdpal_sel = 0;
+                    }
+                    ui.add_space(4.0);
+                    if hits.is_empty() {
+                        ui.weak("no matches");
+                    }
+                    for (row, &i) in hits.iter().enumerate() {
+                        if palette_row(ui, &entries[i], row == app.cmdpal_sel).clicked() {
+                            run = Some(entries[i].clone());
+                        }
+                    }
+                    ui.add_space(4.0);
+                    ui.weak("↑ ↓ move   Enter run   Esc close   —   Ctrl+K opens this");
+                });
+        });
+
+    if let Some(e) = run {
+        app.cmdpal_recent.retain(|l| *l != e.label);
+        app.cmdpal_recent.insert(0, e.label.clone());
+        app.cmdpal_recent.truncate(PALETTE_RECENTS);
+        close_command_palette(app);
+        // Dispatch, never mutate: the command arms carry the cache doors.
+        app.push_cmd(e.cmd);
+    }
+}
+
+/// One result row: label left, menu path weak on the right.
+fn palette_row(ui: &mut egui::Ui, e: &Entry, selected: bool) -> egui::Response {
+    let w = ui.available_width();
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 20.0), egui::Sense::click());
+    let p = ui.painter();
+    if selected {
+        p.rect_filled(rect, 3.0, theme::SEL_ROW);
+    } else if resp.hovered() {
+        p.rect_filled(rect, 3.0, theme::HOVER);
+    }
+    let color = if selected {
+        theme::TEXT_STRONG
+    } else {
+        theme::TEXT
+    };
+    p.text(
+        egui::pos2(rect.left() + 6.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        &e.label,
+        egui::FontId::proportional(12.0),
+        color,
+    );
+    p.text(
+        egui::pos2(rect.right() - 6.0, rect.center().y),
+        egui::Align2::RIGHT_CENTER,
+        e.path,
+        egui::FontId::proportional(10.5),
+        theme::TEXT_WEAK,
+    );
+    resp
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,5 +550,89 @@ mod tests {
             );
             assert_eq!(*wher, "Layer ▸ Ruler", "same menu path as its siblings");
         }
+    }
+
+    /// Two fake presets, enough to prove the brush half without an App.
+    fn fake_presets() -> Vec<(String, PathBuf)> {
+        vec![
+            ("Kabura pen".to_owned(), PathBuf::from("csp/kabura.myb")),
+            ("Rough ink".to_owned(), PathBuf::from("classic/rough.myb")),
+        ]
+    }
+
+    fn labels(entries: &[Entry], hits: &[usize]) -> Vec<String> {
+        hits.iter().map(|&i| entries[i].label.clone()).collect()
+    }
+
+    /// Brushes are half the reason the overlay exists: they must be in the
+    /// searchable set, findable by name, and run the SAME command the Sub
+    /// Tool list pushes — a second brush-picking path would be a second
+    /// place to keep in step.
+    #[test]
+    fn palette_entries_carry_the_brush_presets() {
+        let presets = fake_presets();
+        let entries = palette_entries(&presets);
+        assert!(
+            entries.len() > command_index().len(),
+            "the presets are appended, not replacing the commands"
+        );
+        let hits = palette_filter(&entries, "kabura", &[], PALETTE_ROWS);
+        assert_eq!(labels(&entries, &hits), vec!["Kabura pen".to_owned()]);
+        let brush = &entries[hits[0]];
+        assert_eq!(brush.path, "Sub Tool ▸ Brush", "row says where it lives");
+        match &brush.cmd {
+            AppCmd::SelectBrush(p) => assert_eq!(p, &PathBuf::from("csp/kabura.myb")),
+            other => panic!("a brush row must push SelectBrush, not {other:?}"),
+        }
+    }
+
+    /// Substring and menu-path matching, and the score ladder: an exact
+    /// prefix outranks a mid-word hit for the same query.
+    #[test]
+    fn palette_filter_matches_labels_and_menu_paths() {
+        let entries = palette_entries(&fake_presets());
+        let hits = labels(&entries, &palette_filter(&entries, "eras", &[], PALETTE_ROWS));
+        assert!(hits.contains(&"Eraser".to_owned()), "{hits:?}");
+        let rulers = labels(&entries, &palette_filter(&entries, "ruler", &[], 20));
+        assert!(rulers.len() >= 5, "the ruler family is reachable {rulers:?}");
+        // A menu path is searchable too — "Ruler" as a *path* fragment.
+        let by_path = labels(&entries, &palette_filter(&entries, "layer ▸", &[], 20));
+        assert!(!by_path.is_empty(), "menu paths are part of the haystack");
+        // Ladder: "pen" is a prefix of "Pen" and only a fuzzy/word hit
+        // elsewhere, so the tool wins the top row.
+        let pen = labels(&entries, &palette_filter(&entries, "pen", &[], PALETTE_ROWS));
+        assert_eq!(pen.first().map(String::as_str), Some("Pen"), "{pen:?}");
+        assert!(
+            palette_filter(&entries, "zzzznotathing", &[], PALETTE_ROWS).is_empty(),
+            "a miss is a miss — no fuzzy match on nonsense"
+        );
+    }
+
+    /// The empty query is the recents list, most recent first — Ctrl+K then
+    /// Enter repeats the last thing you ran. Everything else follows in the
+    /// index's own order, so the list is never empty.
+    #[test]
+    fn palette_filter_leads_with_recents_on_an_empty_query() {
+        let entries = palette_entries(&fake_presets());
+        let recents = vec!["Redo".to_owned(), "Kabura pen".to_owned()];
+        let hits = labels(&entries, &palette_filter(&entries, "", &recents, PALETTE_ROWS));
+        assert_eq!(hits.len(), PALETTE_ROWS, "the empty query still fills rows");
+        assert_eq!(&hits[..2], &recents[..], "most recent first, in order");
+        assert_eq!(
+            hits[2], "Pen",
+            "then the index's own order, from the top ({hits:?})"
+        );
+        // A recent still sorts first inside a filtered query.
+        let by_query = labels(
+            &entries,
+            &palette_filter(&entries, "pen", &recents, PALETTE_ROWS),
+        );
+        assert_eq!(by_query.first().map(String::as_str), Some("Pen"));
+        // Whitespace is not a query.
+        assert_eq!(
+            labels(&entries, &palette_filter(&entries, "   ", &recents, 2)),
+            recents,
+            "a field holding only spaces is still the empty query"
+        );
     }
 }

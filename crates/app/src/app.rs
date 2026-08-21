@@ -339,6 +339,14 @@ pub struct App {
     /// Quick Access (UI-050/052): the search field + pinned commands.
     pub quick_query: String,
     pub quick_pins: Vec<String>,
+    /// The floating command palette (Ctrl+K, `ui/quick.rs`): open flag, its
+    /// query, the highlighted row, and the labels run this session (most
+    /// recent first — they lead the empty query). Session-only on purpose:
+    /// a "recent" list restored from disk is not recent, it is history.
+    pub cmdpal_open: bool,
+    pub cmdpal_query: String,
+    pub cmdpal_sel: usize,
+    pub cmdpal_recent: Vec<String>,
     /// PM-046: the find/replace row state.
     pub story_find: String,
     pub story_repl: String,
@@ -1140,6 +1148,10 @@ impl App {
                 .filter(|s| !s.is_empty())
                 .map(str::to_string)
                 .collect(),
+            cmdpal_open: false,
+            cmdpal_query: String::new(),
+            cmdpal_sel: 0,
+            cmdpal_recent: Vec::new(),
             story_open: false,
             story_docs: Vec::new(),
             story_bufs: Vec::new(),

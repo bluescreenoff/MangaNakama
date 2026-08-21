@@ -1502,6 +1502,15 @@ fn shortcut(app: &mut App, vk: u16, repeat: bool) -> bool {
             app.step_subtool(true);
             true
         }
+        // Ctrl+K — the command palette (type-to-run, brushes included).
+        // Free in the owner's CSP set, and the editor chord everyone
+        // already knows. It only OPENS here: once the overlay's field has
+        // focus the shell reports `wants_keyboard` and this table stands
+        // down, so Esc (or a run) is the way back out.
+        (true, 0x4B) if !repeat => {
+            crate::ui::open_command_palette(app);
+            true
+        }
         (true, 0x57) => {
             // Ctrl+W — close (the prompt runs in pump_commands).
             app.close_requested = true;
