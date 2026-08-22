@@ -24,6 +24,26 @@ pub enum EngineKind {
     Dyna(DynaDab),
 }
 
+/// The engine a preset asks for through its optional `mn-engine` key:
+/// grid/hairy/curve/dyna are procedural, so they get their own engine instead
+/// of the MyPaint one (a sub-tool identity without a second preset format).
+/// `None` = an ordinary `.myb` for `MyBrush::load`.
+///
+/// `cmd.rs`'s `SelectBrush` reads the same key to build the LIVE engine — the
+/// two must stay in step, or a preset draws as one brush and previews as
+/// another.
+pub fn preset_engine(path: &Path) -> Option<EngineKind> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let j: serde_json::Value = serde_json::from_str(&text).ok()?;
+    match j.get("mn-engine")?.as_str()? {
+        "grid" => Some(EngineKind::Grid(GridDab::default())),
+        "hairy" => Some(EngineKind::Hairy(HairyDab::default())),
+        "curve" => Some(EngineKind::Curve(CurveDab::default())),
+        "dyna" => Some(EngineKind::Dyna(DynaDab::default())),
+        _ => None,
+    }
+}
+
 /// App-side GPU dab stroke state (the Renderer holds its own; this is the
 /// repair list + counters the HUD shows).
 pub struct DabStrokeApp {

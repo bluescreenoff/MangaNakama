@@ -6,7 +6,7 @@
 use super::icons::{self, Icon};
 use super::theme;
 use super::theme::ValueBar;
-use super::widgets::{group_caption, icon_btn, px_mm_text};
+use super::widgets::{group_caption, icon_btn, icon_btn_tint, px_mm_text};
 use crate::app::{App, LayerFilterKind};
 use crate::cmd::AppCmd;
 use mn_core::{Blend, FillKind, LayerKind};
@@ -875,10 +875,33 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
         if icon_btn(ui, Icon::Lock, s, a_lock, true, "Lock layer").clicked() {
             app.push_cmd(AppCmd::SetLayerLock(active, !a_lock));
         }
-        if icon_btn(ui, Icon::Reference, s, a_reference, true, "Reference layer").clicked() {
+        // These two wear the same hues as the marks they set in the rows'
+        // status column, so the header toggle and the row mark are visibly
+        // the same flag (owner 2026-08-22).
+        if icon_btn_tint(
+            ui,
+            Icon::Reference,
+            s,
+            a_reference,
+            true,
+            "Reference layer",
+            Some(REF_MARK),
+        )
+        .clicked()
+        {
             app.push_cmd(AppCmd::SetLayerReference(active, !a_reference));
         }
-        if icon_btn(ui, Icon::Draft, s, a_draft, true, "Draft layer").clicked() {
+        if icon_btn_tint(
+            ui,
+            Icon::Draft,
+            s,
+            a_draft,
+            true,
+            "Draft layer",
+            Some(DRAFT_MARK),
+        )
+        .clicked()
+        {
             app.push_cmd(AppCmd::SetLayerDraft(active, !a_draft));
         }
     });

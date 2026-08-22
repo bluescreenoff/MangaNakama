@@ -29,6 +29,12 @@ pub struct MaterialItem {
     pub path: PathBuf,
     /// Index into the folder list (grouping + display).
     pub folder: usize,
+    /// The material's folder-relative **directory chain** — empty for a file
+    /// sitting in the registered root, `sfx/impact` two levels down. The
+    /// file name is deliberately not in here: every consumer (a tree node, a
+    /// subtree filter, the info strip's "where does this live" line) wants
+    /// the containing folder, and `path` already carries the name.
+    pub rel: PathBuf,
     /// MT-012: the folder sidecar's tag line for this file, normalised
     /// (`"screentone, dots, 10%"`). Empty = untagged, which is what every
     /// material was before this existed.
@@ -95,57 +101,275 @@ pub fn write_gen_spec(dir: &Path, stem: &str, spec: &GenLinesSpec) -> Option<Pat
     Some(p)
 }
 
-/// One folder's materials in display order. Free-standing so the scan can
-/// be exercised against a temp folder without an App (and a GPU).
+/// How deep a registered folder is walked. A material bank is a shallow
+/// thing — CSP's own tree is three levels — so this is really a stop, not a
+/// budget: a directory junction pointing back at an ancestor would
+/// otherwise recurse until the stack ran out. (Symlinks cannot start that
+/// loop at all: `file_type()` reports them as neither dir nor file, so they
+/// fall through to the extension filter and are dropped.)
+const SCAN_MAX_DEPTH: usize = 6;
+
+/// One registered folder's materials, its subdirectories included, in
+/// display order. Free-standing so the scan can be exercised against a temp
+/// folder without an App (and a GPU).
 pub fn materials_scan_folder(folder: &Path, fi: usize) -> Vec<MaterialItem> {
-    let Ok(rd) = std::fs::read_dir(folder) else {
-        return Vec::new();
+    let mut items = Vec::new();
+    scan_dir(folder, PathBuf::new(), fi, 0, &mut items);
+    // (rel, name): a FLAT folder has an empty `rel` on every item, so this
+    // is byte-for-byte the old name-only order — the recursive scan changes
+    // nothing for the banks that have no subfolders.
+    items.sort_by(|a, b| (&a.rel, &a.name).cmp(&(&b.rel, &b.name)));
+    items
+}
+
+/// The walk's one directory. `rel` is where we are relative to the
+/// registered root, and is what every item found here is stamped with.
+fn scan_dir(dir: &Path, rel: PathBuf, fi: usize, depth: usize, out: &mut Vec<MaterialItem>) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
     };
-    // One sidecar read per FOLDER, not per file. The sidecar is the
+    // One sidecar read per DIRECTORY, not per file. The sidecar is the
     // only home of a tag, so a rescan re-reads it rather than
     // remembering: tags on materials the owner adds by hand survive
-    // every rescan, restart and folder re-add.
-    let side = MaterialTags::load(folder);
-    let paths: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+    // every rescan, restart and folder re-add. A subfolder carries its
+    // own `tags.txt` — the sidecar travels WITH the images it describes.
+    let side = MaterialTags::load(dir);
+    // `file_type()` comes off the directory entry on both platforms, so
+    // splitting here costs nothing; `p.is_dir()` would stat all 2399.
+    let (mut dirs, mut paths): (Vec<PathBuf>, Vec<PathBuf>) = (Vec::new(), Vec::new());
+    for e in rd.flatten() {
+        match e.file_type() {
+            Ok(t) if t.is_dir() => dirs.push(e.path()),
+            Ok(_) => paths.push(e.path()),
+            Err(_) => {}
+        }
+    }
     // Generator stems first: a `<stem>.png` beside a `<stem>.gen.json` is
     // that generator's thumbnail, so it must not scan as its own material.
     let gen_stems: std::collections::HashSet<String> = paths
         .iter()
         .filter_map(|p| gen_material_stem(p).map(|s| s.to_lowercase()))
         .collect();
-    let mut items: Vec<MaterialItem> = paths
-        .iter()
-        .filter_map(|p| {
-            let (name, kind) = match gen_material_stem(p) {
-                Some(stem) => (stem, MaterialKind::GenLines(read_gen_spec(p)?)),
-                None => {
-                    let ext = p
-                        .extension()
-                        .and_then(|x| x.to_str())
-                        .map(|x| x.to_ascii_lowercase())
-                        .unwrap_or_default();
-                    if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp") {
-                        return None;
-                    }
-                    let name = p.file_stem()?.to_string_lossy().into_owned();
-                    if gen_stems.contains(&name.to_lowercase()) {
-                        return None;
-                    }
-                    (name, MaterialKind::Image)
+    out.extend(paths.iter().filter_map(|p| {
+        let (name, kind) = match gen_material_stem(p) {
+            Some(stem) => (stem, MaterialKind::GenLines(read_gen_spec(p)?)),
+            None => {
+                let ext = p
+                    .extension()
+                    .and_then(|x| x.to_str())
+                    .map(|x| x.to_ascii_lowercase())
+                    .unwrap_or_default();
+                if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp") {
+                    return None;
                 }
-            };
-            let tags = side.get(&p.file_name()?.to_string_lossy()).to_owned();
-            Some(MaterialItem {
-                name,
-                path: p.clone(),
-                folder: fi,
-                tags,
-                kind,
-            })
+                let name = p.file_stem()?.to_string_lossy().into_owned();
+                if gen_stems.contains(&name.to_lowercase()) {
+                    return None;
+                }
+                (name, MaterialKind::Image)
+            }
+        };
+        let tags = side.get(&p.file_name()?.to_string_lossy()).to_owned();
+        Some(MaterialItem {
+            name,
+            path: p.clone(),
+            folder: fi,
+            rel: rel.clone(),
+            tags,
+            kind,
         })
-        .collect();
-    items.sort_by(|a, b| a.name.cmp(&b.name));
-    items
+    }));
+    if depth + 1 >= SCAN_MAX_DEPTH {
+        return;
+    }
+    for d in dirs {
+        let Some(n) = d.file_name() else { continue };
+        // A dot-folder is the tool's business (`.git`, `.thumbnails`), not
+        // the artist's; the bank should never show one.
+        if n.to_string_lossy().starts_with('.') {
+            continue;
+        }
+        scan_dir(&d, rel.join(n), fi, depth + 1, out);
+    }
+}
+
+/// P1-4's three thumbnail sizes (small / medium / large), in px. Here
+/// rather than in the palette because `App::new` seeds the field from it.
+pub const THUMB_STEPS: [f32; 3] = [36.0, 52.0, 76.0];
+
+/// How many decoded thumbnails stay resident. Each is its own GPU texture
+/// (there is no atlas), so an uncapped cache is one allocation per file —
+/// 2399 of them on the owner's bank. Scrolling back over an evicted cell
+/// re-decodes it, which is a frame's work and invisible next to the alternative.
+pub const THUMB_CACHE_MAX: usize = 300;
+
+// --- the folder tree (P0-1) ----------------------------------------------
+
+/// What the material grid is narrowed to — the tree row that is selected.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub enum MaterialFilter {
+    /// The tree's root row: every registered folder's every material.
+    #[default]
+    All,
+    /// A registered root's subtree: folder index + folder-relative
+    /// directory. An empty directory means the root itself, and a directory
+    /// always INCLUDES its subfolders (CSP shows one folder's contents; a
+    /// bank whose leaves are three deep is unusable if the branches read
+    /// empty).
+    Dir(usize, PathBuf),
+    /// A virtual name-prefix group — folder, directory, leading token. See
+    /// [`materials_tree`]; this is ours, not CSP's.
+    Prefix(usize, PathBuf, String),
+}
+
+impl MaterialFilter {
+    /// A stable row id: the collapse set's key and the egui widget salt.
+    /// Stable across a rescan, which is the point — collapsing a branch
+    /// must survive pressing Rescan.
+    pub fn id(&self) -> String {
+        match self {
+            Self::All => "all".to_owned(),
+            Self::Dir(f, d) => format!("d{f}\u{1f}{}", d.display()),
+            Self::Prefix(f, d, t) => format!("p{f}\u{1f}{}\u{1f}{t}", d.display()),
+        }
+    }
+
+    pub fn accepts(&self, item: &MaterialItem) -> bool {
+        match self {
+            Self::All => true,
+            // Component-wise, so `sfx2` is not a child of `sfx`.
+            Self::Dir(f, d) => item.folder == *f && item.rel.starts_with(d),
+            Self::Prefix(f, d, t) => {
+                item.folder == *f
+                    && item.rel == *d
+                    && name_prefix_token(&item.name).as_deref() == Some(t.as_str())
+            }
+        }
+    }
+}
+
+/// One row of the folder tree, emitted in **pre-order** — a node's whole
+/// subtree follows it contiguously at a greater `depth`, which is what lets
+/// the palette hide a collapsed branch by skipping rows until `depth` drops
+/// back to the collapsed node's own.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MaterialNode {
+    pub label: String,
+    pub depth: usize,
+    pub filter: MaterialFilter,
+    /// How many materials the row would show (a directory counts its whole
+    /// subtree, so a branch never reads empty).
+    pub count: usize,
+    pub children: bool,
+}
+
+/// OUR ADDITION, not CSP: a flat folder past this many DIRECT materials
+/// gets virtual name-prefix groups under it. CSP's answer to 2399 files in
+/// one directory is "put them in subfolders", which is true and useless —
+/// the owner's bank arrived flat and re-filing it by hand is a day's work.
+/// Below the threshold a folder is browsable as-is and inventing groups
+/// would only add rows.
+const FLAT_GROUP_MIN: usize = 200;
+/// …and only a token that actually names a family becomes a row. A handful
+/// of files sharing a first word is noise, not a folder.
+const FLAT_GROUP_TOKEN_MIN: usize = 8;
+
+/// A material name's leading word, lowercased, for the virtual grouping.
+/// Leading separators are skipped FIRST because the owner's own bank is
+/// full of `_boom_ horizontal.png` — the empty token before that first `_`
+/// names nothing and would group half the bank under it.
+pub fn name_prefix_token(name: &str) -> Option<String> {
+    const SEP: [char; 3] = ['_', '-', ' '];
+    let t = name.trim_start_matches(SEP);
+    let tok = &t[..t.find(SEP).unwrap_or(t.len())];
+    // One character is an index letter, not a family name.
+    (tok.chars().count() >= 2).then(|| tok.to_lowercase())
+}
+
+/// Build the palette's folder tree from the scanned items' `rel` paths.
+/// Pure and free-standing so it can be tested without an App; the palette
+/// caches the result on `App::material_tree` rather than rebuilding it per
+/// frame (the counts are an O(dirs × items) sweep).
+pub fn materials_tree(items: &[MaterialItem], folder_names: &[String]) -> Vec<MaterialNode> {
+    let mut out = vec![MaterialNode {
+        label: "All materials".to_owned(),
+        depth: 0,
+        filter: MaterialFilter::All,
+        count: items.len(),
+        children: !folder_names.is_empty(),
+    }];
+    for (f, fname) in folder_names.iter().enumerate() {
+        // Directories keyed by their COMPONENT LIST, not by PathBuf: a
+        // `Vec<String>` sorts a parent immediately before its own
+        // descendants (pre-order), while raw path bytes do not — `a\b`
+        // sorts after `aB` on Windows, which would split a subtree.
+        let mut dirs: std::collections::BTreeSet<Vec<String>> = std::collections::BTreeSet::new();
+        // The registered root always has a row, even with nothing in it:
+        // "my folder is registered and empty" is information.
+        dirs.insert(Vec::new());
+        for it in items.iter().filter(|i| i.folder == f) {
+            let comps: Vec<String> = it
+                .rel
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect();
+            for n in 0..=comps.len() {
+                dirs.insert(comps[..n].to_vec());
+            }
+        }
+        for comps in &dirs {
+            let rel: PathBuf = comps.iter().collect();
+            let count = items
+                .iter()
+                .filter(|i| i.folder == f && i.rel.starts_with(&rel))
+                .count();
+            let has_sub = dirs
+                .iter()
+                .any(|c| c.len() == comps.len() + 1 && c.starts_with(comps.as_slice()));
+            let groups = flat_prefix_groups(items, f, &rel);
+            out.push(MaterialNode {
+                // The registered folder's own name stays the top node.
+                label: comps.last().cloned().unwrap_or_else(|| fname.clone()),
+                depth: 1 + comps.len(),
+                filter: MaterialFilter::Dir(f, rel.clone()),
+                count,
+                children: has_sub || !groups.is_empty(),
+            });
+            // Groups are emitted before the real subdirectories: both are
+            // children of this node, and sibling order inside a subtree is
+            // free — pre-order only requires the subtree stay contiguous.
+            for (tok, n) in groups {
+                out.push(MaterialNode {
+                    label: tok.clone(),
+                    depth: 2 + comps.len(),
+                    filter: MaterialFilter::Prefix(f, rel.clone(), tok),
+                    count: n,
+                    children: false,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// The virtual groups for one directory, `(token, count)` sorted by token.
+/// Empty unless the directory is big enough to need them.
+fn flat_prefix_groups(items: &[MaterialItem], f: usize, rel: &Path) -> Vec<(String, usize)> {
+    let direct = items.iter().filter(|i| i.folder == f && i.rel == *rel);
+    let mut by: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut n = 0usize;
+    for it in direct {
+        n += 1;
+        if let Some(t) = name_prefix_token(&it.name) {
+            *by.entry(t).or_default() += 1;
+        }
+    }
+    if n <= FLAT_GROUP_MIN {
+        return Vec::new();
+    }
+    by.into_iter()
+        .filter(|&(_, c)| c >= FLAT_GROUP_TOKEN_MIN)
+        .collect()
 }
 
 impl App {
@@ -190,7 +414,50 @@ impl App {
                     .unwrap_or_else(|| p.display().to_string())
             })
             .collect();
+        self.material_tree = materials_tree(&self.materials, &self.material_folder_names);
+        // A filter (and a selection) is an INDEX into what was just thrown
+        // away. Dropping a filter whose row no longer exists is what stops
+        // Rescan from leaving the grid mysteriously empty; a filter that
+        // survived keeps its row, so rescanning inside a folder stays put.
+        if !self
+            .material_tree
+            .iter()
+            .any(|n| n.filter == self.material_filter)
+        {
+            self.material_filter = MaterialFilter::All;
+        }
+        self.material_selected = None;
         self.material_thumbs.clear();
+        self.material_thumb_lru.clear();
+    }
+
+    /// Note that a thumbnail was DRAWN this frame, and evict the coldest
+    /// ones once the cache is over [`THUMB_CACHE_MAX`]. Eviction runs in a
+    /// batch down to 7/8 of the cap, so a grid whose visible cells sit
+    /// exactly on the line does not evict-and-re-mint one texture per frame.
+    pub fn material_thumb_touch(&mut self, path: &Path) {
+        self.material_thumb_tick += 1;
+        self.material_thumb_lru
+            .insert(path.to_path_buf(), self.material_thumb_tick);
+        if self.material_thumbs.len() <= THUMB_CACHE_MAX {
+            return;
+        }
+        let drop_n = self.material_thumbs.len() - (THUMB_CACHE_MAX - THUMB_CACHE_MAX / 8);
+        let mut cold: Vec<(u64, PathBuf)> = self
+            .material_thumbs
+            .keys()
+            .map(|p| {
+                (
+                    self.material_thumb_lru.get(p).copied().unwrap_or(0),
+                    p.clone(),
+                )
+            })
+            .collect();
+        cold.sort_unstable_by_key(|(t, _)| *t);
+        for (_, p) in cold.iter().take(drop_n) {
+            self.material_thumbs.remove(p);
+            self.material_thumb_lru.remove(p);
+        }
     }
 
     /// Count a use (frequency-of-use sorting, MT-016's input) and mark the
@@ -572,8 +839,20 @@ mod tests {
             name: name.to_owned(),
             path: PathBuf::from(format!("C:/m/{name}.png")),
             folder: 0,
+            rel: PathBuf::new(),
             tags: tags.to_owned(),
             kind: MaterialKind::Image,
+        }
+    }
+
+    /// A material in a named subfolder of registered root `f`. The rel is
+    /// re-collected through `components()` so a `/` written here becomes
+    /// whatever separator this platform's scan would have produced.
+    fn item_in(f: usize, rel: &str, name: &str) -> MaterialItem {
+        MaterialItem {
+            rel: Path::new(rel).components().collect(),
+            folder: f,
+            ..item(name, "")
         }
     }
 
@@ -588,6 +867,10 @@ mod tests {
             width: 4.0,
             jitter: 0.3,
             seed: 9,
+            // The bank stores whatever the generator says; these tests are
+            // about the SIDECAR round trip, so the newer generator
+            // parameters ride along at their defaults.
+            ..Default::default()
         }
     }
 
@@ -807,6 +1090,184 @@ mod tests {
             "the source's comments describe the source: {out}"
         );
         let _ = std::fs::remove_dir_all(src.parent().unwrap());
+    }
+
+    // --- P0-1: the recursive scan and the folder tree --------------------
+
+    /// A flat folder behaves EXACTLY as it did before the scan learned to
+    /// recurse: the same materials, in the same name order, every one of
+    /// them at the registered root (`rel` empty).
+    #[test]
+    fn materials_scan_of_a_flat_folder_is_unchanged_and_carries_an_empty_rel() {
+        let dir = gen_dir("flat");
+        for n in ["b.png", "a.png", "c.jpg", "notes.txt"] {
+            std::fs::write(dir.join(n), "x").unwrap();
+        }
+        let items = materials_scan_folder(&dir, 0);
+        assert_eq!(
+            items.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
+            ["a", "b", "c"],
+            "name order, images only — the old contract"
+        );
+        assert!(
+            items.iter().all(|m| m.rel.as_os_str().is_empty()),
+            "a root file has no sub-path: {items:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Subdirectories are walked, each item carries the folder-relative
+    /// DIRECTORY it was found in, a nested `tags.txt` tags its own
+    /// neighbours, and a dot-folder is not the artist's business.
+    #[test]
+    fn materials_scan_walks_subfolders_and_stamps_each_item_with_its_rel() {
+        let dir = gen_dir("nested");
+        let sfx = dir.join("sfx");
+        let impact = sfx.join("impact");
+        std::fs::create_dir_all(&impact).unwrap();
+        std::fs::create_dir_all(dir.join(".cache")).unwrap();
+        std::fs::write(dir.join("root.png"), "x").unwrap();
+        std::fs::write(sfx.join("whoosh.png"), "x").unwrap();
+        std::fs::write(impact.join("boom.png"), "x").unwrap();
+        std::fs::write(dir.join(".cache/ignored.png"), "x").unwrap();
+        std::fs::write(sfx.join(TAGS_FILE), "whoosh.png=effect, air\n").unwrap();
+
+        let items = materials_scan_folder(&dir, 2);
+        let mut got: Vec<(String, String)> = items
+            .iter()
+            .map(|m| (m.rel.display().to_string(), m.name.clone()))
+            .collect();
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                (String::new(), "root".to_owned()),
+                ("sfx".to_owned(), "whoosh".to_owned()),
+                (
+                    Path::new("sfx/impact").components().collect::<PathBuf>().display().to_string(),
+                    "boom".to_owned()
+                ),
+            ],
+            "a dot-folder must not scan, and every hit knows where it lives"
+        );
+        assert!(items.iter().all(|m| m.folder == 2));
+        assert_eq!(
+            items.iter().find(|m| m.name == "whoosh").unwrap().tags,
+            "effect, air",
+            "a subfolder's sidecar tags its OWN neighbours"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The tree is pre-order (a node's subtree follows it contiguously at a
+    /// greater depth), the registered folder's own name is the top node, a
+    /// directory counts its whole subtree, and selecting a branch shows
+    /// everything under it — not just its direct files.
+    #[test]
+    fn materials_tree_is_preorder_and_a_branch_includes_its_subtree() {
+        let items = vec![
+            item_in(0, "", "root-a"),
+            item_in(0, "sfx", "whoosh"),
+            item_in(0, "sfx/impact", "boom"),
+            item_in(1, "", "other"),
+        ];
+        let tree = materials_tree(&items, &["bank".into(), "mine".into()]);
+        let shape: Vec<(usize, &str, usize)> = tree
+            .iter()
+            .map(|n| (n.depth, n.label.as_str(), n.count))
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                (0, "All materials", 4),
+                (1, "bank", 3),
+                (2, "sfx", 2),
+                (3, "impact", 1),
+                (1, "mine", 1),
+            ],
+            "roots keep their registered names; a branch counts its subtree"
+        );
+        // Depth only ever grows by one, which is what makes "skip until the
+        // depth drops back" a correct collapse.
+        for w in tree.windows(2) {
+            assert!(w[1].depth <= w[0].depth + 1, "not pre-order: {tree:?}");
+        }
+        let dir_sfx = &tree[2].filter;
+        assert!(
+            items.iter().filter(|i| dir_sfx.accepts(i)).count() == 2,
+            "selecting sfx must include sfx/impact"
+        );
+        assert!(
+            !dir_sfx.accepts(&item_in(0, "sfx2", "decoy")),
+            "component-wise: sfx2 is not inside sfx"
+        );
+        assert!(tree[1].children && !tree[4].children);
+    }
+
+    /// OUR ADDITION: a flat folder past the threshold grows virtual
+    /// name-prefix groups, labelled with the token, and only for tokens that
+    /// actually name a family. A folder under the threshold grows none —
+    /// which is why the flat-folder behaviour above is still the old one.
+    #[test]
+    fn materials_tree_groups_a_huge_flat_folder_by_name_prefix() {
+        // The owner's real shapes: a leading `_` before the word, and a
+        // leading space.
+        let mut items: Vec<MaterialItem> = Vec::new();
+        for n in 0..12 {
+            items.push(item_in(0, "", &format!("_boom_ {n}")));
+        }
+        for n in 0..9 {
+            items.push(item_in(0, "", &format!(" Painter {n}")));
+        }
+        for n in 0..5 {
+            items.push(item_in(0, "", &format!("lonely-{n}")));
+        }
+        // …padded past FLAT_GROUP_MIN with names that share nothing.
+        for n in 0..(FLAT_GROUP_MIN + 1 - items.len()) {
+            items.push(item_in(0, "", &format!("x{n}y{n}")));
+        }
+        let tree = materials_tree(&items, &["bank".into()]);
+        let groups: Vec<(&str, usize)> = tree
+            .iter()
+            .filter(|n| matches!(n.filter, MaterialFilter::Prefix(..)))
+            .map(|n| (n.label.as_str(), n.count))
+            .collect();
+        assert_eq!(
+            groups,
+            vec![("boom", 12), ("painter", 9)],
+            "leading separators are skipped, and 5 files are not a folder"
+        );
+        assert_eq!(tree[1].depth + 1, tree[2].depth, "groups hang off the root");
+        let boom = &tree[2].filter;
+        assert_eq!(items.iter().filter(|i| boom.accepts(i)).count(), 12);
+
+        // One material short of the threshold: no groups at all.
+        items.pop();
+        assert!(
+            !materials_tree(&items, &["bank".into()])
+                .iter()
+                .any(|n| matches!(n.filter, MaterialFilter::Prefix(..))),
+            "a browsable folder must not sprout invented rows"
+        );
+    }
+
+    /// A tree row's id is what the collapse set stores, so two different
+    /// rows must never share one — and the token rule must not turn a
+    /// one-letter lead into a group name.
+    #[test]
+    fn materials_filter_ids_are_distinct_and_prefix_tokens_need_two_chars() {
+        let a = MaterialFilter::Dir(0, PathBuf::from("sfx"));
+        let b = MaterialFilter::Dir(1, PathBuf::from("sfx"));
+        let c = MaterialFilter::Prefix(0, PathBuf::from("sfx"), "boom".into());
+        let ids = [MaterialFilter::All.id(), a.id(), b.id(), c.id()];
+        let mut uniq = ids.to_vec();
+        uniq.sort();
+        uniq.dedup();
+        assert_eq!(uniq.len(), ids.len(), "colliding tree ids: {ids:?}");
+        assert_eq!(name_prefix_token("_boom_ horizontal").as_deref(), Some("boom"));
+        assert_eq!(name_prefix_token(" Painter 11").as_deref(), Some("painter"));
+        assert_eq!(name_prefix_token("a-1").as_deref(), None, "one letter names nothing");
+        assert_eq!(name_prefix_token("___").as_deref(), None);
     }
 
     // --- generator materials (the bank places effect lines LIVE) ---------

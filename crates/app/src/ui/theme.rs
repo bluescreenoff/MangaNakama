@@ -51,9 +51,15 @@ pub const R_CTRL: u8 = 2;
 
 // --- value bar -----------------------------------------------------------
 
-/// The CSP/Rebelle property control: a filled horizontal bar with the label
-/// inside on the left and the value inside on the right. Click or drag
-/// anywhere on it to set the value.
+/// The CSP property row (`csp/150_tools_0008.png`): a plain
+/// "Label ......... value" text line with a THIN slider track underneath it.
+/// Click or drag anywhere on the row to set the value.
+///
+/// It used to be a full-height accent-FILLED bar with the label inside, which
+/// at 100% painted a solid blue row — "Opacity 100%" read as a *selected*
+/// row rather than a slider at maximum, and Tool Property looked like two
+/// highlighted rows on every launch (parity P0-2). The interaction is
+/// unchanged; only the paint is.
 pub struct ValueBar<'a> {
     label: &'a str,
     min: f32,
@@ -130,6 +136,11 @@ impl<'a> ValueBar<'a> {
     }
 
     pub fn show(self, ui: &mut egui::Ui, v: &mut f32) -> egui::Response {
+        /// The slider track's thickness — CSP's is a hairline under the
+        /// label line, not a bar the row is made of.
+        const TRACK_H: f32 = 3.0;
+        // The row keeps its old height: it is the hit area (drag anywhere),
+        // and every consumer's list rhythm is measured against it.
         let h = 17.0;
         let w = self.width.unwrap_or_else(|| ui.available_width());
         let (rect, mut resp) =
@@ -144,31 +155,37 @@ impl<'a> ValueBar<'a> {
                 }
             }
         }
+        let hot = resp.hovered() || resp.dragged();
         let p = ui.painter();
-        let cr = CornerRadius::same(3);
-        p.rect_filled(rect, cr, FIELD);
-        let t = self.to_t(*v);
-        let fill_w = t * rect.width();
-        if fill_w > 0.5 {
-            let hot = resp.hovered() || resp.dragged();
-            let fill = if hot {
-                Color32::from_rgb(0x40, 0x69, 0x9c)
-            } else {
-                ACCENT_FILL
-            };
-            let clip =
-                egui::Rect::from_min_max(rect.min, egui::pos2(rect.left() + fill_w, rect.bottom()));
-            p.with_clip_rect(clip).rect_filled(rect, cr, fill);
+        // The row itself is not a control surface any more — only the hover
+        // wash says "this is draggable".
+        if hot {
+            p.rect_filled(rect, CornerRadius::same(R_CTRL), HOVER);
         }
-        p.rect_stroke(
-            rect,
-            cr,
-            Stroke::new(1.0, OUTLINE),
-            egui::StrokeKind::Inside,
+        // The track: a hairline strip along the bottom edge, empty part
+        // inset-dark, filled part accent. Full width, so the drag mapping
+        // (pointer x → t) is exactly the one the row already had.
+        let track = egui::Rect::from_min_max(
+            egui::pos2(rect.left(), rect.bottom() - TRACK_H),
+            rect.right_bottom(),
         );
+        let cr = CornerRadius::same(1);
+        p.rect_filled(track, cr, FIELD);
+        let t = self.to_t(*v);
+        let fill_w = t * track.width();
+        if fill_w > 0.5 {
+            let fill = if hot { ACCENT } else { ACCENT_FILL };
+            let clip = egui::Rect::from_min_max(
+                track.min,
+                egui::pos2(track.left() + fill_w, track.bottom()),
+            );
+            p.with_clip_rect(clip).rect_filled(track, cr, fill);
+        }
+        // Label left, value right, both on the text line ABOVE the track.
+        let text_y = rect.top() + (rect.height() - TRACK_H) * 0.5;
         let font = egui::FontId::proportional(11.0);
         p.text(
-            egui::pos2(rect.left() + 6.0, rect.center().y),
+            egui::pos2(rect.left() + 4.0, text_y),
             egui::Align2::LEFT_CENTER,
             self.label,
             font.clone(),
@@ -178,7 +195,7 @@ impl<'a> ValueBar<'a> {
             .display
             .unwrap_or_else(|| format!("{:.*}{}", self.decimals, v, self.suffix));
         p.text(
-            egui::pos2(rect.right() - 6.0, rect.center().y),
+            egui::pos2(rect.right() - 4.0, text_y),
             egui::Align2::RIGHT_CENTER,
             value_text,
             font,

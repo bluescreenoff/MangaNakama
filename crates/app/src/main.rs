@@ -1163,7 +1163,16 @@ fn resolve_dialog(hwnd: HWND, cmd: AppCmd) -> Option<AppCmd> {
             let name = name
                 .strip_suffix(".ora")
                 .map_or(name.clone(), |s| format!("{s}.mnc"));
-            save_comic_dialog("Export Single File", &name).map(AppCmd::ExportMncPath)
+            // ONE filter, not `save_comic_dialog`'s pair: rfd takes the default
+            // extension from the FIRST filter, and offering OpenRaster here let
+            // the user save the single-file comic under a name the format does
+            // not match (parked owner nit, plan 30-LOW).
+            rfd::FileDialog::new()
+                .set_title("Export Single File")
+                .add_filter("MangaNakama Comic", &["mnc"])
+                .set_file_name(&name)
+                .save_file()
+                .map(AppCmd::ExportMncPath)
         }
         AppCmd::ExportAllPagesGo => rfd::FileDialog::new()
             .set_title("Export All Pages (numbered PNGs)")

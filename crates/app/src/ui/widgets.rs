@@ -22,6 +22,22 @@ pub(super) fn icon_btn(
     enabled: bool,
     tip: &str,
 ) -> egui::Response {
+    icon_btn_tint(ui, icon, size, selected, enabled, tip, None)
+}
+
+/// [`icon_btn`] with the glyph in a caller's colour. For toggles whose subject
+/// already carries a hue elsewhere in the palette — the Layers reference/draft
+/// marks — so the button and the mark it flips read as one thing. `None` is
+/// the plain theme text.
+pub(super) fn icon_btn_tint(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    size: f32,
+    selected: bool,
+    enabled: bool,
+    tip: &str,
+    tint: Option<egui::Color32>,
+) -> egui::Response {
     let sense = if enabled {
         egui::Sense::click()
     } else {
@@ -58,9 +74,11 @@ pub(super) fn icon_btn(
     let color = if !enabled {
         theme::TEXT_WEAK.gamma_multiply(0.55)
     } else if selected || resp.hovered() {
-        theme::TEXT_STRONG
+        tint.unwrap_or(theme::TEXT_STRONG)
     } else {
-        theme::TEXT
+        // Idle a tinted glyph sits back at the palette's own weight: two
+        // coloured toggles must not out-shout the grey ones beside them.
+        tint.map_or(theme::TEXT, |c| c.gamma_multiply(0.8))
     };
     let mut glyph = rect.shrink(size * 0.18);
     if pressed {

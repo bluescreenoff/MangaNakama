@@ -1021,89 +1021,20 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
             }
         });
 
-        // --- command row, same strip (CSP keeps it one bar) ----------------
+        // --- the menu row ENDS at the menus --------------------------------
         //
-        // NARROW WINDOWS (owner report 2026-08-20): the row used to add
-        // every cluster unconditionally and then hand the caption buttons
-        // whatever was left — at small widths the bar WRAPPED onto a second
-        // line, the centred title painted over the menus, and − □ × fell
-        // off the end of the row entirely. The rule now: the caption
-        // cluster's width is RESERVED up front and each command cluster is
-        // added only if it still fits beside that reservation; the title
-        // paints only when the free gap actually holds it. WM_GETMINMAXINFO
-        // (main.rs) floors the window so the menus + caption always fit.
+        // The icon commands used to ride this row too, wedged between the
+        // menus and the − □ × cluster. CSP gives its command bar a strip of
+        // its own under the menus (`csp/060_pc_0001.png`, region 2) — ours is
+        // `command_row`, added right after this bar.
+        //
+        // NARROW WINDOWS (owner report 2026-08-20): the caption cluster's
+        // width is RESERVED up front so − □ × can never be pushed off the end
+        // of the row, and the window title paints only where there is free
+        // space for it (it used to paint at the bar centre unconditionally,
+        // on top of whatever was there). WM_GETMINMAXINFO (main.rs) floors
+        // the window so the menus + caption always fit.
         const CAPTION_W: f32 = 3.0 * 34.0 + 42.0; // − □ ×, separator, F1
-        let fits = |ui: &egui::Ui, need: f32| -> bool {
-            bar.right() - ui.cursor().min.x - CAPTION_W >= need
-        };
-        let s = 20.0;
-        if fits(ui, 70.0) {
-            ui.separator();
-            if icon_btn(ui, Icon::Undo, s, false, true, "Undo (Ctrl+Z)").clicked() {
-                app.push_cmd(AppCmd::Undo);
-            }
-            if icon_btn(ui, Icon::Redo, s, false, true, "Redo (Ctrl+Y)").clicked() {
-                app.push_cmd(AppCmd::Redo);
-            }
-        }
-        if fits(ui, 160.0) {
-            ui.separator();
-            if icon_btn(ui, Icon::ZoomOut, s, false, true, "Zoom out").clicked() {
-                app.push_cmd(AppCmd::ZoomStep(1.0 / 1.25));
-            }
-            ui.label(
-                egui::RichText::new(format!("{:>4.0}%", app.viewport.zoom * 100.0))
-                    .monospace()
-                    .size(10.5)
-                    .color(theme::TEXT_WEAK),
-            );
-            if icon_btn(ui, Icon::ZoomIn, s, false, true, "Zoom in").clicked() {
-                app.push_cmd(AppCmd::ZoomStep(1.25));
-            }
-            if icon_btn(ui, Icon::ZoomFit, s, false, true, "Fit to window (Ctrl+0)").clicked() {
-                app.push_cmd(AppCmd::ZoomFit);
-            }
-            if icon_btn(ui, Icon::Zoom100, s, false, true, "Zoom 100% (Ctrl+1)").clicked() {
-                app.push_cmd(AppCmd::Zoom100);
-            }
-        }
-        if fits(ui, 160.0) {
-            ui.separator();
-            let step = app.prefs.rotate_step_deg.to_radians();
-            if icon_btn(ui, Icon::RotateLeft, s, false, true, "Rotate CCW (-)").clicked() {
-                app.push_cmd(AppCmd::RotateView(-step));
-            }
-            if icon_btn(ui, Icon::RotateRight, s, false, true, "Rotate CW (F9)").clicked() {
-                app.push_cmd(AppCmd::RotateView(step));
-            }
-            if icon_btn(ui, Icon::RotateReset, s, false, true, "Reset rotation").clicked() {
-                app.push_cmd(AppCmd::RotateReset);
-            }
-            if icon_btn(
-                ui,
-                Icon::FlipH,
-                s,
-                app.viewport.flip_h,
-                true,
-                "Flip view horizontally (Ctrl+9)",
-            )
-            .clicked()
-            {
-                app.push_cmd(AppCmd::FlipView);
-            }
-            if icon_btn(
-                ui,
-                Icon::FlipV,
-                s,
-                app.viewport.flip_v,
-                true,
-                "Flip view vertically (Ctrl+Shift+9)",
-            )
-            .clicked()
-            {
-                app.push_cmd(AppCmd::FlipViewV);
-            }
-        }
         let flow_end = ui.cursor().min.x;
 
         // Window title — the doc tab names the page; this names the window
@@ -1162,6 +1093,110 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
             .changed()
         {
             app.hud_open = hud;
+        }
+    });
+    command_row(ui, app);
+}
+
+/// The command bar: CSP puts its icon commands on a slim strip of their own
+/// UNDER the menus (`csp/060_pc_0001.png`, region 2) rather than beside them,
+/// which is what lets a command bar exist at all on a narrow window. Ours
+/// costs one slim row: 18 px icons, no separator rules of its own beyond the
+/// cluster dividers.
+///
+/// Clusters are still added only if they fit — the row is full width now, so
+/// this bites far later than it did on the shared row, but a very narrow
+/// window drops rotate before zoom before undo rather than wrapping.
+fn command_row(ui: &mut egui::Ui, app: &mut App) {
+    const S: f32 = 18.0;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        // Empty command-row space drags the window like the menu row's does
+        // (registered first, so every button below sits above it in the hit
+        // test — same trick as the menu bar's caption strip).
+        // Height-clamped: `available_rect_before_wrap` in an auto-sized panel
+        // can report the rest of the window, and a drag region that tall
+        // would swallow the canvas.
+        let avail = ui.available_rect_before_wrap();
+        let strip = egui::Rect::from_min_size(avail.min, egui::vec2(avail.width(), S + 4.0));
+        let drag = ui.interact(
+            strip,
+            egui::Id::new("mn.cmdrow.drag"),
+            egui::Sense::click_and_drag(),
+        );
+        if drag.drag_started() {
+            app.drag_window = true;
+        }
+        if drag.double_clicked() {
+            app.caption_cmd = Some(CaptionCmd::ToggleMax);
+        }
+        let fits = |ui: &egui::Ui, need: f32| -> bool { strip.right() - ui.cursor().min.x >= need };
+
+        if fits(ui, 50.0) {
+            if icon_btn(ui, Icon::Undo, S, false, true, "Undo (Ctrl+Z)").clicked() {
+                app.push_cmd(AppCmd::Undo);
+            }
+            if icon_btn(ui, Icon::Redo, S, false, true, "Redo (Ctrl+Y)").clicked() {
+                app.push_cmd(AppCmd::Redo);
+            }
+        }
+        if fits(ui, 150.0) {
+            ui.separator();
+            if icon_btn(ui, Icon::ZoomOut, S, false, true, "Zoom out").clicked() {
+                app.push_cmd(AppCmd::ZoomStep(1.0 / 1.25));
+            }
+            ui.label(
+                egui::RichText::new(format!("{:>4.0}%", app.viewport.zoom * 100.0))
+                    .monospace()
+                    .size(10.5)
+                    .color(theme::TEXT_WEAK),
+            );
+            if icon_btn(ui, Icon::ZoomIn, S, false, true, "Zoom in").clicked() {
+                app.push_cmd(AppCmd::ZoomStep(1.25));
+            }
+            if icon_btn(ui, Icon::ZoomFit, S, false, true, "Fit to window (Ctrl+0)").clicked() {
+                app.push_cmd(AppCmd::ZoomFit);
+            }
+            if icon_btn(ui, Icon::Zoom100, S, false, true, "Zoom 100% (Ctrl+1)").clicked() {
+                app.push_cmd(AppCmd::Zoom100);
+            }
+        }
+        if fits(ui, 150.0) {
+            ui.separator();
+            let step = app.prefs.rotate_step_deg.to_radians();
+            if icon_btn(ui, Icon::RotateLeft, S, false, true, "Rotate CCW (-)").clicked() {
+                app.push_cmd(AppCmd::RotateView(-step));
+            }
+            if icon_btn(ui, Icon::RotateRight, S, false, true, "Rotate CW (F9)").clicked() {
+                app.push_cmd(AppCmd::RotateView(step));
+            }
+            if icon_btn(ui, Icon::RotateReset, S, false, true, "Reset rotation").clicked() {
+                app.push_cmd(AppCmd::RotateReset);
+            }
+            if icon_btn(
+                ui,
+                Icon::FlipH,
+                S,
+                app.viewport.flip_h,
+                true,
+                "Flip view horizontally (Ctrl+9)",
+            )
+            .clicked()
+            {
+                app.push_cmd(AppCmd::FlipView);
+            }
+            if icon_btn(
+                ui,
+                Icon::FlipV,
+                S,
+                app.viewport.flip_v,
+                true,
+                "Flip view vertically (Ctrl+Shift+9)",
+            )
+            .clicked()
+            {
+                app.push_cmd(AppCmd::FlipViewV);
+            }
         }
     });
 }

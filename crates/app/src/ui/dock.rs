@@ -774,19 +774,36 @@ pub fn is_open(app: &App, p: Palette) -> bool {
         .any(|(_, t)| *t == Pane::Palette(p))
 }
 
+/// Reopen a closed palette and FOCUS it — the Window-menu path, where the
+/// user just asked for that palette by name.
+pub fn reopen(app: &mut App, p: Palette) {
+    reopen_in(&mut app.dock, p, true);
+}
+
+/// Reopen a closed palette WITHOUT taking its leaf's active tab. For the
+/// automatic paths: `App::sync_pages_palette` reopens Pages whenever the
+/// document turns out to be a manga, and with focus that landed the Pages
+/// tab on top of Layers — a fresh launch showed page thumbnails where CSP
+/// shows the Layer palette (parity P0-3; `research/ui-shots/ours/layers.png`
+/// is three failed attempts to screenshot Layers because of this).
+pub fn reopen_unfocused(app: &mut App, p: Palette) {
+    reopen_in(&mut app.dock, p, false);
+}
+
 /// Reopen a closed palette. It joins the leaf holding the Layers palette
 /// (the palette home CSP's Window menu targets), else the first palette
 /// leaf, else a fresh column split off the tree's right edge — never the
-/// canvas leaf (patch #16's rule, upheld on this path too).
-pub fn reopen(app: &mut App, p: Palette) {
-    if is_open(app, p) {
+/// canvas leaf (patch #16's rule, upheld on this path too). Takes the tree
+/// rather than the `App` so the activation rule is testable without a GPU.
+fn reopen_in(dock: &mut DockTree, p: Palette, focus: bool) {
+    let pane = Pane::Palette(p);
+    if dock.iter_all_tabs().any(|(_, t)| *t == pane) {
         return;
     }
-    let pane = Pane::Palette(p);
     // Main-surface leaves only: a palette reopened "into" a floating window
     // the user parked off-screen would look like it never opened.
-    let docked_leaf = |want: &dyn Fn(&[Pane]) -> bool| {
-        app.dock.iter_all_nodes().find_map(|(path, node)| {
+    let docked_leaf = |dock: &DockTree, want: &dyn Fn(&[Pane]) -> bool| {
+        dock.iter_all_nodes().find_map(|(path, node)| {
             if !path.surface.is_main() {
                 return None;
             }
@@ -794,23 +811,28 @@ pub fn reopen(app: &mut App, p: Palette) {
             want(&leaf.tabs).then_some(path.node)
         })
     };
-    let target = docked_leaf(&|tabs: &[Pane]| {
+    let target = docked_leaf(dock, &|tabs: &[Pane]| {
         tabs.contains(&Pane::Palette(Palette::Layers))
     })
-    .or_else(|| docked_leaf(&|tabs: &[Pane]| tabs.iter().any(|t| matches!(t, Pane::Palette(_)))));
+    .or_else(|| {
+        docked_leaf(dock, &|tabs: &[Pane]| {
+            tabs.iter().any(|t| matches!(t, Pane::Palette(_)))
+        })
+    });
     match target {
         Some(idx) => {
-            if let Ok(leaf) = app.dock.main_surface_mut().leaf_mut(idx) {
+            if let Ok(leaf) = dock.main_surface_mut().leaf_mut(idx) {
                 leaf.tabs.push(pane);
-                leaf.active = egui_dock::TabIndex(leaf.tabs.len() - 1);
+                if focus {
+                    leaf.active = egui_dock::TabIndex(leaf.tabs.len() - 1);
+                }
             }
         }
         None => {
             // Every palette is closed: split a fresh column off the right.
-            let canvas = docked_leaf(&|tabs: &[Pane]| tabs.contains(&Pane::Canvas))
+            let canvas = docked_leaf(dock, &|tabs: &[Pane]| tabs.contains(&Pane::Canvas))
                 .unwrap_or(NodeIndex::root());
-            app.dock
-                .main_surface_mut()
+            dock.main_surface_mut()
                 .split_right(canvas, 0.82, vec![pane]);
         }
     }
@@ -1058,6 +1080,68 @@ mod tests {
                 .count(),
             1,
             "the canvas pane is untouched by page panes"
+        );
+    }
+
+    /// Parity P0-3: a fresh launch must show the LAYER palette. Two things
+    /// have to hold — the default tree's Layers leaf comes up with Layers
+    /// active, and the automatic Pages reopen (`sync_pages_palette`, which
+    /// fires on the first manga document) joins that leaf WITHOUT taking
+    /// the tab. Before the fix the second half failed: Pages was pushed and
+    /// activated, so page thumbnails covered Layers on every manga launch.
+    #[test]
+    fn fresh_launch_leaves_layers_the_active_tab() {
+        let active_of = |tree: &DockTree, p: Palette| -> Pane {
+            let path = tree
+                .iter_all_tabs()
+                .find(|(_, t)| **t == Pane::Palette(p))
+                .map(|(path, _)| path)
+                .unwrap_or_else(|| panic!("{p:?} is in the default tree"));
+            let leaf = tree[path.surface][path.node]
+                .get_leaf()
+                .expect("palettes live in leaves");
+            leaf.tabs[leaf.active.0]
+        };
+
+        let mut tree = default_tree();
+        assert_eq!(
+            active_of(&tree, Palette::Layers),
+            Pane::Palette(Palette::Layers),
+            "the default tree comes up with Layers focused in its leaf"
+        );
+
+        // A plain image closes Pages; opening a manga reopens it — into the
+        // Layers leaf, silently.
+        let path = tree
+            .iter_all_tabs()
+            .find(|(_, t)| **t == Pane::Palette(Palette::Pages))
+            .map(|(p, _)| p)
+            .expect("Pages ships in the default tree");
+        tree.remove_tab(path);
+        reopen_in(&mut tree, Palette::Pages, false);
+        assert!(
+            tree.iter_all_tabs()
+                .any(|(_, t)| *t == Pane::Palette(Palette::Pages)),
+            "Pages did reopen — it is available as a tab"
+        );
+        assert_eq!(
+            active_of(&tree, Palette::Layers),
+            Pane::Palette(Palette::Layers),
+            "reopening Pages must not steal the Layers leaf's active tab"
+        );
+
+        // The Window-menu path is unchanged: asking for a palette focuses it.
+        let path = tree
+            .iter_all_tabs()
+            .find(|(_, t)| **t == Pane::Palette(Palette::Pages))
+            .map(|(p, _)| p)
+            .expect("Pages open");
+        tree.remove_tab(path);
+        reopen_in(&mut tree, Palette::Pages, true);
+        assert_eq!(
+            active_of(&tree, Palette::Pages),
+            Pane::Palette(Palette::Pages),
+            "an explicitly reopened palette still comes up focused"
         );
     }
 

@@ -117,7 +117,7 @@ pub struct FrameOutput {
     pub repaint_after: Duration,
 }
 
-pub use engine::{DabStrokeApp, Engine, EngineKind};
+pub use engine::{DabStrokeApp, Engine, EngineKind, preset_engine};
 use engine::{StrokeTwin, TwinAxis, smudge_tile_oracle, symmetric_affines};
 
 pub struct App {
@@ -453,6 +453,33 @@ pub struct App {
     /// different material, so it can never write one material's tags onto
     /// another's.
     pub material_tag_edit: Option<(std::path::PathBuf, String)>,
+    /// P0-1: the palette's folder tree, rebuilt by `materials_scan()` and
+    /// never per frame (its counts are an O(dirs × items) sweep, and the
+    /// owner's bank is 2399 files).
+    pub material_tree: Vec<crate::app::materials::MaterialNode>,
+    /// Which tree row the grid is showing.
+    pub material_filter: crate::app::materials::MaterialFilter,
+    /// Tree rows whose subtree is folded away, by `MaterialFilter::id()`.
+    /// CLOSED rather than open, so the default — an absent id — is an
+    /// expanded tree: a bank whose branches all start shut looks empty.
+    pub material_tree_closed: std::collections::HashSet<String>,
+    /// The tree column is showing. Off gives the grid the whole palette,
+    /// which is what a narrow dock wants.
+    pub material_tree_show: bool,
+    /// P1-2: the SELECTED material (index into `materials`), which is not
+    /// the pasted one — a click selects, a double-click applies. Cleared by
+    /// every rescan, because the index means nothing across one.
+    pub material_selected: Option<usize>,
+    /// Thumbnail edge in px — the small/medium/large cycle. **Session-only,
+    /// deliberately**: no `ui.txt` key fits it naturally (the material keys
+    /// there are the folder list and the use counters), and inventing one
+    /// means editing `layout.rs`, which other work owns this round.
+    pub material_thumb_px: f32,
+    /// Thumbnail-cache bookkeeping: path → the tick it was last drawn on,
+    /// plus the tick counter. `material_thumbs` is capped, and this is what
+    /// decides who goes — 2399 live GPU textures is a texture per file.
+    pub material_thumb_lru: std::collections::HashMap<std::path::PathBuf, u64>,
+    pub material_thumb_tick: u64,
     /// The References palette (`ui/refs.rs`): the persisted path list, the
     /// lazily loaded textures, and the open viewer windows. One field because
     /// the halves only make sense together — the list is what persists, the
@@ -1293,6 +1320,14 @@ impl App {
             material_size: MaterialPasteSize::default(),
             material_order: MaterialLayerOrder::default(),
             material_tag_edit: None,
+            material_tree: Vec::new(),
+            material_filter: crate::app::materials::MaterialFilter::All,
+            material_tree_closed: std::collections::HashSet::new(),
+            material_tree_show: true,
+            material_selected: None,
+            material_thumb_px: crate::app::materials::THUMB_STEPS[1],
+            material_thumb_lru: std::collections::HashMap::new(),
+            material_thumb_tick: 0,
             refs: crate::ui::refs::RefBank::from_layout(&layout.references),
             fit_sticky: false,
             ruler_pending: None,

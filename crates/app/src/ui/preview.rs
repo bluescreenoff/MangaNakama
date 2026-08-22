@@ -78,6 +78,17 @@ pub fn generate(ctx: &egui::Context, path: &Path) -> Option<egui::TextureHandle>
 
 /// The pure-CPU half: brush → tiny document → composited image.
 pub fn generate_image(path: &Path) -> Option<egui::ColorImage> {
+    // A procedural preset (`mn-engine`) is not a MyPaint file, so `MyBrush::load`
+    // rejects it — which is why grid/hairy/curve/dyna sat in the list with an
+    // empty cell. Same stroke, same normalized weight, through their engine.
+    if let Some(kind) = crate::app::preset_engine(path) {
+        let mut e = crate::app::Engine::new(kind);
+        e.set_size_px(CH as f32 * 0.30);
+        e.set_color(INK);
+        let mut doc = Document::new(CW, CH);
+        stroke(&mut e, &mut doc);
+        return Some(composite(&doc));
+    }
     let mut b = MyBrush::load(path).ok()?;
     // Normalize: whatever the preset's real size, the preview stroke should
     // read as an elegant line, not a bar. The multiplier is unclamped.
@@ -98,9 +109,26 @@ pub fn generate_image(path: &Path) -> Option<egui::ColorImage> {
     Some(composite(&doc))
 }
 
+/// The sample gesture's pressure at `t` — one 0 → crest → 0 arch, shared by
+/// the list swatch and the live test strip so a preset reads the same in both.
+///
+/// The exponent SPREADS the taper instead of boosting it. At `0.6` most of the
+/// stroke rode within a hair of full width and only the extreme tips thinned,
+/// so a 100 px brush read as a fat sausage with a needle through it (owner
+/// report, plan 30-LOW L5). Above 1 the pen stays light through the approach
+/// and the exit; the crest below the top of the range keeps the widest point
+/// *visibly* the widest rather than pinning it to the nominal size.
+///
+/// `sin(π)` lands a hair *below* zero in f32 and a negative base makes `powf`
+/// return NaN — clamp first (a NaN here once reached libmypaint as a NaN dab
+/// radius).
+fn arch_pressure(t: f32) -> f32 {
+    (t * std::f32::consts::PI).sin().max(0.0).powf(1.6) * 0.72
+}
+
 /// An S-curve with a pressure ramp — enough to show tip shape, taper and
 /// texture in one gesture.
-fn stroke(b: &mut MyBrush, doc: &mut Document) {
+fn stroke<S: StrokeSink>(b: &mut S, doc: &mut Document) {
     const N: u32 = 96;
     doc.begin_op();
     b.begin(doc);
@@ -108,10 +136,8 @@ fn stroke(b: &mut MyBrush, doc: &mut Document) {
         let t = k as f32 / N as f32;
         let x = CW as f32 * (0.06 + 0.88 * t);
         let y = CH as f32 * 0.5 + (t * std::f32::consts::TAU * 0.82).sin() * CH as f32 * 0.16;
-        // Ease in and out so pressure-dynamic tips read. `sin(π)` lands a hair
-        // *below* zero in f32 and a negative base makes `powf` return NaN —
-        // clamp first (a NaN here once reached libmypaint as a NaN dab radius).
-        let pressure = (t * std::f32::consts::PI).sin().max(0.0).powf(0.6);
+        // Ease in and out so pressure-dynamic tips read (see `arch_pressure`).
+        let pressure = arch_pressure(t);
         b.sample(
             doc,
             PenSample {
@@ -298,14 +324,18 @@ pub fn test_stroke_image(
     if eraser {
         fill_layer(&mut doc, BAND);
     }
-    test_s_curve(&mut chain, &mut doc, (w * k) as f32, (h * k) as f32);
+    // The S flattens as the zoom-out climbs: at 1:4 the stroke alone is a
+    // quarter of the strip tall, and a full-amplitude curve on top of that
+    // leaves no paper between the crests (L5).
+    let amp = 0.22 - 0.04 * (k - 1) as f32;
+    test_s_curve(&mut chain, &mut doc, (w * k) as f32, (h * k) as f32, amp);
     composite_checker(&doc, w, h, k)
 }
 
 /// The sample gesture: one S-curve with synthesized pressure ramping
 /// 0 → 1 → 0, so tip shape, taper, texture and the pressure dynamics all read
 /// in a single stroke.
-fn test_s_curve<S: StrokeSink>(sink: &mut S, doc: &mut Document, w: f32, h: f32) {
+fn test_s_curve<S: StrokeSink>(sink: &mut S, doc: &mut Document, w: f32, h: f32, amp: f32) {
     // Samples scale with the strip so the pen's apparent SPEED (and with it
     // every speed-mapped dynamic) does not change when the palette is
     // resized — the same reason the mouse fallback stamps a real `t_ms`.
@@ -315,11 +345,8 @@ fn test_s_curve<S: StrokeSink>(sink: &mut S, doc: &mut Document, w: f32, h: f32)
     for k in 0..=n {
         let t = k as f32 / n as f32;
         let x = w * (0.07 + 0.86 * t);
-        let y = h * 0.5 + (t * std::f32::consts::TAU * 0.82).sin() * h * 0.22;
-        // `sin(π)` lands a hair below zero in f32 and a negative base makes
-        // `powf` return NaN — clamp first (see `stroke` above; a NaN once
-        // reached libmypaint as a dab radius).
-        let pressure = (t * std::f32::consts::PI).sin().max(0.0).powf(0.6);
+        let y = h * 0.5 + (t * std::f32::consts::TAU * 0.82).sin() * h * amp;
+        let pressure = arch_pressure(t);
         sink.sample(
             doc,
             PenSample {
@@ -539,6 +566,61 @@ mod test_stroke_tests {
             bare > img.pixels.len() / 5,
             "and the strip is not a solid bar — paper must still show ({bare} of {})",
             img.pixels.len()
+        );
+    }
+
+    /// L6: the procedural engines' presets are not MyPaint files, so the swatch
+    /// path handed them to `MyBrush::load`, got `None`, and the sub tool list
+    /// showed them with an empty cell. (Fails against that path — no image at
+    /// all.)
+    #[test]
+    fn procedural_engine_presets_get_a_swatch_too() {
+        for name in ["grid-dots", "hairy-bristles", "curve-brush", "dyna-spring"] {
+            let p = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("../../assets/brushes/krita/{name}.myb"));
+            let img = generate_image(&p).unwrap_or_else(|| panic!("{name}: no swatch minted"));
+            assert_eq!(img.size, [PREVIEW_W, PREVIEW_H], "{name}: wrong size");
+            let field = img.pixels[0];
+            assert!(
+                img.pixels.iter().any(|px| *px != field),
+                "{name}: the swatch is a uniform field — the engine inked nothing"
+            );
+        }
+    }
+
+    /// Ink height of every column that has ink, left to right — the stroke's
+    /// width profile along the gesture, which is what "fat sausage" is about.
+    fn column_heights(img: &egui::ColorImage) -> Vec<usize> {
+        (0..img.size[0])
+            .map(|x| (0..img.size[1]).filter(|y| img[(x, *y)].r() < 200).count())
+            .filter(|c| *c > 0)
+            .collect()
+    }
+
+    /// L5: at Size 100 the strip read as a fat sausage with a needle through
+    /// it. `powf(0.6)` BOOSTED mid pressures, so ~80 % of the stroke rode at
+    /// full width and only the extreme tips tapered. The taper has to be
+    /// spread across the whole gesture, and the peak has to stay under the
+    /// nominal size or the widest point cannot be seen to be the widest.
+    /// (Fails against the 0.6 profile on both counts.)
+    #[test]
+    fn test_stroke_tapers_across_the_gesture_not_only_at_the_tips() {
+        let props = ToolProps {
+            size_px: 100.0,
+            ..Default::default()
+        };
+        let img = test_stroke_image(Some(&pen()), &props, [0.0, 0.0, 0.0], false, None, 180);
+        let cols = column_heights(&img);
+        let peak = *cols.iter().max().unwrap() as f32;
+        let mean = cols.iter().sum::<usize>() as f32 / cols.len() as f32;
+        let full = props.size_px / test_stroke_scale(props.size_px) as f32;
+        assert!(
+            peak < full * 0.9,
+            "the crest must stay below the nominal size ({peak} of {full} px)"
+        );
+        assert!(
+            mean < peak * 0.62,
+            "most of the stroke must be thinner than its crest (mean {mean}, peak {peak})"
         );
     }
 
