@@ -1,6 +1,6 @@
 # MangaNakama
 
-![MangaNakama — panels, screentone, balloons and vertical Japanese text on a manga page](docs/screenshot.png)
+![MangaNakama — a blank three-page manuscript in the Japanese submission format (B4, 600 dpi, trim and safety guides), page one divided into panels](docs/screenshot.png)
 
 A free, GPU-first manga drawing app for Windows: inking, panels, screentone,
 balloons, vertical Japanese text, multi-page chapters, and a built-in reader

@@ -49,6 +49,17 @@ pub fn run(
     // Everything the shot is meant to prove renders, including the HUD —
     // except a hero shot, whose audience is a README reader, not an agent.
     app.hud_open = !shot_hero;
+    // The hero shot builds its OWN document (a blank manuscript) and leaves
+    // this harness's demo page — strokes, balloon, tone, self-checks — to the
+    // agent-facing shots. Capture itself is shared, deliberately: the README
+    // image must come out of the same path the app renders with.
+    if shot_hero {
+        hero_doc(&mut app);
+        let img = capture(&mut app, w, h, true)?;
+        img.save(out).map_err(|e| format!("png write: {e}"))?;
+        println!("[app] screenshot {}x{} -> {}", w, h, out.display());
+        return Ok(());
+    }
     // Round 7/10: a frame border FOLDER cut into three panels — proves the
     // koma raster (white gutter + borders), the folder rows (header + White +
     // draw layer) and Layer Property. The strokes go in AFTER it exists so
@@ -335,16 +346,6 @@ pub fn run(
         }
     }
 
-    if shot_hero {
-        // Hero content: strokes feed through the viewport round trip
-        // (to_screen → push_batch → to_canvas), so they land in doc space
-        // whatever the current zoom; the page FIT happens inside capture,
-        // once the dock has laid the canvas pane out.
-        hero_extras(&mut app);
-        // A frozen coaching line ("tone layer — paint grey/black ink…")
-        // reads as noise under a README title.
-        app.set_status(String::new());
-    }
     // The derived tone rasters normally refresh at the head of App::render;
     // this harness never runs it, so a tone layer added above would shoot
     // as an invisible no-op without this.
@@ -376,78 +377,131 @@ const DEMO_FOOTPRINT: ((i32, i32), (i32, i32)) = ((320, 186), (800, 414));
 /// physics, not a coordinate bug.
 const TILE: i32 = 128;
 
+/// The hero shot's document (owner's call, 2026-08-22): a BLANK three-page
+/// work in the Japanese submission manuscript format — B4 paper at 600 dpi
+/// with the Shueisha trim/bleed/inner guides — page 1 cut into five empty
+/// panels, pages 2 and 3 left as the single default frame. The README should
+/// show the manuscript the app is for, not a demo page of art.
+///
+/// Built entirely through the real commands: New Comic (the dialog's draft +
+/// `NewComicCreate`) and the Frame tool's divide, aimed the way a drag across
+/// a panel aims it.
+fn hero_doc(app: &mut App) {
+    use crate::cmd::{AppCmd, FrameMode, dispatch};
+
+    // The SHIPPED layout, whatever `ui.txt` beside the exe says: a README
+    // image taken on a machine whose palettes had been dragged around
+    // advertises that machine, not the app. The one departure: Pages gets a
+    // leaf of its own under Layers instead of the foot of the left column,
+    // where the default's share of a 1000 px window is too short to show a
+    // three-page work. Built from the same column builders as `default_tree`,
+    // with the same width seeds, so the columns come out shipped-width.
+    {
+        use crate::ui::dock::{Palette, default_left, merge_columns};
+        let mut left = default_left();
+        // (bound first: an `if let` would pin the iterator's borrow of `left`
+        // across the body, and `remove_tab` needs it mutably.)
+        let pages_tab = left
+            .iter_all_tabs()
+            .find(|(_, t)| **t == Palette::Pages)
+            .map(|(p, _)| p);
+        if let Some(path) = pages_tab {
+            left.remove_tab(path);
+        }
+        let mut right = egui_dock::DockState::new(vec![Palette::Color, Palette::ColorSet]);
+        {
+            let tree = right.main_surface_mut();
+            let [_, mid] = tree.split_below(
+                egui_dock::NodeIndex::root(),
+                0.30,
+                vec![Palette::Layers, Palette::Actions],
+            );
+            tree.split_below(mid, 0.42, vec![Palette::Pages]);
+        }
+        let (l, r) = (
+            serde_json::to_string(&left).unwrap_or_default(),
+            serde_json::to_string(&right).unwrap_or_default(),
+        );
+        if let Some(tree) = merge_columns(&l, &r, 186.0, 208.0, 1280.0) {
+            app.dock = tree;
+        }
+    }
+    // Page cells small enough that all three fit the Pages leaf (the palette's
+    // own size control, which `ui.txt` may have left anywhere).
+    app.pages_fit = false;
+    app.pages_cell_w = 95.0;
+    app.new_doc_draft.setup = mn_core::PageSetup::presets().remove(0);
+    app.new_doc_draft.pages = 3;
+    app.new_doc_draft.binding_right = true;
+    app.new_doc_draft.frame_folder = true;
+    app.new_doc_draft.story = String::new();
+    dispatch(app, AppCmd::NewComicCreate);
+    // New Comic parks the startup canvas in a tab of its own; the README
+    // wants one document, not a spare empty one beside it.
+    app.close_doc(0);
+
+    // Divide the BORDER, not into new folders: one frame folder holding
+    // every panel is what a page cut up in one sitting looks like, and it
+    // keeps the Layers palette readable. The gutters are CSP's own defaults
+    // (2.96 mm between columns, 9.74 mm between rows) — the Frame tool's
+    // per-sub-tool Tool Property, set here because the border sub tool's
+    // remembered pair is tighter than a printed page reads at fit zoom.
+    app.frame_mode = FrameMode::DivideBorder;
+    app.gutter_border_mm = (2.96, 9.74);
+    let Some([x0, y0, x1, y1]) = app.page.as_ref().map(|p| p.inner_rect_px()) else {
+        return;
+    };
+    let (w, h) = (x1 - x0, y1 - y0);
+    let at = |fx: f32, fy: f32| (x0 + w * fx, y0 + h * fy);
+    // Tiers first (each cut segment runs past the paper edge, like a drag
+    // that starts and ends off the panel), then one vertical cut inside
+    // each of the lower two tiers — the cut only splits frames its SEGMENT
+    // touches, so the tier above is untouched.
+    let (row1, row2) = (0.30f32, 0.63f32);
+    for fy in [row1, row2] {
+        let (_, y) = at(0.0, fy);
+        dispatch(
+            app,
+            AppCmd::FrameDivide {
+                a: (x0 - w * 0.1, y),
+                b: (x1 + w * 0.1, y),
+            },
+        );
+    }
+    for (fx, top, bottom) in [(0.45f32, row1, row2), (0.58, row2, 1.0)] {
+        let (x, _) = at(fx, 0.0);
+        dispatch(
+            app,
+            AppCmd::FrameDivide {
+                a: (x, at(0.0, top).1 + h * 0.02),
+                b: (x, at(0.0, bottom).1 - h * 0.02),
+            },
+        );
+    }
+    // Then select the folder's draw layer, the way you do before inking:
+    // with a FRAME layer active the canvas wears the frame-focus veil (a
+    // blue wash over everything outside the panels — `--shot-framefocus` is
+    // the shot that exists to show it), and the README wants white paper.
+    // `add_frame_folder` pushes White, draw, header, so the draw layer is
+    // the row directly under the header.
+    if let Some(fi) = app.doc.layers.iter().rposition(|l| l.folder && l.is_frame()) {
+        app.doc.set_active(fi.saturating_sub(1));
+    }
+    // The ACTIVE page's Pages-panel thumbnail is minted at the head of
+    // `App::render`, which this harness never runs — without these two lines
+    // (render's own) page 1 shows the grey "editing" placeholder while the
+    // parked pages show their stashed thumbs.
+    let thumb = app.thumb_of_current();
+    app.pages[app.page_index].thumb = Some(thumb);
+    // A frozen coaching line ("divided into…") reads as noise under a
+    // README title.
+    app.set_status(String::new());
+}
+
 /// A few strokes so the canvas is not blank in the shot (and the tile upload +
 /// compositing path is exercised). Coordinates are CANVAS space; they go
 /// through `viewport.to_screen` because `push_batch` converts screen→canvas
 /// itself (the live WM_POINTER path hands it client-space history batches).
-/// Hero-shot content pass: a tapered speed-line burst in the lower half of
-/// the page, then the one-gesture Tone tool over the upper panel — so the
-/// README shows a page that reads as manga (ink + screentone), all through
-/// the same real command/stroke paths as everything else in this harness.
-fn hero_extras(app: &mut App) {
-    app.engine_mut().set_color([0.05, 0.05, 0.08]);
-    let vp = app.viewport;
-    // Focus lines: from an outer arc toward a focal point in the lower
-    // panel, stopping short of it, tapering to nothing — the manga read.
-    // A full focus-line FIELD around the lower panel's centre, every line
-    // clipped to a conservative interior box so nothing crosses the panel
-    // border (the one thing a manga reader spots instantly), dense enough
-    // to read as a field rather than countable strokes.
-    let (cx, cy) = (1024.0f32, 1450.0f32);
-    let (bx0, by0, bx1, by1) = (240.0f32, 1080.0f32, 1810.0f32, 1850.0f32);
-    for i in 0..34 {
-        let a = i as f32 * (std::f32::consts::TAU / 34.0) + (i as f32 * 1.7).sin() * 0.04;
-        let (dx, dy) = (a.sin(), a.cos());
-        // Where the ray from the focal point exits the interior box.
-        let tx = if dx > 0.0 {
-            (bx1 - cx) / dx
-        } else if dx < 0.0 {
-            (bx0 - cx) / dx
-        } else {
-            f32::INFINITY
-        };
-        let ty = if dy > 0.0 {
-            (by1 - cy) / dy
-        } else if dy < 0.0 {
-            (by0 - cy) / dy
-        } else {
-            f32::INFINITY
-        };
-        let r0 = (tx.min(ty) - 10.0).max(180.0);
-        let r1 = 150.0 + (i as f32 * 3.1).cos() * 30.0;
-        let (x0, y0) = (cx + dx * r0, cy + dy * r0);
-        let (x1, y1) = (cx + dx * r1, cy + dy * r1);
-        app.begin_stroke(PointerKind::Mouse);
-        let batch: Vec<PenSample> = (0..40)
-            .map(|k| {
-                let t = k as f32 / 39.0;
-                let (x, y) = vp.to_screen(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t);
-                PenSample {
-                    x,
-                    y,
-                    pressure: (0.4 * (1.0 - t)).max(0.02),
-                    tilt_x: 0.0,
-                    tilt_y: 0.0,
-                    t_ms: k as f64 * 4.0,
-                }
-            })
-            .collect();
-        for chunk in batch.chunks(9) {
-            app.push_batch(chunk);
-            app.flush_gpu_dabs();
-        }
-        app.end_stroke();
-    }
-    // Screentone over the upper panel: the one-gesture Tone tool, flooding
-    // from an empty spot of the panel — the balloon is CLOSED, so the tone
-    // wraps around it, the classic look. Coarse and light on purpose: the
-    // dots must SURVIVE the fitted ~40% zoom (a fine 60 LPI screen at 35%
-    // reads as flat grey, and 100% coverage reads as a black fill).
-    app.tone_opts.density = 0.35;
-    app.tone_opts.tone.lpi = 27.5;
-    crate::cmd::dispatch(app, crate::cmd::AppCmd::ToneRegion(180.0, 780.0));
-}
-
 fn demo_strokes(app: &mut App) {
     app.engine_mut().set_color([0.05, 0.05, 0.08]);
     let vp = app.viewport;
