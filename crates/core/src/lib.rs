@@ -74,7 +74,7 @@ pub use gradient::{
 pub use page::PageSetup;
 pub use preflight::{PreflightFinding, PreflightLevel, run_page, run_work};
 pub use project::{Expression, Project, ProjectMeta};
-pub use ruler::{CurveRuler, Ruler, RulerGrab, Rulers, SnapLock};
+pub use ruler::{AnchorRole, CurveRuler, Ruler, RulerGrab, Rulers, SnapLock};
 pub use selection::{SEL_ON, Selection, SelectionOp, selected};
 pub use stabilize::Stabilizer;
 pub use stroke::{PenSample, StrokeSink};

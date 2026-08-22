@@ -1312,11 +1312,32 @@ impl App {
             moved: false,
             before: self.doc.rulers.clone(),
         });
-        self.set_status(match grab {
-            mn_core::RulerGrab::Anchor(_) => "ruler handle — drag to move this end",
-            mn_core::RulerGrab::Body => "ruler — drag to move the whole ruler",
-        });
+        // M3 phase A: name the handle. The generic "this end" was right
+        // for a line ruler and useless on a perspective set, where WHICH
+        // point you grabbed is the whole question. Curve rulers (index
+        // past `items`) have no roles and keep the old wording.
+        let msg = match grab {
+            mn_core::RulerGrab::Anchor(i) => self.ruler_anchor_role(ruler, i).map_or_else(
+                || "ruler handle — drag to move this end".into(),
+                |r| r.hint(),
+            ),
+            mn_core::RulerGrab::Body => "ruler — drag to move the whole ruler".to_string(),
+        };
+        self.set_status(msg);
         true
+    }
+
+    /// The role of anchor `i` on the ruler at a combined index (see
+    /// [`mn_core::Rulers::grab_near`]) — `None` for a curve ruler's
+    /// vertices, which are bare path points.
+    fn ruler_anchor_role(&self, ruler: usize, i: usize) -> Option<mn_core::AnchorRole> {
+        self.doc
+            .rulers
+            .items
+            .get(ruler)?
+            .anchor_roles()
+            .get(i)
+            .copied()
     }
 
     /// Object tool press: find what the cursor grabbed, topmost vector layer
@@ -1768,9 +1789,18 @@ impl App {
         if let Some(m) = self.ruler_move.as_mut() {
             let d = [cx - m.last[0], cy - m.last[1]];
             m.last = [cx, cy];
+            // M3 phase A: say what is moving, ONCE, as the drag starts —
+            // the status line is not a per-sample readout.
+            let starting = !m.moved && d[0].abs() + d[1].abs() > 0.0;
             m.moved |= d[0].abs() + d[1].abs() > 0.0;
             let (k, grab) = (m.ruler, m.grab);
             self.doc.rulers.move_by(k, grab, d);
+            if starting
+                && let mn_core::RulerGrab::Anchor(i) = grab
+                && let Some(role) = self.ruler_anchor_role(k, i)
+            {
+                self.set_status(role.moving());
+            }
             self.needs_redraw = true;
             return;
         }

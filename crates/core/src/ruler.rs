@@ -140,29 +140,138 @@ pub enum RulerGrab {
     Body,
 }
 
+/// What an anchor MEANS on its ruler (M3 phase A: self-explaining
+/// rulers). The handles are otherwise index-blind points, so the overlay
+/// and the status line have nothing to say about them beyond "a handle";
+/// the role is what lets them name the thing under the pointer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnchorRole {
+    /// An end of a straight-edge line ruler.
+    LineEnd,
+    /// An end of the PARALLEL ruler's direction segment: it aims the
+    /// whole family, it is not one of the lines.
+    ParallelEnd,
+    /// A horizon vanishing point, numbered from 1 for its tag.
+    Vp(u8),
+    /// The 1-pt set's bare horizon HANDLE — it tilts the eye level, it is
+    /// not a second vanishing point.
+    Horizon,
+    /// A 3-pt set's vertical vanishing point (the one the verticals
+    /// converge to).
+    VerticalVp,
+    /// The centre of a radial ruler: the fan's point, the rings' middle,
+    /// the mirror's origin.
+    Center,
+}
+
+impl AnchorRole {
+    /// The short tag drawn beside the handle. Kept to a couple of words —
+    /// it sits on the artwork.
+    pub fn tag(self) -> &'static str {
+        match self {
+            AnchorRole::LineEnd => "edge",
+            AnchorRole::ParallelEnd => "direction",
+            AnchorRole::Vp(1) => "VP1",
+            AnchorRole::Vp(2) => "VP2",
+            AnchorRole::Vp(_) => "VP",
+            AnchorRole::Horizon => "eye level",
+            // The third VP of a 3-pt set: numbered like its horizon pair,
+            // because that is how the set is drawn and talked about.
+            AnchorRole::VerticalVp => "VP3",
+            AnchorRole::Center => "centre",
+        }
+    }
+
+    /// The handle spoken aloud, for the status line.
+    pub fn name(self) -> &'static str {
+        match self {
+            AnchorRole::LineEnd => "a ruler end",
+            AnchorRole::ParallelEnd => "the direction handle",
+            AnchorRole::Vp(1) => "vanishing point 1",
+            AnchorRole::Vp(2) => "vanishing point 2",
+            AnchorRole::Vp(_) => "a vanishing point",
+            AnchorRole::Horizon => "the eye level handle",
+            AnchorRole::VerticalVp => "the vertical vanishing point",
+            AnchorRole::Center => "the ruler's centre",
+        }
+    }
+
+    /// What dragging it DOES — the half that makes a ruler explain
+    /// itself. A vanishing point only means anything through the lines
+    /// that run to it.
+    pub fn effect(self) -> &'static str {
+        match self {
+            AnchorRole::LineEnd => "the edge re-aims",
+            AnchorRole::ParallelEnd => "every parallel re-aims",
+            AnchorRole::Vp(_) => "lines toward it follow",
+            AnchorRole::Horizon => "the horizon tilts, and the verticals with it",
+            AnchorRole::VerticalVp => "the verticals converge to it",
+            AnchorRole::Center => "the whole fan travels with it",
+        }
+    }
+
+    /// The status line on grab: what it is, then what it does.
+    pub fn hint(self) -> String {
+        format!("{} — {}", self.name(), self.effect())
+    }
+
+    /// The same one-liner while the drag is under way.
+    pub fn moving(self) -> String {
+        format!("moving {} — {}", self.name(), self.effect())
+    }
+}
+
 /// Moving a ruler after it exists (ROADMAP "make rulers movable"). The
 /// geometry IS the ruler — there is no separate transform — so a move is
 /// applied straight to the anchors and every snap after it reads the new
 /// position with no invalidation step.
 impl Ruler {
-    /// The draggable anchor points, canvas px, in creation order. A
-    /// [`Ruler::Guide`] has none: it is a bare coordinate, so the drawn
-    /// line is its own handle (body drags only).
-    pub fn anchors(&self) -> Vec<[f32; 2]> {
+    /// The draggable anchor points WITH their meaning, canvas px, in
+    /// creation order — the ONE source [`Ruler::anchors`] and
+    /// [`Ruler::anchor_roles`] are both derived from, so the two views
+    /// cannot drift out of alignment with each other or with
+    /// [`Ruler::move_anchor`]'s indices. A [`Ruler::Guide`] has none: it
+    /// is a bare coordinate, so the drawn line is its own handle (body
+    /// drags only).
+    pub fn anchors_with_roles(&self) -> Vec<([f32; 2], AnchorRole)> {
         match *self {
-            Ruler::Line { a, b } | Ruler::Parallel { a, b } | Ruler::Perspective { a, b } => {
-                vec![a, b]
+            Ruler::Line { a, b } => vec![(a, AnchorRole::LineEnd), (b, AnchorRole::LineEnd)],
+            Ruler::Parallel { a, b } => {
+                vec![(a, AnchorRole::ParallelEnd), (b, AnchorRole::ParallelEnd)]
             }
+            Ruler::Perspective { a, b } => vec![(a, AnchorRole::Vp(1)), (b, AnchorRole::Vp(2))],
             // The 1-pt set's second anchor is the horizon handle: dragging
             // it TILTS the eye level (and with it the horizontals and
             // verticals) without moving the vanishing point.
-            Ruler::Perspective1 { vp, h } => vec![vp, h],
-            Ruler::Perspective3 { a, b, z } => vec![a, b, z],
+            Ruler::Perspective1 { vp, h } => {
+                vec![(vp, AnchorRole::Vp(1)), (h, AnchorRole::Horizon)]
+            }
+            Ruler::Perspective3 { a, b, z } => vec![
+                (a, AnchorRole::Vp(1)),
+                (b, AnchorRole::Vp(2)),
+                (z, AnchorRole::VerticalVp),
+            ],
             Ruler::VanishingPoint { c, .. }
             | Ruler::Concentric { c, .. }
-            | Ruler::Symmetric { c, .. } => vec![c],
+            | Ruler::Symmetric { c, .. } => vec![(c, AnchorRole::Center)],
             Ruler::Guide { .. } => Vec::new(),
         }
+    }
+
+    /// The draggable anchor points, canvas px, in creation order.
+    pub fn anchors(&self) -> Vec<[f32; 2]> {
+        self.anchors_with_roles()
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect()
+    }
+
+    /// What each anchor means, index-aligned with [`Ruler::anchors`].
+    pub fn anchor_roles(&self) -> Vec<AnchorRole> {
+        self.anchors_with_roles()
+            .into_iter()
+            .map(|(_, r)| r)
+            .collect()
     }
 
     /// Move anchor `i` by `d` (an out-of-range index is ignored). Only the
@@ -1685,5 +1794,135 @@ mod part3_tests {
             rs.grab_near([52.0, 903.0], 10.0),
             Some((0, RulerGrab::Anchor(2)))
         );
+    }
+
+    /// Every ruler kind, one of each — the roster the role tests loop. A
+    /// NEW variant fails to compile inside `anchors_with_roles` first, so
+    /// this list is a reminder, not the guard.
+    fn one_of_every_variant() -> Vec<Ruler> {
+        vec![
+            Ruler::Line {
+                a: [0.0, 0.0],
+                b: [100.0, 0.0],
+            },
+            Ruler::VanishingPoint {
+                c: [50.0, 50.0],
+                rays: 12,
+                angle0: 0.3,
+            },
+            Ruler::Parallel {
+                a: [0.0, 0.0],
+                b: [40.0, 60.0],
+            },
+            Ruler::Concentric {
+                c: [10.0, 20.0],
+                dr: 25.0,
+            },
+            Ruler::Guide {
+                horizontal: true,
+                pos: 200.0,
+            },
+            Ruler::Symmetric {
+                c: [30.0, 40.0],
+                lines: 4,
+                angle0: 0.1,
+            },
+            Ruler::Perspective {
+                a: [-300.0, 100.0],
+                b: [500.0, 100.0],
+            },
+            Ruler::Perspective1 {
+                vp: [300.0, 100.0],
+                h: [800.0, 100.0],
+            },
+            Ruler::Perspective3 {
+                a: [-600.0, 100.0],
+                b: [700.0, 100.0],
+                z: [50.0, 900.0],
+            },
+        ]
+    }
+
+    /// M3 phase A: the roles are index-aligned with the anchors for EVERY
+    /// kind, because both views come off one array. The alignment that
+    /// actually bites is with `move_anchor` — role i names the point
+    /// `Anchor(i)` drags — so the test drags each index and checks the
+    /// point at that index, and nothing else, moved.
+    #[test]
+    fn anchor_roles_align_with_anchors_for_every_variant() {
+        for r in one_of_every_variant() {
+            let pairs = r.anchors_with_roles();
+            let pts = r.anchors();
+            let roles = r.anchor_roles();
+            assert_eq!(roles.len(), pts.len(), "{r:?}");
+            assert_eq!(pairs.len(), pts.len(), "{r:?}");
+            for (i, (p, role)) in pairs.iter().enumerate() {
+                assert_eq!(*p, pts[i], "point {i} of {r:?}");
+                assert_eq!(*role, roles[i], "role {i} of {r:?}");
+                assert!(!role.tag().is_empty() && !role.hint().is_empty());
+            }
+            for i in 0..pts.len() {
+                let mut moved = r;
+                moved.move_anchor(i, [7.0, -3.0]);
+                for (j, q) in moved.anchors().iter().enumerate() {
+                    let want = if j == i {
+                        [pts[j][0] + 7.0, pts[j][1] - 3.0]
+                    } else {
+                        pts[j]
+                    };
+                    assert_eq!(*q, want, "moving anchor {i} of {r:?} moved index {j}");
+                }
+            }
+        }
+    }
+
+    /// The naming itself, since the labels ARE the feature: the
+    /// perspective sets say which vanishing point is which, the 1-pt
+    /// set's far handle is the eye level and not a VP, and a guide has
+    /// nothing to name.
+    #[test]
+    fn anchor_roles_name_each_perspective_handle() {
+        let roles = |r: Ruler| r.anchor_roles();
+        assert_eq!(
+            roles(Ruler::Perspective {
+                a: [0.0, 0.0],
+                b: [1.0, 0.0]
+            }),
+            vec![AnchorRole::Vp(1), AnchorRole::Vp(2)]
+        );
+        assert_eq!(
+            roles(Ruler::Perspective1 {
+                vp: [0.0, 0.0],
+                h: [1.0, 0.0]
+            }),
+            vec![AnchorRole::Vp(1), AnchorRole::Horizon]
+        );
+        assert_eq!(
+            roles(Ruler::Perspective3 {
+                a: [0.0, 0.0],
+                b: [1.0, 0.0],
+                z: [0.0, 9.0]
+            }),
+            vec![AnchorRole::Vp(1), AnchorRole::Vp(2), AnchorRole::VerticalVp]
+        );
+        assert_eq!(
+            roles(Ruler::VanishingPoint {
+                c: [0.0, 0.0],
+                rays: 8,
+                angle0: 0.0
+            }),
+            vec![AnchorRole::Center]
+        );
+        assert!(
+            roles(Ruler::Guide {
+                horizontal: false,
+                pos: 10.0
+            })
+            .is_empty(),
+            "a guide is its own handle"
+        );
+        assert_eq!(AnchorRole::Vp(2).tag(), "VP2");
+        assert_eq!(AnchorRole::VerticalVp.tag(), "VP3");
+        assert_eq!(AnchorRole::Horizon.tag(), "eye level");
     }
 }

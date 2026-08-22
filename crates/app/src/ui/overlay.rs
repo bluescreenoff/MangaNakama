@@ -525,24 +525,61 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
         // square, accent outline). A guide has no anchor — its whole line
         // is the grab — so it shows none, which is the honest affordance.
         if app.tool == Tool::Object {
-            let handle = |p: [f32; 2]| {
-                let r = egui::Rect::from_center_size(to_pt(p[0], p[1]), egui::vec2(7.0, 7.0));
+            let outline = egui::Stroke::new(1.2, theme::ACCENT);
+            let square = |c: egui::Pos2| {
+                let r = egui::Rect::from_center_size(c, egui::vec2(7.0, 7.0));
                 painter.rect_filled(r, 1.0, egui::Color32::WHITE);
-                painter.rect_stroke(
-                    r,
-                    1.0,
-                    egui::Stroke::new(1.2, theme::ACCENT),
-                    egui::StrokeKind::Inside,
-                );
+                painter.rect_stroke(r, 1.0, outline, egui::StrokeKind::Inside);
             };
+            // M3 phase A: the handle's SHAPE says what it is before the
+            // label is read — a vanishing point is a diamond (the set
+            // aims at it), the 1-pt set's horizon handle a circle (it
+            // only tilts the eye level), every other anchor the plain
+            // square every on-canvas affordance wears.
+            let handle = |p: [f32; 2], role: mn_core::AnchorRole| {
+                let c = to_pt(p[0], p[1]);
+                match role {
+                    mn_core::AnchorRole::Vp(_) | mn_core::AnchorRole::VerticalVp => {
+                        let d = 5.5;
+                        painter.add(egui::Shape::convex_polygon(
+                            vec![
+                                c + egui::vec2(0.0, -d),
+                                c + egui::vec2(d, 0.0),
+                                c + egui::vec2(0.0, d),
+                                c + egui::vec2(-d, 0.0),
+                            ],
+                            egui::Color32::WHITE,
+                            outline,
+                        ));
+                    }
+                    mn_core::AnchorRole::Horizon => {
+                        painter.circle(c, 4.0, egui::Color32::WHITE, outline);
+                    }
+                    _ => square(c),
+                }
+            };
+            // …and the small tag spells it out ("VP1", "eye level"). Theme
+            // type, set to the handle's RIGHT so it never covers the mark
+            // it names — the labels teach the set, they don't compete with
+            // the art.
+            let font = egui::TextStyle::Small.resolve(ui.style());
             for r in &app.doc.rulers.items {
-                for p in r.anchors() {
-                    handle(p);
+                for (p, role) in r.anchors_with_roles() {
+                    handle(p, role);
+                    painter.text(
+                        to_pt(p[0], p[1]) + egui::vec2(8.0, 0.0),
+                        egui::Align2::LEFT_CENTER,
+                        role.tag(),
+                        font.clone(),
+                        theme::ACCENT,
+                    );
                 }
             }
+            // A curve ruler's vertices are just path points — no role to
+            // name, so they keep the plain square.
             for c in &app.doc.rulers.curves {
                 for p in c.anchors() {
-                    handle(*p);
+                    square(to_pt(p[0], p[1]));
                 }
             }
         }

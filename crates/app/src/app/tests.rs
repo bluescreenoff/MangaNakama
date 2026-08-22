@@ -7847,3 +7847,87 @@ fn figure_flash_drags_place_urchin_and_solid_layers() {
     assert_eq!(s.kind, 0, "stream stays the legacy kind");
     assert!((s.taper - 0.7).abs() < 1e-6, "the knob reached the layer");
 }
+
+/// M3 phase A (self-explaining rulers): the status line NAMES the handle
+/// under the pointer instead of saying "this end". The 3-point set is the
+/// case that needed it — three anchors that look identical and do three
+/// different things — and the naming must survive the drag, because the
+/// press and the drag are where the reader learns what a VP is.
+#[test]
+fn ruler_handles_name_themselves_in_the_status_line() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    let empty: [PenSample; 0] = [];
+    app.viewport.zoom = 1.0;
+
+    crate::cmd::dispatch(
+        &mut app,
+        crate::cmd::AppCmd::RulerArm(crate::cmd::RulerKind::Perspective3),
+    );
+    let (x0, y0) = app.viewport.to_screen(-400.0, 100.0);
+    let (x1, y1) = app.viewport.to_screen(900.0, 100.0);
+    app.canvas_down(x0, y0, PointerKind::Mouse, &empty);
+    app.canvas_up(x1, y1, &empty);
+    let z = match app.doc.rulers.items.as_slice() {
+        [mn_core::Ruler::Perspective3 { z, .. }] => *z,
+        other => panic!("the drag did not create a 3-point set: {other:?}"),
+    };
+    app.tool = crate::cmd::Tool::Object;
+
+    // Anchor 1 is the right-hand horizon VP.
+    let (bx, by) = app.viewport.to_screen(900.0, 100.0);
+    app.canvas_down(bx, by, PointerKind::Mouse, &empty);
+    assert!(
+        app.status.contains("vanishing point 2"),
+        "the grab named VP2: {}",
+        app.status
+    );
+    let (bx1, by1) = app.viewport.to_screen(920.0, 130.0);
+    app.canvas_move(bx1, by1, &empty);
+    assert!(
+        app.status.starts_with("moving vanishing point 2"),
+        "and the drag says what is moving: {}",
+        app.status
+    );
+    app.canvas_up(bx1, by1, &empty);
+
+    // The vertical VP is a different handle with a different sentence.
+    let (zx, zy) = app.viewport.to_screen(z[0], z[1]);
+    app.canvas_down(zx, zy, PointerKind::Mouse, &empty);
+    assert!(
+        app.status.contains("vertical vanishing point"),
+        "the third anchor names itself: {}",
+        app.status
+    );
+    app.canvas_up(zx, zy, &empty);
+
+    // A line ruler's ends keep a sentence of their own, and its body
+    // still reports the whole-ruler move.
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::RulerClear);
+    crate::cmd::dispatch(
+        &mut app,
+        crate::cmd::AppCmd::RulerArm(crate::cmd::RulerKind::Line),
+    );
+    let (lx0, ly0) = app.viewport.to_screen(100.0, 200.0);
+    let (lx1, ly1) = app.viewport.to_screen(400.0, 200.0);
+    app.canvas_down(lx0, ly0, PointerKind::Mouse, &empty);
+    app.canvas_up(lx1, ly1, &empty);
+    app.tool = crate::cmd::Tool::Object;
+    app.canvas_down(lx1, ly1, PointerKind::Mouse, &empty);
+    assert!(
+        app.status.contains("ruler end"),
+        "a line end names itself: {}",
+        app.status
+    );
+    app.canvas_up(lx1, ly1, &empty);
+    let (mx, my) = app.viewport.to_screen(250.0, 200.0);
+    app.canvas_down(mx, my, PointerKind::Mouse, &empty);
+    assert!(
+        app.status.contains("the whole ruler"),
+        "the body message is unchanged: {}",
+        app.status
+    );
+    app.canvas_up(mx, my, &empty);
+}
