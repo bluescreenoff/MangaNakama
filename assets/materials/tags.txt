@@ -1,0 +1,2 @@
+focus-lines.gen.json=effect lines, focus lines, radial, burst, impact, action
+speed-lines.gen.json=effect lines, speed lines, motion, streak, action

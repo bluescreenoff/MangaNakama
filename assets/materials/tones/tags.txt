@@ -1,0 +1,16 @@
+tone-dot-27.5lpi-10.png=screentone, tone, dots, halftone, 10%, 27.5 lpi, 45
+tone-dot-27.5lpi-20.png=screentone, tone, dots, halftone, 20%, 27.5 lpi, 45
+tone-dot-27.5lpi-30.png=screentone, tone, dots, halftone, 30%, 27.5 lpi, 45
+tone-dot-27.5lpi-50.png=screentone, tone, dots, halftone, 50%, 27.5 lpi, 45
+tone-dot-42.5lpi-10.png=screentone, tone, dots, halftone, 10%, 42.5 lpi, 45
+tone-dot-42.5lpi-20.png=screentone, tone, dots, halftone, 20%, 42.5 lpi, 45
+tone-dot-42.5lpi-30.png=screentone, tone, dots, halftone, 30%, 42.5 lpi, 45
+tone-dot-42.5lpi-50.png=screentone, tone, dots, halftone, 50%, 42.5 lpi, 45
+tone-dot-60lpi-10.png=screentone, tone, dots, halftone, 10%, 60 lpi, 45
+tone-dot-60lpi-20.png=screentone, tone, dots, halftone, 20%, 60 lpi, 45
+tone-dot-60lpi-30.png=screentone, tone, dots, halftone, 30%, 60 lpi, 45
+tone-dot-60lpi-50.png=screentone, tone, dots, halftone, 50%, 60 lpi, 45
+tone-line-30lpi-50.png=screentone, tone, lines, line screen, hatching, 50%, 30 lpi, 45
+tone-line-60lpi-50.png=screentone, tone, lines, line screen, hatching, 50%, 60 lpi, 45
+tone-noise-30lpi-30.png=screentone, tone, noise, grain, sand, random, FM, 30%
+tone-dot-60lpi-gradient.png=screentone, tone, gradient, graded, fade, ramp, dots, 60 lpi
