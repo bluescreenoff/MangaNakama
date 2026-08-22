@@ -135,6 +135,12 @@ fn pages_body(ui: &mut egui::Ui, app: &mut App) {
             // slider, or the pane width when Fit is on; the chosen width is
             // remembered so the live thumb renders at the size actually
             // shown (app.pages_cell_px).
+            //
+            // ONE cell size for the whole palette, in every mode: Fit divides
+            // by the FULL spread (2), never by the pages this row happens to
+            // hold, so the lone cover is a normal-sized page sitting in its
+            // half of the row instead of a stretched one. `spread_groups`
+            // hands back a fixed `[Option; 2]` per row for the same reason.
             let max_tw = ((avail - 2.0 * pad - gap) * 0.5).max(34.0);
             let tw = if app.pages_fit {
                 max_tw
@@ -233,6 +239,19 @@ fn pages_body(ui: &mut egui::Ui, app: &mut App) {
                     } else {
                         app.pages[i].thumb.as_ref()
                     };
+                    // PAPER FIRST, art over it. Owner report 2026-08-22:
+                    // "page 1 renders much bigger than pages 2-3". The cells
+                    // are the same size — what differed was the BACKING. The
+                    // active page's thumb is a live `render_offscreen`, which
+                    // composites over the canvas paper, so it fills the cell
+                    // edge to edge; a stashed page's thumb is the ORA
+                    // `mergedimage` taken over a TRANSPARENT background, and
+                    // on a blank frame-folder page the only opaque pixels are
+                    // the folder's white fill — clipped to the 180x270 mm
+                    // inner frame. That 2:3 patch floating on the dark well
+                    // read as a smaller page. Painting the paper here backs
+                    // every cell the same way, whichever tier drew the art.
+                    p.rect_filled(cell_rect, 2.0, egui::Color32::WHITE);
                     match tex {
                         Some(t) => {
                             p.image(
@@ -245,18 +264,16 @@ fn pages_body(ui: &mut egui::Ui, app: &mut App) {
                                 egui::Color32::WHITE,
                             );
                         }
-                        None => {
-                            p.rect_filled(cell_rect, 2.0, egui::Color32::from_gray(228));
-                            if selected {
-                                p.text(
-                                    cell_rect.center(),
-                                    egui::Align2::CENTER_CENTER,
-                                    "editing",
-                                    egui::FontId::proportional(9.0),
-                                    egui::Color32::from_gray(110),
-                                );
-                            }
+                        None if selected => {
+                            p.text(
+                                cell_rect.center(),
+                                egui::Align2::CENTER_CENTER,
+                                "editing",
+                                egui::FontId::proportional(9.0),
+                                egui::Color32::from_gray(110),
+                            );
                         }
+                        None => {}
                     }
                     let stroke = if selected {
                         egui::Stroke::new(2.0, theme::ACCENT)

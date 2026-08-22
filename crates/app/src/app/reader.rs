@@ -682,4 +682,30 @@ mod tests {
         // the reading-start side — there is no cover slot in offset mode).
         assert_eq!(spread_groups(1, true, true), vec![[None, Some(0)]]);
     }
+
+    /// The Pages palette lays every row out on the SAME two-cell grid, so
+    /// a cell is one size for the whole palette (owner report 2026-08-22:
+    /// "page 1 renders much bigger than pages 2-3"). The guarantee the
+    /// panel leans on is structural: every group is a fixed `[Option; 2]`,
+    /// so the lone cover occupies ONE half of its row — the half it would
+    /// sit in for the binding — and never the whole width. The 3-page
+    /// right-bound work from the report is the case.
+    #[test]
+    fn every_row_is_a_two_cell_grid() {
+        let groups = spread_groups(3, true, false);
+        assert_eq!(
+            groups,
+            vec![[Some(0), None], [Some(2), Some(1)]],
+            "cover alone on the left (right-bound), then the 3|2 spread"
+        );
+        // Same slot count per row => the palette's `avail / 2` cell width
+        // is the width of EVERY cell, lone cover included.
+        for g in &groups {
+            assert_eq!(g.len(), 2);
+        }
+        // The cover keeps its binding-side half rather than being centred
+        // or stretched: right-bound => the left slot.
+        assert_eq!(groups[0][0], Some(0));
+        assert_eq!(groups[0][1], None);
+    }
 }
