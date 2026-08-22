@@ -431,6 +431,14 @@ impl TabViewer for Viewer<'_> {
     }
 
     fn title(&mut self, tab: &mut Pane) -> egui::WidgetText {
+        // Display only — `Pane::title` stays the stable identity (the tab
+        // `id` above, the serialized `dock_tree` tag, the Window menu). CSP
+        // names this palette after the tool whose sub tools it is showing,
+        // so "Sub Tool" becomes "Figure Tools" / "Pen Tools" / ... A tool
+        // with no sub tool list would keep the generic name.
+        if let Pane::Palette(Palette::SubTool) = tab {
+            return format!("{} Tools", self.app.tool.label()).into();
+        }
         tab.title().into()
     }
 

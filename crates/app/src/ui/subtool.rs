@@ -43,7 +43,16 @@ pub(super) fn sub_tool_list(ui: &mut egui::Ui, app: &mut App) {
         // The selection pen/eraser ride the BRUSH preset list — the stroke
         // is the active brush; only the target differs (selection coverage).
         Tool::Pen | Tool::Eraser | Tool::SelPen | Tool::SelEraser => brush_sub_tools(ui, app),
-        _ => mode_sub_tools(ui, app),
+        // Most mode lists are three or four rows, but Figure runs thirteen
+        // over three captions and the tail was simply unreachable. The
+        // brush list scrolls itself, so only this arm gets a ScrollArea —
+        // wrapping the whole fn would nest two of them.
+        _ => {
+            egui::ScrollArea::vertical()
+                .id_salt("mn.subtool.modes")
+                .auto_shrink([false, false])
+                .show(ui, |ui| mode_sub_tools(ui, app));
+        }
     }
 }
 
