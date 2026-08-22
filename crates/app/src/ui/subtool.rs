@@ -5,10 +5,10 @@
 
 use std::path::PathBuf;
 
-use super::icons::{self, Icon};
+use super::icons::Icon;
 use super::preview;
 use super::theme;
-use super::widgets::group_caption;
+use super::widgets::{group_caption, paint_icon};
 use crate::app::App;
 use crate::cmd::{AppCmd, BalloonMode, FillMode, SelectMode, Tool};
 
@@ -76,7 +76,7 @@ fn mode_row(ui: &mut egui::Ui, selected: bool, icon: Icon, name: &str) -> egui::
         egui::pos2(rect.left() + 15.0, rect.center().y),
         egui::vec2(15.0, 15.0),
     );
-    icons::paint(
+    paint_icon(
         p,
         ir,
         icon,

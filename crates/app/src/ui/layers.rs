@@ -3,10 +3,10 @@
 //! the LayerDrag payload), blend/opacity strip, thumbnails over a
 //! checkerboard, and the Layer Property palette body.
 
-use super::icons::{self, Icon};
+use super::icons::Icon;
 use super::theme;
 use super::theme::ValueBar;
-use super::widgets::{group_caption, icon_btn, icon_btn_tint, px_mm_text};
+use super::widgets::{group_caption, icon_btn, icon_btn_tint, paint_icon, px_mm_text};
 use crate::app::{App, LayerFilterKind};
 use crate::cmd::AppCmd;
 use mn_core::{Blend, FillKind, LayerKind};
@@ -1309,26 +1309,26 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
                 (true, true) => {
                     let up = egui::pos2(cx, cy - 7.0);
                     let dn = egui::pos2(cx, cy + 7.0);
-                    icons::paint(
+                    paint_icon(
                         p,
                         egui::Rect::from_center_size(up, fs),
                         Icon::Reference,
                         theme::c().ref_mark,
                     );
-                    icons::paint(
+                    paint_icon(
                         p,
                         egui::Rect::from_center_size(dn, fs),
                         Icon::Draft,
                         theme::c().draft_mark,
                     );
                 }
-                (true, false) => icons::paint(
+                (true, false) => paint_icon(
                     p,
                     egui::Rect::from_center_size(egui::pos2(cx, cy), fs),
                     Icon::Reference,
                     theme::c().ref_mark,
                 ),
-                (false, true) => icons::paint(
+                (false, true) => paint_icon(
                     p,
                     egui::Rect::from_center_size(egui::pos2(cx, cy), fs),
                     Icon::Draft,
@@ -1341,7 +1341,7 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
             egui::pos2(eye_cell.center().x, cy),
             egui::vec2(15.0, 15.0),
         );
-        icons::paint(
+        paint_icon(
             p,
             eye_r.shrink(1.5),
             if row.visible { Icon::Eye } else { Icon::EyeOff },
@@ -1359,7 +1359,7 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
                 egui::pos2(pen_cell.center().x, cy),
                 egui::vec2(13.0, 13.0),
             );
-            icons::paint(p, pr, Icon::Pen, rail_icon);
+            paint_icon(p, pr, Icon::Pen, rail_icon);
         } else if multi {
             let c = egui::pos2(pen_cell.center().x, cy);
             p.line(
@@ -1439,7 +1439,7 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
                 Icon::Folder
             };
             let ir = egui::Rect::from_center_size(tr.center(), egui::Vec2::splat(22.0));
-            icons::paint(
+            paint_icon(
                 p,
                 ir,
                 icon,
@@ -1511,7 +1511,7 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
         let mut fx = rect.right() - 11.0;
         if row.lock || row.lock_alpha {
             let lr = egui::Rect::from_center_size(egui::pos2(fx, y_meta), egui::vec2(12.0, 12.0));
-            icons::paint(
+            paint_icon(
                 p,
                 lr,
                 if row.lock {
@@ -1532,7 +1532,7 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
                 egui::pos2(meta_x + 6.0, y_meta),
                 egui::vec2(12.0, 12.0),
             );
-            icons::paint(
+            paint_icon(
                 p,
                 fr,
                 icon,
@@ -1809,7 +1809,7 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
             egui::pos2(eye_cell.center().x, cy),
             egui::vec2(15.0, 15.0),
         );
-        icons::paint(p, eye_r.shrink(1.5), Icon::Eye, theme::c().text_weak);
+        paint_icon(p, eye_r.shrink(1.5), Icon::Eye, theme::c().text_weak);
         let tr = egui::Rect::from_min_size(
             egui::pos2(pen_cell.right() + 7.0, cy - 16.0),
             egui::vec2(32.0, 32.0),
@@ -1834,7 +1834,7 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
             egui::pos2(tr.right() + 14.0, rect.top() + 12.0),
             egui::vec2(12.0, 12.0),
         );
-        icons::paint(p, gr, Icon::Paper, theme::c().text_weak);
+        paint_icon(p, gr, Icon::Paper, theme::c().text_weak);
         p.text(
             egui::pos2(gr.right() + 4.0, rect.top() + 12.0),
             egui::Align2::LEFT_CENTER,

@@ -100,6 +100,11 @@ pub struct Prefs {
     /// left alone — same rule as `new_preset`, and the reason a theme from a
     /// newer build survives a downgrade instead of being rewritten to `dark`.
     pub theme: String,
+    /// Tint icons by what they do (`ui::icons::IconRole`), ON by default —
+    /// the owner asked for coloured icons everywhere and an off switch, in
+    /// that order. Off paints every glyph in plain chrome grey, which is
+    /// what this app looked like before 2026-08-22.
+    pub icon_colours: bool,
     /// `k=v` lines this build does not recognise, kept so saving here does
     /// not delete a newer build's settings.
     unknown: Vec<String>,
@@ -123,6 +128,7 @@ impl Default for Prefs {
             export_reminder: true,
             palette_icon_px: PALETTE_ICON_PX,
             theme: THEME.to_owned(),
+            icon_colours: true,
             unknown: Vec::new(),
             dirty: false,
         }
@@ -190,7 +196,7 @@ impl Prefs {
     /// wrote that this one does not understand, verbatim.
     fn to_body(&self) -> String {
         let mut body = format!(
-            "autosave_min={}\nautosave_every_op={}\nundo_depth={}\nmouse_smooth_px={}\nnew_canvas_w={}\nnew_canvas_h={}\nfit_margin={}\nwheel_step={}\nrotate_step_deg={}\nrecent_depth={}\ntext_size_pt={}\nnew_preset={}\nexport_reminder={}\npalette_icon_px={}\ntheme={}\n",
+            "autosave_min={}\nautosave_every_op={}\nundo_depth={}\nmouse_smooth_px={}\nnew_canvas_w={}\nnew_canvas_h={}\nfit_margin={}\nwheel_step={}\nrotate_step_deg={}\nrecent_depth={}\ntext_size_pt={}\nnew_preset={}\nexport_reminder={}\npalette_icon_px={}\ntheme={}\nicon_colours={}\n",
             self.autosave_min,
             u8::from(self.autosave_every_op),
             self.undo_depth,
@@ -206,6 +212,7 @@ impl Prefs {
             u8::from(self.export_reminder),
             self.palette_icon_px,
             self.theme.replace('\n', ""),
+            u8::from(self.icon_colours),
         );
         for line in &self.unknown {
             body.push_str(line);
@@ -260,6 +267,16 @@ impl Prefs {
             "theme" => {
                 if !v.is_empty() {
                     self.theme = v.to_owned();
+                }
+            }
+            // Both spellings, and gibberish keeps the value — the same rule
+            // as the two flags above. Reading "icon_colours=yes" as OFF
+            // would silently grey the whole app.
+            "icon_colours" => {
+                self.icon_colours = match v {
+                    "1" | "true" => true,
+                    "0" | "false" => false,
+                    _ => self.icon_colours,
                 }
             }
             // A key we do not know is a key from a NEWER build. Keep the
@@ -365,6 +382,10 @@ mod tests {
         assert!(
             p.export_reminder,
             "the unexported-pages reminder ships ON (owner ask 2026-08-22)"
+        );
+        assert!(
+            p.icon_colours,
+            "coloured icons ship ON; monochrome is the opt-out (owner 2026-08-21)"
         );
         // Empty resolves to the first preset — Shueisha A (Jump), which is
         // what `NewComicDraft::default` used to spell out itself.
@@ -586,5 +607,35 @@ mod tests {
             from_body("export_reminder=maybe\n").export_reminder,
             "gibberish must not silently turn the reminder off"
         );
+
+        assert!(!from_body("icon_colours=0\n").icon_colours);
+        assert!(!from_body("icon_colours=false\n").icon_colours);
+        assert!(from_body("icon_colours=1\n").icon_colours);
+        assert!(
+            from_body("icon_colours=nope\n").icon_colours,
+            "gibberish must not silently grey every icon in the app"
+        );
+    }
+
+    /// The icon-colour switch survives the round trip both ways — turning it
+    /// off is the whole point of the setting, and an off that comes back on
+    /// after a restart is the same bug as no setting at all.
+    #[test]
+    fn icon_colours_round_trips() {
+        let mut me = Prefs::default();
+        me.icon_colours = false;
+        let back = from_body(&me.to_body());
+        assert!(!back.icon_colours);
+        assert!(me.to_body().contains("icon_colours=0\n"));
+        assert!(
+            from_body(&back.to_body())
+                .to_body()
+                .contains("icon_colours=0")
+        );
+
+        // And back on again.
+        let on = from_body("icon_colours=1\n");
+        assert!(on.icon_colours);
+        assert!(on.to_body().contains("icon_colours=1\n"));
     }
 }

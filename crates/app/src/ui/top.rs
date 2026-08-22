@@ -2,9 +2,9 @@
 //! and the segmented status bar. Everything here goes through
 //! `app.push_cmd` — no direct state mutation except the doc-tab close flag.
 
-use super::icons::{self, Icon};
+use super::icons::Icon;
 use super::theme;
-use super::widgets::{icon_btn, item};
+use super::widgets::{icon_btn, item, paint_icon};
 use crate::app::{App, CaptionCmd};
 use crate::cmd::AppCmd;
 
@@ -1398,7 +1398,7 @@ pub(super) fn doc_tab(ui: &mut egui::Ui, app: &mut App) {
         if cresp.hovered() {
             p.rect_filled(close, 2.0, theme::c().hover);
         }
-        icons::paint(
+        paint_icon(
             p,
             close.shrink(3.5),
             Icon::Close,

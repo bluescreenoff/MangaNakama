@@ -909,6 +909,19 @@ pub(super) fn prefs_window(ctx: &egui::Context, app: &mut App) {
                         }
                     });
                     ui.end_row();
+
+                    ui.label("Coloured icons");
+                    changed |= ui
+                        .checkbox(&mut p.icon_colours, "")
+                        .on_hover_text(
+                            "Tints each icon by what it does — a green plus on the \
+                             new-layer buttons, a red bin, one hue for the selection \
+                             family — in low-saturation shades taken from the current \
+                             theme. Off draws every glyph in plain chrome grey. \
+                             (colour, colors, icons, monochrome, tint, hue, greyscale)",
+                        )
+                        .changed();
+                    ui.end_row();
                 });
             ui.weak("Applies immediately. Only dark themes ship for now.");
 
@@ -988,6 +1001,11 @@ pub(super) fn prefs_window(ctx: &egui::Context, app: &mut App) {
         app.new_doc_draft.setup = app.prefs.new_preset_setup();
         theme_pick = Some(theme::resolved_name(&app.prefs.theme));
     }
+    // Unconditional, and after `reset`: the checkbox writes the preference
+    // and this pushes it into the painters' global. One atomic store per
+    // frame the window is open costs nothing, and it means Reset cannot
+    // leave the switch and the setting disagreeing.
+    super::icons::set_accents(app.prefs.icon_colours);
     if let Some(name) = theme_pick {
         app.prefs.theme = name.to_owned();
         // Live, this frame: swap the tokens, then push them through egui's

@@ -1110,6 +1110,9 @@ impl App {
         // fresh context: set the palette first and the first frame is
         // already in the user's theme, with no flash of the default.
         crate::ui::theme::set_by_name(&prefs.theme);
+        // Same reason, same frame: the icon accent switch is read by the
+        // painters, not passed to them.
+        crate::ui::icons::set_accents(prefs.icon_colours);
         // `Document::default()` is `DEFAULT_SIZE`; the preference IS that
         // constant until the owner changes it in the panel.
         let doc = Document::new(prefs.new_canvas.0, prefs.new_canvas.1);

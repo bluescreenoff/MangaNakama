@@ -82,12 +82,44 @@ pub(super) fn icon_btn_tint(
         // coloured toggles must not out-shout the grey ones beside them.
         tint.map_or(theme::c().text, |c| c.gamma_multiply(0.8))
     };
+    // The one place ~57 buttons ask what colour their icon's subject is. A
+    // caller-supplied `tint` WINS: it means "this button and the mark it
+    // flips are the same thing", which is a stronger statement than the
+    // icon's own category. A disabled button is grey all through — a
+    // coloured glyph on a dead button reads as available.
+    let accent = match (enabled, tint) {
+        (false, _) | (_, Some(_)) => None,
+        (true, None) => icons::accent_for(icon).map(|a| {
+            if selected || resp.hovered() {
+                a
+            } else {
+                // Same idle rule as `tint` above, for the same reason.
+                a.gamma_multiply(0.8)
+            }
+        }),
+    };
     let mut glyph = rect.shrink(size * 0.18);
     if pressed {
         glyph = glyph.translate(egui::vec2(0.0, 0.75));
     }
-    icons::paint(ui.painter(), glyph, icon, color);
+    icons::paint_role(ui.painter(), glyph, icon, color, accent);
     resp.on_hover_text(tip)
+}
+
+/// `icons::paint` for the places that draw a glyph THEMSELVES — layer rows,
+/// document tabs, sub tool rows — rather than through [`icon_btn`]. Same
+/// base colour as before, plus the icon's accent when colours are on.
+///
+/// It exists so the toggle has two doors in the whole app instead of a
+/// dozen: a direct `icons::paint` call would silently stay monochrome
+/// forever and nobody would notice which of the fifty glyphs was the stale
+/// one.
+pub(super) fn paint_icon(p: &egui::Painter, r: egui::Rect, icon: Icon, base: egui::Color32) {
+    // A hair back from full: these glyphs sit beside weak-grey row text, and
+    // a saturated mark next to `text_weak` reads as the loudest thing in a
+    // list of forty rows.
+    let accent = icons::accent_for(icon).map(|a| a.gamma_multiply(0.85));
+    icons::paint_role(p, r, icon, base, accent);
 }
 
 pub(super) fn item(ui: &mut egui::Ui, label: &str, shortcut: &str) -> bool {
