@@ -26,6 +26,9 @@ const PASTE_ROW_MIN_W: f32 = 330.0;
 /// The material-information strip's height — one thumbnail plus four short
 /// lines beside it.
 const INFO_H: f32 = 68.0;
+/// The strip with NOTHING selected: one weak line of prompt text. Reserving
+/// the full `INFO_H` there spent 50px of grid on blank space.
+const INFO_H_EMPTY: f32 = 20.0;
 
 pub(super) fn materials_palette(ui: &mut egui::Ui, app: &mut App) {
     header(ui, app);
@@ -47,18 +50,29 @@ pub(super) fn materials_palette(ui: &mut egui::Ui, app: &mut App) {
     // The info strip is reserved BEFORE the body so it cannot be pushed off
     // the bottom by a long grid — it is the palette's only view of a
     // material's tags and folder, and a strip you have to scroll to is not one.
-    let body_h = (ui.available_height() - INFO_H - 12.0).max(80.0);
+    let body_h = (ui.available_height() - info_height(app) - 12.0).max(80.0);
     ui.allocate_ui(egui::vec2(ui.available_width(), body_h), |ui| {
         ui.horizontal_top(|ui| {
             if app.material_tree_show && ui.available_width() >= TREE_MIN_PALETTE_W {
                 tree_column(ui, app, body_h);
                 ui.separator();
             }
-            grid(ui, app, &order);
+            grid(ui, app, &order, body_h);
         });
     });
     ui.separator();
     info_strip(ui, app);
+}
+
+/// What the information strip costs the grid this frame. It is a fixed
+/// reservation either way — a strip you have to scroll to is not a strip —
+/// but the empty state is one line, not four.
+fn info_height(app: &App) -> f32 {
+    if app.material_selected.is_some_and(|i| i < app.materials.len()) {
+        INFO_H
+    } else {
+        INFO_H_EMPTY
+    }
 }
 
 // --- header (P0-3: search + sort, everything else behind ≡) --------------
@@ -322,40 +336,80 @@ fn visible_order(app: &App) -> Vec<usize> {
     order
 }
 
-fn grid(ui: &mut egui::Ui, app: &mut App, order: &[usize]) {
+/// The cell box for a thumbnail of `thumb` px: CSP's cell is the thumbnail
+/// with the name centred UNDERNEATH it.
+fn cell_size(thumb: f32) -> egui::Vec2 {
+    egui::vec2(thumb + 16.0, thumb + 22.0)
+}
+
+/// How many cells fit across `avail` points. Never zero: a pane too narrow
+/// for one whole cell shows one clipped column rather than nothing.
+fn grid_cols(avail: f32, cell_w: f32, gap: f32) -> usize {
+    (((avail + gap) / (cell_w + gap)).floor() as usize).max(1)
+}
+
+/// `height` is threaded in EXPLICITLY, exactly as the tree column's is, and
+/// that is the whole fix for the one-row grid the owner hit on 2026-08-22:
+/// inside `horizontal_top` a child `Ui`'s `max_rect` is only
+/// `interact_size.y` tall (egui sizes a horizontal row from its default item
+/// height and lets the contents overflow it). A `ScrollArea` that sizes
+/// itself from `available_height()` in there therefore came out ~20px tall —
+/// it drew the one row that fits and left the rest of the pane blank, with
+/// no scrollbar to hint that 2400 materials were hiding under it.
+fn grid(ui: &mut egui::Ui, app: &mut App, order: &[usize], height: f32) {
     if order.is_empty() {
         ui.weak("nothing matches — clear the search, or pick All materials");
         return;
     }
-    let thumb = app.material_thumb_px;
-    // CSP's cell: thumbnail with the name centred UNDERNEATH it.
-    let cell = egui::vec2(thumb + 16.0, thumb + 22.0);
+    let cell = cell_size(app.material_thumb_px);
     let gap = 4.0;
-    let cols = (((ui.available_width() + gap) / (cell.x + gap)).floor() as usize).max(1);
+    let cols = grid_cols(ui.available_width(), cell.x, gap);
     let rows = order.len().div_ceil(cols);
-    egui::ScrollArea::vertical()
-        .id_salt("mn.materials.grid")
-        .auto_shrink([false, false])
-        // show_rows lays out only the visible band. A uniform cell is what
-        // buys it: row height is a constant, so egui can jump straight to
-        // the right band instead of measuring 1200 rows.
-        .show_rows(ui, cell.y + gap, rows, |ui, range| {
-            ui.spacing_mut().item_spacing = egui::vec2(gap, gap);
-            for r in range {
-                ui.horizontal(|ui| {
-                    for c in 0..cols {
-                        let Some(&i) = order.get(r * cols + c) else {
-                            break;
-                        };
-                        material_cell(ui, app, i, cell);
+    ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width(), height),
+        egui::Layout::top_down(egui::Align::Min),
+        |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("mn.materials.grid")
+                .auto_shrink([false, false])
+                // show_rows lays out only the visible band. A uniform cell is
+                // what buys it: row height is a constant, so egui can jump
+                // straight to the right band instead of measuring 1200 rows.
+                .show_rows(ui, cell.y + gap, rows, |ui, range| {
+                    ui.spacing_mut().item_spacing = egui::vec2(gap, gap);
+                    for r in range {
+                        ui.horizontal(|ui| {
+                            for c in 0..cols {
+                                let Some(&i) = order.get(r * cols + c) else {
+                                    break;
+                                };
+                                material_cell(ui, app, i, cell);
+                            }
+                        });
                     }
                 });
-            }
-        });
+        },
+    );
+}
+
+/// One grid cell's widget id. Stable across frames and derived from the bank
+/// index alone, so a test can read the cell back out of the context after a
+/// pass and prove which cells were actually laid out.
+pub(super) fn cell_id(i: usize) -> egui::Id {
+    egui::Id::new(("mn.materials.cell", i))
 }
 
 fn material_cell(ui: &mut egui::Ui, app: &mut App, i: usize, size: egui::Vec2) {
-    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+    let (_, rect) = ui.allocate_space(size);
+    // click_and_drag, not click, for TWO reasons. The drop below is one. The
+    // other is that a torn-off palette is an `egui::Window` with no title bar,
+    // so its whole body moves the window: against a click-only cell egui's
+    // hit test handed the DRAG to the window behind it and the owner could
+    // only shove the palette around (report 2026-08-22). A widget that senses
+    // drag on top of the window wins that hit test, so the window stays put —
+    // no dock-side change needed. Docked panes never had the problem: a dock
+    // tab drag starts on the tab, not in the body.
+    let resp = ui.interact(rect, cell_id(i), egui::Sense::click_and_drag());
     // Everything read out of the item is a small copy taken ONCE — never
     // the item itself (P0-2: that clone was two Strings, a PathBuf and
     // possibly a GenLinesSpec, per cell per frame).
@@ -431,13 +485,36 @@ fn material_cell(ui: &mut egui::Ui, app: &mut App, i: usize, size: egui::Vec2) {
     if resp.double_clicked() {
         paste(app, &path);
     }
+    // P1-3: drag a cell onto the canvas to place the material THERE.
+    if resp.drag_started() {
+        app.material_selected = Some(i);
+        app.set_status("drop it on the canvas to place it there");
+    }
+    if resp.dragged() {
+        drag_ghost(ui, app, &path);
+    }
+    if resp.drag_stopped() {
+        // `app.last_pointer` is the win32 truth about where the button came
+        // up, and `owns_pointer` is the same "is this the canvas?" test the
+        // pen router uses. Released back over the UI: the drag was a shove,
+        // not a drop — the selection it already made is the whole result.
+        let (px, py) = app.last_pointer;
+        if !app.shell.owns_pointer(px, py) {
+            // No new door: `PasteMaterial` already aims at `last_pointer`
+            // (Ctrl+V's paste-to-position rule), and a generator material's
+            // `genlines_aim_point` reads the very same field — so the drop
+            // point IS the paste point / the point the focus lines converge
+            // on, for free.
+            paste(app, &path);
+        }
+    }
     // Built only while hovered: the info strip is where the full detail
     // lives now, so the other cells never format a line of it.
     let resp = if resp.hovered() {
         let what = if is_gen {
-            "double-click to place LIVE effect lines (the Object tool re-aims them)"
+            "double-click (or drag onto the canvas) to place LIVE effect lines (the Object tool re-aims them)"
         } else {
-            "double-click to paste"
+            "double-click to paste, or drag onto the canvas to paste there"
         };
         let hover = if tags.is_empty() {
             format!("{name} — {what}, right-click to tag")
@@ -449,6 +526,33 @@ fn material_cell(ui: &mut egui::Ui, app: &mut App, i: usize, size: egui::Vec2) {
         resp
     };
     material_tag_menu(&resp, app, path, name, tags);
+}
+
+/// A translucent copy of the thumbnail under the pointer while a cell is
+/// dragged, so the gesture reads as carrying something. Painted straight onto
+/// the tooltip layer: `layer_painter` registers no *area*, which matters —
+/// an area under the pointer would make `owns_pointer` call the drop "UI"
+/// and the paste would never fire. Nothing is drawn if the thumbnail has not
+/// been decoded yet; a ghost is a nicety, not the feature.
+fn drag_ghost(ui: &egui::Ui, app: &App, path: &std::path::Path) {
+    let (Some(pos), Some(tex)) = (ui.ctx().pointer_latest_pos(), app.material_thumbs.get(path))
+    else {
+        return;
+    };
+    let sz = tex.size_vec2();
+    let k = (app.material_thumb_px / sz.x.max(sz.y)).min(1.0);
+    let rect = egui::Rect::from_min_size(pos + egui::vec2(10.0, 10.0), sz * k);
+    ui.ctx()
+        .layer_painter(egui::LayerId::new(
+            egui::Order::Tooltip,
+            egui::Id::new("mn.materials.drag"),
+        ))
+        .image(
+            tex.id(),
+            rect,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            egui::Color32::from_white_alpha(180),
+        );
 }
 
 /// Paint a thumbnail INSIDE `box_` at its own aspect ratio. `paint_at`
@@ -477,9 +581,9 @@ fn paste(app: &mut App, path: &std::path::Path) {
 /// other way to apply one, and a discoverable palette needs a visible verb.
 fn info_strip(ui: &mut egui::Ui, app: &mut App) {
     let Some(i) = app.material_selected.filter(|&i| i < app.materials.len()) else {
-        ui.allocate_ui(egui::vec2(ui.available_width(), INFO_H), |ui| {
-            ui.weak("click a material to see its details");
-        });
+        // One line, and `info_height` reserved exactly one line for it — the
+        // strip never takes grid height it is not using.
+        ui.weak("click a material to see its details");
         return;
     };
     let (path, name, is_gen, thumb_path, tags, folder, rel) = {
@@ -617,4 +721,74 @@ fn load_thumb(app: &mut App, path: &std::path::Path, px: f32) -> Option<egui::Te
         ci,
         egui::TextureOptions::LINEAR,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_pane_too_narrow_for_a_cell_still_shows_one_column() {
+        assert_eq!(grid_cols(220.0, 68.0, 4.0), 3);
+        assert_eq!(grid_cols(71.0, 68.0, 4.0), 1);
+        assert_eq!(grid_cols(0.0, 68.0, 4.0), 1);
+    }
+
+    /// The empty strip is one line, not four: with nothing selected it used
+    /// to reserve the full `INFO_H` and the grid paid for the blank space.
+    #[test]
+    fn the_information_strip_only_reserves_what_it_draws() {
+        assert!(INFO_H_EMPTY < INFO_H);
+    }
+
+    /// Owner report 2026-08-22: the palette drew ONE row of thumbnails and
+    /// then dead space, docked or floating. The grid's `ScrollArea` sized
+    /// itself from `available_height()` inside `horizontal_top`, where a
+    /// child `Ui`'s `max_rect` is one `interact_size.y` tall — so a 700px
+    /// pane got a ~20px scroll viewport. Both halves of the fix are asserted
+    /// here: the grid fills the pane, and a cell senses DRAG (against a
+    /// click-only cell egui's hit test handed the drag to the `egui::Window`
+    /// behind it, and dragging a thumbnail moved the whole palette instead of
+    /// carrying the material to the canvas).
+    #[test]
+    fn the_grid_fills_the_pane_and_cells_carry_the_drag() {
+        let Some(renderer) = crate::app::headless_renderer() else {
+            return;
+        };
+        let mut app = App::new(renderer, (360, 700), 1.0);
+        let mat_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/materials");
+        assert!(
+            mat_dir.join("tones/tone-dot-60lpi-10.png").is_file(),
+            "the starter materials must ship in assets/materials"
+        );
+        if app.materials.is_empty() {
+            app.material_folders[0] = mat_dir;
+            app.materials_scan();
+        }
+        let n = app.materials.len();
+        assert!(n >= 12, "the starter bank must overflow one row: {n} items");
+
+        let ctx = app.shell.ctx.clone();
+        let raw = app.shell.begin((360, 700));
+        let mut out = ctx.run_ui(raw, |ui| materials_palette(ui, &mut app));
+        // No GPU pass in this test, so the thumbnail uploads are ours to drop.
+        out.textures_delta.clear();
+
+        let laid_out = (0..n)
+            .filter(|&i| ctx.read_response(cell_id(i)).is_some())
+            .count();
+        let cols = grid_cols(360.0 - TREE_W, cell_size(app.material_thumb_px).x, 4.0);
+        assert!(
+            laid_out > cols,
+            "a 700px-tall pane laid out {laid_out} cells across {cols} columns — that is one row"
+        );
+
+        let cell = ctx.read_response(cell_id(0)).expect("cell 0 was laid out");
+        assert!(
+            cell.sense.senses_drag(),
+            "a cell must sense drag, or the floating palette swallows the gesture and moves itself"
+        );
+        assert!(cell.sense.senses_click(), "a cell still selects on click");
+    }
 }
