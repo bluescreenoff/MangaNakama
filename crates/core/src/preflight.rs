@@ -17,10 +17,14 @@
 //! not checked; folio checks wait on a folio concept (our margin print is
 //! outside the trim BY DESIGN).
 
-use crate::doc::Document;
+use crate::doc::{Document, LayerKind};
+use crate::fill_layer::FillKind;
 use crate::page::PageSetup;
 use crate::project::ProjectMeta;
 use crate::text::TextItem;
+use crate::tile::{FIX15_ONE, TILE_SIZE, Tile, TileIdx};
+use crate::tone::TonePattern;
+use std::collections::HashSet;
 
 /// A chromatic pixel's channel spread above this (fix15 units, ~1.5% of
 /// full scale) reads as colour on a mono work — quantization-safe.
@@ -29,6 +33,25 @@ const CHROMA_ULP: u16 = 491;
 /// CSP's text-vs-trim rule is a fixed 5 mm, independent of the work's own
 /// safety margins.
 const TEXT_SAFE_MM: f32 = 5.0;
+
+/// Two overlapping screens count as the SAME screen when their numbers
+/// agree this closely. lpi and angle are typed by hand into three
+/// different panels, so exact float equality would report every
+/// re-entered 60 as a clash, and half a line per inch (or half a degree)
+/// is not a difference a printer can resolve.
+const TONE_LPI_EPS: f32 = 0.5;
+const TONE_ANGLE_EPS: f32 = 0.5;
+
+/// Alpha this far from 0 / full is a fractional (anti-aliased) edge pixel.
+/// Same margin as [`CHROMA_ULP`] and for the same reason: a source that
+/// round-tripped through 8-bit lands a unit or two off the rails.
+const ALPHA_ULP: u16 = 491;
+
+/// Fewer fractional-alpha pixels than this is stray quantization, not a
+/// soft edge — a genuinely anti-aliased shape carries them along its whole
+/// outline, so the threshold costs no real detections and kills the
+/// one-stray-pixel false positive.
+const GREY_EDGE_MIN_PX: usize = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PreflightLevel {
@@ -137,8 +160,191 @@ fn text_aabb(t: &TextItem) -> [f32; 4] {
     [cx - hx, cy - hy, cx + hx, cy + hy]
 }
 
-/// Page-level checks over the page's CONTENT: lettering vs the trim, and
-/// colour on a mono work. `page_index` names the page in findings.
+/// One tone-bearing thing on a page, reduced to what moiré cares about.
+///
+/// The three carriers print the SAME screen through different plumbing —
+/// `Layer::tone` (painted pixels are the ink source), a `FillKind::Tone`
+/// layer (the layer mask is the window), and a balloon's `fill_tone`
+/// (pure geometry, and its cell is stored in px, not lpi). Comparing them
+/// in one flat list is the whole point: the pairs that actually ring in
+/// print are usually a tone layer under a toned balloon, and a check that
+/// only knew about `Layer::tone` would never see them.
+struct ToneCarrier<'a> {
+    /// Names the offender in the finding: `Layer "sky"`, `Balloon 2 on …`.
+    label: String,
+    lpi: f32,
+    angle_deg: f32,
+    pattern: TonePattern,
+    /// Coverage, coarse: the 64 px tiles this carrier can print in.
+    tiles: HashSet<TileIdx>,
+    /// The pixels the screen reads its ink from, when there are any — a
+    /// balloon's interior is geometry, so it has none. `tone.grey_edge`
+    /// samples these.
+    source: Vec<(TileIdx, &'a Tile)>,
+}
+
+/// Round for display: a balloon's lpi is a division, so it arrives as
+/// 46.153847 and prints as 46.2.
+fn round1(v: f32) -> f32 {
+    (v * 10.0).round() / 10.0
+}
+
+impl ToneCarrier<'_> {
+    /// `Layer "sky" 60 lpi/45° Dots` — the numbers the user re-entered by
+    /// hand are exactly the ones he needs to compare.
+    fn describe(&self) -> String {
+        format!(
+            "{} {} lpi/{}° {}",
+            self.label,
+            round1(self.lpi),
+            round1(self.angle_deg),
+            self.pattern.label()
+        )
+    }
+
+    fn overlaps(&self, other: &ToneCarrier) -> bool {
+        let (a, b) = if self.tiles.len() <= other.tiles.len() {
+            (&self.tiles, &other.tiles)
+        } else {
+            (&other.tiles, &self.tiles)
+        };
+        a.iter().any(|t| b.contains(t))
+    }
+
+    fn clashes_with(&self, other: &ToneCarrier) -> bool {
+        if self.pattern != other.pattern || (self.lpi - other.lpi).abs() > TONE_LPI_EPS {
+            return true;
+        }
+        // Screen angle is periodic: 179° and 1° are 2° apart, not 178°.
+        let d = (self.angle_deg - other.angle_deg).rem_euclid(180.0);
+        d.min(180.0 - d) > TONE_ANGLE_EPS
+    }
+}
+
+/// The tiles a canvas-px rect touches, clipped to the canvas. An empty
+/// polygon's infinite bbox saturates the casts and yields an empty range,
+/// which is the right answer for a balloon with no points.
+fn rect_tiles(r: [f32; 4], size: (u32, u32)) -> HashSet<TileIdx> {
+    let t = TILE_SIZE as i32;
+    let last = |n: u32| ((n as usize).div_ceil(TILE_SIZE) as i32 - 1).max(0);
+    let (lx, ly) = (last(size.0), last(size.1));
+    let x0 = (r[0].floor() as i32).div_euclid(t).clamp(0, lx);
+    let y0 = (r[1].floor() as i32).div_euclid(t).clamp(0, ly);
+    let x1 = (r[2].ceil() as i32).div_euclid(t).clamp(0, lx);
+    let y1 = (r[3].ceil() as i32).div_euclid(t).clamp(0, ly);
+    let mut out = HashSet::new();
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            out.insert(TileIdx::new(x, y));
+        }
+    }
+    out
+}
+
+/// Every visible tone carrier on the page, bottom of the stack first.
+///
+/// `Noise` drops out here: it is an FM screen with no lattice, so it has
+/// nothing to interfere with and nothing a grey edge can degrade.
+fn tone_carriers<'a>(setup: &PageSetup, doc: &'a Document) -> Vec<ToneCarrier<'a>> {
+    let mut out: Vec<ToneCarrier<'a>> = Vec::new();
+    for layer in &doc.layers {
+        if !layer.visible {
+            continue;
+        }
+        if let Some(t) = &layer.tone {
+            let source: Vec<_> = layer.tiles().map(|(i, t)| (i, &**t)).collect();
+            out.push(ToneCarrier {
+                label: format!("Layer {:?}", layer.name),
+                lpi: t.lpi,
+                angle_deg: t.angle_deg,
+                pattern: t.pattern,
+                tiles: source.iter().map(|(i, _)| *i).collect(),
+                source,
+            });
+        }
+        match &layer.kind {
+            LayerKind::Fill(FillKind::Tone { tone, .. }) => {
+                // The window rule copied from `Layer::refresh_fill`: the
+                // mask is the coverage, and NO mask windows the whole
+                // canvas (the adjustment-layer convention). `enabled` is
+                // not consulted there either.
+                let source: Vec<_> = layer
+                    .mask
+                    .iter()
+                    .flat_map(|m| m.tiles.iter().map(|(i, t)| (*i, &**t)))
+                    .collect();
+                let tiles = if layer.mask.is_some() {
+                    source.iter().map(|(i, _)| *i).collect()
+                } else {
+                    rect_tiles([0.0, 0.0, doc.size.0 as f32, doc.size.1 as f32], doc.size)
+                };
+                out.push(ToneCarrier {
+                    label: format!("Layer {:?}", layer.name),
+                    lpi: tone.lpi,
+                    angle_deg: tone.angle_deg,
+                    pattern: tone.pattern,
+                    tiles,
+                    source,
+                });
+            }
+            LayerKind::Balloon(bs) => {
+                for (n, b) in bs.balloons.iter().enumerate() {
+                    let Some(bt) = b.fill_tone else { continue };
+                    out.push(ToneCarrier {
+                        label: format!("Balloon {} on {:?}", n + 1, layer.name),
+                        // `BalloonTone` stores its cell in canvas px by
+                        // design (it rasterizes from paths that carry no
+                        // dpi) — the page dpi is the only thing that turns
+                        // it back into a number comparable with a tone
+                        // layer's lpi.
+                        lpi: setup.dpi as f32 / bt.cell_px.max(1.0),
+                        angle_deg: bt.angle_deg,
+                        pattern: bt.pattern,
+                        tiles: rect_tiles(b.bbox(), doc.size),
+                        source: Vec::new(),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    out.retain(|c| c.pattern != TonePattern::Noise);
+    out
+}
+
+/// Fractional alpha along the ink's outline.
+///
+/// Only the tiles at the EDGE of the painted set are sampled: a soft edge
+/// lives where the coverage ends, and walking a filled region's interior
+/// at 600 dpi is millions of pixels for a boolean.
+fn has_grey_edges(source: &[(TileIdx, &Tile)]) -> bool {
+    let filled: HashSet<TileIdx> = source.iter().map(|(i, _)| *i).collect();
+    let hi = FIX15_ONE as u16 - ALPHA_ULP;
+    let mut n = 0usize;
+    for (idx, tile) in source {
+        let interior = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+            .iter()
+            .all(|(dx, dy)| filled.contains(&TileIdx::new(idx.x + dx, idx.y + dy)));
+        if interior {
+            continue;
+        }
+        for px in tile.data().chunks_exact(4) {
+            if px[3] > ALPHA_ULP && px[3] < hi {
+                n += 1;
+                if n >= GREY_EDGE_MIN_PX {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Page-level checks over the page's CONTENT: lettering vs the trim,
+/// colour on a mono work, and the moiré pair (TOP-15 #1 — CSP's own tips
+/// article 9181 calls getting moiré "a coin flip", because nothing in CSP
+/// ever tells the user which two tones are fighting).
+/// `page_index` names the page in findings.
 pub fn run_page(
     setup: &PageSetup,
     meta: &ProjectMeta,
@@ -203,6 +409,42 @@ pub fn run_page(
                     }
                 }
             }
+        }
+    }
+    let carriers = tone_carriers(setup, doc);
+    for (i, upper) in carriers.iter().enumerate() {
+        // Bottom-first collection, so everything before `i` is underneath.
+        for lower in &carriers[..i] {
+            if !upper.clashes_with(lower) || !upper.overlaps(lower) {
+                continue;
+            }
+            out.push(warn(
+                "tone.clash",
+                format!(
+                    "page {}: {} over {} — two screens on the same area, \
+                     unaligned dots: expect interference rings in print",
+                    page_index + 1,
+                    upper.describe(),
+                    lower.describe()
+                ),
+            ));
+        }
+    }
+    if meta.expression == crate::project::Expression::Mono {
+        for c in &carriers {
+            if !has_grey_edges(&c.source) {
+                continue;
+            }
+            out.push(warn(
+                "tone.grey_edge",
+                format!(
+                    "page {}: {} screens a source with anti-aliased grey edges — \
+                     grey under a halftone is the classic moiré: threshold the \
+                     source to pure black and white",
+                    page_index + 1,
+                    c.label
+                ),
+            ));
         }
     }
     out
@@ -327,6 +569,140 @@ mod tests {
         doc.set_texts(li, ts);
         let f = run_page(&s, &m, 0, &doc);
         assert!(f.iter().any(|x| x.check == "text.margin"));
+    }
+
+    /// A tone layer with a hard-edged ink source: one opaque pixel per
+    /// named tile, which is all the tile-granular coverage check reads.
+    fn tone_layer(doc: &mut Document, name: &str, lpi: f32, tiles: &[(i32, i32)]) -> usize {
+        let i = doc.add_layer(name);
+        for &(x, y) in tiles {
+            doc.layers[i]
+                .tile_mut(TileIdx::new(x, y))
+                .set_pixel(0, 0, [0, 0, 0, FIX15_ONE as u16]);
+        }
+        doc.layers[i].tone = Some(crate::tone::ToneParams {
+            lpi,
+            ..Default::default()
+        });
+        i
+    }
+
+    fn clash_of(f: &[PreflightFinding]) -> Option<&PreflightFinding> {
+        f.iter().find(|x| x.check == "tone.clash")
+    }
+
+    #[test]
+    fn tone_clash_names_both_carriers_and_their_numbers() {
+        let s = good_setup();
+        let m = meta(Some(s.clone()));
+        let mut doc = Document::new(256, 256);
+        tone_layer(&mut doc, "cloud", 55.0, &[(0, 0), (1, 0)]);
+        tone_layer(&mut doc, "sky", 60.0, &[(1, 0)]);
+        let f = run_page(&s, &m, 0, &doc);
+        let c = clash_of(&f).unwrap_or_else(|| panic!("mismatched overlap must flag: {f:?}"));
+        assert_eq!(c.level, PreflightLevel::Warn);
+        assert!(
+            c.message.contains("Layer \"sky\" 60 lpi/45°")
+                && c.message.contains("Layer \"cloud\" 55 lpi/45°"),
+            "both carriers and their numbers: {}",
+            c.message
+        );
+    }
+
+    #[test]
+    fn tone_clash_ignores_carriers_that_only_touch() {
+        let s = good_setup();
+        let m = meta(Some(s.clone()));
+        let mut doc = Document::new(256, 256);
+        tone_layer(&mut doc, "cloud", 55.0, &[(0, 0)]);
+        tone_layer(&mut doc, "sky", 60.0, &[(1, 0)]);
+        let f = run_page(&s, &m, 0, &doc);
+        assert!(
+            clash_of(&f).is_none(),
+            "adjacent tiles do not interfere: {f:?}"
+        );
+    }
+
+    #[test]
+    fn tone_clash_ignores_matching_screens() {
+        let s = good_setup();
+        let m = meta(Some(s.clone()));
+        let mut doc = Document::new(256, 256);
+        tone_layer(&mut doc, "cloud", 60.0, &[(0, 0)]);
+        tone_layer(&mut doc, "sky", 60.0, &[(0, 0)]);
+        let f = run_page(&s, &m, 0, &doc);
+        assert!(
+            clash_of(&f).is_none(),
+            "same screen is phase 2's job: {f:?}"
+        );
+    }
+
+    #[test]
+    fn tone_clash_normalizes_a_balloons_cell_px() {
+        let s = good_setup();
+        let m = meta(Some(s.clone()));
+        let mut doc = Document::new(256, 256);
+        tone_layer(&mut doc, "sky", 55.0, &[(0, 0)]);
+        let b = crate::balloon::Balloon {
+            shape: crate::balloon::BalloonShape::Ellipse {
+                center: [32.0, 32.0],
+                radii: [20.0, 20.0],
+            },
+            tails: Vec::new(),
+            // The balloon stores px; 60 lpi at this page's dpi is that cell.
+            fill_tone: Some(crate::balloon::BalloonTone {
+                cell_px: s.dpi as f32 / 60.0,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        doc.add_balloon_layer(
+            "bubbles",
+            crate::balloon::BalloonSet {
+                balloons: vec![b],
+                border_px: 2.0,
+                pressure_width: false,
+            },
+        );
+        let f = run_page(&s, &m, 0, &doc);
+        let c = clash_of(&f).unwrap_or_else(|| panic!("balloon over tone must flag: {f:?}"));
+        assert!(
+            c.message.contains("Balloon 1 on \"bubbles\" 60 lpi/45°")
+                && c.message.contains("Layer \"sky\" 55 lpi/45°"),
+            "cell px must read back as lpi: {}",
+            c.message
+        );
+    }
+
+    #[test]
+    fn tone_grey_edge_fires_on_a_soft_source_only() {
+        let s = good_setup();
+        let m = meta(Some(s.clone()));
+        let mut doc = Document::new(256, 256);
+        let i = tone_layer(&mut doc, "sky", 60.0, &[(0, 0)]);
+        // An anti-aliased outline: a run of half-covered grey pixels.
+        for x in 0..20 {
+            doc.layers[i]
+                .tile_mut(TileIdx::new(0, 0))
+                .set_pixel(x, 3, [8000, 8000, 8000, 16000]);
+        }
+        let f = run_page(&s, &m, 0, &doc);
+        assert!(
+            f.iter().any(|x| x.check == "tone.grey_edge"),
+            "an AA'd tone source must flag: {f:?}"
+        );
+
+        // Hardened to pure ink: nothing to break up.
+        for x in 0..20 {
+            doc.layers[i]
+                .tile_mut(TileIdx::new(0, 0))
+                .set_pixel(x, 3, [0, 0, 0, FIX15_ONE as u16]);
+        }
+        let f = run_page(&s, &m, 0, &doc);
+        assert!(
+            !f.iter().any(|x| x.check == "tone.grey_edge"),
+            "a hard-edged source must not flag: {f:?}"
+        );
     }
 
     #[test]
