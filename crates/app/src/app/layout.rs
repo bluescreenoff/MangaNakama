@@ -8,6 +8,22 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+/// Parse a JSON string-array of paths, healing the one hand-edit mistake
+/// that actually happens: a raw Windows path pasted with single backslashes
+/// (`"F:\Projects\…"` — `\P` is not a JSON escape, so strict parsing fails).
+/// The failure mode without this is vicious: the line parses to nothing,
+/// the field stays empty, and the NEXT save writes `[]` back — one edit
+/// silently destroys the user's wiring (it cost the owner his 2399-material
+/// bank folder, 2026-08-22). Retry with every backslash doubled; in a line
+/// that mixed valid `\\` escapes with raw ones this yields a visibly-wrong
+/// doubled path instead of a silent wipe, which is the better failure.
+fn parse_path_list(v: &str) -> Option<Vec<String>> {
+    if let Ok(f) = serde_json::from_str::<Vec<String>>(v) {
+        return Some(f);
+    }
+    serde_json::from_str::<Vec<String>>(&v.replace('\\', "\\\\")).ok()
+}
+
 /// Persisted palette layout: column widths + the two dock columns (as JSON,
 /// handed in by `App::sync_dock_layout` — egui_dock types stay out of this
 /// module so it keeps no dependency on them).
@@ -499,7 +515,7 @@ impl UiLayout {
             // TRIAGE 133: user material folders (JSON string array) and
             // use counters (JSON map path→count).
             "material_folders" if !line.contains('\n') => {
-                if let Ok(f) = serde_json::from_str::<Vec<String>>(v) {
+                if let Some(f) = parse_path_list(v) {
                     self.material_folders = f;
                 }
             }
@@ -510,7 +526,7 @@ impl UiLayout {
             // line costs the list and nothing else — the palette then starts
             // empty, which is recoverable; half-parsed paths are not.
             "references" if !line.contains('\n') => {
-                if let Ok(f) = serde_json::from_str::<Vec<String>>(v) {
+                if let Some(f) = parse_path_list(v) {
                     self.references = f;
                 }
             }
@@ -1054,5 +1070,25 @@ mod tests {
             junk.apply_kv(line);
             assert!(!junk.test_stroke_hidden, "{line} must not fold the strip");
         }
+    }
+
+    /// A hand-pasted Windows path (single backslashes = invalid JSON escapes)
+    /// must still load — the strict-parse-only version dropped the line and
+    /// the next save wiped the user's folder wiring with `[]`.
+    #[test]
+    fn material_folders_heal_single_backslash_paths() {
+        let mut me = UiLayout::default();
+        me.apply_kv(r#"material_folders=["F:\Projects\MangaNakama\play\materials-csp"]"#);
+        assert_eq!(
+            me.material_folders,
+            vec![r"F:\Projects\MangaNakama\play\materials-csp".to_string()],
+            "raw Windows backslashes heal instead of silently dropping"
+        );
+        // Valid JSON stays bit-exact through the same door.
+        me.apply_kv(r#"material_folders=["F:\\other\\dir"]"#);
+        assert_eq!(me.material_folders, vec![r"F:\other\dir".to_string()]);
+        // References ride the same helper.
+        me.apply_kv(r#"references=["C:\refs\pose.png"]"#);
+        assert_eq!(me.references, vec![r"C:\refs\pose.png".to_string()]);
     }
 }

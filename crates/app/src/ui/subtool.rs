@@ -325,7 +325,13 @@ fn mode_sub_tools(ui: &mut egui::Ui, app: &mut App) {
             }
         }
         Tool::Figure => {
-            group_caption(ui, "Figure");
+            // CSP's Figure tool is three sub tool groups (直接描画 / 流線 /
+            // 集中線) — same shape here (owner order 2026-08-22). The line
+            // groups' extra rows are PRESETS: picking one arms the mode and
+            // writes its parameters; the knobs stay editable in Tool
+            // Property (a tweaked set simply highlights no row, like a
+            // modified brush preset).
+            group_caption(ui, "Direct draw");
             use crate::cmd::FigureMode;
             for (m, icon) in [
                 (FigureMode::Line, Icon::Figure),
@@ -336,6 +342,50 @@ fn mode_sub_tools(ui: &mut egui::Ui, app: &mut App) {
                 if mode_row(ui, app.figure_mode == m, icon, m.label()).clicked() {
                     app.figure_mode = m;
                     app.figure_poly = None;
+                }
+            }
+            group_caption(ui, "Stream line");
+            for (label, count, width) in [
+                ("Stream line", 60u32, 3.0f32),
+                ("Dense stream", 140, 2.0),
+                ("Sparse stream", 24, 4.5),
+            ] {
+                let on = app.figure_mode == FigureMode::Stream
+                    && app.figure_stream.count == count
+                    && app.figure_stream.width == width;
+                if mode_row(ui, on, Icon::StreamLines, label)
+                    .on_hover_text("drag along the motion — a fresh speed-line layer each drag")
+                    .clicked()
+                {
+                    app.figure_mode = FigureMode::Stream;
+                    app.figure_poly = None;
+                    app.figure_stream.count = count;
+                    app.figure_stream.width = width;
+                }
+            }
+            group_caption(ui, "Saturated line");
+            for (label, count, width, jitter, r_in) in [
+                ("Saturated line", 96u32, 4.0f32, 0.35f32, 0.4f32),
+                ("Dense saturated line", 180, 3.0, 0.3, 0.35),
+                ("Dark burst", 260, 7.0, 0.5, 0.22),
+            ] {
+                let on = app.figure_mode == FigureMode::Focus
+                    && app.figure_focus.count == count
+                    && app.figure_focus.width == width
+                    && app.figure_focus.jitter == jitter
+                    && app.figure_focus.r_in_frac == r_in;
+                if mode_row(ui, on, Icon::FocusLines, label)
+                    .on_hover_text(
+                        "drag from the convergence point outward — a fresh focus-line layer each drag",
+                    )
+                    .clicked()
+                {
+                    app.figure_mode = FigureMode::Focus;
+                    app.figure_poly = None;
+                    app.figure_focus.count = count;
+                    app.figure_focus.width = width;
+                    app.figure_focus.jitter = jitter;
+                    app.figure_focus.r_in_frac = r_in;
                 }
             }
         }

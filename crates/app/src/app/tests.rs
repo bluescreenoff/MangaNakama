@@ -7664,3 +7664,59 @@ fn oversized_paste_scales_to_fit_the_panel() {
     assert!(w <= 257.0, "fit-scaled width {w}");
     assert!((w / h - 1.0).abs() < 0.01, "uniform scale, {w}x{h}");
 }
+
+/// Figure ▸ Stream/Saturated line (owner order 2026-08-22, CSP's 流線 /
+/// 集中線 sub tool groups): a drag release generates a FRESH effect-line
+/// layer through `GenLinesPlace` — never the dialog's in-place regen, which
+/// would let drag 2 silently overwrite drag 1 (the generated layer becomes
+/// active). Geometry comes from the drag, parameters from the tool knobs,
+/// and the seed bumps so a re-drag rerolls.
+#[test]
+fn figure_line_drags_place_fresh_effect_layers() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    app.tool = Tool::Figure;
+
+    // Saturated line: press = convergence point, release = reach.
+    app.figure_mode = crate::cmd::FigureMode::Focus;
+    let seed0 = app.figure_focus.seed;
+    let layers_before = app.doc.layers.len();
+    app.finish_figure_drag((300.0, 200.0), (300.0, 80.0));
+    drain_cmds(&mut app);
+    assert_eq!(app.doc.layers.len(), layers_before + 1, "one new layer");
+    assert_eq!(app.doc.active_layer().name, "Focus lines");
+    let g = app.doc.active_layer().genlines.expect("spec on the layer");
+    assert!(g.focus);
+    assert_eq!([g.a, g.b], [300.0, 200.0], "converges on the press point");
+    assert!((g.d - 120.0).abs() < 0.01, "outer radius = drag length");
+    assert!(
+        (g.c - 120.0 * app.figure_focus.r_in_frac).abs() < 0.5,
+        "inner hole from the fraction knob"
+    );
+    assert!(app.doc.active_layer().tiles().count() > 0, "ink landed");
+    assert_eq!(app.figure_focus.seed, seed0 + 1, "seed bumped for the reroll");
+
+    // A second drag while the generated layer is ACTIVE: another fresh
+    // layer (the CSP behaviour), not an in-place overwrite of the first.
+    app.finish_figure_drag((150.0, 150.0), (150.0, 250.0));
+    drain_cmds(&mut app);
+    assert_eq!(app.doc.layers.len(), layers_before + 2, "second fresh layer");
+
+    // Stream line: the drag sets angle and length bracket.
+    app.figure_mode = crate::cmd::FigureMode::Stream;
+    app.finish_figure_drag((100.0, 100.0), (400.0, 100.0));
+    drain_cmds(&mut app);
+    assert_eq!(app.doc.active_layer().name, "Speed lines");
+    let s = app.doc.active_layer().genlines.expect("spec on the layer");
+    assert!(!s.focus);
+    assert_eq!(s.a, 0.0, "rightward drag = 0 degrees");
+    assert!((s.b - 210.0).abs() < 0.01 && (s.c - 390.0).abs() < 0.01);
+
+    // A tiny drag refuses with guidance instead of a degenerate burst.
+    let n = app.doc.layers.len();
+    app.finish_figure_drag((200.0, 200.0), (203.0, 202.0));
+    drain_cmds(&mut app);
+    assert_eq!(app.doc.layers.len(), n, "tiny drag places nothing");
+}

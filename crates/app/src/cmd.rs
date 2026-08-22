@@ -635,6 +635,13 @@ pub enum FigureMode {
     Ellipse,
     /// Click vertices; the first vertex / Enter closes, Esc cancels.
     Polygon,
+    /// CSP 流線 Stream line: drag along the motion — a fresh speed-line
+    /// layer sweeps the canvas at that angle (the GenLines engine; the
+    /// layer stays parameter-editable afterwards, unlike CSP's).
+    Stream,
+    /// CSP 集中線 Saturated line: drag from the convergence point outward —
+    /// a fresh focus-line layer converging on the press point.
+    Focus,
 }
 
 impl FigureMode {
@@ -644,6 +651,45 @@ impl FigureMode {
             FigureMode::Rect => "Rectangle",
             FigureMode::Ellipse => "Ellipse",
             FigureMode::Polygon => "Polygon",
+            FigureMode::Stream => "Stream line",
+            FigureMode::Focus => "Saturated line",
+        }
+    }
+}
+
+/// Tool-side parameters for Figure ▸ Stream/Saturated line — what the NEXT
+/// drag generates with (the drag itself supplies the geometry: center and
+/// radius, or angle and length). One struct serves both modes; Stream
+/// ignores `jitter`/`r_in_frac` (the speed renderer has no use for either).
+/// `seed` bumps after every placement so consecutive drags differ without
+/// losing determinism.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct FigureLineOpts {
+    pub count: u32,
+    pub width: f32,
+    pub jitter: f32,
+    /// Focus only: the empty middle, as a fraction of the dragged radius.
+    pub r_in_frac: f32,
+    pub seed: u64,
+}
+
+impl FigureLineOpts {
+    pub fn stream_default() -> Self {
+        Self {
+            count: 60,
+            width: 3.0,
+            jitter: 0.0,
+            r_in_frac: 0.0,
+            seed: 1,
+        }
+    }
+    pub fn focus_default() -> Self {
+        Self {
+            count: 96,
+            width: 4.0,
+            jitter: 0.35,
+            r_in_frac: 0.4,
+            seed: 1,
         }
     }
 }
@@ -1021,6 +1067,8 @@ impl SubTool {
             SubTool::Figure(FigureMode::Rect),
             SubTool::Figure(FigureMode::Ellipse),
             SubTool::Figure(FigureMode::Polygon),
+            SubTool::Figure(FigureMode::Stream),
+            SubTool::Figure(FigureMode::Focus),
             SubTool::Gradient(GradMode::FgToBg),
             SubTool::Gradient(GradMode::FgToTransparent),
             SubTool::Gradient(GradMode::TransparentToFg),
@@ -1462,6 +1510,22 @@ pub enum AppCmd {
     /// stored params (refuses when it is not a generated layer).
     GenLinesEdit,
     GenLinesApply {
+        focus: bool,
+        a: f32,
+        b: f32,
+        c: f32,
+        d: f32,
+        count: u32,
+        width: f32,
+        jitter: f32,
+        seed: u64,
+    },
+    /// Figure ▸ Stream/Saturated line release: ALWAYS a fresh layer, unlike
+    /// `GenLinesApply` whose in-place regen keys on the active layer — the
+    /// generated layer becomes active after the first drag, so the dialog
+    /// rule would silently overwrite drag 1 with drag 2 (CSP places a new
+    /// layer per drag; adjusting an existing one is the Object tool's job).
+    GenLinesPlace {
         focus: bool,
         a: f32,
         b: f32,
@@ -2616,6 +2680,35 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             match genlines_new_layer(app, spec) {
                 Some(name) => app.set_status(format!("{name} generated — {count} lines")),
                 None => app.set_status("generator produced nothing — widen the parameters"),
+            }
+        }
+        AppCmd::GenLinesPlace {
+            focus,
+            a,
+            b,
+            c,
+            d,
+            count,
+            width,
+            jitter,
+            seed,
+        } => {
+            let spec = mn_core::genlines::GenLinesSpec {
+                focus,
+                a,
+                b,
+                c,
+                d,
+                count,
+                width,
+                jitter,
+                seed,
+            };
+            match genlines_new_layer(app, spec) {
+                Some(name) => app.set_status(format!(
+                    "{name} placed — the Object tool's handles (or Layer ▸ effect lines) adjust it"
+                )),
+                None => app.set_status("no lines landed on the canvas — drag further out"),
             }
         }
         AppCmd::HistoryTo { keep } => {

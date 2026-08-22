@@ -540,6 +540,12 @@ impl App {
                             }
                         }
                     }
+                    FigureMode::Stream | FigureMode::Focus => {
+                        // No frame-layer guard: these never ink the active
+                        // layer — the release generates a fresh effect-line
+                        // layer of their own.
+                        self.figure_drag = Some(((cx, cy), (cx, cy)));
+                    }
                     _ => {
                         if self.guard_frame_layer() {
                             return;
@@ -985,6 +991,20 @@ impl App {
                     .collect()
             }
             FigureMode::Polygon => vec![], // handled by finish_figure_poly
+            // Stream line: the drag reads as the motion arrow it sets.
+            FigureMode::Stream => vec![[a.0, a.1], [b.0, b.1]],
+            // Saturated line: a circle around the convergence point at the
+            // dragged radius — the ring the generated lines will reach.
+            FigureMode::Focus => {
+                let r = (b.0 - a.0).hypot(b.1 - a.1).max(0.5);
+                let n = 96;
+                (0..=n)
+                    .map(|k| {
+                        let t = k as f32 / n as f32 * std::f32::consts::TAU;
+                        [a.0 + r * t.cos(), a.1 + r * t.sin()]
+                    })
+                    .collect()
+            }
         }
     }
 
@@ -1044,11 +1064,19 @@ impl App {
             FigureMode::Rect => "rectangle inked",
             FigureMode::Ellipse => "ellipse inked",
             FigureMode::Polygon => "polygon inked",
+            // Stream/Focus release never reaches ink_figure (they generate
+            // a layer instead) — arms exist for exhaustiveness only.
+            FigureMode::Stream | FigureMode::Focus => "lines generated",
         });
     }
 
     /// Figure release (line/rect/ellipse): ink the dragged shape.
+    /// Stream/Saturated line release: generate an effect-line layer instead.
     pub fn finish_figure_drag(&mut self, a: (f32, f32), b: (f32, f32)) {
+        if matches!(self.figure_mode, FigureMode::Stream | FigureMode::Focus) {
+            self.finish_figure_lines(a, b);
+            return;
+        }
         let path = self.figure_path(a, b);
         if path.len() < 2 {
             return;
@@ -1059,6 +1087,54 @@ impl App {
             return;
         }
         self.ink_figure(&path, true);
+    }
+
+    /// Figure ▸ Stream/Saturated line release: turn the drag's geometry into
+    /// a `GenLinesSpec` and place it as a fresh layer (`GenLinesPlace` —
+    /// never the dialog's in-place regen; see the AppCmd doc). The tool
+    /// knobs (count/width/jitter/inner radius) ride on `figure_stream` /
+    /// `figure_focus`; the seed bumps per placement so re-drags reroll.
+    fn finish_figure_lines(&mut self, a: (f32, f32), b: (f32, f32)) {
+        let len = (b.0 - a.0).hypot(b.1 - a.1);
+        if len < 8.0 {
+            self.set_status(if self.figure_mode == FigureMode::Focus {
+                "drag from the convergence point out to where the lines should reach"
+            } else {
+                "drag along the motion — length sets the line length"
+            });
+            return;
+        }
+        let focus = self.figure_mode == FigureMode::Focus;
+        let opts = if focus {
+            let o = self.figure_focus;
+            self.figure_focus.seed = o.seed.wrapping_add(1);
+            o
+        } else {
+            let o = self.figure_stream;
+            self.figure_stream.seed = o.seed.wrapping_add(1);
+            o
+        };
+        let (pa, pb, pc, pd) = if focus {
+            // center, r_in, r_out from the drag; the inner hole is a
+            // fraction knob so one drag places a ready donut.
+            (a.0, a.1, len * opts.r_in_frac.clamp(0.0, 0.95), len)
+        } else {
+            // Angle from the drag direction; lengths bracket the dragged
+            // distance so the strokes read like the gesture that made them.
+            let angle = (b.1 - a.1).atan2(b.0 - a.0).to_degrees();
+            (angle, len * 0.7, len * 1.3, 0.0)
+        };
+        self.push_cmd(AppCmd::GenLinesPlace {
+            focus,
+            a: pa,
+            b: pb,
+            c: pc,
+            d: pd,
+            count: opts.count,
+            width: opts.width,
+            jitter: opts.jitter,
+            seed: opts.seed,
+        });
     }
 
     /// Figure ▸ Polygon release: ink the clicked vertex loop.

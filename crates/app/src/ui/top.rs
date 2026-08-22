@@ -620,9 +620,16 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
             ui.separator();
             ui.weak("closed palettes reopen beside Layers");
             for p in crate::ui::dock::ALL {
-                let open = crate::ui::dock::is_open(app, p);
-                if ui.checkbox(&mut open.clone(), p.title()).changed() && !open {
-                    crate::ui::dock::reopen(app, p);
+                let mut open = crate::ui::dock::is_open(app, p);
+                if ui.checkbox(&mut open, p.title()).changed() {
+                    // A real toggle (owner report 2026-08-22: the boxes
+                    // wouldn't UNcheck): check reopens beside Layers,
+                    // uncheck removes the palette wherever it lives.
+                    if open {
+                        crate::ui::dock::reopen(app, p);
+                    } else {
+                        crate::ui::dock::close_palette(app, p);
+                    }
                     ui.close();
                 }
             }

@@ -519,8 +519,57 @@ pub(crate) fn sec_obj_guide(ui: &mut egui::Ui, _app: &mut App) {
 }
 
 pub(crate) fn sec_figure(ui: &mut egui::Ui, app: &mut App) {
-    ui.checkbox(&mut app.figure_fill, "Fill with drawing colour")
-        .on_hover_text("closed shapes fill before the outline inks");
+    use crate::cmd::FigureMode;
+    match app.figure_mode {
+        FigureMode::Stream | FigureMode::Focus => {
+            // The effect-line knobs: what the NEXT drag generates with.
+            // Ranges mirror the generator dialog's (its clamp rationale —
+            // giant counts/widths were a real UI hang — applies here too).
+            let focus = app.figure_mode == FigureMode::Focus;
+            let o = if focus {
+                &mut app.figure_focus
+            } else {
+                &mut app.figure_stream
+            };
+            ui.horizontal(|ui| {
+                ui.label("Lines");
+                ui.add(egui::DragValue::new(&mut o.count).range(1..=512));
+            });
+            ui.horizontal(|ui| {
+                ui.label("Width");
+                ui.add(
+                    egui::DragValue::new(&mut o.width)
+                        .range(0.5..=40.0)
+                        .speed(0.1),
+                );
+            });
+            if focus {
+                ui.horizontal(|ui| {
+                    ui.label("Jitter");
+                    ui.add(
+                        egui::DragValue::new(&mut o.jitter)
+                            .range(0.0..=1.0)
+                            .speed(0.01),
+                    )
+                    .on_hover_text("angle, width and length wobble — 0 is a drafting tool's fan");
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Hollow centre");
+                    ui.add(
+                        egui::DragValue::new(&mut o.r_in_frac)
+                            .range(0.0..=0.95)
+                            .speed(0.01),
+                    )
+                    .on_hover_text("the empty middle, as a fraction of the dragged radius");
+                });
+            }
+            ui.weak("each drag places its own layer — one undo press removes it");
+        }
+        _ => {
+            ui.checkbox(&mut app.figure_fill, "Fill with drawing colour")
+                .on_hover_text("closed shapes fill before the outline inks");
+        }
+    }
 }
 
 pub(crate) fn sec_figure_guide(ui: &mut egui::Ui, app: &mut App) {
@@ -530,8 +579,17 @@ pub(crate) fn sec_figure_guide(ui: &mut egui::Ui, app: &mut App) {
         FigureMode::Rect => "drag corner to corner; Shift keeps it square",
         FigureMode::Ellipse => "drag the bounding box; Shift keeps it round",
         FigureMode::Polygon => "click vertices; the first one / Enter closes, Esc cancels",
+        FigureMode::Stream => "drag along the motion — angle and length come from the drag",
+        FigureMode::Focus => "drag from the convergence point out to the lines' reach",
     });
-    ui.weak("inked with the active brush — Size/Opacity above apply");
+    match app.figure_mode {
+        FigureMode::Stream | FigureMode::Focus => {
+            ui.weak("adjust later: Object tool handles, or Layer ▸ effect lines");
+        }
+        _ => {
+            ui.weak("inked with the active brush — Size/Opacity above apply");
+        }
+    }
 }
 
 // --- the gradient ramp editor (CSP's Edit gradient, `G-001`/`G-008`/

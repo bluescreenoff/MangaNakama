@@ -31,7 +31,10 @@ pub(super) fn materials_palette(ui: &mut egui::Ui, app: &mut App) {
                 ui.selectable_value(&mut app.material_sort_uses, true, "most used");
             });
     });
-    ui.horizontal(|ui| {
+    // Wrapped, not clipped: this row holds two combos and four buttons and
+    // the palette is routinely ~380px wide — a plain horizontal() silently
+    // cut everything past "+ folder" (owner report 2026-08-22).
+    ui.horizontal_wrapped(|ui| {
         ui.checkbox(&mut app.material_tile, "Tile")
             .on_hover_text("paste covers the whole canvas in N×N copies — a mask to draw through");
         ui.checkbox(&mut app.material_tone, "Tone")

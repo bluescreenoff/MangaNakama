@@ -134,6 +134,10 @@ pub enum Icon {
     Stop,
     /// Drag handle: two columns of grip dots — "this row moves".
     Grip,
+    /// Figure ▸ Stream line (流線): three parallel motion strokes.
+    StreamLines,
+    /// Figure ▸ Saturated line (集中線): rays converging on an empty centre.
+    FocusLines,
 }
 
 /// Paint `icon` to fill `r` (which should be square-ish), in `color`.
@@ -902,6 +906,29 @@ pub fn paint(p: &Painter, r: Rect, icon: Icon, color: Color32) {
                 for y in [0.22, 0.44, 0.66, 0.88] {
                     p.circle_filled(pt(r, x, y), w * 0.075, color);
                 }
+            }
+        }
+        Icon::StreamLines => {
+            // Three parallel motion strokes, staggered like a speed-line
+            // panel; the middle one longest.
+            p.line(poly(r, &[(0.10, 0.30), (0.72, 0.30)]), thin);
+            p.line(poly(r, &[(0.20, 0.52), (0.92, 0.52)]), line);
+            p.line(poly(r, &[(0.10, 0.74), (0.64, 0.74)]), thin);
+        }
+        Icon::FocusLines => {
+            // Eight rays converging on an empty centre — the donut a
+            // saturated-line drag places.
+            let c = r.center();
+            for k in 0..8 {
+                let a = k as f32 * std::f32::consts::TAU / 8.0 + 0.2;
+                let (s, co) = a.sin_cos();
+                p.line(
+                    vec![
+                        Pos2::new(c.x + co * w * 0.18, c.y + s * w * 0.18),
+                        Pos2::new(c.x + co * w * 0.42, c.y + s * w * 0.42),
+                    ],
+                    thin,
+                );
             }
         }
     }

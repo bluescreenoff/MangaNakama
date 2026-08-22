@@ -708,6 +708,11 @@ pub struct App {
     pub figure_drag: Option<((f32, f32), (f32, f32))>,
     /// Figure ▸ Polygon: the placed vertices so far.
     pub figure_poly: Option<Vec<(f32, f32)>>,
+    /// Figure ▸ Stream line: parameters the next drag generates with
+    /// (session-only, like every other Tool Property knob here).
+    pub figure_stream: crate::cmd::FigureLineOpts,
+    /// Figure ▸ Saturated line: same, for the focus-line drags.
+    pub figure_focus: crate::cmd::FigureLineOpts,
     /// Gradient-tool sub-mode (which two colours the ramp spans).
     pub grad_mode: GradMode,
     /// `G-008`/`G-013`/`G-014`: the interior colour stops the Tool Property
@@ -1375,6 +1380,8 @@ impl App {
             figure_fill: false,
             figure_drag: None,
             figure_poly: None,
+            figure_stream: crate::cmd::FigureLineOpts::stream_default(),
+            figure_focus: crate::cmd::FigureLineOpts::focus_default(),
             grad_mode: GradMode::FgToBg,
             grad_mid: Default::default(),
             grad_opts: Default::default(),
@@ -3377,6 +3384,10 @@ impl App {
                 self.eyedrop_opts.refer = M[cycle(cur, M.len())];
             }
             Tool::Figure => {
+                // Direct-draw shapes only: cycling through Stream/Saturated
+                // line too would make the shortcut a six-stop tour where a
+                // stray press generates a layer — those two are a deliberate
+                // sub-tool-list (or Ctrl+K) pick.
                 const M: [FigureMode; 4] = [
                     FigureMode::Line,
                     FigureMode::Rect,
