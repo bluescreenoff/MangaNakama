@@ -2,11 +2,53 @@
 
 ![MangaNakama — a blank three-page manuscript in the Japanese submission format (B4, 600 dpi, trim and safety guides), page one divided into panels](docs/screenshot.png)
 
-A free, GPU-first manga drawing app for Windows: inking, panels, screentone,
-balloons, vertical Japanese text, multi-page chapters, and a built-in reader
-so you can read your own chapter the way a reader will. Local files, no
-cloud, no account. MIT OR Apache-2.0. Early development, moving fast —
-[`ROADMAP.md`](ROADMAP.md) is what works today and what comes next.
+A free, GPU-first manga drawing app for Windows. Local files, no cloud, no
+account, no subscription. MIT OR Apache-2.0. The expected basics are all
+here — inking, panels, screentone, balloons, vertical Japanese text,
+multi-page chapters — but the point is what's **better than Clip Studio
+PAINT**:
+
+- **Search everything (Ctrl+K).** Every command, brush, sub tool, material,
+  layer, page, auto action and setting from one box. CSP's official answer
+  to "too many clicks" is buying a hardware remote.
+- **A built-in chapter reader.** Read your pages as right-to-left spreads,
+  fullscreen; spot a mistake, jump to it, fix it, return to the same
+  spread. The export → WinRAR → CBZ-viewer proofreading loop is gone.
+- **Auto Actions you can actually edit.** Recorded command sequences with
+  inline parameters, drag-to-reorder steps, per-run step toggles, and one
+  press of undo for a whole run — with a Scratch-style colourful block
+  editor on the way.
+- **Panels numbered by reading order,** recomputed live as frames move,
+  with an on-canvas reading-path overlay. CSP numbers panels by creation
+  order and never recovers.
+- **Page setup you can change your mind about.** Resize a work's pages
+  after creation, across every page in one pass — the decision CSP makes
+  permanent at File ▸ New.
+- **Brushes from everywhere.** Photoshop `.abr`, GIMP, Krita, and Clip
+  Studio's own `.sut` read directly — or lasso your own marks and register
+  them as a stamp brush, tuned on a live test stroke.
+- **One-gesture tone.** Click an enclosed region and a live, editable tone
+  layer lands on exactly that area. No four-palette dance, no mask
+  thumbnail hunting.
+- **Pattern Studio.** Draw on a wrap-around tile, watch it repeat live,
+  save it as a material in one click — versus CSP's register-material
+  ceremony.
+- **Text styles on the work.** Edit "dialogue" once and every balloon on
+  every page reflows. CSP's own tutorial warns that a mid-chapter font
+  change means fixing every page by hand.
+- **Panels that let art burst out** while the frame stays editable, and
+  white knockout mats generated from the art itself — no rasterizing, no
+  hand-painted "White" layers.
+- **One dock tree, canvas included.** The canvas is a pane like any
+  palette: split, tab, tear off, open pages side by side.
+- **Requests get built.** The roadmap is fed by what CSP's own tutorials
+  and forums confess is hard — and by whoever opens an issue. Ask for
+  something.
+
+In flight right now: the Scratch-style block editor, themes and a coloured,
+customisable UI, searchable tabbed preferences, and publisher print
+profiles. Early development, moving fast — [`ROADMAP.md`](ROADMAP.md) is
+what works today and what comes next.
 
 **[Read my Webtoon here.](https://mangadex.org/title/6a08b268-e032-4198-a53a-ef705e592dc3/tekno)**
 
