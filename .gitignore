@@ -17,3 +17,6 @@ swatches.txt
 # The user's registered materials (pattern saves, registered layers) —
 # a dev-run writes them beside the repo's assets folder.
 /materials-mine/
+
+# standalone vendor-test resolution (MN-PATCH #18); the workspace lock is the real one
+vendor/egui_dock/Cargo.lock
