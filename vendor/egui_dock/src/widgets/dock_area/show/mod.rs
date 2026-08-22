@@ -42,6 +42,10 @@ impl<Tab> DockArea<'_, Tab> {
         self.style
             .get_or_insert(Style::from_egui(ui.style().as_ref()));
         self.window_bounds.get_or_insert(ui.ctx().content_rect());
+        // MN-PATCH #18: the dock area's own rect, for the root-edge drop
+        // zones below (window_bounds covers the whole window incl. menu and
+        // status bars — the edge strips must not extend into those).
+        let dock_rect = ui.available_rect_before_wrap();
 
         let mut state = State::load(ui.ctx(), self.id);
 
@@ -74,11 +78,35 @@ impl<Tab> DockArea<'_, Tab> {
 
         match (drag_data, owns_drag) {
             (Some(source), true) => {
+                // MN-PATCH #18 (MangaNakama, 2026-08-22): root-edge drop
+                // zones. A strip along the dock area's left/right edge means
+                // "make the dragged tab a brand-new OUTERMOST column on that
+                // side" (owner ask: drag a palette to the far left of the
+                // screen → a new column left of everything, tools included).
+                // Takes precedence over leaf hovers and float-window moves —
+                // at the very edge the gesture is unambiguous.
+                let edge = state
+                    .last_hover_pos
+                    .and_then(|p| super::drag_and_drop::edge_split_zone(dock_rect, p));
+                let edge = match (edge, &source.src) {
+                    (Some((split, zone)), &TreeComponent::Tab(src)) => Some((split, zone, src)),
+                    _ => None,
+                };
+                if let Some((split, zone, src)) = edge {
+                    super::drag_and_drop::draw_edge_zone(ui, self.style.as_ref().unwrap(), zone);
+                    if ui.input(|i| i.pointer.primary_released()) {
+                        // The new column's share of the window; the helper
+                        // translates it through the by-position fraction rule.
+                        const EDGE_SPLIT_FRACTION: f32 = 0.2;
+                        self.dock_state
+                            .move_tab_to_root_split(src, split, EDGE_SPLIT_FRACTION);
+                    }
+                }
                 // MN-PATCH #14 (MangaNakama, 2026-08-21): a tab drag that
                 // STARTED in a floating window surface moves the WINDOW,
                 // unless the pointer is over a drop target that means
                 // something (see `float_drag_moves_window`).
-                if self.float_drag_moves_window(&source, hover_data.as_ref()) {
+                else if self.float_drag_moves_window(&source, hover_data.as_ref()) {
                     self.drag_move_window(ui, &mut state, source.src.surface_address());
                 } else if let Some(hover) = hover_data {
                     let style = self.style.as_ref().unwrap();

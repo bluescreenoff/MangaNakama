@@ -287,6 +287,38 @@ same as after deserialization.
 **Upstream-relevant:** yes in principle (tree composition is a real gap),
 but the API would need bikeshedding upstream.
 
+### 18. Drop-position UX: half-of-title insertion + root-edge split zones (`show/leaf.rs`, `show/mod.rs`, `drag_and_drop.rs`, `dock_state/mod.rs`, 2026-08-22)
+
+**What:** three related drop fixes, one owner report ("I can't drop a pane
+as the RIGHTMOST tab — it always lands in the middle; and I can't drag a
+pane to the far left of the screen to make a new column").
+
+1. `title_insert_half` (`show/leaf.rs`): hovering a tab title during a drag
+   picks the insertion side from the hovered HALF — left half inserts
+   before that tab, right half after it (index+1). The stored indicator
+   rect is the chosen half. Needed because our tab bars are FILLED: titles
+   stretch across the whole bar, so there is no empty-bar area to drop past
+   the last tab, and upstream's "insert before the hovered tab" could never
+   produce the last slot.
+2. `move_tab` `TabInsert::Insert` (`dock_state/mod.rs`): same-node indices
+   now mean PRE-removal positions (index decremented when the source sat
+   left of it). Without this a same-node move right landed one slot short,
+   and dropping a tab on its own right half swapped instead of no-op.
+3. Root-edge drop zones (`drag_and_drop.rs` `edge_split_zone`/`EDGE_ZONE_W`,
+   `show/mod.rs`, `DockState::move_tab_to_root_split`): during a dock drag,
+   24 pt strips along the dock area's left/right edges are drop targets
+   that split the ROOT — the dragged tab becomes a brand-new OUTERMOST
+   column (fraction 0.2 for the new side, set explicitly because
+   `Tree::split`'s fraction is by-position — the recorded 2026-08-21 trap).
+   Takes precedence over leaf hovers and patch-#14 float-window moves.
+
+**Tests:** `title_halves_pick_the_insertion_side`,
+`same_node_insert_uses_pre_removal_positions`,
+`root_split_makes_an_outermost_column`, `edge_zones_are_the_outer_strips_only`.
+
+**Upstream-relevant:** 1 and 2 yes (filled tab bars exist upstream via
+`fill_tab_bar`; the same dead-slot bug applies); 3 is arguably a feature PR.
+
 ## vendor/libmypaint — round 25 (2026-08-16): Krita-inspired dab modes
 
 ### 8. Hard stamp dabs (`mypaint-tiled-surface.c`)

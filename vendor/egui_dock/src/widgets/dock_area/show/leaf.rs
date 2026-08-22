@@ -568,7 +568,17 @@ impl<Tab> DockArea<'_, Tab> {
                     // response.hovered as the dragged tab covers
                     // the underlying tab
                     if state.drag_start.is_some() && response.rect.contains(pos) {
-                        self.tab_hover_rect = Some((response.rect, tab_index));
+                        // MN-PATCH #18 (MangaNakama, 2026-08-22): the
+                        // insertion SIDE comes from which half of the title
+                        // the pointer is in. Filled tab bars leave no empty
+                        // bar to drop past the last tab, so "insert before
+                        // the hovered tab" alone can never produce the
+                        // rightmost slot (a third tab always landed in the
+                        // middle). Left half = before this tab, right half =
+                        // after it; the stored rect is the chosen half, so
+                        // the drop highlight shows the side it will land on.
+                        self.tab_hover_rect =
+                            Some(title_insert_half(response.rect, pos, tab_index));
                     }
                 }
 
@@ -1509,11 +1519,43 @@ impl<Tab> DockArea<'_, Tab> {
     }
 }
 
+/// MN-PATCH #18: which slot a drop on a tab title means, by hovered half.
+/// Left half → insert BEFORE this tab (its own index); right half → insert
+/// AFTER it (index + 1). Returns the chosen half-rect so the drop highlight
+/// communicates the side. Pure — pinned by tests below.
+fn title_insert_half(title: Rect, pointer: egui::Pos2, tab_index: TabIndex) -> (Rect, TabIndex) {
+    if pointer.x >= title.center().x {
+        (
+            Rect::from_min_max(title.center_top(), title.right_bottom()),
+            TabIndex(tab_index.0 + 1),
+        )
+    } else {
+        (
+            Rect::from_min_max(title.left_top(), title.center_bottom()),
+            tab_index,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::tab_body_id;
-    use crate::{NodeIndex, NodePath, SurfaceIndex};
-    use egui::Id;
+    use super::{tab_body_id, title_insert_half};
+    use crate::{NodeIndex, NodePath, SurfaceIndex, TabIndex};
+    use egui::{Id, Rect, pos2};
+
+    /// MN-PATCH #18: with filled tab bars there is no "past the last tab"
+    /// area, so the right half of the LAST title must mean append (index+1)
+    /// or a third tab could never be dropped into the rightmost slot.
+    #[test]
+    fn title_halves_pick_the_insertion_side() {
+        let title = Rect::from_min_max(pos2(100.0, 0.0), pos2(200.0, 20.0));
+        let (left_rect, before) = title_insert_half(title, pos2(120.0, 10.0), TabIndex(1));
+        assert_eq!(before, TabIndex(1), "left half inserts before the tab");
+        assert!(left_rect.max.x <= title.center().x + f32::EPSILON);
+        let (right_rect, after) = title_insert_half(title, pos2(180.0, 10.0), TabIndex(1));
+        assert_eq!(after, TabIndex(2), "right half inserts after the tab");
+        assert!(right_rect.min.x >= title.center().x - f32::EPSILON);
+    }
 
     #[test]
     fn tab_body_ids_differ_between_surfaces() {

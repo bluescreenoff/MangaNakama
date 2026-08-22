@@ -436,6 +436,40 @@ const fn lerp_vec(split: Split, alpha: f32) -> Vec2 {
     }
 }
 
+/// MN-PATCH #18: width (in points) of the root-edge drop strips.
+pub(in super::super) const EDGE_ZONE_W: f32 = 24.0;
+
+/// MN-PATCH #18: is the pointer inside a root-edge drop strip of the dock
+/// area? Left/right edges only — a hit means "put the dragged tab in a
+/// brand-new outermost column on that side". Returns the split direction
+/// and the strip rect (for the overlay highlight). Pure — pinned by tests.
+pub(in super::super) fn edge_split_zone(dock_rect: Rect, pointer: Pos2) -> Option<(Split, Rect)> {
+    if !dock_rect.contains(pointer) {
+        return None;
+    }
+    let left = Rect::from_min_max(
+        dock_rect.left_top(),
+        Pos2::new(dock_rect.left() + EDGE_ZONE_W, dock_rect.bottom()),
+    );
+    if left.contains(pointer) {
+        return Some((Split::Left, left));
+    }
+    let right = Rect::from_min_max(
+        Pos2::new(dock_rect.right() - EDGE_ZONE_W, dock_rect.top()),
+        dock_rect.right_bottom(),
+    );
+    if right.contains(pointer) {
+        return Some((Split::Right, right));
+    }
+    None
+}
+
+/// MN-PATCH #18: highlight an active root-edge drop strip.
+pub(in super::super) fn draw_edge_zone(ui: &Ui, style: &Style, rect: Rect) {
+    let painter = make_overlay_painter(ui);
+    painter.rect_filled(rect, 0.0, style.overlay.selection_color);
+}
+
 // Draws a filled rect describing where a tab will be dropped.
 #[inline(always)]
 fn draw_drop_rect(rect: Rect, ui: &Ui, style: &Style) {
@@ -456,6 +490,28 @@ fn draw_window_rect(rect: Rect, ui: &Ui, style: &Style) {
         ),
         StrokeKind::Inside,
     );
+}
+
+#[cfg(test)]
+mod edge_zone_tests {
+    use super::*;
+
+    /// MN-PATCH #18: the strips hug the dock rect's left/right edges; the
+    /// middle (and anything outside the rect) is not an edge drop.
+    #[test]
+    fn edge_zones_are_the_outer_strips_only() {
+        let dock = Rect::from_min_max(Pos2::new(0.0, 30.0), Pos2::new(1600.0, 900.0));
+        let (split, strip) = edge_split_zone(dock, Pos2::new(10.0, 400.0)).expect("left strip");
+        assert_eq!(split, Split::Left);
+        assert!(strip.max.x <= dock.left() + EDGE_ZONE_W + f32::EPSILON);
+        let (split, _) = edge_split_zone(dock, Pos2::new(1595.0, 400.0)).expect("right strip");
+        assert_eq!(split, Split::Right);
+        assert!(edge_split_zone(dock, Pos2::new(800.0, 400.0)).is_none(), "centre is not an edge");
+        assert!(
+            edge_split_zone(dock, Pos2::new(10.0, 10.0)).is_none(),
+            "above the dock area (top bar) is not an edge"
+        );
+    }
 }
 
 /// An adapted version of the [`egui::Area`]s code for restricting an area rect to a bound.

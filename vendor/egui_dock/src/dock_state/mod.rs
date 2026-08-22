@@ -316,6 +316,16 @@ impl<Tab> DockState<Tab> {
                         self[dst.surface].split(dst.node, split, 0.5, Node::leaf(tab));
                     }
                     TabInsert::Insert(index) => {
+                        // MN-PATCH #18: `index` was computed while the dragged
+                        // tab still sat in the destination node (hover runs
+                        // pre-removal). A same-node move to the RIGHT would
+                        // land one slot too far after the removal shifts
+                        // everything left — and dropping a tab on its own
+                        // right half must be a no-op, not a swap.
+                        let mut index = index;
+                        if src.node_path() == dst && src.tab.0 < index.0 {
+                            index.0 -= 1;
+                        }
                         // Clamp index to valid range: after remove_tab the node may have fewer tabs
                         // than the original index (e.g. when reordering within the same node).
                         let count = self[dst.surface][dst.node].tabs_count();
@@ -336,6 +346,34 @@ impl<Tab> DockState<Tab> {
         }
         if self[src.surface].is_empty() && !src.surface.is_main() {
             self.remove_surface(src.surface);
+        }
+    }
+
+    /// MN-PATCH #18 (MangaNakama, 2026-08-22): move a tab into a brand-new
+    /// OUTERMOST column/row of the main surface — the "drag to the window
+    /// edge" gesture. Splits the root and then sets the root split's
+    /// fraction to `edge_fraction` = the share the NEW node gets (callers
+    /// pass ~0.2 for a palette column). `Tree::split`'s own fraction
+    /// parameter is not used for this because it sizes the LEFT child by
+    /// POSITION (recorded trap, 2026-08-21), which flips meaning between
+    /// `Split::Left` and `Split::Right`.
+    pub fn move_tab_to_root_split(&mut self, src: TabPath, split: Split, edge_fraction: f32) {
+        let root = NodePath {
+            surface: SurfaceIndex::main(),
+            node: NodeIndex::root(),
+        };
+        self.move_tab(src, TabDestination::Node(root, TabInsert::Split(split)));
+        // Root stays index 0 across the split; the new split node is there.
+        // fraction = the LEFT (or TOP) child's share, by position: the new
+        // node IS that child for Left/Above, and the old tree is for
+        // Right/Below.
+        if let Some(Node::Horizontal(s) | Node::Vertical(s)) =
+            self.main_surface_mut().root_node_mut()
+        {
+            s.fraction = match split {
+                Split::Left | Split::Above => edge_fraction,
+                Split::Right | Split::Below => 1.0 - edge_fraction,
+            };
         }
     }
 
@@ -778,5 +816,55 @@ mod test {
         t.remove_tab(i);
         t.retain_tabs(|_| false);
         t.push_to_focused_leaf(0);
+    }
+
+    /// MN-PATCH #18: same-node `Insert` indices mean PRE-removal positions.
+    /// Dragging the first tab onto the right half of the last one must land
+    /// it last — under the raw post-removal index it landed one short
+    /// (the owner's "always goes to the middle").
+    #[test]
+    fn same_node_insert_uses_pre_removal_positions() {
+        let mut t = DockState::new(vec!["a", "b", "c"]);
+        let root = NodePath {
+            surface: SurfaceIndex::main(),
+            node: NodeIndex::root(),
+        };
+        let src = TabPath::new(SurfaceIndex::main(), NodeIndex::root(), TabIndex(0));
+        // Right half of tab "c" (index 2) → insert at 3 = append.
+        t.move_tab(src, TabDestination::Node(root, TabInsert::Insert(TabIndex(3))));
+        let tabs: Vec<_> = t.main_surface().root_node().unwrap().tabs().unwrap().to_vec();
+        assert_eq!(tabs, ["b", "c", "a"], "first tab dropped after the last lands last");
+
+        // Dropping a tab on its own right half is a no-op, not a swap.
+        let src = TabPath::new(SurfaceIndex::main(), NodeIndex::root(), TabIndex(0));
+        t.move_tab(src, TabDestination::Node(root, TabInsert::Insert(TabIndex(1))));
+        let tabs: Vec<_> = t.main_surface().root_node().unwrap().tabs().unwrap().to_vec();
+        assert_eq!(tabs, ["b", "c", "a"], "own right half does not move the tab");
+    }
+
+    /// MN-PATCH #18: the edge gesture splits the ROOT — the new column sits
+    /// outside everything, and gets the edge fraction regardless of side.
+    #[test]
+    fn root_split_makes_an_outermost_column() {
+        let mut t = DockState::new(vec!["canvas", "layers"]);
+        let [_, right] = t.main_surface_mut().split_tabs(
+            NodeIndex::root(),
+            crate::Split::Right,
+            0.7,
+            vec!["tools"],
+        );
+        let src = TabPath::new(SurfaceIndex::main(), right, TabIndex(0));
+        t.move_tab_to_root_split(src, crate::Split::Left, 0.2);
+        match t.main_surface().root_node().unwrap() {
+            Node::Horizontal(s) => {
+                assert!((s.fraction - 0.2).abs() < f32::EPSILON, "left child = new column = 0.2");
+            }
+            n => panic!("root should be a horizontal split, got {n:?}"),
+        }
+        // The new leftmost leaf holds the moved tab.
+        let leftmost = t.main_surface().root_node().unwrap();
+        let _ = leftmost;
+        let found = t.find_tab(&"tools").expect("tools still docked");
+        assert_eq!(found.surface, SurfaceIndex::main());
     }
 }

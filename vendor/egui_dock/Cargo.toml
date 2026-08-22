@@ -74,14 +74,10 @@ optional = true
 [dependencies.thiserror]
 version = "2.0.18"
 
-[dev-dependencies.eframe]
-version = "0.36"
-features = [
-    "default",
-    "default_fonts",
-    "glow",
-]
-default-features = false
+# MN-PATCH #18: eframe dev-dependency removed — only `src/` is vendored
+# (no examples/doc-tests need it), and keeping it made `cargo test
+# --manifest-path vendor/egui_dock/Cargo.toml --lib` build half of winit
+# just to run pure unit tests.
 
 [dev-dependencies.serde_json]
 version = "1"

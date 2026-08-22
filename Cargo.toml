@@ -1,6 +1,11 @@
 [workspace]
 resolver = "3"
 members = ["crates/core", "crates/brush", "crates/gpu", "crates/text", "crates/app"]
+# MN-PATCH #18: excluded so the vendored crate's own unit tests can run
+# standalone (`cargo test --manifest-path vendor/egui_dock/Cargo.toml --lib`
+# with CARGO_TARGET_DIR=target) — as a workspace non-member-non-excluded
+# path it could not be tested at all.
+exclude = ["vendor/egui_dock"]
 
 [workspace.package]
 version = "0.2.0"
