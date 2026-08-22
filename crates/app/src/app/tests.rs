@@ -7721,6 +7721,86 @@ fn figure_line_drags_place_fresh_effect_layers() {
     assert_eq!(app.doc.layers.len(), n, "tiny drag places nothing");
 }
 
+/// Owner repro 2026-08-22: Figure ▸ Saturated line on a PANELED page put a
+/// "Focus lines" row in the palette and NOTHING on the canvas. TWO faults,
+/// each sufficient on its own, which is why this asserts the COMPOSITE and
+/// not the layer's tiles — the tiles were always there:
+///
+/// 1. `core::genlines::put` inked opaque WHITE (`[ONE; 4]`), so every
+///    generator drew white on white. Fixed in core; pinned there too.
+/// 2. `add_layer` inserts above the active layer at that layer's depth, and
+///    a frame folder leaves its draw layer active — so the generated layer
+///    landed INSIDE the folder, where the panel coverage mask clipped it
+///    away entirely for a burst outside the panel window.
+///
+/// All four generators come through the same door (`GenLinesPlace` →
+/// `genlines_new_layer`), so all four are checked.
+#[test]
+fn figure_line_drags_are_visible_on_a_paneled_page() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    // Page-scale doc with one small panel in the corner: the bursts below
+    // are placed far outside the panel window, the way the owner drew them.
+    // The doc size is set here, not taken from `App::new` — that argument is
+    // the WINDOW, and the doc would otherwise come from the machine's prefs.
+    let mut app = App::new(renderer, (1280, 800), 1.0);
+    app.doc = Document::new(2048, 2048);
+    let fs = mn_core::FrameSet::single_rect([120.0, 120.0, 900.0, 900.0], 8.0);
+    let hdr = app.doc.add_frame_folder("Frame", fs);
+    assert_eq!(
+        app.doc.enclosing_frame_folder(app.doc.active),
+        Some(hdr),
+        "a real paneled page arrives with the folder's draw layer active"
+    );
+
+    app.tool = Tool::Figure;
+    for (mode, name, a, b) in [
+        (crate::cmd::FigureMode::Focus, "Focus lines", (1500.0, 1500.0), (1500.0, 1200.0)),
+        (crate::cmd::FigureMode::Urchin, "Urchin flash", (600.0, 1600.0), (600.0, 1300.0)),
+        (crate::cmd::FigureMode::SolidFlash, "Solid flash", (1600.0, 500.0), (1600.0, 250.0)),
+        (crate::cmd::FigureMode::Stream, "Speed lines", (200.0, 1900.0), (900.0, 1900.0)),
+    ] {
+        app.figure_mode = mode;
+        app.finish_figure_drag(a, b);
+        drain_cmds(&mut app);
+
+        let li = app.doc.active;
+        assert_eq!(app.doc.layers[li].name, name);
+        assert!(app.doc.layers[li].tiles().count() > 0, "{name}: ink landed");
+
+        // The owner's symptom, asserted first: the page must actually SHOW
+        // the ink. Probe a pixel the generator wrote solid and read the
+        // composite back there.
+        let mut probe = None;
+        'find: for (idx, t) in app.doc.layers[li].tiles() {
+            let d = t.data();
+            for p in 0..mn_core::TILE_PIXELS {
+                if d[p * 4 + 3] > 24_000 {
+                    probe = Some((
+                        idx.x * mn_core::TILE_SIZE as i32 + (p % mn_core::TILE_SIZE) as i32,
+                        idx.y * mn_core::TILE_SIZE as i32 + (p / mn_core::TILE_SIZE) as i32,
+                    ));
+                    break 'find;
+                }
+            }
+        }
+        let (px, py) = probe.unwrap_or_else(|| panic!("{name}: a solid pixel"));
+        let seen = mn_core::export::composite_pixel(&app.doc, px, py)
+            .unwrap_or_else(|| panic!("{name}: probe on canvas"));
+        assert!(
+            seen[0] < 128,
+            "{name}: the page reads {seen:?} at ({px}, {py}) — the ink is not visible"
+        );
+        // …and the reason it is visible: it is not sealed in the panel folder.
+        assert_eq!(
+            app.doc.enclosing_frame_folder(li),
+            None,
+            "{name}: sealed inside the panel folder, which clips it"
+        );
+    }
+}
+
 /// Book-side seeding (owner report 2026-08-22: pages 2 and 3 wore the SAME
 /// inner-frame offset): the blank-page factory mirrors the seeded frame's
 /// binding offset by the page number it is destined for. Right-bound: page

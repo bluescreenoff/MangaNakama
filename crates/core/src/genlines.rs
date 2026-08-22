@@ -131,6 +131,18 @@ fn rand(seed: &mut u64) -> f32 {
     (z >> 40) as f32 / (1u64 << 24) as f32
 }
 
+/// Ink one pixel opaque BLACK, premultiplied fix15 — `[0, 0, 0, ONE]`.
+///
+/// This wrote `[ONE; 4]` from the first commit, which is opaque WHITE (the
+/// same four words `Layer::fill_white` writes), so every generator in this
+/// module drew white-on-white: a layer in the palette and nothing on the
+/// page. It survived because every test here reads channel 3 only —
+/// coverage — and the fingerprint pin counts inked PIXELS, not their
+/// colour, so the whole suite agreed with a bug it never looked at. Owner
+/// repro 2026-08-22, Figure ▸ Saturated line. Black is the documented
+/// contract of this module (three doc comments say so) and the print
+/// reality of 集中線/流線; the geometry is untouched, so the bit-stability
+/// pin still matches.
 fn put(map: &mut HashMap<TileIdx, Tile>, x: i32, y: i32) {
     if x < 0 || y < 0 {
         return;
@@ -143,9 +155,9 @@ fn put(map: &mut HashMap<TileIdx, Tile>, x: i32, y: i32) {
     if lx < TILE_SIZE && ly < TILE_SIZE {
         let o = Tile::offset(lx, ly);
         let d = tile.data_mut();
-        d[o] = FIX15_ONE as u16;
-        d[o + 1] = FIX15_ONE as u16;
-        d[o + 2] = FIX15_ONE as u16;
+        d[o] = 0;
+        d[o + 1] = 0;
+        d[o + 2] = 0;
         d[o + 3] = FIX15_ONE as u16;
     }
 }
@@ -445,6 +457,84 @@ mod tests {
         assert!(!ink_at(&m, 256, 256), "the hole is empty");
         let m2 = render_focus(&p, (512, 512));
         assert_eq!(m.len(), m2.len(), "seeded = deterministic");
+    }
+
+    /// The COLOUR pin (owner repro 2026-08-22). Every generator here inked
+    /// `[ONE; 4]` — opaque white — from the first commit, so a placed layer
+    /// showed nothing on a white page. Every other test in this module reads
+    /// channel 3 alone, which is exactly why nothing caught it; this one
+    /// reads channels 0..3 for all four generators.
+    #[test]
+    fn every_generator_inks_black_not_white() {
+        let focus = render_focus(
+            &FocusLinesParams {
+                center: [256.0, 256.0],
+                r_in: 100.0,
+                r_out: 240.0,
+                count: 64,
+                width: 6.0,
+                angle_jitter: 0.5,
+                width_jitter: 0.5,
+                length_jitter: 0.2,
+                taper: 0.0,
+                seed: 7,
+            },
+            (512, 512),
+        );
+        let speed = render_speed(
+            &SpeedLinesParams {
+                angle_deg: 20.0,
+                count: 80,
+                len_min: 100.0,
+                len_max: 300.0,
+                width: 4.0,
+                taper: 0.0,
+                converge: None,
+                seed: 3,
+            },
+            (512, 512),
+        );
+        let urchin = |solid| {
+            render_urchin(
+                &UrchinParams {
+                    center: [256.0, 256.0],
+                    r_in: 80.0,
+                    r_out: 240.0,
+                    count: 24,
+                    width: 18.0,
+                    angle_jitter: 0.2,
+                    length_jitter: 0.2,
+                    solid,
+                    seed: 5,
+                },
+                (512, 512),
+            )
+        };
+        for (what, m) in [
+            ("focus", &focus),
+            ("speed", &speed),
+            ("urchin", &urchin(false)),
+            ("solid flash", &urchin(true)),
+        ] {
+            let mut inked = 0u32;
+            for t in m.values() {
+                for y in 0..TILE_SIZE {
+                    for x in 0..TILE_SIZE {
+                        let p = t.pixel(x, y);
+                        if p[3] == 0 {
+                            continue;
+                        }
+                        inked += 1;
+                        assert_eq!(
+                            [p[0], p[1], p[2]],
+                            [0, 0, 0],
+                            "{what}: inked pixel at ({x}, {y}) is not black"
+                        );
+                    }
+                }
+            }
+            assert!(inked > 0, "{what}: drew nothing to check");
+        }
     }
 
     /// A position-sensitive fingerprint of a rendered layer: tile count,

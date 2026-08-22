@@ -2349,7 +2349,23 @@ fn genlines_new_layer(app: &mut App, spec: mn_core::genlines::GenLinesSpec) -> O
         return None;
     }
     let name = spec.layer_name();
-    app.doc.add_layer(name);
+    // Never SEALED inside a frame folder. `add_layer` inserts above the
+    // active layer at its depth, and a frame folder leaves its draw layer
+    // active — so the generated layer used to land inside the folder, where
+    // the panel coverage mask clipped it. A burst drawn outside the panel
+    // window then vanished completely: a layer in the palette, nothing on
+    // the page (owner repro 2026-08-22, Figure ▸ Saturated line). The
+    // placing gesture skips the frame-layer guard on purpose — "these never
+    // ink the active layer" (canvas_input.rs) — which is exactly why the
+    // destination has to be chosen here. CSP's call too: effect lines are a
+    // page-level sheet you clip DOWN into a panel deliberately, not an
+    // accident of which draw layer happened to be selected. The loop climbs
+    // out of nested frame folders; `add_layer_above` still hops clip runs.
+    let mut anchor = app.doc.active;
+    while let Some(f) = app.doc.enclosing_frame_folder(anchor) {
+        anchor = f;
+    }
+    app.doc.add_layer_above(anchor, name);
     app.doc.layers[app.doc.active].genlines = Some(spec);
     app.doc.begin_op();
     app.doc.set_op_label("Generate lines");
