@@ -540,7 +540,7 @@ impl App {
                             }
                         }
                     }
-                    FigureMode::Stream | FigureMode::Focus => {
+                    m if m.generates() => {
                         // No frame-layer guard: these never ink the active
                         // layer — the release generates a fresh effect-line
                         // layer of their own.
@@ -993,9 +993,10 @@ impl App {
             FigureMode::Polygon => vec![], // handled by finish_figure_poly
             // Stream line: the drag reads as the motion arrow it sets.
             FigureMode::Stream => vec![[a.0, a.1], [b.0, b.1]],
-            // Saturated line: a circle around the convergence point at the
-            // dragged radius — the ring the generated lines will reach.
-            FigureMode::Focus => {
+            // Saturated line and the two flashes: a circle around the
+            // centre at the dragged radius — the ring the generated lines
+            // (or spikes) will reach.
+            FigureMode::Focus | FigureMode::Urchin | FigureMode::SolidFlash => {
                 let r = (b.0 - a.0).hypot(b.1 - a.1).max(0.5);
                 let n = 96;
                 (0..=n)
@@ -1064,16 +1065,17 @@ impl App {
             FigureMode::Rect => "rectangle inked",
             FigureMode::Ellipse => "ellipse inked",
             FigureMode::Polygon => "polygon inked",
-            // Stream/Focus release never reaches ink_figure (they generate
-            // a layer instead) — arms exist for exhaustiveness only.
+            // A generating release never reaches ink_figure (it makes a
+            // layer instead) — arms exist for exhaustiveness only.
             FigureMode::Stream | FigureMode::Focus => "lines generated",
+            FigureMode::Urchin | FigureMode::SolidFlash => "flash generated",
         });
     }
 
     /// Figure release (line/rect/ellipse): ink the dragged shape.
-    /// Stream/Saturated line release: generate an effect-line layer instead.
+    /// Stream/Saturated/flash release: generate an effect-line layer instead.
     pub fn finish_figure_drag(&mut self, a: (f32, f32), b: (f32, f32)) {
-        if matches!(self.figure_mode, FigureMode::Stream | FigureMode::Focus) {
+        if self.figure_mode.generates() {
             self.finish_figure_lines(a, b);
             return;
         }
@@ -1095,17 +1097,19 @@ impl App {
     /// knobs (count/width/jitter/inner radius) ride on `figure_stream` /
     /// `figure_focus`; the seed bumps per placement so re-drags reroll.
     fn finish_figure_lines(&mut self, a: (f32, f32), b: (f32, f32)) {
+        let radial = self.figure_mode.radial();
         let len = (b.0 - a.0).hypot(b.1 - a.1);
         if len < 8.0 {
-            self.set_status(if self.figure_mode == FigureMode::Focus {
-                "drag from the convergence point out to where the lines should reach"
+            self.set_status(if radial {
+                "drag from the centre out to where the lines should reach"
             } else {
                 "drag along the motion — length sets the line length"
             });
             return;
         }
-        let focus = self.figure_mode == FigureMode::Focus;
-        let opts = if focus {
+        // The flashes share Saturated line's knobs — same centre-out
+        // gesture, same four values (see FigureLineOpts).
+        let opts = if radial {
             let o = self.figure_focus;
             self.figure_focus.seed = o.seed.wrapping_add(1);
             o
@@ -1114,7 +1118,7 @@ impl App {
             self.figure_stream.seed = o.seed.wrapping_add(1);
             o
         };
-        let (pa, pb, pc, pd) = if focus {
+        let (pa, pb, pc, pd) = if radial {
             // center, r_in, r_out from the drag; the inner hole is a
             // fraction knob so one drag places a ready donut.
             (a.0, a.1, len * opts.r_in_frac.clamp(0.0, 0.95), len)
@@ -1125,7 +1129,10 @@ impl App {
             (angle, len * 0.7, len * 1.3, 0.0)
         };
         self.push_cmd(AppCmd::GenLinesPlace {
-            focus,
+            // Kinds 1/2 keep focus = true: the Object tool's driver
+            // handles and their clamps key on it (GenLinesSpec's doc).
+            focus: radial,
+            kind: self.figure_mode.gen_kind(),
             a: pa,
             b: pb,
             c: pc,
@@ -1133,6 +1140,13 @@ impl App {
             count: opts.count,
             width: opts.width,
             jitter: opts.jitter,
+            // Focus rays taper toward the convergence like Stream tails
+            // (the renderer swaps endpoints for that); the flash kinds'
+            // teeth carry their own shape and ignore it.
+            taper: match self.figure_mode {
+                FigureMode::Focus | FigureMode::Stream => opts.taper,
+                _ => 0.0,
+            },
             seed: opts.seed,
         });
     }
@@ -2690,6 +2704,7 @@ mod gen_drag_tests {
             width: 2.0,
             jitter: 0.1,
             seed: 3,
+            ..Default::default()
         }
     }
 

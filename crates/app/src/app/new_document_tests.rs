@@ -81,17 +81,36 @@ fn a_new_project_is_identical_whether_or_not_you_drew_first() {
 /// The stashed pages must be as clean as the visible one — a leftover on
 /// page 2 would only surface when the owner switched to it.
 #[test]
-fn every_page_of_a_new_comic_matches_the_first() {
+fn every_page_of_a_new_comic_matches_its_book_side() {
+    // Was "every page matches the first" — that exact uniformity WAS a
+    // bug (owner 2026-08-22): a setup with a binding offset must seed
+    // FACING frames mirrored (ノド/小口 swap sides page by page), so page
+    // 2 — the right page of a right-bound book — legitimately differs
+    // from pages 1 and 3, which are left pages. Same-side pages still
+    // match exactly, which keeps the original leak-detection value.
     let Some(mut app) = headless() else { return };
     scribble(&mut app);
-    small_draft(&mut app, 3, "");
+    small_draft(&mut app, 4, "");
+    // An offset-carrying setup, dpi dropped after so the test stays small.
+    app.new_doc_draft.setup = mn_core::page::PageSetup::presets()
+        .into_iter()
+        .find(|p| p.name.contains("Shueisha"))
+        .expect("offset preset");
+    app.new_doc_draft.setup.dpi = 72;
+    assert!(app.new_doc_draft.setup.inner_offset_mm.0 > 0.0);
+    app.new_doc_draft.binding_right = true;
     dispatch(&mut app, AppCmd::NewComicCreate);
-    assert_eq!(app.pages.len(), 3);
+    assert_eq!(app.pages.len(), 4);
 
-    dispatch(&mut app, AppCmd::SelectPage(0));
-    let first = all_ink(&app);
-    for i in 1..3 {
-        dispatch(&mut app, AppCmd::SelectPage(i));
-        assert_eq!(all_ink(&app), first, "page {i} differs from page 1");
-    }
+    let ink_of = |app: &mut App, i: usize| {
+        dispatch(app, AppCmd::SelectPage(i));
+        all_ink(app)
+    };
+    let p1 = ink_of(&mut app, 0);
+    let p2 = ink_of(&mut app, 1);
+    let p3 = ink_of(&mut app, 2);
+    let p4 = ink_of(&mut app, 3);
+    assert_eq!(p1, p3, "pages 1 and 3 are both left pages");
+    assert_eq!(p2, p4, "pages 2 and 4 are both right pages");
+    assert_ne!(p1, p2, "facing pages mirror the binding offset");
 }

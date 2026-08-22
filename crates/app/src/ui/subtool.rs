@@ -388,6 +388,41 @@ fn mode_sub_tools(ui: &mut egui::Ui, app: &mut App) {
                     app.figure_focus.r_in_frac = r_in;
                 }
             }
+            // ウニフラッシュ, the pro-page audit's #1 IMPOSSIBLE — same
+            // group because it is the same centre-out gesture on the same
+            // knobs, only the rays are filled spikes. `width` reads as the
+            // spike base width in px here, so the rows carry values that
+            // suit a flash rather than a hairline fan.
+            for (label, mode, count, width, jitter, r_in) in [
+                (
+                    "Sea urchin flash",
+                    FigureMode::Urchin,
+                    64u32,
+                    20.0f32,
+                    0.25f32,
+                    0.3f32,
+                ),
+                ("Solid flash", FigureMode::SolidFlash, 64, 22.0, 0.25, 0.45),
+            ] {
+                let on = app.figure_mode == mode
+                    && app.figure_focus.count == count
+                    && app.figure_focus.width == width
+                    && app.figure_focus.jitter == jitter
+                    && app.figure_focus.r_in_frac == r_in;
+                if mode_row(ui, on, Icon::UrchinFlash, label)
+                    .on_hover_text(
+                        "drag from the flash's centre outward — a fresh flash layer each drag",
+                    )
+                    .clicked()
+                {
+                    app.figure_mode = mode;
+                    app.figure_poly = None;
+                    app.figure_focus.count = count;
+                    app.figure_focus.width = width;
+                    app.figure_focus.jitter = jitter;
+                    app.figure_focus.r_in_frac = r_in;
+                }
+            }
         }
         Tool::Gradient => {
             group_caption(ui, "Gradient");

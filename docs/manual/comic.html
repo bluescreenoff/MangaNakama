@@ -58,6 +58,16 @@ palettes is a key you pressed.</div>
 <div class="quirk"><b>A canvas made from a pixel preset has no
 guides.</b> They are millimetre geometry at a dpi, so a canvas created
 in pixels has nothing to draw and the switch has nothing to do.</div>
+<div class="quirk"><b>The inner border and safety margins know which
+side of the book the page is.</b> In a right-bound work, odd pages sit
+left and even pages sit right (page 1 is a left page), so the binding
+edge — the ノド, where margin has to be generous because the fold eats
+it — swaps sides page by page. The guides mirror to match, the frame
+folder a new page is seeded with follows, and a combined spread shows
+both sides' frames with the fold between them. <span class="why">A
+setup's X offset is stored once, in right-page orientation; the page's
+book side decides its sign. Two facing pages wearing the same offset —
+both gutters on one side — is exactly the mistake print rejects.</span></div>
 <h2>Cutting panels</h2>
 <div class="quirk warn"><b>What a cut does to the art is a setting, not
 a rule.</b> With the <i>Divide frame folder</i> sub tool, Tool Property
@@ -168,6 +178,18 @@ is nearest to it, so the two colours meet along the ridge between them. Put
 them on separate balloon layers if you want a hard edge instead.</div>
 
 <h2>Effect lines</h2>
+<div class="quirk"><b>The fastest way in is the Figure tool.</b> The
+Figure tool carries the same three groups Clip Studio's does: <i>Direct
+draw</i> (line, rectangle, ellipse, polygon — inked with the active
+brush), <i>Stream line</i> and <i>Saturated line</i>. With a line sub
+tool armed, one drag places the lines: a saturated-line drag goes from
+the convergence point out to where the rays should reach, a stream-line
+drag runs along the motion (its angle and length come from the drag).
+Every drag makes its OWN layer — one <kbd>Ctrl+Z</kbd> removes it, and
+the layer is a normal generator afterwards: Object-tool handles and
+Layer ▸ Edit effect lines both adjust it. Count, width, jitter and the
+hollow centre live in Tool Property and apply to the <em>next</em>
+drag.</div>
 <div class="quirk warn"><b>Regenerating effect lines replaces the
 layer's pixels wholesale, including anything painted on top of them.</b>
 Layer ▸ Edit effect lines ▸ Apply re-runs the generator with the dialog's

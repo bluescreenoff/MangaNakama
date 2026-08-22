@@ -62,6 +62,16 @@ impl PageSetup {
         self.dpi != 0
     }
 
+    /// Which side of the open book 1-based page `idx1` sits on.
+    /// Right-bound (JP): page 1 is a LEFT page (the reader module's rule),
+    /// so even pages sit right, odd sit left — 「奇数ページは左、偶数ページ
+    /// は右」, the manuscript-guide phrasing. Left-bound mirrors (Western
+    /// recto: odd pages right). The binding edge (ノド) is the spine-facing
+    /// edge of whichever side this returns.
+    pub fn page_is_right(idx1: usize, binding_right: bool) -> bool {
+        (idx1 % 2 == 0) == binding_right
+    }
+
     /// A rectangle of `mm` size centred on the paper, offset by `off_mm`,
     /// canvas px: [x0, y0, x1, y1].
     pub fn rect_px(&self, mm: (f32, f32), off_mm: (f32, f32)) -> [f32; 4] {
@@ -84,6 +94,38 @@ impl PageSetup {
 
     pub fn inner_rect_px(&self) -> [f32; 4] {
         self.rect_px(self.inner_mm, self.inner_offset_mm)
+    }
+
+    /// `inner_rect_px` placed for one SIDE of the book. The stored offsets
+    /// are authored in RIGHT-PAGE orientation (+x = toward the outside 小口
+    /// edge, which for a right page is the right); a LEFT page mirrors the
+    /// X offset, exactly what CSP's page manager does by swapping the
+    /// ノド/小口 fields per side. Y (天/地) never mirrors.
+    pub fn inner_rect_px_on(&self, right_page: bool) -> [f32; 4] {
+        let mut off = self.inner_offset_mm;
+        if !right_page {
+            off.0 = -off.0;
+        }
+        self.rect_px(self.inner_mm, off)
+    }
+
+    /// `safety_rect_px` placed for one side: the raw rect puts "inside"
+    /// (ノド) on the left, i.e. a RIGHT page of a right-bound book; a left
+    /// page swaps the inside/outside insets.
+    pub fn safety_rect_px_on(&self, right_page: bool) -> Option<[f32; 4]> {
+        let [t, b, inside, outside] = self.safety_mm?;
+        let (l, r) = if right_page {
+            (inside, outside)
+        } else {
+            (outside, inside)
+        };
+        let [x0, y0, x1, y1] = self.trim_rect_px();
+        Some([
+            x0 + self.mm_to_px(l),
+            y0 + self.mm_to_px(t),
+            x1 - self.mm_to_px(r),
+            y1 - self.mm_to_px(b),
+        ])
     }
 
     /// Safety-margin rectangle (inside the trim), if the preset defines one.
@@ -423,5 +465,41 @@ mod spread_tests {
             "B's layer vanishes from A's half"
         );
         assert_eq!(drop_empty_raster_layers(&mut r), 1, "and A's from B's");
+    }
+}
+
+#[cfg(test)]
+mod side_tests {
+    use super::*;
+
+    /// The book-side rule and the mirrored guide rects. Right-bound: page 1
+    /// left, page 2 right (the reader's own pairing); the inner frame's X
+    /// offset points at the outside (小口) edge on BOTH sides, so the two
+    /// pages of a spread come out symmetric about the fold — the owner's
+    /// 2026-08-22 report was pages 2 and 3 wearing the SAME offset.
+    #[test]
+    fn inner_frame_mirrors_per_book_side() {
+        assert!(!PageSetup::page_is_right(1, true), "JP page 1 = left");
+        assert!(PageSetup::page_is_right(2, true));
+        assert!(!PageSetup::page_is_right(3, true));
+        assert!(PageSetup::page_is_right(1, false), "Western recto");
+
+        let s = PageSetup::presets()
+            .into_iter()
+            .find(|p| p.name.contains("Shueisha"))
+            .expect("offset-carrying preset");
+        assert!(s.inner_offset_mm.0 > 0.0, "the test needs a real offset");
+        let (pw, _) = s.paper_px();
+        let right = s.inner_rect_px_on(true);
+        let left = s.inner_rect_px_on(false);
+        assert!(right[0] > left[0], "right page shifts right (小口), left page left");
+        // Symmetric about the paper centre: left is the right's mirror.
+        assert!((left[0] - (pw as f32 - right[2])).abs() < 0.6, "{left:?} vs {right:?}");
+        assert_eq!(s.inner_rect_px(), s.inner_rect_px_on(true), "raw = right-page orientation");
+
+        let sr = s.safety_rect_px_on(true).unwrap();
+        let sl = s.safety_rect_px_on(false).unwrap();
+        assert_eq!(s.safety_rect_px().unwrap(), sr, "raw safety = right page");
+        assert!((sl[0] - (pw as f32 - sr[2])).abs() < 0.6, "safety mirrors too");
     }
 }

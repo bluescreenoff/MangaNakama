@@ -29,6 +29,10 @@ pub struct FocusLinesParams {
     pub width_jitter: f32,
     /// 0..1 — per-line length jitter fraction of (r_out − r_in).
     pub length_jitter: f32,
+    /// 0..1 — rays thin toward the CENTRE (a printed 集中線 needles at the
+    /// convergence and carries its weight at the rim). 0 = the legacy
+    /// constant-width ray, bit-stable.
+    pub taper: f32,
     pub seed: u64,
 }
 
@@ -41,7 +45,78 @@ pub struct SpeedLinesParams {
     pub len_min: f32,
     pub len_max: f32,
     pub width: f32,
+    /// 0..1 — how far each run thins toward its TAIL (the end it travels
+    /// to). 0 is the pre-2026-08-22 look, bit for bit; 1 ends in a needle
+    /// point, which is what a printed 流線 block actually does (the
+    /// pro-page audit's "flat noise field" complaint).
+    pub taper: f32,
+    /// Aim every run at this canvas point instead of running pure
+    /// parallel — a far point gives the subtle fan a perspective panel
+    /// wants; `None` is parallel. A NEAR point turns the block into
+    /// focus lines, which is the other tool's job.
+    pub converge: Option<[f32; 2]>,
     pub seed: u64,
+}
+
+/// ウニフラッシュ — sea-urchin flash: `count` FILLED triangular spikes
+/// around `center`, needle-pointed at `r_in` and `width` px wide at
+/// `r_out`. That is the classic flash mat: the shape a segment-based
+/// generator cannot make, and the pro-page audit's #1 IMPOSSIBLE.
+///
+/// `solid` flips the POLARITY to the ベタフラッシュ variant — the ring
+/// area between `r_in` and `r_out` inks solid and the same teeth are cut
+/// OUT of it, so the ink pools at the hole and breaks into outward
+/// spikes at the rim. The hole stays empty either way: it is where the
+/// art goes.
+#[derive(Clone, Debug)]
+pub struct UrchinParams {
+    pub center: [f32; 2],
+    pub r_in: f32,
+    pub r_out: f32,
+    pub count: u32,
+    /// Spike base width in px at `r_out`, CLAMPED to 90% of the gap
+    /// between neighbours: a wider value merges the teeth into a plain
+    /// ring (and, inverted, erases the solid variant entirely), so the
+    /// tool would silently stop drawing the shape it exists for.
+    pub width: f32,
+    /// 0..1 — per-spike angle jitter as a fraction of the angular gap.
+    /// Clamped to half a gap by the renderer, and that clamp is load-
+    /// bearing: the solid variant finds a pixel's teeth by SECTOR index,
+    /// and a tooth that wandered a whole sector over would be missed —
+    /// a black tooth straddling a white gap.
+    pub angle_jitter: f32,
+    /// 0..1 — per-spike length jitter; each tip pulls in from `r_out`.
+    pub length_jitter: f32,
+    pub solid: bool,
+    pub seed: u64,
+}
+
+/// One flash tooth as a filled isoceles triangle: apex on the ray at
+/// `r_apex`, `hw` half-width at `r_base`. The sides are STRAIGHT — the
+/// test is the triangle's, not an angular wedge's, because a constant-
+/// angle wedge bows outward and reads as a petal instead of a spike.
+struct Tooth {
+    c: f32,
+    s: f32,
+    r_apex: f32,
+    r_base: f32,
+    hw: f32,
+}
+
+impl Tooth {
+    /// Is `(dx, dy)` — a pixel relative to the flash centre — inside?
+    fn hit(&self, dx: f32, dy: f32) -> bool {
+        let along = dx * self.c + dy * self.s;
+        if along < self.r_apex || along > self.r_base {
+            return false;
+        }
+        let span = self.r_base - self.r_apex;
+        if span <= f32::EPSILON {
+            return false;
+        }
+        let perp = -dx * self.s + dy * self.c;
+        perp.abs() <= self.hw * ((along - self.r_apex) / span)
+    }
 }
 
 /// xorshift64* — small, deterministic, no deps.
@@ -79,13 +154,25 @@ fn put(map: &mut HashMap<TileIdx, Tile>, x: i32, y: i32) {
 /// bbox and testing point-to-segment distance. Hard edges — speed lines
 /// are print black; AA lives in the resample on export.
 ///
+/// `taper` (0..1) ramps the half-width down along a→b, so `b` is the
+/// needle end; 0 leaves the constant-width behaviour untouched (the
+/// ramp evaluates to `hw * 1.0`, the same float, so every effect-line
+/// layer saved before tapering existed regenerates bit for bit).
+///
 /// The bbox is CLIPPED to the canvas here, not after: the dialog's own
 /// maximums (count 512, outer radius 2×width) put a segment's unclipped
 /// bbox at ~10^7 pixels on a 600 dpi page — unclipped, the scan was
 /// quadratic in the radius and allocated unbounded off-canvas tiles that
 /// `retain` only discarded after building (a multi-minute UI hang and a
 /// commit spike, from three slider drags).
-fn segment(map: &mut HashMap<TileIdx, Tile>, a: [f32; 2], b: [f32; 2], hw: f32, size: (u32, u32)) {
+fn segment(
+    map: &mut HashMap<TileIdx, Tile>,
+    a: [f32; 2],
+    b: [f32; 2],
+    hw: f32,
+    taper: f32,
+    size: (u32, u32),
+) {
     let d = [b[0] - a[0], b[1] - a[1]];
     let dd = d[0] * d[0] + d[1] * d[1];
     if dd <= f32::EPSILON {
@@ -98,7 +185,6 @@ fn segment(map: &mut HashMap<TileIdx, Tile>, a: [f32; 2], b: [f32; 2], hw: f32, 
     if x0 >= x1 || y0 >= y1 {
         return;
     }
-    let hw2 = hw * hw;
     for y in y0.floor() as i32..=y1.ceil() as i32 {
         for x in x0.floor() as i32..=x1.ceil() as i32 {
             let px = x as f32 + 0.5;
@@ -108,7 +194,34 @@ fn segment(map: &mut HashMap<TileIdx, Tile>, a: [f32; 2], b: [f32; 2], hw: f32, 
             let qy = a[1] + t * d[1];
             let ex = px - qx;
             let ey = py - qy;
-            if ex * ex + ey * ey <= hw2 {
+            let hwt = hw * (1.0 - taper * t);
+            if ex * ex + ey * ey <= hwt * hwt {
+                put(map, x, y);
+            }
+        }
+    }
+}
+
+/// Fill one tooth by scanning ITS bbox — the same clip-first rule as
+/// [`segment`], and for the same reason: an off-canvas flash centre with
+/// a page-sized outer radius is an unbounded scan and an unbounded tile
+/// allocation, not a slow one.
+fn fill_tooth(map: &mut HashMap<TileIdx, Tile>, c: [f32; 2], t: &Tooth, size: (u32, u32)) {
+    let apex = [c[0] + t.c * t.r_apex, c[1] + t.s * t.r_apex];
+    let base = [c[0] + t.c * t.r_base, c[1] + t.s * t.r_base];
+    let off = [-t.s * t.hw, t.c * t.hw];
+    let xs = [apex[0], base[0] + off[0], base[0] - off[0]];
+    let ys = [apex[1], base[1] + off[1], base[1] - off[1]];
+    let x0 = (xs.iter().copied().fold(f32::INFINITY, f32::min) - 1.0).max(0.0);
+    let x1 = (xs.iter().copied().fold(f32::NEG_INFINITY, f32::max) + 1.0).min(size.0 as f32);
+    let y0 = (ys.iter().copied().fold(f32::INFINITY, f32::min) - 1.0).max(0.0);
+    let y1 = (ys.iter().copied().fold(f32::NEG_INFINITY, f32::max) + 1.0).min(size.1 as f32);
+    if x0 >= x1 || y0 >= y1 {
+        return;
+    }
+    for y in y0.floor() as i32..=y1.ceil() as i32 {
+        for x in x0.floor() as i32..=x1.ceil() as i32 {
+            if t.hit(x as f32 + 0.5 - c[0], y as f32 + 0.5 - c[1]) {
                 put(map, x, y);
             }
         }
@@ -130,11 +243,16 @@ pub fn render_focus(p: &FocusLinesParams, size: (u32, u32)) -> HashMap<TileIdx, 
         let r2 = p.r_out - rand(&mut seed) * p.length_jitter * span * 0.5;
         let w = p.width * (1.0 - rand(&mut seed) * p.width_jitter);
         let (s, c) = ang.sin_cos();
+        // OUTER first: segment() tapers toward `b`, and a focus ray thins
+        // toward the convergence (the inner end). With taper 0 the order
+        // is invisible — the distance test is symmetric — so legacy
+        // renders stay bit-stable (pinned test).
         segment(
             &mut map,
-            [p.center[0] + c * r1, p.center[1] + s * r1],
             [p.center[0] + c * r2, p.center[1] + s * r2],
+            [p.center[0] + c * r1, p.center[1] + s * r1],
             (w * 0.5).max(0.5),
+            p.taper.clamp(0.0, 1.0),
             size,
         );
     }
@@ -176,9 +294,102 @@ pub fn render_speed(p: &SpeedLinesParams, size: (u32, u32)) -> HashMap<TileIdx, 
             nrm[0] * t + dir[0] * (along - len * 0.5),
             nrm[1] * t + dir[1] * (along - len * 0.5),
         ];
-        let tip = [base[0] + dir[0] * len, base[1] + dir[1] * len];
-        segment(&mut map, base, tip, (p.width * 0.5).max(0.5), size);
+        // Convergence aims the run at a far point instead of along the
+        // shared direction; the SCATTER stays the parallel layout's, so
+        // the fan is a lean on the block rather than a second tool.
+        let run = match p.converge {
+            Some(v) => {
+                let (vx, vy) = (v[0] - base[0], v[1] - base[1]);
+                let l = vx.hypot(vy);
+                if l > 1e-3 { [vx / l, vy / l] } else { dir }
+            }
+            None => dir,
+        };
+        let tip = [base[0] + run[0] * len, base[1] + run[1] * len];
+        segment(
+            &mut map,
+            base,
+            tip,
+            (p.width * 0.5).max(0.5),
+            p.taper.clamp(0.0, 1.0),
+            size,
+        );
     }
+    let (wi, hi_) = (size.0 as i32, size.1 as i32);
+    map.retain(|idx, _| {
+        let (ox, oy) = idx.origin();
+        ox < wi && oy < hi_ && ox + TILE_SIZE as i32 > 0 && oy + TILE_SIZE as i32 > 0
+    });
+    map.into_iter().map(|(k, v)| (k, Arc::new(v))).collect()
+}
+
+/// Render a sea-urchin flash (or, with `solid`, its inverse) into sparse
+/// tiles. Deterministic under `seed` like the other two.
+pub fn render_urchin(p: &UrchinParams, size: (u32, u32)) -> HashMap<TileIdx, Arc<Tile>> {
+    let mut map: HashMap<TileIdx, Tile> = HashMap::new();
+    let mut seed = p.seed | 1;
+    let n = p.count.max(1);
+    let step = std::f32::consts::TAU / n as f32;
+    let r_out = p.r_out.max(1.0);
+    let r_in = p.r_in.clamp(0.0, r_out - 1.0);
+    let span = r_out - r_in;
+    // See UrchinParams::width — 90% of the gap, never more. The cap is
+    // floored before the clamp because f32::clamp PANICS on min > max
+    // and a tiny flash would otherwise abort through wndproc (audit B).
+    let hw = (p.width * 0.5).clamp(0.5, (step * r_out * 0.45).max(0.5));
+    let aj = p.angle_jitter.clamp(0.0, 0.5);
+    let lj = p.length_jitter.clamp(0.0, 1.0);
+    let teeth: Vec<Tooth> = (0..n)
+        .map(|i| {
+            let ang = i as f32 * step + (rand(&mut seed) - 0.5) * aj * step;
+            let r_tip = r_out - rand(&mut seed) * lj * span * 0.5;
+            let (s, c) = ang.sin_cos();
+            Tooth {
+                c,
+                s,
+                r_apex: r_in,
+                r_base: r_tip,
+                hw,
+            }
+        })
+        .collect();
+
+    if p.solid {
+        // One scan over the ring, inking everything the teeth do NOT
+        // cover. Only the NEIGHBOURING sectors' teeth are tested per
+        // pixel — a tooth cannot wander further (angle_jitter is capped
+        // at half a gap); testing all `count` teeth per pixel is a
+        // hundred-million-test scan on a full-page burst.
+        let c = p.center;
+        let x0 = (c[0] - r_out - 1.0).max(0.0);
+        let x1 = (c[0] + r_out + 1.0).min(size.0 as f32);
+        let y0 = (c[1] - r_out - 1.0).max(0.0);
+        let y1 = (c[1] + r_out + 1.0).min(size.1 as f32);
+        if x0 < x1 && y0 < y1 {
+            let (ri2, ro2) = (r_in * r_in, r_out * r_out);
+            for y in y0.floor() as i32..=y1.ceil() as i32 {
+                for x in x0.floor() as i32..=x1.ceil() as i32 {
+                    let dx = x as f32 + 0.5 - c[0];
+                    let dy = y as f32 + 0.5 - c[1];
+                    let r2 = dx * dx + dy * dy;
+                    if r2 < ri2 || r2 > ro2 {
+                        continue;
+                    }
+                    let k = (dy.atan2(dx).rem_euclid(std::f32::consts::TAU) / step) as i32;
+                    let cut =
+                        (-1..=1).any(|o| teeth[(k + o).rem_euclid(n as i32) as usize].hit(dx, dy));
+                    if !cut {
+                        put(&mut map, x, y);
+                    }
+                }
+            }
+        }
+    } else {
+        for t in &teeth {
+            fill_tooth(&mut map, p.center, t, size);
+        }
+    }
+
     let (wi, hi_) = (size.0 as i32, size.1 as i32);
     map.retain(|idx, _| {
         let (ox, oy) = idx.origin();
@@ -211,6 +422,7 @@ mod tests {
             angle_jitter: 0.5,
             width_jitter: 0.5,
             length_jitter: 0.2,
+            taper: 0.0,
             seed: 7,
         };
         let m = render_focus(&p, (512, 512));
@@ -235,6 +447,70 @@ mod tests {
         assert_eq!(m.len(), m2.len(), "seeded = deterministic");
     }
 
+    /// A position-sensitive fingerprint of a rendered layer: tile count,
+    /// inked pixels, and a checksum that moves if a single pixel moves.
+    pub(super) fn fingerprint(m: &HashMap<TileIdx, Arc<Tile>>) -> (usize, u64, u64) {
+        let mut keys: Vec<_> = m.keys().copied().collect();
+        keys.sort_by_key(|i| (i.y, i.x));
+        let (mut px, mut sum) = (0u64, 0u64);
+        for k in keys {
+            let (ox, oy) = k.origin();
+            for y in 0..TILE_SIZE {
+                for x in 0..TILE_SIZE {
+                    if m[&k].pixel(x, y)[3] > 0 {
+                        px += 1;
+                        let gx = (ox + x as i32) as u64;
+                        let gy = (oy + y as i32) as u64;
+                        sum = sum
+                            .wrapping_mul(0x0100_0000_01B3)
+                            .wrapping_add(gx.wrapping_mul(65_537).wrapping_add(gy));
+                    }
+                }
+            }
+        }
+        (m.len(), px, sum)
+    }
+
+    /// BIT-STABILITY PIN (flash round, 2026-08-22): the two original
+    /// renderers must keep drawing exactly what they drew before `kind`,
+    /// `taper` and `converge` existed — every effect-line layer in every
+    /// saved file regenerates through them. The numbers were taken from
+    /// the pre-round code; a change that moves them has silently redrawn
+    /// the owner's archive.
+    #[test]
+    fn legacy_renders_are_bit_stable() {
+        let f = FocusLinesParams {
+            center: [256.0, 256.0],
+            r_in: 100.0,
+            r_out: 240.0,
+            count: 64,
+            width: 6.0,
+            angle_jitter: 0.5,
+            width_jitter: 0.5,
+            length_jitter: 0.2,
+            taper: 0.0,
+            seed: 7,
+        };
+        assert_eq!(
+            fingerprint(&render_focus(&f, (512, 512))),
+            (52, 37446, 14_909_681_065_247_512_801)
+        );
+        let s = SpeedLinesParams {
+            angle_deg: 20.0,
+            count: 80,
+            len_min: 100.0,
+            len_max: 300.0,
+            width: 4.0,
+            taper: 0.0,
+            converge: None,
+            seed: 3,
+        };
+        assert_eq!(
+            fingerprint(&render_speed(&s, (512, 512))),
+            (57, 25119, 6_096_450_357_538_070_854)
+        );
+    }
+
     /// Speed lines: horizontal runs at many heights (0° set).
     #[test]
     fn speed_lines_parallel_bands() {
@@ -244,6 +520,8 @@ mod tests {
             len_min: 100.0,
             len_max: 300.0,
             width: 4.0,
+            taper: 0.0,
+            converge: None,
             seed: 3,
         };
         let m = render_speed(&p, (512, 512));
@@ -261,6 +539,268 @@ mod tests {
         let bot = (256..512).step_by(2).any(|y| ink_at(&m, 256, y));
         assert!(top && bot, "runs scatter over the full normal extent");
     }
+
+    /// Taper thins a run toward its TAIL: sampled across the same run,
+    /// the head still inks at the full half-width and the tail no longer
+    /// does. 0 changes nothing (pinned separately by the bit-stability
+    /// fingerprint).
+    #[test]
+    fn focus_lines_taper_needles_at_the_centre() {
+        // Jitters off so ray 0 sits exactly on angle 0 (the +x axis): the
+        // ray's cross-section near r_in must be materially thinner than
+        // near r_out under taper, and identical without it.
+        let p = |taper: f32| FocusLinesParams {
+            center: [256.0, 256.0],
+            r_in: 40.0,
+            r_out: 220.0,
+            count: 8,
+            width: 12.0,
+            angle_jitter: 0.0,
+            width_jitter: 0.0,
+            length_jitter: 0.0,
+            taper,
+            seed: 7,
+        };
+        let cross = |m: &HashMap<TileIdx, Arc<Tile>>, x: i32| {
+            (0..40)
+                .filter(|dy| ink_at(m, x, 256 - 20 + dy))
+                .count() as i32
+        };
+        let flat = render_focus(&p(0.0), (512, 512));
+        assert_eq!(
+            cross(&flat, 256 + 50),
+            cross(&flat, 256 + 210),
+            "taper 0: constant width end to end"
+        );
+        let tapered = render_focus(&p(0.9), (512, 512));
+        let inner = cross(&tapered, 256 + 50);
+        let outer = cross(&tapered, 256 + 210);
+        assert!(
+            inner * 2 < outer && outer >= 10,
+            "needles at the convergence, weight at the rim ({inner} vs {outer})"
+        );
+    }
+
+    #[test]
+    fn speed_lines_taper_thins_the_tail() {
+        // The ramp itself, measured on one PLACED run so no scatter is in
+        // the way: how tall is the run's column at the head, and at the
+        // far end?
+        let col = |taper: f32, x: i32| {
+            let mut m: HashMap<TileIdx, Tile> = HashMap::new();
+            segment(
+                &mut m,
+                [50.0, 256.0],
+                [450.0, 256.0],
+                8.0,
+                taper,
+                (512, 512),
+            );
+            (0..512)
+                .filter(|y| {
+                    let idx = TileIdx::of_pixel(x, *y);
+                    m.get(&idx).is_some_and(|t| {
+                        let (ox, oy) = idx.origin();
+                        t.pixel((x - ox) as usize, (*y - oy) as usize)[3] > 0
+                    })
+                })
+                .count()
+        };
+        assert_eq!(col(0.0, 60), col(0.0, 400), "0 = constant width, as before");
+        assert_eq!(col(1.0, 60), col(0.0, 60), "the head keeps its width");
+        let tail = col(1.0, 400);
+        assert!(
+            tail * 3 < col(1.0, 60),
+            "the tail thinned to a needle ({tail})"
+        );
+        assert!(tail >= 1, "but the run still reaches its end");
+
+        // And the parameter is plumbed through the generator.
+        let p = SpeedLinesParams {
+            angle_deg: 0.0,
+            count: 40,
+            len_min: 300.0,
+            len_max: 300.0,
+            width: 10.0,
+            taper: 0.0,
+            converge: None,
+            seed: 5,
+        };
+        let flat = fingerprint(&render_speed(&p, (512, 512)));
+        let tapered = fingerprint(&render_speed(
+            &SpeedLinesParams {
+                taper: 0.8,
+                ..p.clone()
+            },
+            (512, 512),
+        ));
+        assert!(
+            flat.1 > 0 && tapered.1 * 4 < flat.1 * 3,
+            "less ink on the page"
+        );
+    }
+
+    /// Convergence leans the runs at a point instead of leaving them
+    /// parallel: with the vanishing point straight above the canvas the
+    /// block fans, so the runs no longer share one direction.
+    #[test]
+    fn speed_lines_converge_on_a_point() {
+        let p = SpeedLinesParams {
+            angle_deg: 0.0,
+            count: 24,
+            len_min: 200.0,
+            len_max: 200.0,
+            width: 3.0,
+            taper: 0.0,
+            converge: Some([256.0, -4000.0]),
+            seed: 9,
+        };
+        let m = render_speed(&p, (512, 512));
+        assert!(!m.is_empty(), "the fan landed on the canvas");
+        let par = render_speed(
+            &SpeedLinesParams {
+                converge: None,
+                ..p.clone()
+            },
+            (512, 512),
+        );
+        assert_ne!(
+            fingerprint(&m),
+            fingerprint(&par),
+            "aiming at the point moved the runs"
+        );
+    }
+
+    /// Sea-urchin flash: filled spikes, wide at the rim and pointed at
+    /// the hole — so a ring of probes just inside `r_out` finds far more
+    /// ink than the same ring just outside `r_in`, and the hole is empty.
+    #[test]
+    fn urchin_flash_spikes_are_filled_wedges() {
+        let p = UrchinParams {
+            center: [256.0, 256.0],
+            r_in: 60.0,
+            r_out: 240.0,
+            count: 32,
+            width: 26.0,
+            angle_jitter: 0.2,
+            length_jitter: 0.1,
+            solid: false,
+            seed: 11,
+        };
+        let m = render_urchin(&p, (512, 512));
+        let ring = |r: f32| {
+            (0..720)
+                .filter(|k| {
+                    let a = *k as f32 * std::f32::consts::TAU / 720.0;
+                    let (s, c) = a.sin_cos();
+                    ink_at(&m, (256.0 + c * r) as i32, (256.0 + s * r) as i32)
+                })
+                .count()
+        };
+        let rim = ring(230.0);
+        let near = ring(70.0);
+        assert!(rim > 150, "the rim is mostly ink ({rim}/720)");
+        assert!(near * 3 < rim, "and the points are thin ({near} vs {rim})");
+        assert!(!ink_at(&m, 256, 256), "the hole stays empty");
+        // A wedge is FILLED, not an outline: walk a rim spoke inward and
+        // it stays inked for a long unbroken run.
+        let mut best = 0;
+        let mut run = 0;
+        for k in 0..720 {
+            let a = k as f32 * std::f32::consts::TAU / 720.0;
+            let (s, c) = a.sin_cos();
+            run = if ink_at(&m, (256.0 + c * 230.0) as i32, (256.0 + s * 230.0) as i32) {
+                run + 1
+            } else {
+                0
+            };
+            best = best.max(run);
+        }
+        assert!(best >= 8, "a spike is a solid band at the rim ({best})");
+        assert_eq!(
+            fingerprint(&m),
+            fingerprint(&render_urchin(&p, (512, 512))),
+            "seeded = deterministic"
+        );
+    }
+
+    /// Solid flash is the SAME teeth cut out of a solid ring: the hole
+    /// is still empty, the ring is mostly ink where the urchin is mostly
+    /// gaps, and the two are complementary inside the annulus.
+    #[test]
+    fn solid_flash_inverts_the_ring() {
+        let mut p = UrchinParams {
+            center: [256.0, 256.0],
+            r_in: 60.0,
+            r_out: 240.0,
+            count: 32,
+            width: 26.0,
+            angle_jitter: 0.2,
+            length_jitter: 0.0,
+            solid: false,
+            seed: 11,
+        };
+        let spikes = render_urchin(&p, (512, 512));
+        p.solid = true;
+        let solid = render_urchin(&p, (512, 512));
+        assert!(!ink_at(&solid, 256, 256), "the hole stays empty");
+        // Just inside the hole's edge the solid variant is unbroken ink
+        // (the teeth are needle-thin there).
+        let ring = |m: &HashMap<TileIdx, Arc<Tile>>, r: f32| {
+            (0..720)
+                .filter(|k| {
+                    let a = *k as f32 * std::f32::consts::TAU / 720.0;
+                    let (s, c) = a.sin_cos();
+                    ink_at(m, (256.0 + c * r) as i32, (256.0 + s * r) as i32)
+                })
+                .count()
+        };
+        // Not 720/720: the teeth are still ~1 px wide this close to the
+        // apex, so they nick a couple of probes each.
+        assert!(ring(&solid, 70.0) > 600, "solid at the hole's edge");
+        assert!(
+            ring(&solid, 70.0) > ring(&spikes, 70.0) * 8,
+            "and the polarity really is the other way round"
+        );
+        assert!(
+            ring(&solid, 230.0) < ring(&spikes, 230.0),
+            "gaps at the rim"
+        );
+        // Complementary: no pixel of the annulus carries ink in both.
+        let mut both = 0;
+        for k in 0..2000 {
+            let a = k as f32 * 0.031;
+            let r = 65.0 + (k % 170) as f32;
+            let (x, y) = ((256.0 + a.cos() * r) as i32, (256.0 + a.sin() * r) as i32);
+            if ink_at(&spikes, x, y) && ink_at(&solid, x, y) {
+                both += 1;
+            }
+        }
+        // Edge pixels of a tooth can round into both scans; a handful is
+        // the rasterizer's seam, a flood would mean the polarity is off.
+        assert!(both < 40, "the two polarities barely overlap ({both})");
+    }
+
+    /// A degenerate flash (radius smaller than one spike) must not panic:
+    /// the half-width cap is floored before `clamp`, which PANICS on
+    /// min > max and would abort through wndproc (audit B).
+    #[test]
+    fn tiny_flash_does_not_panic() {
+        for solid in [false, true] {
+            let p = UrchinParams {
+                center: [10.0, 10.0],
+                r_in: 0.0,
+                r_out: 0.2,
+                count: 512,
+                width: 40.0,
+                angle_jitter: 1.0,
+                length_jitter: 1.0,
+                solid,
+                seed: 1,
+            };
+            let _ = render_urchin(&p, (64, 64));
+        }
+    }
 }
 
 // --- SF-004/005 (TRIAGE 140, r85): the generator's parameters persist on
@@ -270,7 +810,25 @@ mod tests {
 // is the serialized form; the two render fns remain the raster source.
 
 /// A generated effect-line layer's parameters, as the dialog holds them.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+///
+/// `kind` is the generator discriminant, added 2026-08-22 with the flash
+/// round. EVERY file written before that date has no such attribute, so
+/// `#[serde(default)]` = `0` MUST keep meaning exactly what those files
+/// meant — pinned by `pre_flash_specs_load_with_the_old_meaning`:
+///
+/// - `0` — the original pair, chosen by `focus`: 集中線 focus lines
+///   (`a`,`b` = centre, `c` = r_in, `d` = r_out) or 流線 speed lines
+///   (`a` = angle°, `b` = len_min, `c` = len_max, `d` unused).
+/// - `1` — ウニフラッシュ sea-urchin flash: filled triangular spikes,
+///   focus geometry, `width` = the spike base width in px at `r_out`.
+/// - `2` — solid flash: the same teeth cut out of a solid ring.
+///
+/// An UNKNOWN kind falls back to the kind-0 reading rather than
+/// rendering nothing: a file from a future build should look wrong, not
+/// vanish. Kinds 1/2 keep `focus = true` on purpose — the Object tool's
+/// driver handles and their drag clamps key on that flag, and a flash is
+/// aimed exactly like a focus-line burst.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct GenLinesSpec {
     pub focus: bool,
     /// focus: center.x, center.y, r_in, r_out; speed: angle_deg, len_min, len_max (d unused).
@@ -282,11 +840,56 @@ pub struct GenLinesSpec {
     pub width: f32,
     pub jitter: f32,
     pub seed: u64,
+    /// Generator discriminant — see the type doc. Absent = 0 = legacy.
+    #[serde(default)]
+    pub kind: u8,
+    /// Speed lines only: [`SpeedLinesParams::taper`]. Absent = 0 = the
+    /// constant-width runs every older file drew.
+    #[serde(default)]
+    pub taper: f32,
+    /// Speed lines only: [`SpeedLinesParams::converge`]. Absent = None.
+    #[serde(default)]
+    pub converge: Option<[f32; 2]>,
 }
 
 impl GenLinesSpec {
+    /// The layer name a fresh generation gets — one place, so the app,
+    /// the Materials bank and the dialog cannot disagree.
+    pub fn layer_name(&self) -> &'static str {
+        match self.kind {
+            1 => "Urchin flash",
+            2 => "Solid flash",
+            _ if self.focus => "Focus lines",
+            _ => "Speed lines",
+        }
+    }
+
+    /// Does this generator converge on a point (focus lines and both
+    /// flashes)? The aim-at-the-click paste rule keys on this — keying on
+    /// `focus` alone left kind 1/2 materials placing at their stored
+    /// centre instead of the cursor (M7 audit finding).
+    pub fn radial(&self) -> bool {
+        self.kind == 1 || self.kind == 2 || self.focus
+    }
+
     /// Rasterize the spec into tiles (the shared source with the dialog).
     pub fn render(&self, size: (u32, u32)) -> HashMap<TileIdx, Arc<Tile>> {
+        if self.kind == 1 || self.kind == 2 {
+            return render_urchin(
+                &UrchinParams {
+                    center: [self.a, self.b],
+                    r_in: self.c,
+                    r_out: self.d,
+                    count: self.count.max(1),
+                    width: self.width,
+                    angle_jitter: self.jitter,
+                    length_jitter: self.jitter,
+                    solid: self.kind == 2,
+                    seed: self.seed,
+                },
+                size,
+            );
+        }
         if self.focus {
             render_focus(
                 &FocusLinesParams {
@@ -298,6 +901,7 @@ impl GenLinesSpec {
                     angle_jitter: self.jitter,
                     width_jitter: self.jitter,
                     length_jitter: self.jitter,
+                    taper: self.taper.clamp(0.0, 1.0),
                     seed: self.seed,
                 },
                 size,
@@ -310,6 +914,8 @@ impl GenLinesSpec {
                     len_min: self.b,
                     len_max: self.c,
                     width: self.width,
+                    taper: self.taper,
+                    converge: self.converge,
                     seed: self.seed,
                 },
                 size,
@@ -322,6 +928,90 @@ impl GenLinesSpec {
 mod spec_tests {
     use super::*;
     use crate::doc::Document;
+
+    /// HARD REQUIREMENT (flash round, 2026-08-22): an .ora or a
+    /// `.gen.json` material written before `kind`/`taper`/`converge`
+    /// existed carries only the nine original attributes, and must
+    /// deserialize into a spec that renders exactly what it rendered
+    /// then — not "close", the same tiles.
+    #[test]
+    fn pre_flash_specs_load_with_the_old_meaning() {
+        let legacy_focus = r#"{"focus":true,"a":256.0,"b":256.0,"c":100.0,"d":240.0,"count":64,"width":6.0,"jitter":0.5,"seed":7}"#;
+        let s: GenLinesSpec = serde_json::from_str(legacy_focus).expect("old spec still loads");
+        assert_eq!(s.kind, 0, "no attribute = the original pair");
+        assert_eq!(s.taper, 0.0);
+        assert_eq!(s.converge, None);
+        assert_eq!(s.layer_name(), "Focus lines");
+        let old = render_focus(
+            &FocusLinesParams {
+                center: [256.0, 256.0],
+                r_in: 100.0,
+                r_out: 240.0,
+                count: 64,
+                width: 6.0,
+                angle_jitter: 0.5,
+                width_jitter: 0.5,
+                length_jitter: 0.5,
+                taper: 0.0,
+                seed: 7,
+            },
+            (512, 512),
+        );
+        let new = s.render((512, 512));
+        assert_eq!(old.len(), new.len(), "same tiles");
+        for (idx, t) in &old {
+            assert_eq!(t.data(), new[idx].data(), "legacy focus raster moved");
+        }
+
+        let legacy_speed = r#"{"focus":false,"a":20.0,"b":100.0,"c":300.0,"d":0.0,"count":80,"width":4.0,"jitter":0.0,"seed":3}"#;
+        let q: GenLinesSpec = serde_json::from_str(legacy_speed).unwrap();
+        assert_eq!((q.kind, q.taper, q.converge), (0, 0.0, None));
+        assert_eq!(q.layer_name(), "Speed lines");
+        let speed = q.render((512, 512));
+        assert_eq!(
+            super::tests::fingerprint(&speed),
+            (57, 25119, 6_096_450_357_538_070_854),
+            "the pre-round speed raster, from the pre-round attributes"
+        );
+
+        // And the round trip out is still readable BY an old build: the
+        // three new attributes are the only additions, and each of them
+        // reads back as the value a missing one defaults to.
+        let back: GenLinesSpec = serde_json::from_str(&serde_json::to_string(&q).unwrap()).unwrap();
+        assert_eq!(back, q);
+    }
+
+    /// The flash kinds ride the same field set, survive ORA, and stay
+    /// distinguishable — a saved urchin does not reload as focus lines.
+    #[test]
+    fn flash_kinds_round_trip_through_ora() {
+        for (kind, name) in [(1u8, "Urchin flash"), (2, "Solid flash")] {
+            let spec = GenLinesSpec {
+                focus: true,
+                a: 200.0,
+                b: 200.0,
+                c: 40.0,
+                d: 180.0,
+                count: 40,
+                width: 20.0,
+                jitter: 0.25,
+                seed: 7,
+                kind,
+                ..Default::default()
+            };
+            assert_eq!(spec.layer_name(), name);
+            let mut doc = Document::new(400, 400);
+            let li = doc.add_layer(name);
+            doc.layers[li].genlines = Some(spec);
+            assert!(doc.regen_genlines(li, spec), "{name} inked");
+
+            let mut buf = std::io::Cursor::new(Vec::new());
+            crate::ora::save_to(&doc, &mut buf).unwrap();
+            let re = crate::ora::load_from(std::io::Cursor::new(buf.into_inner())).unwrap();
+            let g = re.layers[li].genlines.expect("spec survived");
+            assert_eq!(g, spec, "{name}: kind survived the save");
+        }
+    }
 
     /// SF-004/005: the spec persists through ORA and regen renders from
     /// it — a re-applied layer keeps its stack position, the tiles follow
@@ -340,6 +1030,7 @@ mod spec_tests {
             width: 2.0,
             jitter: 0.2,
             seed: 7,
+            ..Default::default()
         };
         let li = doc.layers.len() - 1;
         doc.layers[li].genlines = Some(spec);
@@ -398,6 +1089,7 @@ mod spec_tests {
             width: 2.0,
             jitter: 0.2,
             seed: 7,
+            ..Default::default()
         };
         doc.layers[li].genlines = Some(spec);
         assert!(doc.regen_genlines(li, spec));
@@ -449,6 +1141,7 @@ mod spec_tests {
             width: 2.0,
             jitter: 0.2,
             seed: 7,
+            ..Default::default()
         };
         // A first generation, then an ordinary tile write on top of it:
         // two steps for the regen under test to sit above.
@@ -482,7 +1175,12 @@ mod spec_tests {
         assert_ne!(before, regenerated, "the regen changed the raster");
         assert_eq!(
             doc.undo_labels(),
-            ["New layer", "Regenerate lines", "Stroke", "Regenerate lines"],
+            [
+                "New layer",
+                "Regenerate lines",
+                "Stroke",
+                "Regenerate lines"
+            ],
             "one step for the regen, and the older steps survived it"
         );
 

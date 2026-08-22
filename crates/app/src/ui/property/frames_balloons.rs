@@ -519,31 +519,57 @@ pub(crate) fn sec_obj_guide(ui: &mut egui::Ui, _app: &mut App) {
 }
 
 pub(crate) fn sec_figure(ui: &mut egui::Ui, app: &mut App) {
-    use crate::cmd::FigureMode;
     match app.figure_mode {
-        FigureMode::Stream | FigureMode::Focus => {
+        m if m.generates() => {
             // The effect-line knobs: what the NEXT drag generates with.
             // Ranges mirror the generator dialog's (its clamp rationale —
             // giant counts/widths were a real UI hang — applies here too).
-            let focus = app.figure_mode == FigureMode::Focus;
-            let o = if focus {
+            let radial = m.radial();
+            let flash = m.gen_kind() != 0;
+            let o = if radial {
                 &mut app.figure_focus
             } else {
                 &mut app.figure_stream
             };
             ui.horizontal(|ui| {
-                ui.label("Lines");
+                ui.label(if flash { "Spikes" } else { "Lines" });
                 ui.add(egui::DragValue::new(&mut o.count).range(1..=512));
             });
             ui.horizontal(|ui| {
-                ui.label("Width");
+                ui.label(if flash { "Spike width" } else { "Width" });
+                // A flash's width is the spike BASE, so it needs a range
+                // a line never does; the renderer still caps it at the
+                // gap between neighbours so the teeth cannot merge.
                 ui.add(
                     egui::DragValue::new(&mut o.width)
-                        .range(0.5..=40.0)
+                        .range(if flash { 1.0..=200.0 } else { 0.5..=40.0 })
                         .speed(0.1),
-                );
+                )
+                .on_hover_text(if flash {
+                    "how wide each spike is at the rim, in pixels"
+                } else {
+                    "line thickness in pixels"
+                });
             });
-            if focus {
+            // Stream tails and Focus rays both taper (a printed 集中線
+            // needles at the convergence); the flash kinds' teeth carry
+            // their own shape and get no knob.
+            if !flash {
+                ui.horizontal(|ui| {
+                    ui.label("Taper");
+                    ui.add(
+                        egui::DragValue::new(&mut o.taper)
+                            .range(0.0..=1.0)
+                            .speed(0.01),
+                    )
+                    .on_hover_text(if radial {
+                        "how far each ray thins toward the convergence — 0 flat, 1 a needle point"
+                    } else {
+                        "how far each line thins toward its tail — 0 is a flat run, 1 a needle point"
+                    });
+                });
+            }
+            if radial {
                 ui.horizontal(|ui| {
                     ui.label("Jitter");
                     ui.add(
@@ -581,14 +607,13 @@ pub(crate) fn sec_figure_guide(ui: &mut egui::Ui, app: &mut App) {
         FigureMode::Polygon => "click vertices; the first one / Enter closes, Esc cancels",
         FigureMode::Stream => "drag along the motion — angle and length come from the drag",
         FigureMode::Focus => "drag from the convergence point out to the lines' reach",
+        FigureMode::Urchin => "drag from the flash's centre out to the spikes' reach",
+        FigureMode::SolidFlash => "drag from the hole's centre out to the ring's rim",
     });
-    match app.figure_mode {
-        FigureMode::Stream | FigureMode::Focus => {
-            ui.weak("adjust later: Object tool handles, or Layer ▸ effect lines");
-        }
-        _ => {
-            ui.weak("inked with the active brush — Size/Opacity above apply");
-        }
+    if app.figure_mode.generates() {
+        ui.weak("adjust later: Object tool handles, or Layer ▸ effect lines");
+    } else {
+        ui.weak("inked with the active brush — Size/Opacity above apply");
     }
 }
 

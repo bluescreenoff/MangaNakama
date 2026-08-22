@@ -191,7 +191,11 @@ impl App {
         }
         if manga {
             // Never the canvas leaf: reopen() upholds the class rule.
-            crate::ui::dock::reopen(self, Palette::Pages);
+            // UNFOCUSED: this is automatic, not a request for the Pages
+            // palette, and CSP's default workspace shows Layers (parity
+            // P0-3). Focusing it here put page thumbnails on top of the
+            // Layer palette on every manga launch.
+            crate::ui::dock::reopen_unfocused(self, Palette::Pages);
         } else {
             crate::ui::dock::close_palette(self, Palette::Pages);
         }
@@ -655,26 +659,66 @@ impl App {
         self.needs_redraw = true;
     }
 
+    /// 1-based reading-order number of the page entry `i` STARTS at — a
+    /// combined spread occupies two numbers, so parity downstream of one
+    /// stays honest.
+    pub fn page_number1(&self, entry: usize) -> usize {
+        1 + self.pages[..entry.min(self.pages.len())]
+            .iter()
+            .map(|e| if e.spread { 2 } else { 1 })
+            .sum::<usize>()
+    }
+
+    /// The current page's book side (`Some(true)` = right page). `None` =
+    /// a combined spread, which spans the fold and has both sides.
+    pub fn current_page_right(&self) -> Option<bool> {
+        let e = self.pages.get(self.page_index)?;
+        if e.spread {
+            return None;
+        }
+        Some(mn_core::page::PageSetup::page_is_right(
+            self.page_number1(self.page_index),
+            self.binding_right,
+        ))
+    }
+
     /// A fresh page document matching the project's page size, seeded with a
-    /// frame border folder when the project asked for one.
+    /// frame border folder when the project asked for one. Sided for the
+    /// slot AddPage fills — right after the current page — so the seeded
+    /// frame sits on the correct ノド/小口 offset (the owner's 2026-08-22
+    /// report: pages 2 and 3 wore the SAME offset, like two right pages).
     pub fn blank_page_doc(&self) -> Document {
         let (w, h) = self
             .page
             .as_ref()
             .map(|p| p.paper_px())
             .unwrap_or(self.doc.size);
-        self.blank_page_doc_sized(w, h)
+        let after = self.page_number1(self.page_index)
+            + if self.pages.get(self.page_index).is_some_and(|e| e.spread) {
+                2
+            } else {
+                1
+            };
+        self.blank_page_doc_at(w, h, after)
     }
 
     /// Same, at an explicit size (New Comic runs before `self.doc` exists).
+    /// Page 1's side by the book rule.
     pub fn blank_page_doc_sized(&self, w: u32, h: u32) -> Document {
+        self.blank_page_doc_at(w, h, 1)
+    }
+
+    /// The seeding core: `number1` decides which book side the frame's
+    /// binding offset mirrors to.
+    pub fn blank_page_doc_at(&self, w: u32, h: u32, number1: usize) -> Document {
         let mut doc = Document::new(w, h);
         if self.seed_frame_folder {
             if let Some(p) = self.page.as_ref().filter(|p| p.has_guides()) {
                 let border = (0.8 / 25.4 * p.dpi.max(1) as f32).max(2.0);
+                let right = mn_core::page::PageSetup::page_is_right(number1, self.binding_right);
                 doc.add_frame_folder(
                     "Frame 1",
-                    mn_core::FrameSet::single_rect(p.inner_rect_px(), border),
+                    mn_core::FrameSet::single_rect(p.inner_rect_px_on(right), border),
                 );
             }
         }

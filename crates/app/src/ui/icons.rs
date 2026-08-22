@@ -138,6 +138,8 @@ pub enum Icon {
     StreamLines,
     /// Figure ▸ Saturated line (集中線): rays converging on an empty centre.
     FocusLines,
+    /// Figure ▸ Sea urchin / Solid flash (ウニフラッシュ): a spiky burst.
+    UrchinFlash,
 }
 
 /// Paint `icon` to fill `r` (which should be square-ish), in `color`.
@@ -929,6 +931,28 @@ pub fn paint(p: &Painter, r: Rect, icon: Icon, color: Color32) {
                     ],
                     thin,
                 );
+            }
+        }
+        Icon::UrchinFlash => {
+            // Eight FILLED spikes, needle-pointed at the hole — the shape
+            // itself is the difference from FocusLines, so the icon draws
+            // wedges rather than strokes.
+            let c = r.center();
+            for k in 0..8 {
+                let a = k as f32 * std::f32::consts::TAU / 8.0 + 0.2;
+                let (s, co) = a.sin_cos();
+                let (nx, ny) = (-s, co);
+                let tip = w * 0.46;
+                let hw = w * 0.09;
+                p.add(Shape::convex_polygon(
+                    vec![
+                        Pos2::new(c.x + co * w * 0.14, c.y + s * w * 0.14),
+                        Pos2::new(c.x + co * tip + nx * hw, c.y + s * tip + ny * hw),
+                        Pos2::new(c.x + co * tip - nx * hw, c.y + s * tip - ny * hw),
+                    ],
+                    color,
+                    Stroke::NONE,
+                ));
             }
         }
     }

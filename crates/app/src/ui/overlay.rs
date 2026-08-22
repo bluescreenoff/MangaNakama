@@ -261,37 +261,74 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
     // reads the same lines (`template_lines` below), and export never drew
     // them in the first place. The switch persists in ui.txt.
     if let Some(ps) = app.page.as_ref().filter(|_| !app.layout.guides_hidden) {
-        painter.add(egui::Shape::line(
-            quad(ps.bleed_rect_px()),
-            egui::Stroke::new(
-                1.0,
-                egui::Color32::from_rgba_unmultiplied(110, 190, 220, 110),
-            ),
-        ));
-        painter.add(egui::Shape::line(
-            quad(ps.trim_rect_px()),
-            egui::Stroke::new(
-                1.0,
-                egui::Color32::from_rgba_unmultiplied(110, 150, 240, 210),
-            ),
-        ));
-        painter.add(egui::Shape::line(
-            quad(ps.inner_rect_px()),
-            egui::Stroke::new(
-                1.0,
-                egui::Color32::from_rgba_unmultiplied(110, 200, 140, 190),
-            ),
-        ));
-        if let Some(r) = ps.safety_rect_px() {
-            painter.extend(egui::Shape::dashed_line(
-                &quad(r),
-                egui::Stroke::new(
-                    1.0,
-                    egui::Color32::from_rgba_unmultiplied(240, 170, 90, 170),
-                ),
-                5.0,
-                5.0,
-            ));
+        let bleed_stroke = egui::Stroke::new(
+            1.0,
+            egui::Color32::from_rgba_unmultiplied(110, 190, 220, 110),
+        );
+        let trim_stroke = egui::Stroke::new(
+            1.0,
+            egui::Color32::from_rgba_unmultiplied(110, 150, 240, 210),
+        );
+        let inner_stroke = egui::Stroke::new(
+            1.0,
+            egui::Color32::from_rgba_unmultiplied(110, 200, 140, 190),
+        );
+        let safety_stroke = egui::Stroke::new(
+            1.0,
+            egui::Color32::from_rgba_unmultiplied(240, 170, 90, 170),
+        );
+        // Book-side aware (owner report 2026-08-22): the inner frame and
+        // safety margins mirror per page — ノド (binding) margin on the
+        // spine side, 小口 offset outward — so pages 2 and 3 stop wearing
+        // the same gutter. A combined spread draws BOTH halves' frames and
+        // spans trim/bleed across the fold (nothing is cut at the fold).
+        let shift = |r: [f32; 4], dx: f32| [r[0] + dx, r[1], r[2] + dx, r[3]];
+        let span = |r: [f32; 4], dw: f32, pw: f32| [r[0], r[1], dw - (pw - r[2]), r[3]];
+        match app.current_page_right() {
+            Some(right) => {
+                painter.add(egui::Shape::line(quad(ps.bleed_rect_px()), bleed_stroke));
+                painter.add(egui::Shape::line(quad(ps.trim_rect_px()), trim_stroke));
+                painter.add(egui::Shape::line(
+                    quad(ps.inner_rect_px_on(right)),
+                    inner_stroke,
+                ));
+                if let Some(r) = ps.safety_rect_px_on(right) {
+                    painter.extend(egui::Shape::dashed_line(&quad(r), safety_stroke, 5.0, 5.0));
+                }
+            }
+            None => {
+                let pw = ps.paper_px().0 as f32;
+                let dw = app.doc.size.0 as f32;
+                painter.add(egui::Shape::line(
+                    quad(span(ps.bleed_rect_px(), dw, pw)),
+                    bleed_stroke,
+                ));
+                painter.add(egui::Shape::line(
+                    quad(span(ps.trim_rect_px(), dw, pw)),
+                    trim_stroke,
+                ));
+                // Left half of the spread = a LEFT page, right half = a
+                // RIGHT page, whatever the binding — the fold is between.
+                painter.add(egui::Shape::line(
+                    quad(ps.inner_rect_px_on(false)),
+                    inner_stroke,
+                ));
+                painter.add(egui::Shape::line(
+                    quad(shift(ps.inner_rect_px_on(true), dw - pw)),
+                    inner_stroke,
+                ));
+                if let Some(r) = ps.safety_rect_px_on(false) {
+                    painter.extend(egui::Shape::dashed_line(&quad(r), safety_stroke, 5.0, 5.0));
+                }
+                if let Some(r) = ps.safety_rect_px_on(true) {
+                    painter.extend(egui::Shape::dashed_line(
+                        &quad(shift(r, dw - pw)),
+                        safety_stroke,
+                        5.0,
+                        5.0,
+                    ));
+                }
+            }
         }
     }
 
@@ -1726,12 +1763,16 @@ fn template_lines(app: &App) -> Vec<[f32; 4]> {
     };
     push_rect(&mut out, p.trim_rect_px());
     push_rect(&mut out, p.bleed_rect_px());
-    push_rect(&mut out, p.inner_rect_px());
-    if let Some(s) = p.safety_rect_px() {
+    // Both book sides' variants: snapping is a tolerance affordance, and a
+    // panel drawn against last session's side (or a page about to be
+    // reordered) should still find a line to sit on.
+    push_rect(&mut out, p.inner_rect_px_on(true));
+    push_rect(&mut out, p.inner_rect_px_on(false));
+    if let Some(s) = p.safety_rect_px_on(true) {
         push_rect(&mut out, s);
-        // The mirrored variant (right-bound pages swap inside/outside).
-        let w = p.paper_px().0 as f32;
-        push_rect(&mut out, [w - s[2], s[1], w - s[0], s[3]]);
+    }
+    if let Some(s) = p.safety_rect_px_on(false) {
+        push_rect(&mut out, s);
     }
     out
 }

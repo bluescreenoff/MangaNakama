@@ -642,6 +642,42 @@ pub enum FigureMode {
     /// CSP 集中線 Saturated line: drag from the convergence point outward —
     /// a fresh focus-line layer converging on the press point.
     Focus,
+    /// ウニフラッシュ Sea urchin flash: same centre-out drag, but the rays
+    /// are FILLED triangular spikes — the flash mat no line generator can
+    /// make (pro-page audit 2026-08-22, #1 IMPOSSIBLE).
+    Urchin,
+    /// ベタフラッシュ Solid flash: the same teeth cut OUT of a solid ring.
+    SolidFlash,
+}
+
+impl FigureMode {
+    /// Do the Stream/Saturated/flash drags apply — the modes that place a
+    /// generated layer instead of inking the active one? One predicate,
+    /// because press, preview, release and the Tool Property all have to
+    /// agree and a missed arm inks a frame layer.
+    pub fn generates(self) -> bool {
+        matches!(
+            self,
+            FigureMode::Stream | FigureMode::Focus | FigureMode::Urchin | FigureMode::SolidFlash
+        )
+    }
+
+    /// The [`mn_core::genlines::GenLinesSpec`] `kind` this mode places.
+    pub fn gen_kind(self) -> u8 {
+        match self {
+            FigureMode::Urchin => 1,
+            FigureMode::SolidFlash => 2,
+            _ => 0,
+        }
+    }
+
+    /// Centre-out drags (everything but Stream, among the generators).
+    pub fn radial(self) -> bool {
+        matches!(
+            self,
+            FigureMode::Focus | FigureMode::Urchin | FigureMode::SolidFlash
+        )
+    }
 }
 
 impl FigureMode {
@@ -653,6 +689,8 @@ impl FigureMode {
             FigureMode::Polygon => "Polygon",
             FigureMode::Stream => "Stream line",
             FigureMode::Focus => "Saturated line",
+            FigureMode::Urchin => "Sea urchin flash",
+            FigureMode::SolidFlash => "Solid flash",
         }
     }
 }
@@ -660,26 +698,39 @@ impl FigureMode {
 /// Tool-side parameters for Figure ▸ Stream/Saturated line — what the NEXT
 /// drag generates with (the drag itself supplies the geometry: center and
 /// radius, or angle and length). One struct serves both modes; Stream
-/// ignores `jitter`/`r_in_frac` (the speed renderer has no use for either).
-/// `seed` bumps after every placement so consecutive drags differ without
-/// losing determinism.
+/// ignores `jitter`/`r_in_frac` (the speed renderer has no use for either)
+/// and the radial modes ignore `taper`. `seed` bumps after every placement
+/// so consecutive drags differ without losing determinism.
+///
+/// The flash modes share `figure_focus` with Saturated line: they are the
+/// same centre-out gesture with the same four knobs, and every sub tool
+/// row writes its own preset values on the way in.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct FigureLineOpts {
     pub count: u32,
     pub width: f32,
     pub jitter: f32,
-    /// Focus only: the empty middle, as a fraction of the dragged radius.
+    /// Focus/flash only: the empty middle, as a fraction of the radius.
     pub r_in_frac: f32,
+    /// Stream only: [`mn_core::genlines::SpeedLinesParams::taper`]. 0 is
+    /// the pre-2026-08-22 look and stays the default — an existing drag
+    /// must not change shape because the knob appeared.
+    pub taper: f32,
     pub seed: u64,
 }
 
 impl FigureLineOpts {
+    // Default tapers are NOT 0: a flat-width effect line is the "flat
+    // noise field" the pro-page audit flagged — printed 流線/集中線 thin
+    // to needles. Tool defaults are free to be right (nothing saved
+    // regenerates through them; the 0-means-legacy rule guards SPECS).
     pub fn stream_default() -> Self {
         Self {
             count: 60,
             width: 3.0,
             jitter: 0.0,
             r_in_frac: 0.0,
+            taper: 0.5,
             seed: 1,
         }
     }
@@ -689,6 +740,7 @@ impl FigureLineOpts {
             width: 4.0,
             jitter: 0.35,
             r_in_frac: 0.4,
+            taper: 0.5,
             seed: 1,
         }
     }
@@ -1069,6 +1121,8 @@ impl SubTool {
             SubTool::Figure(FigureMode::Polygon),
             SubTool::Figure(FigureMode::Stream),
             SubTool::Figure(FigureMode::Focus),
+            SubTool::Figure(FigureMode::Urchin),
+            SubTool::Figure(FigureMode::SolidFlash),
             SubTool::Gradient(GradMode::FgToBg),
             SubTool::Gradient(GradMode::FgToTransparent),
             SubTool::Gradient(GradMode::TransparentToFg),
@@ -1527,6 +1581,8 @@ pub enum AppCmd {
     /// layer per drag; adjusting an existing one is the Object tool's job).
     GenLinesPlace {
         focus: bool,
+        /// `GenLinesSpec::kind` — 0 focus/speed, 1 urchin, 2 solid flash.
+        kind: u8,
         a: f32,
         b: f32,
         c: f32,
@@ -1534,6 +1590,7 @@ pub enum AppCmd {
         count: u32,
         width: f32,
         jitter: f32,
+        taper: f32,
         seed: u64,
     },
     /// CV-004: drop the whole undo history (frees memory, irreversible).
@@ -2291,11 +2348,7 @@ fn genlines_new_layer(app: &mut App, spec: mn_core::genlines::GenLinesSpec) -> O
     if tiles.is_empty() {
         return None;
     }
-    let name = if spec.focus {
-        "Focus lines"
-    } else {
-        "Speed lines"
-    };
+    let name = spec.layer_name();
     app.doc.add_layer(name);
     app.doc.layers[app.doc.active].genlines = Some(spec);
     app.doc.begin_op();
@@ -2649,6 +2702,12 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             seed,
         } => {
             app.gen_open = false;
+            // The dialog only knows the original nine parameters, so it
+            // must CARRY the layer's kind/taper/converge rather than
+            // rebuild them: applying it to a flash layer would otherwise
+            // silently turn the spikes back into plain focus lines, with
+            // the raster following on the same press.
+            let carry = app.doc.active_layer().genlines.unwrap_or_default();
             let spec = mn_core::genlines::GenLinesSpec {
                 focus,
                 a,
@@ -2659,6 +2718,9 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 width,
                 jitter,
                 seed,
+                kind: carry.kind,
+                taper: carry.taper,
+                converge: carry.converge,
             };
             // SF-004/005: re-applying on the layer the params came from
             // regenerates IN PLACE (the layer keeps name/stack/blend);
@@ -2684,6 +2746,7 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
         }
         AppCmd::GenLinesPlace {
             focus,
+            kind,
             a,
             b,
             c,
@@ -2691,6 +2754,7 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             count,
             width,
             jitter,
+            taper,
             seed,
         } => {
             let spec = mn_core::genlines::GenLinesSpec {
@@ -2703,6 +2767,9 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 width,
                 jitter,
                 seed,
+                kind,
+                taper,
+                ..Default::default()
             };
             match genlines_new_layer(app, spec) {
                 Some(name) => app.set_status(format!(
@@ -2781,13 +2848,31 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             let (w, h) = d.setup.paper_px();
             app.page = d.setup.has_guides().then(|| d.setup.clone());
             app.seed_frame_folder = d.frame_folder;
+            // Binding BEFORE any page is seeded: every seeded frame's book
+            // side (`page_is_right`) keys on it, and the old order built
+            // page 1 under the PREVIOUS work's binding.
+            app.binding_right = d.binding_right;
             app.doc = app.blank_page_doc_sized(w, h);
             app.story = d.story;
-            app.binding_right = d.binding_right;
-            let blank = mn_core::project::doc_to_bytes(&app.doc).ok();
+            // Facing pages get facing frames: one encoding per BOOK SIDE,
+            // picked by page number. Reusing one blank for every page put
+            // the same gutter offset on both halves of every spread — the
+            // owner's 2026-08-22 report, visible in the hero shot's pages
+            // 2/3 thumbnails.
+            let n_right = if app.binding_right { 2 } else { 1 };
+            let blank_right =
+                mn_core::project::doc_to_bytes(&app.blank_page_doc_at(w, h, n_right)).ok();
+            let blank_left =
+                mn_core::project::doc_to_bytes(&app.blank_page_doc_at(w, h, 3 - n_right)).ok();
             app.pages = vec![PageEntry::active()];
-            for _ in 1..d.pages.max(1) {
-                let e = app.fresh_page(blank.clone(), None);
+            for n in 2..=(d.pages.max(1) as usize) {
+                let right = mn_core::page::PageSetup::page_is_right(n, app.binding_right);
+                let bytes = if right {
+                    blank_right.clone()
+                } else {
+                    blank_left.clone()
+                };
+                let e = app.fresh_page(bytes, None);
                 app.pages.push(e);
             }
             app.page_index = 0;
@@ -4660,7 +4745,7 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             // converge where you clicked; the rest is what the material
             // stores (a material is reusable, a position is not).
             if let Some(mut spec) = crate::app::materials::read_gen_spec(&path) {
-                if spec.focus {
+                if spec.radial() {
                     (spec.a, spec.b) = genlines_aim_point(app);
                 }
                 app.material_note_use(&path);

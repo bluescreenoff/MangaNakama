@@ -1694,7 +1694,7 @@ fn material_bank_pastes_and_tiles() {
     // drive — assert the starter set exists in the repo layout.
     let mat_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/materials");
     assert!(
-        mat_dir.join("tone-dots-10pct.png").is_file(),
+        mat_dir.join("tones/tone-dot-60lpi-10.png").is_file(),
         "the starter materials must ship in assets/materials"
     );
     if app.materials.is_empty() {
@@ -1703,7 +1703,7 @@ fn material_bank_pastes_and_tiles() {
         app.materials_scan();
     }
     assert!(
-        app.materials.iter().any(|m| m.name == "tone-dots-10pct"),
+        app.materials.iter().any(|m| m.name == "tone-dot-60lpi-10"),
         "the scan must find the starter tones: {:?}",
         app.materials
             .iter()
@@ -1714,7 +1714,7 @@ fn material_bank_pastes_and_tiles() {
     let dots = app
         .materials
         .iter()
-        .find(|m| m.name == "tone-dots-10pct")
+        .find(|m| m.name == "tone-dot-60lpi-10")
         .unwrap()
         .path
         .clone();
@@ -1798,7 +1798,7 @@ fn material_tone_paste_renders_screentone() {
     let dots = app
         .materials
         .iter()
-        .find(|m| m.name == "tone-gradient-halftone")
+        .find(|m| m.name == "tone-dot-60lpi-gradient")
         .expect("the gradient starter ships")
         .path
         .clone();
@@ -1855,7 +1855,7 @@ fn material_paste_size_modes_and_layer_order() {
     let dots = app
         .materials
         .iter()
-        .find(|m| m.name == "tone-dots-10pct")
+        .find(|m| m.name == "tone-dot-60lpi-10")
         .unwrap()
         .path
         .clone();
@@ -7719,4 +7719,131 @@ fn figure_line_drags_place_fresh_effect_layers() {
     app.finish_figure_drag((200.0, 200.0), (203.0, 202.0));
     drain_cmds(&mut app);
     assert_eq!(app.doc.layers.len(), n, "tiny drag places nothing");
+}
+
+/// Book-side seeding (owner report 2026-08-22: pages 2 and 3 wore the SAME
+/// inner-frame offset): the blank-page factory mirrors the seeded frame's
+/// binding offset by the page number it is destined for. Right-bound: page
+/// 2 = right page (offset toward its right/小口 edge), page 3 = left page
+/// (mirrored) — symmetric about the fold.
+#[test]
+fn seeded_frames_mirror_per_book_side() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    let setup = mn_core::page::PageSetup::presets()
+        .into_iter()
+        .find(|p| p.name.contains("Shueisha"))
+        .expect("offset-carrying preset");
+    assert!(setup.inner_offset_mm.0 > 0.0);
+    let (w, h) = setup.paper_px();
+    app.page = Some(setup);
+    app.seed_frame_folder = true;
+    app.binding_right = true;
+
+    let rect_of = |d: &mn_core::doc::Document| {
+        d.layers
+            .iter()
+            .find_map(|l| l.frames().map(|fs| fs.frames[0].bbox()))
+            .expect("seeded frame folder")
+    };
+    let p2 = rect_of(&app.blank_page_doc_at(w, h, 2));
+    let p3 = rect_of(&app.blank_page_doc_at(w, h, 3));
+    assert!(p2[0] > p3[0], "page 2 (right) sits right of page 3 (left)");
+    assert!(
+        (p3[0] - (w as f32 - p2[2])).abs() < 1.0,
+        "mirrored about the fold: {p3:?} vs {p2:?}"
+    );
+    // And the numbering helper sees through combined spreads.
+    assert_eq!(app.page_number1(0), 1);
+    let e = app.fresh_spread(None);
+    app.pages.push(e);
+    let e = app.fresh_page(None, None);
+    app.pages.push(e);
+    assert_eq!(app.page_number1(1), 2, "spread starts at 2");
+    assert_eq!(app.page_number1(2), 4, "the page after it is 4, not 3");
+}
+
+/// Figure ▸ Sea urchin / Solid flash (pro-page audit 2026-08-22, the #1
+/// IMPOSSIBLE): the same centre-out drag as Saturated line, but the drag
+/// places a FLASH — `kind` 1/2 on the layer's spec, its own layer name,
+/// and `focus = true` so the Object tool's driver handles still work.
+#[test]
+fn figure_flash_drags_place_urchin_and_solid_layers() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    app.tool = Tool::Figure;
+    // The values the "Sea urchin flash" sub tool row arms.
+    app.figure_focus.count = 64;
+    app.figure_focus.width = 20.0;
+    app.figure_focus.jitter = 0.25;
+    app.figure_focus.r_in_frac = 0.3;
+
+    for (mode, kind, name) in [
+        (crate::cmd::FigureMode::Urchin, 1u8, "Urchin flash"),
+        (crate::cmd::FigureMode::SolidFlash, 2, "Solid flash"),
+    ] {
+        app.figure_mode = mode;
+        let before = app.doc.layers.len();
+        app.finish_figure_drag((300.0, 200.0), (300.0, 60.0));
+        drain_cmds(&mut app);
+        assert_eq!(app.doc.layers.len(), before + 1, "{name}: one new layer");
+        assert_eq!(app.doc.active_layer().name, name);
+        let g = app.doc.active_layer().genlines.expect("spec on the layer");
+        assert_eq!(g.kind, kind, "{name}: the generator kind rode along");
+        assert!(g.focus, "{name}: radial, so the driver handles apply");
+        assert_eq!([g.a, g.b], [300.0, 200.0], "centred on the press point");
+        assert!((g.d - 140.0).abs() < 0.01, "rim = drag length");
+        assert!(
+            app.doc.active_layer().tiles().count() > 0,
+            "{name}: ink landed"
+        );
+    }
+
+    // The dialog knows nothing about kinds: re-applying its nine
+    // parameters on a flash layer must NOT turn it back into focus lines.
+    let li = app.doc.active;
+    let g = app.doc.layers[li].genlines.unwrap();
+    crate::dispatch(
+        &mut app,
+        AppCmd::GenLinesApply {
+            focus: true,
+            a: g.a,
+            b: g.b,
+            c: g.c,
+            d: g.d,
+            count: 40,
+            width: g.width,
+            jitter: g.jitter,
+            seed: g.seed,
+        },
+    );
+    let after = app.doc.layers[li]
+        .genlines
+        .expect("still a generator layer");
+    assert_eq!(
+        after.kind, 2,
+        "Apply carried the kind instead of clearing it"
+    );
+    assert_eq!(after.count, 40, "and the dialog's own change landed");
+
+    // Stream taper reaches the placed spec. The TOOL default is 0.5 —
+    // printed effect lines needle, and a tool default is free to be right
+    // (the spec-side 0-means-legacy rule guards saved layers, not knobs).
+    // Turning the knob to 0 still buys the flat legacy look.
+    app.figure_mode = crate::cmd::FigureMode::Stream;
+    assert_eq!(app.figure_stream.taper, 0.5, "the tool default tapers");
+    app.figure_stream.taper = 0.0;
+    app.finish_figure_drag((100.0, 100.0), (400.0, 100.0));
+    drain_cmds(&mut app);
+    assert_eq!(app.doc.active_layer().genlines.unwrap().taper, 0.0);
+    app.figure_stream.taper = 0.7;
+    app.finish_figure_drag((100.0, 300.0), (400.0, 300.0));
+    drain_cmds(&mut app);
+    let s = app.doc.active_layer().genlines.expect("spec on the layer");
+    assert_eq!(s.kind, 0, "stream stays the legacy kind");
+    assert!((s.taper - 0.7).abs() < 1e-6, "the knob reached the layer");
 }
