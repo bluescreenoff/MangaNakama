@@ -55,9 +55,7 @@ fn tool_key(t: Tool) -> &'static str {
 
 /// Tool families, in `STRIP_TOOLS` order: draw+erase+fill, selection,
 /// objects+utility. CSP separates its tool palette into exactly three such
-/// blocks (`csp/150_tools_0002.png`, the numbered orange boxes). Every count
-/// is EVEN so no block ends with a holed cell in the two-column grid — that
-/// is why the split sits where it does rather than one tool either way.
+/// blocks (`csp/150_tools_0002.png`, the numbered orange boxes).
 const GROUPS: [usize; 3] = [6, 4, 6];
 
 /// Icon cell. CSP's cell metric is ~34 px including its padding; ours is the
@@ -66,26 +64,28 @@ const CELL: f32 = 22.0;
 const GAP: f32 = 2.0;
 
 pub(super) fn tool_palette_body(ui: &mut egui::Ui, app: &mut App) {
-    // CSP's Tool palette is a FIXED TWO-COLUMN strip (csp/150_tools_0002.png):
-    // the grid does NOT reflow with the leaf width. Ours used to wrap to fill
-    // the leaf — 8 icons a row at the shipped width, 10 at 2560 — which left a
-    // tall empty void under the palette and read as unfinished (parity P0-1).
+    // CSP's Tool palette is a compact icon grid anchored TOP-LEFT that reflows
+    // to the palette width: one column when the leaf is a sliver, n columns
+    // when it is wide, and the block always starts at the left margin.
+    //
+    // Round 21 pinned it to two columns and CENTRED the pair, which in a
+    // floated palette read as a narrow strip of icons swimming mid-panel with
+    // a wide dead band down the left (owner, 2026-08-22: "this is fucked and
+    // not like csp"). Reflowing keeps the palette's height content-driven —
+    // the thing P0-1 was actually about — without the dead band.
     let avail = ui.available_width();
-    let cols = if avail >= 2.0 * CELL + GAP { 2 } else { 1 };
+    let cols = (((avail + GAP) / (CELL + GAP)).floor() as usize).max(1);
     let grid_w = cols as f32 * CELL + (cols - 1) as f32 * GAP;
-    // The column pair is centred in whatever width the leaf happens to have.
-    let indent = ((avail - grid_w) * 0.5).max(0.0);
     ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP);
 
     let mut tools = STRIP_TOOLS.iter();
     for (g, count) in GROUPS.iter().enumerate() {
         if g > 0 {
-            group_rule(ui, indent, grid_w);
+            group_rule(ui, grid_w);
         }
         let block: Vec<_> = tools.by_ref().take(*count).collect();
         for row in block.chunks(cols) {
             ui.horizontal(|ui| {
-                ui.add_space(indent);
                 for (t, icon) in row {
                     let key = tool_key(*t);
                     let tip = if key.is_empty() {
@@ -100,18 +100,18 @@ pub(super) fn tool_palette_body(ui: &mut egui::Ui, app: &mut App) {
             });
         }
     }
-    ui.add_space(3.0);
+    ui.add_space(4.0);
     color_slots(ui, app);
 }
 
 /// The rule between two tool families: a hairline the width of the grid,
 /// with air either side.
-fn group_rule(ui: &mut egui::Ui, indent: f32, grid_w: f32) {
+fn group_rule(ui: &mut egui::Ui, grid_w: f32) {
     let (rect, _) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), 7.0),
         egui::Sense::hover(),
     );
-    let left = rect.left() + indent;
+    let left = rect.left();
     ui.painter().hline(
         egui::Rangef::new(left, left + grid_w),
         rect.center().y,

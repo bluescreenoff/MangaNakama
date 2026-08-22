@@ -17,43 +17,87 @@ pub(super) fn rgb32(rgb: [f32; 3]) -> egui::Color32 {
     )
 }
 
-/// CSP's main / sub / transparent drawing-colour slots — three wide swatches
-/// spanning the palette, like the reference screenshot.
+/// Chip metrics for [`color_slots`]: the main/sub square, how far the sub
+/// chip sits behind it, and the transparent chip beside the pair.
+const CHIP: f32 = 20.0;
+const BEHIND: f32 = 11.0;
+const CHIP_SMALL: f32 = 15.0;
+
+/// CSP's main / sub / transparent drawing-colour slots: two SMALL chips with
+/// the sub colour tucked behind and down-right of the main one, then the
+/// transparent chip and the swap arrow beside them.
+///
+/// It used to paint three swatches that stretched the full palette width,
+/// which in the Tool palette read as a footer bar rather than a colour
+/// control, and in the Color palette as three loose slabs under the wheel
+/// (owner, 2026-08-22). Same three click targets, same commands — only the
+/// geometry changed. Shared by the Tool and Color palettes so the control is
+/// literally the same object in both.
 pub(super) fn color_slots(ui: &mut egui::Ui, app: &mut App) {
     ui.horizontal(|ui| {
-        let gap = 3.0;
-        let sw = ((ui.available_width() - 20.0 - 3.0 * gap) / 3.0).clamp(22.0, 70.0);
-        for (slot, tip) in [
-            (Slot::Main, "Main colour"),
-            (Slot::Sub, "Sub colour (X swaps)"),
-            (Slot::Transparent, "Transparent — erase with this brush (C)"),
-        ] {
-            let (rect, resp) = ui.allocate_exact_size(egui::vec2(sw, 22.0), egui::Sense::click());
-            let p = ui.painter();
-            match slot {
-                Slot::Main => {
-                    p.rect_filled(rect, 2.0, rgb32(app.main_color));
-                }
-                Slot::Sub => {
-                    p.rect_filled(rect, 2.0, rgb32(app.sub_color));
-                }
-                Slot::Transparent => icons::checkerboard(p, rect, 5.0),
-            }
-            let active = app.slot == slot;
-            let stroke = if active {
-                egui::Stroke::new(2.0, theme::ACCENT)
-            } else {
-                egui::Stroke::new(1.0, theme::OUTLINE)
-            };
-            p.rect_stroke(rect, 2.0, stroke, egui::StrokeKind::Inside);
-            if resp.on_hover_text(tip).clicked() {
-                app.push_cmd(AppCmd::SetSlot(slot));
-            }
+        let (block, _) = ui.allocate_exact_size(
+            egui::vec2(CHIP + BEHIND, CHIP + BEHIND),
+            egui::Sense::hover(),
+        );
+        let main = egui::Rect::from_min_size(block.min, egui::vec2(CHIP, CHIP));
+        let sub = main.translate(egui::vec2(BEHIND, BEHIND));
+        // The sub chip is painted UNDER the main one, so only its lower-right
+        // L is visible. Its hit area is the visible right strip and nothing
+        // else, so neither chip can steal the other's click.
+        let sub_hit = egui::Rect::from_min_max(egui::pos2(main.right(), sub.top()), sub.max);
+        let id = ui.id().with("mn.slots");
+        let sub_resp = ui
+            .interact(sub_hit, id.with("sub"), egui::Sense::click())
+            .on_hover_text("Sub colour (X swaps)");
+        let main_resp = ui
+            .interact(main, id.with("main"), egui::Sense::click())
+            .on_hover_text("Main colour");
+
+        let p = ui.painter();
+        p.rect_filled(sub, 2.0, rgb32(app.sub_color));
+        chip_stroke(p, sub, app.slot == Slot::Sub, sub_resp.hovered());
+        p.rect_filled(main, 2.0, rgb32(app.main_color));
+        chip_stroke(p, main, app.slot == Slot::Main, main_resp.hovered());
+
+        if main_resp.clicked() {
+            app.push_cmd(AppCmd::SetSlot(Slot::Main));
         }
+        if sub_resp.clicked() {
+            app.push_cmd(AppCmd::SetSlot(Slot::Sub));
+        }
+
+        ui.add_space(4.0);
+        let (tr, tr_resp) = ui.allocate_exact_size(
+            egui::vec2(CHIP_SMALL, CHIP_SMALL),
+            egui::Sense::click(),
+        );
+        let p = ui.painter();
+        icons::checkerboard(p, tr, 4.0);
+        chip_stroke(p, tr, app.slot == Slot::Transparent, tr_resp.hovered());
+        if tr_resp
+            .on_hover_text("Transparent — erase with this brush (C)")
+            .clicked()
+        {
+            app.push_cmd(AppCmd::SetSlot(Slot::Transparent));
+        }
+
         if icon_btn(ui, Icon::Swap, 18.0, false, true, "Swap main/sub (X)").clicked() {
             app.push_cmd(AppCmd::SwapColors);
         }
     });
+}
+
+/// The chip outline: accent when the slot is the one being drawn with, a
+/// bright hairline under the pointer, the panel's own outline otherwise.
+fn chip_stroke(p: &egui::Painter, rect: egui::Rect, active: bool, hovered: bool) {
+    let stroke = if active {
+        egui::Stroke::new(2.0, theme::ACCENT)
+    } else if hovered {
+        egui::Stroke::new(1.0, theme::TEXT_STRONG)
+    } else {
+        egui::Stroke::new(1.0, theme::OUTLINE)
+    };
+    p.rect_stroke(rect, 2.0, stroke, egui::StrokeKind::Inside);
 }
 
 // --- color panel (Photoshop-style SV square + hue strip) -----------------
@@ -114,10 +158,18 @@ pub(super) fn picker_sync(app: &mut App) {
 }
 
 pub(super) fn color_section(ui: &mut egui::Ui, app: &mut App) {
-    // CSP's default Color Wheel: hue ring with the SV square inscribed.
+    // CSP's default Color Wheel: hue ring with the SV square inscribed, then
+    // ONE tight run of controls under it — value row, hex, colour chips,
+    // recent — with the leftover height left as clean panel. The rows used to
+    // drift apart on the frame's 3pt rhythm plus their own add_space, which
+    // with the full-width slots made the lower half read as unfinished
+    // (owner, 2026-08-22: "feels ugly like there's some missing space").
+    ui.spacing_mut().item_spacing.y = 2.0;
     let mut hsv = app.picker_hsv;
     let w = ui.available_width();
-    let side = w.clamp(110.0, 172.0);
+    // The wheel grows with the palette (CSP's does); the old 172 ceiling left
+    // a floated Color palette with a small wheel adrift in a wide panel.
+    let side = w.clamp(110.0, 220.0);
     let (all, _) = ui.allocate_exact_size(egui::vec2(w, side), egui::Sense::hover());
     let centre = egui::pos2(all.center().x, all.top() + side * 0.5);
     let r_out = side * 0.5 - 1.0;
@@ -259,7 +311,7 @@ pub(super) fn color_section(ui: &mut egui::Ui, app: &mut App) {
     }
 
     // RGB readout.
-    ui.add_space(3.0);
+    ui.add_space(5.0);
     let rgb = app.active_color();
     let mut vals = [
         (rgb[0] * 255.0).round(),
@@ -298,7 +350,7 @@ pub(super) fn color_section(ui: &mut egui::Ui, app: &mut App) {
     }
 
     hex_field(ui, app, rgb);
-    ui.add_space(2.0);
+    ui.add_space(5.0);
     color_slots(ui, app);
     history_strip(ui, app);
 }
