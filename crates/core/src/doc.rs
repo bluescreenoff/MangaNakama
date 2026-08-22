@@ -198,7 +198,9 @@ impl Blend {
 /// The print check — "would this page hold up in 1-bit?" — without converting
 /// anything. Nothing here touches a pixel, nothing here is exported, and the
 /// setting survives a save so the answer is one click away next session.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+// (serde: the publisher profile stores an export colour — additive derive,
+// nothing existing serializes through it.)
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LayerExpression {
     /// As drawn.
     #[default]

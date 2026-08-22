@@ -734,6 +734,90 @@ fn reduce_u8(p: [u8; 4], e: crate::doc::LayerExpression) -> [u8; 4] {
 /// the downscale is immediately averaged back into grey by the filter, so
 /// the file that reaches the printer is not 1-bit at all — the order here
 /// is the whole correctness of the mono preset.
+/// What rectangle of the page an export writes. `Paper` is every export
+/// before profiles existed, byte for byte; the other two are the crop the
+/// PRINT_PRESETS comment always promised ("without a crop-to-trim the paper
+/// size changes nothing here").
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum ExportCrop {
+    /// The whole canvas (paper), as always.
+    #[default]
+    Paper,
+    /// Trim + bleed — what a printer wants on the plate.
+    TrimBleed,
+    /// Trim only — what a reader sees; the web target.
+    Trim,
+}
+
+/// The crop rectangle in page pixels, `[x0, y0, x1, y1]`, for a document
+/// `doc_px` big under `setup`. Handles SPREADS: a canvas materially wider
+/// than the setup's paper is two pages side by side, so the rect keeps the
+/// left page's left inset and the right page's right inset (the middle is
+/// the fold — nothing to cut there). Degenerate setups (zero trim — the
+/// pixel-canvas presets) and crops that would leave nothing fall back to
+/// the full canvas rather than emit an empty file.
+pub fn crop_rect_px(
+    setup: &crate::page::PageSetup,
+    doc_px: (u32, u32),
+    crop: ExportCrop,
+) -> [u32; 4] {
+    let full = [0, 0, doc_px.0, doc_px.1];
+    if crop == ExportCrop::Paper {
+        return full;
+    }
+    let r = match crop {
+        ExportCrop::Trim => setup.trim_rect_px(),
+        _ => setup.bleed_rect_px(),
+    };
+    let [x0, y0, x1, y1] = r;
+    if !(x1 > x0 && y1 > y0) {
+        return full;
+    }
+    let (pw, _) = setup.paper_px();
+    let (dw, dh) = (doc_px.0 as f32, doc_px.1 as f32);
+    // Spread test mirrors the export loop's width heuristic: same evidence,
+    // same verdict, or the crop would disagree with the split decision.
+    let spread = doc_px.0 as f32 > pw as f32 * 1.5;
+    let x1 = if spread { dw - (pw as f32 - x1) } else { x1 };
+    [
+        (x0.max(0.0)) as u32,
+        (y0.max(0.0)) as u32,
+        (x1.min(dw).round()) as u32,
+        (y1.min(dh).round()) as u32,
+    ]
+}
+
+/// `finish_image` with the profile-era knobs: crop first (crop is in PAGE
+/// pixels, so it must precede any resample), then dpi scale, then the
+/// exact-height fit (`px_height` wins over dpi when both are set — a web
+/// target speced in pixels means those pixels), then colour reduction.
+/// Neither path ever upsamples.
+pub fn finish_image_cropped(
+    img: image::RgbaImage,
+    crop_px: [u32; 4],
+    scale: f32,
+    px_height: u32,
+    colour: crate::doc::LayerExpression,
+) -> image::RgbaImage {
+    let [x0, y0, x1, y1] = crop_px;
+    let img = if x1 > x0 && y1 > y0 && (x1 - x0 < img.width() || y1 - y0 < img.height()) {
+        image::imageops::crop_imm(&img, x0, y0, (x1 - x0).min(img.width() - x0), (y1 - y0).min(img.height() - y0))
+            .to_image()
+    } else {
+        img
+    };
+    if px_height > 0 && px_height < img.height() {
+        // Exact-height fit, resized HERE so the output height is the asked
+        // number, not a rounding neighbour of it. Never up: a 1200px-tall
+        // crop asked for 2048 stays 1200 (the dialog says so, not us).
+        let w = ((img.width() as f32 * px_height as f32 / img.height() as f32).round() as u32)
+            .max(1);
+        let img = image::imageops::resize(&img, w, px_height, image::imageops::FilterType::Lanczos3);
+        return finish_image(img, 1.0, colour);
+    }
+    finish_image(img, scale, colour)
+}
+
 pub fn finish_image(
     img: image::RgbaImage,
     scale: f32,
@@ -1524,5 +1608,88 @@ mod through_ora_tests {
         assert!(back.layers[f].folder);
         assert!(back.layers[f].through, "the flag round-trips");
         assert!(!back.layers[m].through, "plain layers never carry it");
+    }
+}
+
+#[cfg(test)]
+mod crop_tests {
+    use super::*;
+
+    fn setup() -> crate::page::PageSetup {
+        // The 投稿 manuscript preset: 257×364 paper, 220×310 trim, 3mm bleed.
+        crate::page::PageSetup::presets()
+            .into_iter()
+            .find(|p| p.name.contains("投稿"))
+            .expect("manuscript preset")
+    }
+
+    /// Trim and trim+bleed rects land where the setup's own derived rects
+    /// say; Paper is the identity; a spread keeps the outer insets and
+    /// spans the fold.
+    #[test]
+    fn crop_rects_follow_the_setup_and_span_spreads() {
+        let s = setup();
+        let (pw, ph) = s.paper_px();
+        assert_eq!(crop_rect_px(&s, (pw, ph), ExportCrop::Paper), [0, 0, pw, ph]);
+
+        let t = s.trim_rect_px();
+        let got = crop_rect_px(&s, (pw, ph), ExportCrop::Trim);
+        assert_eq!(got, [t[0] as u32, t[1] as u32, t[2].round() as u32, t[3].round() as u32]);
+
+        let b = s.bleed_rect_px();
+        let gb = crop_rect_px(&s, (pw, ph), ExportCrop::TrimBleed);
+        assert!(gb[0] < got[0] && gb[2] > got[2], "bleed extends past trim");
+        assert_eq!(gb[0], b[0] as u32);
+
+        // A spread (double-width doc): left inset = single page's, right
+        // inset mirrored at the far edge.
+        let gs = crop_rect_px(&s, (pw * 2, ph), ExportCrop::Trim);
+        assert_eq!(gs[0], got[0], "left inset unchanged");
+        assert_eq!(
+            gs[2],
+            (pw * 2) - (pw - got[2]),
+            "right inset mirrored on the spread's far edge"
+        );
+
+        // Degenerate (zero trim — pixel canvases): full paper, no empty file.
+        let mut px = s.clone();
+        px.trim_mm = (0.0, 0.0);
+        assert_eq!(
+            crop_rect_px(&px, (pw, ph), ExportCrop::Trim),
+            [0, 0, pw, ph]
+        );
+    }
+
+    /// The cropped finish: crop precedes resample; exact px_height wins
+    /// over dpi scale and never upsamples.
+    #[test]
+    fn cropped_finish_crops_then_fits_height() {
+        let img = image::RgbaImage::from_pixel(400, 600, image::Rgba([255, 255, 255, 255]));
+        let out = finish_image_cropped(
+            img.clone(),
+            [100, 100, 300, 500],
+            1.0,
+            0,
+            crate::doc::LayerExpression::Colour,
+        );
+        assert_eq!((out.width(), out.height()), (200, 400));
+
+        let out = finish_image_cropped(
+            img.clone(),
+            [100, 100, 300, 500],
+            1.0,
+            200,
+            crate::doc::LayerExpression::Colour,
+        );
+        assert_eq!((out.width(), out.height()), (100, 200), "exact height, ratio kept");
+
+        let out = finish_image_cropped(
+            img,
+            [0, 0, 400, 600],
+            1.0,
+            4096,
+            crate::doc::LayerExpression::Colour,
+        );
+        assert_eq!((out.width(), out.height()), (400, 600), "never upsamples");
     }
 }

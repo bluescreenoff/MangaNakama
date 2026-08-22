@@ -36,6 +36,7 @@ pub mod ora;
 pub mod page;
 pub mod palette;
 pub mod preflight;
+pub mod profile;
 pub mod project;
 pub mod ruler;
 pub mod selection;
