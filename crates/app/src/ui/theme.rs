@@ -73,6 +73,26 @@ pub struct Theme {
     /// Auto Actions' armed dot. "Armed" reads as red everywhere, so this one
     /// barely moves between themes.
     pub rec: Color32,
+
+    // --- icon accent hues (owner order 2026-08-21: coloured icons
+    // everywhere, "subtle, theme-fitting", with a Preferences off-switch).
+    // Seven semantic roles, low saturation, tuned against `panel`. Icons
+    // AND the Scratch-style Auto Action block categories draw from the
+    // same seven so the app reads as one system.
+    /// Things that make something new: new-layer plus badges, add-folder.
+    pub hue_create: Color32,
+    /// Things that destroy: delete, clear, remove.
+    pub hue_destroy: Color32,
+    /// Files and media: import/export, save, open, image.
+    pub hue_media: Color32,
+    /// Marks that ink the page: pen, brush, fill, figure, tone.
+    pub hue_ink: Color32,
+    /// Selection-family tools and ops: lasso, wand, select pens.
+    pub hue_select: Color32,
+    /// Layer kinds and layer ops: folders, vector/tone/text layer glyphs.
+    pub hue_layer: Color32,
+    /// Viewing and navigation: zoom, hand, rotate, fit.
+    pub hue_nav: Color32,
 }
 
 /// The default, and the palette every screenshot in `docs/` was taken in:
@@ -100,6 +120,13 @@ pub const DARK: Theme = Theme {
     ref_mark: Color32::from_rgb(0xcf, 0x5d, 0x59),
     draft_mark: Color32::from_rgb(0x66, 0x9e, 0xd6),
     rec: Color32::from_rgb(0xe5, 0x4b, 0x4b),
+    hue_create: Color32::from_rgb(0x6f, 0xae, 0x6f),
+    hue_destroy: Color32::from_rgb(0xc9, 0x6a, 0x62),
+    hue_media: Color32::from_rgb(0x6f, 0x9e, 0xc9),
+    hue_ink: Color32::from_rgb(0xc9, 0xa0, 0x5e),
+    hue_select: Color32::from_rgb(0x62, 0xb5, 0xae),
+    hue_layer: Color32::from_rgb(0xa2, 0x88, 0xcf),
+    hue_nav: Color32::from_rgb(0x8f, 0xa3, 0xb5),
 };
 
 /// The same greys pulled towards brown, under an amber accent — a warm
@@ -129,6 +156,14 @@ pub const SEPIA: Theme = Theme {
     ref_mark: Color32::from_rgb(0xd2, 0x66, 0x4f),
     draft_mark: Color32::from_rgb(0x74, 0x9d, 0xc0),
     rec: Color32::from_rgb(0xe5, 0x4b, 0x4b),
+    // Cool hues muted a step further here — on brown chrome they pop more.
+    hue_create: Color32::from_rgb(0x8a, 0xa6, 0x62),
+    hue_destroy: Color32::from_rgb(0xc9, 0x6a, 0x4f),
+    hue_media: Color32::from_rgb(0x7e, 0x97, 0xb3),
+    hue_ink: Color32::from_rgb(0xcf, 0xa0, 0x50),
+    hue_select: Color32::from_rgb(0x7f, 0xae, 0x9a),
+    hue_layer: Color32::from_rgb(0xa9, 0x8f, 0xc0),
+    hue_nav: Color32::from_rgb(0xa2, 0x9a, 0x8a),
 };
 
 /// Cool and dim: near-black plum chrome under a muted violet accent. The
@@ -156,6 +191,14 @@ pub const VIOLET: Theme = Theme {
     ref_mark: Color32::from_rgb(0xd0, 0x60, 0x7e),
     draft_mark: Color32::from_rgb(0x7d, 0x8f, 0xe0),
     rec: Color32::from_rgb(0xe5, 0x4b, 0x4b),
+    // hue_layer leans magenta here so it never reads as the violet accent.
+    hue_create: Color32::from_rgb(0x7b, 0xb3, 0x83),
+    hue_destroy: Color32::from_rgb(0xc9, 0x66, 0x7a),
+    hue_media: Color32::from_rgb(0x7d, 0x9c, 0xe0),
+    hue_ink: Color32::from_rgb(0xc3, 0x9a, 0x6a),
+    hue_select: Color32::from_rgb(0x6a, 0xb3, 0xc0),
+    hue_layer: Color32::from_rgb(0xb3, 0x89, 0xc9),
+    hue_nav: Color32::from_rgb(0x8e, 0x93, 0xad),
 };
 
 /// The built-ins, in picker order. `dark` is first because it is the
