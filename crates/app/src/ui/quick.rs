@@ -469,7 +469,15 @@ pub fn palette_entries(input: &PaletteInput) -> Vec<Entry> {
 /// scattered-letter fuzzy hit, so typing `pen` puts the Pen tool above
 /// "Perspective ruler" without any per-command tuning.
 fn palette_score(e: &Entry, q: &str) -> Option<u32> {
-    let label = e.label.to_lowercase();
+    text_score(&e.label, &e.path, q)
+}
+
+/// The ladder above as a pure text function, so a second picker can rank the
+/// same way this one does without inventing its own rules (the Auto Action
+/// step palette's search box, `ui::actions`). `path` is the secondary field
+/// a hit may come from — there, the step's category.
+pub(super) fn text_score(label: &str, path: &str, q: &str) -> Option<u32> {
+    let label = label.to_lowercase();
     if label.starts_with(q) {
         return Some(0);
     }
@@ -479,7 +487,7 @@ fn palette_score(e: &Entry, q: &str) -> Option<u32> {
     if label.contains(q) {
         return Some(2);
     }
-    if e.path.to_lowercase().contains(q) {
+    if path.to_lowercase().contains(q) {
         return Some(3);
     }
     // Fuzzy last resort: the query's letters in order, anywhere ("dupl" or

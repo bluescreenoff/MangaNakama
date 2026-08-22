@@ -344,6 +344,10 @@ pub fn run(
             ws.set_position(egui::pos2(660.0, 280.0));
             ws.set_size(egui::vec2(250.0, 380.0));
         }
+        // The Auto Actions palette is in this shot, and it is only worth
+        // shooting with an action OPEN: closed, it is a list of names and
+        // the Scratch-style step blocks never render.
+        app.action_selected = (!app.actions.is_empty()).then_some(0);
     }
 
     // The derived tone rasters normally refresh at the head of App::render;

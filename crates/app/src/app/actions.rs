@@ -42,7 +42,100 @@ pub enum ActionStep {
     GaussianBlur(f32),
 }
 
+/// Which family a step belongs to. Purely DERIVED from the variant and
+/// never serialized — `actions.json` is unchanged by this type existing, so
+/// re-categorising a step is a UI decision and not a file migration.
+///
+/// It buys two things: the Scratch-style block colour (each category owns
+/// one of the theme's seven icon hues, so a block and the icon for the same
+/// idea are the same colour), and the step palette's sections.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum StepCategory {
+    /// Makes something that was not there: raster/vector layers, folders,
+    /// frame folders.
+    Create,
+    /// Says what the layer is called.
+    Name,
+    /// How the layer *shows* without its pixels changing: palette colour,
+    /// sub colour, border effect, screentone.
+    Style,
+    /// Rewrites pixels — the one family that touches the art itself.
+    Filter,
+    /// Moves the active layer. Changes nothing on the page.
+    Navigate,
+}
+
+impl StepCategory {
+    /// Palette order. `Create` first because every useful macro starts by
+    /// making the layer it is about to set up.
+    pub const ALL: [StepCategory; 5] = [
+        StepCategory::Create,
+        StepCategory::Name,
+        StepCategory::Style,
+        StepCategory::Filter,
+        StepCategory::Navigate,
+    ];
+
+    /// The section caption in the step palette.
+    pub fn label(self) -> &'static str {
+        match self {
+            StepCategory::Create => "Create",
+            StepCategory::Name => "Name",
+            StepCategory::Style => "Style",
+            StepCategory::Filter => "Filter",
+            StepCategory::Navigate => "Navigate",
+        }
+    }
+}
+
 impl ActionStep {
+    /// This step's block colour family. See [`StepCategory`] — derived, so
+    /// adding a variant without adding it here will not compile.
+    pub fn category(&self) -> StepCategory {
+        match self {
+            ActionStep::NewRasterLayer
+            | ActionStep::NewVectorLayer
+            | ActionStep::NewFolder
+            | ActionStep::NewFrameFolder => StepCategory::Create,
+            ActionStep::Rename(_) => StepCategory::Name,
+            ActionStep::LayerColour(_)
+            | ActionStep::SubColour(_)
+            | ActionStep::Edge(_)
+            | ActionStep::Tone(_) => StepCategory::Style,
+            ActionStep::GaussianBlur(_) => StepCategory::Filter,
+            ActionStep::SelectAbove | ActionStep::SelectBelow => StepCategory::Navigate,
+        }
+    }
+
+    /// The block's leading words: the label MINUS the parameter readout,
+    /// because in a Scratch block the parameters follow it as live widgets
+    /// ("rename to [SFX]", not "Rename to \"SFX\"" as flat text). Steps with
+    /// no parameters read the same either way.
+    pub fn block_label(&self) -> &'static str {
+        match self {
+            ActionStep::NewRasterLayer => "new raster layer",
+            ActionStep::NewVectorLayer => "new vector layer",
+            ActionStep::NewFolder => "new folder",
+            ActionStep::NewFrameFolder => "new frame folder",
+            ActionStep::Rename(_) => "rename to",
+            ActionStep::LayerColour(_) => "layer colour",
+            ActionStep::SubColour(_) => "sub colour",
+            ActionStep::Edge(_) => "border effect",
+            ActionStep::Tone(_) => "screentone",
+            ActionStep::SelectAbove => "select layer above",
+            ActionStep::SelectBelow => "select layer below",
+            ActionStep::GaussianBlur(_) => "gaussian blur",
+        }
+    }
+
+    /// Do this step's parameters fit INSIDE the block, on one line? The
+    /// Scratch shape wants them there. `Tone` is the exception — a pattern
+    /// combo plus two drag-values is two rows wide — so it keeps the older
+    /// click-to-open framed editor underneath its block.
+    pub fn inline_params(&self) -> bool {
+        self.has_params() && !matches!(self, ActionStep::Tone(_))
+    }
+
     /// The palette's step label.
     pub fn label(&self) -> String {
         match self {
@@ -184,6 +277,15 @@ fn on_default() -> bool {
 pub struct Action {
     pub name: String,
     pub steps: Vec<StepRow>,
+    /// An action THIS build could not read — a step kind from a newer
+    /// version — kept exactly as it was found on disk so that opening the
+    /// file in an older build and saving does not delete it.
+    ///
+    /// `#[serde(skip)]`, so it is not a field in the format: on save the raw
+    /// value REPLACES the whole action (see [`serialize_actions`]). `None`
+    /// for every action this build made itself.
+    #[serde(skip)]
+    pub unknown: Option<Box<serde_json::Value>>,
 }
 
 /// The step-list editing verbs. Pure `Vec` moves, no document contact — the
@@ -192,6 +294,23 @@ pub struct Action {
 /// UI computes them from pointer positions and a drag that lands one row
 /// past the end must nudge the step to the end, not take the app down.
 impl Action {
+    /// An empty action under `name` — the "＋ action" button's constructor.
+    pub fn named(name: impl Into<String>) -> Action {
+        Action {
+            name: name.into(),
+            steps: Vec::new(),
+            unknown: None,
+        }
+    }
+
+    /// Can this build show and run this action? `false` = it came out of a
+    /// newer version's file and is being carried, not understood: the
+    /// palette greys it and offers nothing but delete, because every other
+    /// verb (rename, record, edit a step) would write over the verbatim copy.
+    pub fn is_readable(&self) -> bool {
+        self.unknown.is_none()
+    }
+
     /// Insert `step` at slot `at` (`steps.len()` = append), switched on.
     pub fn insert_step(&mut self, at: usize, step: ActionStep) {
         let at = at.min(self.steps.len());
@@ -225,13 +344,80 @@ impl Action {
         true
     }
 
-    /// A copy under its own name, for the palette's duplicate button.
+    /// A copy under its own name, for the palette's duplicate button. Never
+    /// carries `unknown`: the palette does not offer duplicate on an
+    /// unreadable action, and a copy of one would be a second verbatim blob
+    /// under a name the file does not agree with.
     pub fn duplicated(&self) -> Action {
         Action {
             name: format!("{} copy", self.name),
             steps: self.steps.clone(),
+            unknown: None,
         }
     }
+}
+
+/// Read the whole file, in TWO stages: the outer array first, then each
+/// action on its own.
+///
+/// One `serde_json::from_str::<Vec<Action>>` used to do it, which meant ONE
+/// step kind this build had never heard of failed the entire parse and every
+/// action in the file went unread. It looked survivable — the in-memory list
+/// was simply left alone — but the next edit called `actions_save`, and that
+/// wrote the empty-ish in-memory list over the user's file. Per-action
+/// parsing keeps the readable ones and carries the rest verbatim.
+///
+/// `None` = the text is not even an array (a truncated or hand-mangled
+/// file); the caller keeps what it already has rather than clearing.
+pub fn parse_actions(text: &str) -> Option<Vec<Action>> {
+    let raw: Vec<serde_json::Value> = serde_json::from_str(text).ok()?;
+    Some(
+        raw.into_iter()
+            .map(|v| {
+                serde_json::from_value::<Action>(v.clone()).unwrap_or(Action {
+                    name: v
+                        .get("name")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("unreadable action")
+                        .to_owned(),
+                    steps: Vec::new(),
+                    unknown: Some(Box::new(v)),
+                })
+            })
+            .collect(),
+    )
+}
+
+/// The other half of [`parse_actions`]: unreadable actions go back out with
+/// their contents intact, in their original slot.
+///
+/// The array is assembled from each action's OWN pretty rendering rather
+/// than by serializing one `Vec<serde_json::Value>`, and that is not a
+/// flourish: `serde_json::Value` holds its object keys in a `BTreeMap`, so a
+/// trip through it silently re-sorts every field alphabetically — `"on"`
+/// before `"step"`, `"colour"` before `"width_px"`. Nothing would break, but
+/// every existing actions.json would be rewritten head to toe on the first
+/// save. `the_on_disk_format_did_not_move` is the test that caught it.
+pub fn serialize_actions(actions: &[Action]) -> Option<String> {
+    if actions.is_empty() {
+        return Some("[]".to_owned());
+    }
+    let mut items = Vec::with_capacity(actions.len());
+    for a in actions {
+        let text = match &a.unknown {
+            Some(v) => serde_json::to_string_pretty(v).ok()?,
+            None => serde_json::to_string_pretty(a).ok()?,
+        };
+        // Two spaces on every line: exactly how `to_string_pretty` indents
+        // the members of an array.
+        items.push(
+            text.lines()
+                .map(|l| format!("  {l}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+    }
+    Some(format!("[\n{}\n]", items.join(",\n")))
 }
 
 /// User-global storage, its own file on purpose: `ui.txt` is the file the
@@ -249,9 +435,11 @@ fn actions_path() -> Option<PathBuf> {
 pub fn default_actions() -> Vec<Action> {
     let on = |step: ActionStep| StepRow { step, on: true };
     let off = |step: ActionStep| StepRow { step, on: false };
+    const WHITE: [u8; 3] = [0xff, 0xff, 0xff];
     vec![
         Action {
             name: "Create SFX layer".into(),
+            unknown: None,
             steps: vec![
                 on(ActionStep::NewRasterLayer),
                 on(ActionStep::Rename("SFX".into())),
@@ -262,6 +450,7 @@ pub fn default_actions() -> Vec<Action> {
         },
         Action {
             name: "Create tone layer".into(),
+            unknown: None,
             steps: vec![
                 on(ActionStep::NewRasterLayer),
                 on(ActionStep::Rename("Tone".into())),
@@ -270,10 +459,40 @@ pub fn default_actions() -> Vec<Action> {
         },
         Action {
             name: "Create blue rough layer".into(),
+            unknown: None,
             steps: vec![
                 on(ActionStep::NewRasterLayer),
                 on(ActionStep::Rename("Rough".into())),
                 on(ActionStep::LayerColour(Some([0x2a, 0x6f, 0xf4]))),
+            ],
+        },
+        // Whatever you draw on this one comes out WHITE, whichever brush
+        // colour is loaded — the layer-colour pair maps the black end AND
+        // the white end to white (`blend::layer_colour_tint`). That is why
+        // both chips are set: a white SUB colour alone is a documented
+        // no-op ("an explicit white sub == no sub, everywhere", LP-017), so
+        // the main chip is the step doing the work.
+        Action {
+            name: "Create white cover layer".into(),
+            unknown: None,
+            steps: vec![
+                on(ActionStep::NewRasterLayer),
+                on(ActionStep::Rename("White".into())),
+                on(ActionStep::LayerColour(Some(WHITE))),
+                on(ActionStep::SubColour(Some(WHITE))),
+            ],
+        },
+        // The rough-work bin: a folder to drop drafts into, tinted blue so
+        // it reads as not-final in the Layers palette. (CSP's macro also
+        // flips the folder's DRAFT flag; there is no draft step kind yet,
+        // so the colour carries the meaning until there is one.)
+        Action {
+            name: "Create draft folder".into(),
+            unknown: None,
+            steps: vec![
+                on(ActionStep::NewFolder),
+                on(ActionStep::Rename("Draft".into())),
+                on(ActionStep::LayerColour(Some([0x66, 0x9e, 0xd6]))),
             ],
         },
     ]
@@ -297,7 +516,8 @@ impl App {
             }
             return;
         };
-        if let Ok(list) = serde_json::from_str::<Vec<Action>>(&text) {
+        // Per-action parsing, NOT one `Vec<Action>`: see `parse_actions`.
+        if let Some(list) = parse_actions(&text) {
             self.actions = list;
         }
     }
@@ -309,7 +529,7 @@ impl App {
             return; // see `actions_load`
         }
         let Some(p) = actions_path() else { return };
-        if let Ok(text) = serde_json::to_string_pretty(&self.actions) {
+        if let Some(text) = serialize_actions(&self.actions) {
             let _ = std::fs::write(p, text);
         }
     }
@@ -320,6 +540,10 @@ impl App {
         let Some(action) = self.actions.get(idx) else {
             return;
         };
+        if !action.is_readable() {
+            self.set_status("that action is from a newer version — it is kept as-is, not run");
+            return;
+        }
         let name = action.name.clone();
         let steps: Vec<ActionStep> = action
             .steps
@@ -361,6 +585,10 @@ impl App {
             let n = self.actions.get(idx).map_or(0, |a| a.steps.len());
             self.set_status(format!("recording stopped — {n} steps"));
             self.actions_save();
+        } else if self.actions.get(idx).is_some_and(|a| !a.is_readable()) {
+            // Recording into a verbatim-carried action would append steps
+            // that the save path then throws away (it writes the raw copy).
+            self.set_status("that action is from a newer version — it cannot be recorded into");
         } else if idx < self.actions.len() {
             self.action_recording = Some(idx);
             self.set_status(
@@ -389,6 +617,7 @@ mod tests {
     fn action(steps: Vec<(ActionStep, bool)>, name: &str) -> Action {
         Action {
             name: name.into(),
+            unknown: None,
             steps: steps
                 .into_iter()
                 .map(|(step, on)| StepRow { step, on })
@@ -452,7 +681,10 @@ mod tests {
         dispatch(&mut app, AppCmd::Undo);
         assert!(app.doc.layers[li].edge.is_none(), "run undone");
         assert_eq!(
-            app.doc.layers[li].tile_arc(TileIdx::new(0, 0)).unwrap().data()[0],
+            app.doc.layers[li]
+                .tile_arc(TileIdx::new(0, 0))
+                .unwrap()
+                .data()[0],
             55,
             "the earlier stroke survives"
         );
@@ -471,8 +703,11 @@ mod tests {
         dispatch(&mut app, AppCmd::RenameLayer(li, "X".into()));
         dispatch(&mut app, AppCmd::Zoom100); // not a layer command
         dispatch(&mut app, AppCmd::ActionRecordToggle(0));
-        let steps: Vec<ActionStep> =
-            app.actions[0].steps.iter().map(|r| r.step.clone()).collect();
+        let steps: Vec<ActionStep> = app.actions[0]
+            .steps
+            .iter()
+            .map(|r| r.step.clone())
+            .collect();
         assert_eq!(
             steps,
             vec![ActionStep::NewRasterLayer, ActionStep::Rename("X".into())],
@@ -583,6 +818,35 @@ mod tests {
         labels.dedup();
         assert_eq!(labels.len(), kinds.len(), "no kind listed twice");
         assert_eq!(kinds.len(), 12, "one entry per ActionStep variant");
+        // Every kind lands in a category (the Scratch block's colour), and
+        // no category is empty — an empty section would print a coloured
+        // caption over nothing.
+        for cat in StepCategory::ALL {
+            assert!(
+                kinds.iter().any(|k| k.category() == cat),
+                "{}: no step kind in this category",
+                cat.label()
+            );
+        }
+        for k in &kinds {
+            assert!(
+                StepCategory::ALL.contains(&k.category()),
+                "{}: category outside ALL — the palette would never show it",
+                k.label()
+            );
+            assert!(
+                !k.block_label().is_empty(),
+                "{}: no block label to put in the block",
+                k.label()
+            );
+            // Inline parameters are a subset of "has parameters": a step
+            // with nothing to edit must not claim an inline editor slot.
+            assert!(
+                !k.inline_params() || k.has_params(),
+                "{}: inline editor for a step with no parameters",
+                k.label()
+            );
+        }
         // Parameterized kinds carry usable defaults (an editor opens on
         // them; a `None` default would open on nothing).
         for k in &kinds {
@@ -601,16 +865,26 @@ mod tests {
     /// as-is (a name, at least one ENABLED step) and every one starting
     /// from a new layer so replay never scribbles on existing art.
     #[test]
-    fn default_actions_are_runnable_and_start_on_a_new_layer() {
+    fn default_actions_are_runnable_and_start_by_making_something() {
         let defaults = super::default_actions();
         assert!(!defaults.is_empty());
         for a in &defaults {
             assert!(!a.name.trim().is_empty());
             assert!(a.steps.iter().any(|r| r.on), "{}: nothing enabled", a.name);
+            // Every starter macro's first step CREATES its own target
+            // (layer or folder), so a replay can never scribble on the art
+            // that happens to be selected.
             assert_eq!(
-                a.steps.first().map(|r| &r.step),
-                Some(&ActionStep::NewRasterLayer),
-                "{}: must begin on its own fresh layer",
+                a.steps.first().map(|r| r.step.category()),
+                Some(StepCategory::Create),
+                "{}: must begin by making its own layer or folder",
+                a.name
+            );
+            // "Action 4" shipped in a screenshot once (parity audit T4).
+            // A starter macro says what it is for.
+            assert!(
+                !a.name.starts_with("Action "),
+                "{}: placeholder name in the shipped set",
                 a.name
             );
             for r in &a.steps {
@@ -619,5 +893,96 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A file written by a NEWER build carries step kinds this one has never
+    /// heard of. It used to cost the whole file (see `parse_actions`): the
+    /// one `Vec<Action>` parse failed and nothing loaded. The unreadable
+    /// action is now carried verbatim and everything around it still works.
+    #[test]
+    fn one_unreadable_action_no_longer_costs_the_whole_file() {
+        let text = r#"[
+          {"name":"Good","steps":[{"step":"NewRasterLayer","on":true}]},
+          {"name":"From the future","steps":[{"step":{"WarpMesh":{"rows":4}},"on":true}]},
+          {"name":"Also good","steps":[{"step":"SelectAbove","on":true}]}
+        ]"#;
+        // The shape of the bug, pinned: the OLD one-shot parse still fails
+        // on this exact text, so this test fails against the old code.
+        assert!(
+            serde_json::from_str::<Vec<Action>>(text).is_err(),
+            "the whole-file parse is supposed to choke here — that is the bug"
+        );
+
+        let list = parse_actions(text).expect("the outer array is fine");
+        assert_eq!(list.len(), 3, "nothing dropped out of the middle");
+        assert!(list[0].is_readable() && list[2].is_readable());
+        assert_eq!(list[0].steps.len(), 1);
+        assert_eq!(list[2].steps[0].step, ActionStep::SelectAbove);
+
+        let odd = &list[1];
+        assert!(!odd.is_readable(), "the future action is flagged, not run");
+        assert_eq!(odd.name, "From the future", "it keeps its name for the UI");
+        assert!(odd.steps.is_empty(), "no half-read steps to edit or replay");
+
+        // And a save round-trips it: opening the file in this build and
+        // pressing anything must not delete the user's work.
+        let out = serialize_actions(&list).expect("serializes");
+        let again = parse_actions(&out).expect("round-trips");
+        assert_eq!(again.len(), 3);
+        assert!(
+            out.contains("WarpMesh"),
+            "the unknown step survived the save"
+        );
+        assert_eq!(again[1].name, "From the future");
+        assert!(!again[1].is_readable());
+        assert_eq!(again[0], list[0], "the readable ones are unchanged");
+    }
+
+    /// Same file, no unknowns: the bytes must be what the old
+    /// `to_string_pretty(&Vec<Action>)` wrote, or every user's actions.json
+    /// churns on first save.
+    #[test]
+    fn the_on_disk_format_did_not_move() {
+        let list = default_actions();
+        let ours = serialize_actions(&list).unwrap();
+        let old = serde_json::to_string_pretty(&list).unwrap();
+        assert_eq!(ours, old, "serialize_actions changed the format");
+        assert!(
+            !ours.contains("unknown"),
+            "the carry-field leaked into the format"
+        );
+        assert_eq!(parse_actions(&ours).unwrap(), list, "round-trip");
+        // An empty list is `[]`, not a two-line array of nothing.
+        assert_eq!(serialize_actions(&[]).unwrap(), "[]");
+    }
+
+    /// Not an array at all (truncated write, hand-editing). The caller keeps
+    /// what it has rather than being handed an empty list to save over the
+    /// file with.
+    #[test]
+    fn a_mangled_file_reads_as_nothing_at_all_not_as_zero_actions() {
+        assert!(parse_actions("").is_none());
+        assert!(parse_actions("[{\"name\":\"half").is_none());
+        assert!(parse_actions("{}").is_none());
+        assert_eq!(parse_actions("[]").unwrap().len(), 0);
+    }
+
+    /// The unreadable ones are carried, not operated on: every verb the
+    /// palette hides is also refused by the model.
+    #[test]
+    fn an_unreadable_action_refuses_to_run_or_record() {
+        let Some(mut app) = headless() else {
+            println!("[test] SKIP: no usable adapter");
+            return;
+        };
+        let mut odd = Action::named("From the future");
+        odd.unknown = Some(Box::new(serde_json::json!({"name":"From the future"})));
+        app.actions.push(odd);
+        let n0 = app.doc.layers.len();
+        app.action_run(0);
+        assert_eq!(app.doc.layers.len(), n0, "nothing ran");
+        assert_eq!(app.doc.undo_labels().len(), 0, "and nothing was pushed");
+        app.action_record_toggle(0);
+        assert_eq!(app.action_recording, None, "the recorder stayed disarmed");
     }
 }
