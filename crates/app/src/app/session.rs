@@ -236,6 +236,32 @@ impl App {
         self.reader.show_flags = false;
     }
 
+    /// The unexported-pages reminder's second door: leaving work `i` —
+    /// switching away from it or closing it — with pages the last export
+    /// did not write says so ONCE, as a status line.
+    ///
+    /// A note, never a modal. The export is not urgent and the work is not
+    /// at risk; a dialog in the way of a tab click would be the app
+    /// shouting about its own bookkeeping.
+    fn stale_export_note(&self, i: usize) -> Option<String> {
+        if !self.prefs.export_reminder {
+            return None;
+        }
+        let n = match self.docs.get(i).and_then(|s| s.as_ref()) {
+            Some(s) => {
+                super::pages::unexported_pages(&s.pages, Some((s.page_index, s.doc.revision)))
+            }
+            // The active slot parks nothing: its pages are live on the App.
+            None => self.unexported_pages(),
+        };
+        (n > 0).then(|| {
+            format!(
+                "{n} page{} changed since the last export",
+                if n == 1 { "" } else { "s" }
+            )
+        })
+    }
+
     /// How many documents are open. Always at least 1.
     pub fn doc_count(&self) -> usize {
         self.docs.len().max(1)
@@ -289,6 +315,8 @@ impl App {
         if i == self.active_doc || i >= self.docs.len() {
             return false;
         }
+        // Asked BEFORE the park: the pages we are leaving are still live.
+        let note = self.stale_export_note(self.active_doc);
         self.forget_document_caches();
         let parked = self.park();
         self.docs[self.active_doc] = Some(parked);
@@ -303,6 +331,9 @@ impl App {
         self.active_doc = i;
         self.forget_document_caches();
         self.mark_dirty();
+        if let Some(note) = note {
+            self.set_status(note);
+        }
         true
     }
 
@@ -415,6 +446,8 @@ impl App {
         if i >= self.docs.len() || self.docs.len() < 2 {
             return false;
         }
+        // Asked before the slot goes: after it, there is nothing to count.
+        let note = self.stale_export_note(i);
         self.forget_document_caches();
         if i == self.active_doc {
             // Closing the active tab: step to the neighbour on the left,
@@ -434,6 +467,9 @@ impl App {
         }
         self.forget_document_caches();
         self.mark_dirty();
+        if let Some(note) = note {
+            self.set_status(note);
+        }
         true
     }
 

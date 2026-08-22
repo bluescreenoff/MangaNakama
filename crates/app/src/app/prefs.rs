@@ -86,6 +86,11 @@ pub struct Prefs {
     /// default — and any name this build does not know both resolve to the
     /// first preset, which is exactly today's behaviour.
     pub new_preset: String,
+    /// The status bar's "N pages unexported" chip (owner ask 2026-08-22).
+    /// ON by default — it is the reminder for the case it was asked for
+    /// ("I fixed two panels and forgot to re-export"), and it says nothing
+    /// at all until a work has been exported once.
+    pub export_reminder: bool,
     /// The Layers palette's command-icon size, px, 14..=32 (owner
     /// 2026-08-21: "a bit bigger by default, and a setting"). The toggle
     /// strip above the list derives from it at 0.8×.
@@ -110,6 +115,7 @@ impl Default for Prefs {
             recent_depth: RECENT_DEPTH,
             text_size_pt: TEXT_SIZE_PT,
             new_preset: String::new(),
+            export_reminder: true,
             palette_icon_px: PALETTE_ICON_PX,
             unknown: Vec::new(),
             dirty: false,
@@ -175,7 +181,7 @@ impl Prefs {
     /// wrote that this one does not understand, verbatim.
     fn to_body(&self) -> String {
         let mut body = format!(
-            "autosave_min={}\nautosave_every_op={}\nundo_depth={}\nmouse_smooth_px={}\nnew_canvas_w={}\nnew_canvas_h={}\nfit_margin={}\nwheel_step={}\nrotate_step_deg={}\nrecent_depth={}\ntext_size_pt={}\nnew_preset={}\npalette_icon_px={}\n",
+            "autosave_min={}\nautosave_every_op={}\nundo_depth={}\nmouse_smooth_px={}\nnew_canvas_w={}\nnew_canvas_h={}\nfit_margin={}\nwheel_step={}\nrotate_step_deg={}\nrecent_depth={}\ntext_size_pt={}\nnew_preset={}\nexport_reminder={}\npalette_icon_px={}\n",
             self.autosave_min,
             u8::from(self.autosave_every_op),
             self.undo_depth,
@@ -188,6 +194,7 @@ impl Prefs {
             self.recent_depth,
             self.text_size_pt,
             self.new_preset.replace('\n', ""),
+            u8::from(self.export_reminder),
             self.palette_icon_px,
         );
         for line in &self.unknown {
@@ -225,6 +232,15 @@ impl Prefs {
             "recent_depth" => self.recent_depth = v.parse().unwrap_or(self.recent_depth),
             "text_size_pt" => self.text_size_pt = v.parse().unwrap_or(self.text_size_pt),
             "new_preset" => self.new_preset = v.to_owned(),
+            // Same two spellings as `autosave_every_op`, and the same
+            // refusal to read gibberish as "off".
+            "export_reminder" => {
+                self.export_reminder = match v {
+                    "1" | "true" => true,
+                    "0" | "false" => false,
+                    _ => self.export_reminder,
+                }
+            }
             "palette_icon_px" => self.palette_icon_px = v.parse().unwrap_or(self.palette_icon_px),
             // A key we do not know is a key from a NEWER build. Keep the
             // line so the next save writes it back out instead of eating it.
@@ -320,6 +336,10 @@ mod tests {
         assert_eq!(p.rotate_step_deg, 15.0);
         assert_eq!(p.recent_depth, 8);
         assert_eq!(p.text_size_pt, 12.0);
+        assert!(
+            p.export_reminder,
+            "the unexported-pages reminder ships ON (owner ask 2026-08-22)"
+        );
         // Empty resolves to the first preset — Shueisha A (Jump), which is
         // what `NewComicDraft::default` used to spell out itself.
         assert!(p.new_preset.is_empty());
@@ -343,8 +363,10 @@ mod tests {
         me.recent_depth = 16;
         me.text_size_pt = 20.0;
         me.new_preset = "Doujinshi B5 600dpi (同人誌)".to_owned();
+        me.export_reminder = false;
 
         let back = from_body(&me.to_body());
+        assert!(!back.export_reminder, "turning the reminder off persists");
         assert_eq!(back.autosave_min, 30);
         assert!(back.autosave_every_op);
         assert_eq!(back.undo_depth, 1000);
@@ -470,10 +492,10 @@ mod tests {
         assert!(!p.dirty, "reading must never schedule a write");
     }
 
-    /// PR-041's key is the only boolean in the file. It is WRITTEN as 0/1,
-    /// but `true`/`false` is what a person hand-editing prefs.txt types, so
-    /// both read — and anything else keeps the default rather than being
-    /// read as false, which would silently turn the setting off.
+    /// The file's booleans are WRITTEN as 0/1, but `true`/`false` is what a
+    /// person hand-editing prefs.txt types, so both read — and anything
+    /// else keeps the default rather than being read as false, which would
+    /// silently turn the setting off.
     #[test]
     fn the_per_operation_flag_reads_both_spellings_and_ignores_gibberish() {
         assert!(from_body("autosave_every_op=1\n").autosave_every_op);
@@ -487,6 +509,14 @@ mod tests {
         assert!(
             p.autosave_every_op,
             "an unparseable value keeps the value it had — per line, as everywhere else here"
+        );
+
+        assert!(!from_body("export_reminder=0\n").export_reminder);
+        assert!(!from_body("export_reminder=false\n").export_reminder);
+        assert!(from_body("export_reminder=1\n").export_reminder);
+        assert!(
+            from_body("export_reminder=maybe\n").export_reminder,
+            "gibberish must not silently turn the reminder off"
         );
     }
 }

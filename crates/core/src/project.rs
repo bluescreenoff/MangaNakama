@@ -278,6 +278,11 @@ pub struct FolderPageMeta {
     pub id: u32,
     /// Content revision already on disk for this file.
     pub rev: u64,
+    /// Content revision the last EXPORT of this page wrote (0 = never
+    /// exported). Defaulted, so a work saved before the reminder existed
+    /// loads clean and simply says "never exported" until the next export.
+    #[serde(default)]
+    pub exported_rev: u64,
 }
 
 /// The work-folder index payload (`workfolder.json` inside `work.mnc`).
@@ -313,6 +318,11 @@ pub struct FolderPage {
     /// Revision already on disk; a page with `rev <= saved_rev` and an
     /// existing file is skipped by [`save_folder`].
     pub saved_rev: u64,
+    /// Revision the last export of this page wrote (0 = never exported).
+    /// Rides the index rather than a file in the export folder on purpose:
+    /// an app that writes bookkeeping into an output folder unasked is a
+    /// trap (plans/21-M5-M6-DECISIONS.md, owner ask 2026-08-22).
+    pub exported_rev: u64,
     pub bytes: Vec<u8>,
 }
 
@@ -424,6 +434,7 @@ pub fn save_folder(
                 file: file.clone(),
                 id,
                 rev: p.rev.max(1),
+                exported_rev: p.exported_rev,
             })
             .collect(),
     };
@@ -508,6 +519,7 @@ pub fn load_folder(path: &Path) -> Result<WorkFolder, OraError> {
             id: pm.id,
             rev: pm.rev,
             saved_rev: pm.rev,
+            exported_rev: pm.exported_rev,
             bytes: buf,
         });
     }
@@ -586,12 +598,14 @@ mod tests {
                     id: 0,
                     rev: 1,
                     saved_rev: 0,
+                    exported_rev: 0,
                     bytes: doc_to_bytes(&d1).unwrap(),
                 },
                 FolderPage {
                     id: 0,
                     rev: 2,
                     saved_rev: 0,
+                    exported_rev: 0,
                     bytes: doc_to_bytes(&d2).unwrap(),
                 },
             ],
@@ -625,6 +639,28 @@ mod tests {
         assert_eq!(m.expression, Expression::Mono);
         assert_eq!(m.spine_mm, 0.0);
         assert_eq!(m.cover, None);
+    }
+
+    /// The unexported-pages reminder (owner ask 2026-08-22): the export
+    /// revision round trips per page, and an index written before the
+    /// reminder existed — no `exported_rev` key at all — loads as "never
+    /// exported" instead of failing to parse. Old works must open clean.
+    #[test]
+    fn export_revision_round_trips_and_old_indexes_default() {
+        let dir = temp_dir("exportrev");
+        let mut wf = two_page_work();
+        wf.pages[0].exported_rev = 7;
+        save_folder(&wf, &dir, &[]).unwrap();
+        let back = load_folder(&dir).unwrap();
+        assert_eq!(back.pages[0].exported_rev, 7, "the export revision persists");
+        assert_eq!(back.pages[1].exported_rev, 0, "an unexported page stays 0");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // The pre-reminder page entry: file, id, rev and nothing else.
+        let old = r#"{ "file": "p001.ora", "id": 1, "rev": 42 }"#;
+        let pm: FolderPageMeta = serde_json::from_str(old).expect("old page entry must parse");
+        assert_eq!(pm.rev, 42);
+        assert_eq!(pm.exported_rev, 0, "never exported, not 'up to date'");
     }
 
     #[test]

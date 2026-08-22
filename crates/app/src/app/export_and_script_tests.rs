@@ -313,3 +313,149 @@ fn batch_export_splits_spreads_when_asked() {
     }
     std::fs::remove_dir_all(&dir).ok();
 }
+
+// --- the unexported-pages reminder (owner ask 2026-08-22) ----------------
+
+/// One undoable edit — the cheapest thing that moves a page's content.
+fn edit(app: &mut App) {
+    app.doc.begin_op();
+    let li = app.doc.active;
+    app.doc.layers[li]
+        .tile_mut(mn_core::TileIdx::new(0, 0))
+        .set_pixel(1, 1, [32768, 0, 0, 32768]);
+    app.doc.end_op();
+}
+
+/// A three-page work in a fresh temp folder to export into.
+fn work_and_dir(tag: &str, renderer: mn_gpu::Renderer) -> (App, std::path::PathBuf) {
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    for _ in 0..2 {
+        crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::AddPage);
+    }
+    let dir = std::env::temp_dir().join(format!("mn-unexported-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    (app, dir)
+}
+
+/// The reminder's core arithmetic: an edit after an export makes the page
+/// count, and re-exporting clears it. The LIVE page counts before it
+/// stashes (its `rev` only moves then) and still counts after — the two
+/// halves of the same page, not two different dirty systems.
+#[test]
+fn an_edit_after_an_export_makes_the_page_count_as_unexported() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let (mut app, dir) = work_and_dir("edit", renderer);
+
+    crate::cmd::dispatch(
+        &mut app,
+        crate::cmd::AppCmd::ExportAllPagesPath(dir.clone()),
+    );
+    assert!(
+        app.pages.iter().all(|e| e.exported_rev > 0),
+        "every page was written, so every page is recorded"
+    );
+    assert_eq!(app.unexported_pages(), 0, "fresh off an export: nothing");
+
+    edit(&mut app);
+    assert_eq!(
+        app.unexported_pages(),
+        1,
+        "the page being drawn on counts before it stashes"
+    );
+    app.stash_current_page().unwrap();
+    let e = &app.pages[app.page_index];
+    assert!(
+        e.rev > e.exported_rev,
+        "the stash gave it a fresh revision, above the exported one"
+    );
+    assert_eq!(app.unexported_pages(), 1, "…and it still counts once");
+
+    crate::cmd::dispatch(
+        &mut app,
+        crate::cmd::AppCmd::ExportAllPagesPath(dir.clone()),
+    );
+    assert_eq!(app.unexported_pages(), 0, "re-exporting clears it");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// PM-054's range is the reminder's sharpest edge: an export of pages 2..3
+/// must clear those two and leave page 1 saying it is still out of date.
+/// Marking the whole work would be the silent failure this feature exists
+/// to prevent.
+#[test]
+fn an_export_range_clears_only_the_pages_it_wrote() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let (mut app, dir) = work_and_dir("range", renderer);
+    crate::cmd::dispatch(
+        &mut app,
+        crate::cmd::AppCmd::ExportAllPagesPath(dir.clone()),
+    );
+    assert_eq!(app.unexported_pages(), 0);
+
+    // Every page edited, through the page-switch door that stashes.
+    for i in 0..3 {
+        app.switch_page(i);
+        edit(&mut app);
+    }
+    assert_eq!(app.unexported_pages(), 3, "all three moved");
+
+    app.export_all_range = true;
+    app.export_all_from = 2;
+    app.export_all_to = 3;
+    crate::cmd::dispatch(
+        &mut app,
+        crate::cmd::AppCmd::ExportAllPagesPath(dir.clone()),
+    );
+    assert_eq!(app.unexported_pages(), 1, "page 1 was not in the range");
+    assert!(
+        app.pages[0].rev > app.pages[0].exported_rev,
+        "and it is page 1 specifically"
+    );
+    for i in 1..3 {
+        assert!(
+            app.pages[i].rev <= app.pages[i].exported_rev,
+            "page {} was written by this run",
+            i + 1
+        );
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A work nobody has ever exported must stay silent however much it is
+/// edited: the reminder is for re-exports, and a chip on every new work
+/// would be nagging rather than reminding.
+#[test]
+fn a_work_that_was_never_exported_stays_quiet() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let (mut app, dir) = work_and_dir("quiet", renderer);
+    for i in 0..3 {
+        app.switch_page(i);
+        edit(&mut app);
+    }
+    assert!(
+        app.pages.iter().all(|e| e.exported_rev == 0),
+        "nothing has been exported"
+    );
+    assert_eq!(app.unexported_pages(), 0, "so there is nothing to say");
+
+    // One single-page Export PNG is enough to start the ledger — for that
+    // page only, and the rest of the work then reports honestly.
+    crate::cmd::dispatch(
+        &mut app,
+        crate::cmd::AppCmd::ExportPngPath(dir.join("one.png")),
+    );
+    assert!(app.pages[app.page_index].exported_rev > 0);
+    assert_eq!(
+        app.unexported_pages(),
+        2,
+        "the two pages that export never wrote"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

@@ -3326,6 +3326,12 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                     |img: image::RgbaImage| mn_core::export::finish_image(img, scale, colour);
                 let mut ok = 0usize;
                 let mut files = 0usize;
+                // Which pages this run actually wrote — the export
+                // reminder's ledger. Collected rather than recorded in
+                // place because the loop holds `app.pages` by reference,
+                // and a page outside the range (or one that failed to
+                // save) must keep whatever it had.
+                let mut exported: Vec<usize> = Vec::new();
                 for (i, e) in app.pages.iter().enumerate() {
                     if i + 1 < first || i + 1 > last {
                         continue;
@@ -3361,6 +3367,7 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                                     }
                                 }
                                 ok += 1;
+                                exported.push(i);
                             }
                             None => {
                                 let img = finish(mn_core::export::composite_for_export(
@@ -3371,6 +3378,7 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                                 if img.save(&path).is_ok() {
                                     ok += 1;
                                     files += 1;
+                                    exported.push(i);
                                 }
                             }
                         }
@@ -3378,6 +3386,11 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 }
                 // Restore the active-page invariant (bytes live in `doc`).
                 app.pages[app.page_index].bytes = None;
+                // The pages this run wrote are now up to date; the ones it
+                // skipped keep saying so in the status bar.
+                for i in exported {
+                    app.note_page_exported(i);
+                }
                 // PM-053 as CSP has it: the script rides along with the
                 // image run when the toggle is on.
                 let mut extra = String::new();
@@ -3477,6 +3490,7 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                                         id: fp.id,
                                         rev: fp.rev,
                                         saved_rev: fp.saved_rev,
+                                        exported_rev: fp.exported_rev,
                                         doc_rev: if i == 0 { app.doc.revision } else { 0 },
                                         spread: false,
                                         preview_img: None,
@@ -3731,7 +3745,15 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             let img = app.renderer.render_offscreen(&app.doc, w, h);
             app.renderer.set_paper_override(None);
             match img.save(&p) {
-                Ok(()) => app.set_status(format!("exported {w}x{h} PNG -> {}", p.display())),
+                Ok(()) => {
+                    app.set_status(format!("exported {w}x{h} PNG -> {}", p.display()));
+                    // This page's image just landed on disk, so the export
+                    // reminder stops counting it (and starts counting the
+                    // work at all, if this was its first export). After the
+                    // status line: a stash that fails there has something
+                    // to say and should not be talked over.
+                    app.note_page_exported(app.page_index);
+                }
                 Err(e) => app.set_error(format!("png export failed: {e}")),
             }
         }
@@ -4620,6 +4642,11 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 return;
             }
             let mut report = Vec::new();
+            // Pages this run wrote at least one image of (see the export
+            // reminder). A comp set is a VARIANT of the page rather than
+            // the page itself, but it is still that page's art leaving the
+            // app, so it counts as an export.
+            let mut exported: Vec<usize> = Vec::new();
             // LC-013: a multi-selection (LC-007) exports ONLY those
             // comps; empty selection = everything (CSP's rule).
             let sel = app.comp_multi.clone();
@@ -4651,11 +4678,17 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                         .is_ok()
                     {
                         ok += 1;
+                        exported.push(i);
                     }
                 }
                 report.push(format!("{}: {ok}", c.name));
             }
             app.pages[app.page_index].bytes = None;
+            // Idempotent: a page written once per comp is recorded once per
+            // comp at the same revision.
+            for i in exported {
+                app.note_page_exported(i);
+            }
             let scope = if sel.is_empty() {
                 format!("all {} comps", comps.len())
             } else {

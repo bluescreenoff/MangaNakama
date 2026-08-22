@@ -744,6 +744,23 @@ pub(super) fn prefs_window(ctx: &egui::Context, app: &mut App) {
                         )
                         .changed();
                     ui.end_row();
+
+                    // The unexported-pages reminder (owner ask
+                    // 2026-08-22). It lives under Saving rather than in a
+                    // section of its own: exporting is the other half of
+                    // "did my work make it out of the app", and one more
+                    // row here beats a sixth header for one checkbox.
+                    ui.label("Remind about unexported pages");
+                    changed |= ui
+                        .add(egui::Checkbox::new(&mut p.export_reminder, ""))
+                        .on_hover_text(
+                            "Shows a quiet count in the status bar when pages changed \
+                             since the last export wrote them; click it to open Export \
+                             All Pages. Silent until a work has been exported once. \
+                             Export reminder, unexported, stale pages, forgot to export.",
+                        )
+                        .changed();
+                    ui.end_row();
                 });
             ui.weak(
                 "Work folders save in place on this timer; everything else gets a \

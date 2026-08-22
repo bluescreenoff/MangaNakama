@@ -27,6 +27,11 @@ pub struct PageEntry {
     pub rev: u64,
     /// Revision already on disk in the work folder (skip-write hint).
     pub saved_rev: u64,
+    /// Revision the last export of this page WROTE (0 = this page has
+    /// never been exported). `rev > exported_rev` is the whole of the
+    /// unexported-pages reminder — see [`unexported_pages`]. Persisted
+    /// with the work-folder index, defaulted for older works.
+    pub exported_rev: u64,
     /// `doc.revision` at the moment `bytes` were encoded — makes stashing a
     /// no-op (and a re-encode bump-free) while the page was not edited.
     pub doc_rev: u64,
@@ -76,6 +81,7 @@ impl PageEntry {
             id: 0,
             rev: 0,
             saved_rev: 0,
+            exported_rev: 0,
             doc_rev: 0,
             spread: false,
             preview_img: None,
@@ -88,6 +94,29 @@ impl PageEntry {
             pane_tex_rev: 0,
         }
     }
+}
+
+/// Pages whose content moved since an export last wrote them — the whole
+/// arithmetic of the unexported-pages reminder (owner ask 2026-08-22).
+///
+/// A work NOBODY has exported yet answers 0, on purpose: a chip on a work
+/// that has never left the app is nagging, not reminding.
+///
+/// `live` is the page being edited and its document revision, when the
+/// caller has one (a parked tab does not). The active page's `rev` only
+/// moves when it stashes, so without this the reminder would wait for a
+/// page switch to notice the two panels you just fixed.
+pub(super) fn unexported_pages(pages: &[PageEntry], live: Option<(usize, u64)>) -> usize {
+    if !pages.iter().any(|e| e.exported_rev > 0) {
+        return 0;
+    }
+    pages
+        .iter()
+        .enumerate()
+        .filter(|(i, e)| {
+            e.rev > e.exported_rev || live.is_some_and(|(li, drev)| li == *i && drev != e.doc_rev)
+        })
+        .count()
 }
 
 /// TRIAGE 143: which spread operation the dialog is editing.
@@ -222,6 +251,7 @@ impl App {
             id: 0,
             rev,
             saved_rev: 0,
+            exported_rev: 0,
             doc_rev: 0,
             spread: false,
             preview_img: None,
@@ -251,9 +281,57 @@ impl App {
 
     /// Adopt work-folder bookkeeping after opening a work folder (cmd.rs is a
     /// sibling module — the fields stay private to `app`).
+    ///
+    /// It also lifts the page clock over the revisions the work arrived
+    /// with. The clock starts at 0 every launch, so a work whose pages sit
+    /// at revision 4000 would otherwise hand its next edit a LOWER number:
+    /// `save_folder` skips a page with `rev <= saved_rev`, and the export
+    /// reminder compares the same way — both would have gone quiet about
+    /// the page just edited. Revisions only ever move forward.
     pub fn adopt_folder_state(&mut self, next_id: u32, managed: Vec<String>) {
         self.folder_next_id = next_id;
         self.folder_managed = managed;
+        let highest = self
+            .pages
+            .iter()
+            .map(|e| e.rev.max(e.exported_rev))
+            .max()
+            .unwrap_or(0);
+        self.page_clock = self.page_clock.max(highest);
+    }
+
+    /// This work's unexported-page count (see [`unexported_pages`]), with
+    /// the page currently being drawn on taken into account.
+    pub fn unexported_pages(&self) -> usize {
+        unexported_pages(&self.pages, Some((self.page_index, self.doc.revision)))
+    }
+
+    /// Record that page `i`'s image was just written out by an export.
+    ///
+    /// The ACTIVE page stashes first: its `rev` only moves at stash time,
+    /// so recording the revision it still carries would mark the export
+    /// stale the moment the page landed in its slot — the reminder would
+    /// nag about the pages it just wrote.
+    pub fn note_page_exported(&mut self, i: usize) {
+        if i >= self.pages.len() {
+            return;
+        }
+        if i == self.page_index && self.pages[i].doc_rev != self.doc.revision {
+            let was_live = self.pages[i].bytes.is_none();
+            if let Err(e) = self.stash_current_page() {
+                self.set_error(format!("export note skipped: {e}"));
+                return;
+            }
+            if was_live {
+                // The active page's bytes live in `doc` (the invariant
+                // every other stash caller restores the same way).
+                self.pages[i].bytes = None;
+            }
+        }
+        // At least 1: a page exported at revision 0 (single-file `.mnc`
+        // pages all load there) must still count as "has been exported",
+        // which is the gate that keeps a never-exported work quiet.
+        self.pages[i].exported_rev = self.pages[i].rev.max(1);
     }
 
     /// File names the current pages map to in a work folder (the managed set).
@@ -307,6 +385,7 @@ impl App {
                     id: e.id,
                     rev: e.rev,
                     saved_rev: e.saved_rev,
+                    exported_rev: e.exported_rev,
                     bytes: e.bytes.clone().unwrap_or_default(),
                 })
                 .collect(),

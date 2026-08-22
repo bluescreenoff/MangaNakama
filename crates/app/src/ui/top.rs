@@ -1502,6 +1502,9 @@ pub(super) fn status_bar(ui: &mut egui::Ui, app: &mut App) {
         }
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // Right-to-left: what is added first sits furthest right, so
+            // the layer name and brush keep the corner they have always
+            // had and the reminder chip lands to their left.
             let layer = app
                 .doc
                 .layers
@@ -1522,8 +1525,47 @@ pub(super) fn status_bar(ui: &mut egui::Ui, app: &mut App) {
                 .size(10.5)
                 .color(theme::TEXT),
             );
+            unexported_chip(ui, app);
         });
     });
+}
+
+/// The unexported-pages reminder (owner ask 2026-08-22): "I fixed two
+/// panels and forgot to re-export".
+///
+/// Deliberately the quietest thing on the bar — weak text, no fill, no
+/// warn colour. It is a memory aid, not a problem: nothing is broken, the
+/// files on disk are simply older than the pages. It says nothing until
+/// the work has been exported at least once (a work that has never left
+/// the app has nothing to be reminded about), and nothing at all when the
+/// preference is off.
+fn unexported_chip(ui: &mut egui::Ui, app: &mut App) {
+    if !app.prefs.export_reminder {
+        return;
+    }
+    let n = app.unexported_pages();
+    if n == 0 {
+        return;
+    }
+    ui.separator();
+    let text = if n == 1 {
+        "1 page unexported".to_owned()
+    } else {
+        format!("{n} pages unexported")
+    };
+    let hit = ui
+        .add(
+            egui::Label::new(egui::RichText::new(text).size(10.5).color(theme::TEXT_WEAK))
+                .sense(egui::Sense::click()),
+        )
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(
+            "These pages changed since the last export wrote them. \
+             Click to open Export All Pages.",
+        );
+    if hit.clicked() {
+        app.push_cmd(AppCmd::ExportAllPages);
+    }
 }
 
 // --- paper (PA-001, TRIAGE 100 / CSP OL-005) -----------------------------
