@@ -126,7 +126,7 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
             painter.rect_stroke(
                 rect,
                 1.0,
-                egui::Stroke::new(1.4, if hot { theme::ACCENT } else { blue }),
+                egui::Stroke::new(1.4, if hot { theme::c().accent } else { blue }),
                 egui::StrokeKind::Inside,
             );
         }
@@ -170,7 +170,7 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
                 let t2 = (t + 6.0).min(len);
                 painter.line_segment(
                     [a + dir * t, a + dir * t2],
-                    egui::Stroke::new(1.0, theme::ACCENT.linear_multiply(0.55)),
+                    egui::Stroke::new(1.0, theme::c().accent.linear_multiply(0.55)),
                 );
                 t += 10.0;
             }
@@ -525,7 +525,7 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
         // square, accent outline). A guide has no anchor — its whole line
         // is the grab — so it shows none, which is the honest affordance.
         if app.tool == Tool::Object {
-            let outline = egui::Stroke::new(1.2, theme::ACCENT);
+            let outline = egui::Stroke::new(1.2, theme::c().accent);
             let square = |c: egui::Pos2| {
                 let r = egui::Rect::from_center_size(c, egui::vec2(7.0, 7.0));
                 painter.rect_filled(r, 1.0, egui::Color32::WHITE);
@@ -571,7 +571,7 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
                         egui::Align2::LEFT_CENTER,
                         role.tag(),
                         font.clone(),
-                        theme::ACCENT,
+                        theme::c().accent,
                     );
                 }
             }
@@ -657,24 +657,24 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
         }
         painter.add(egui::Shape::line(
             line,
-            egui::Stroke::new(1.5, theme::ACCENT),
+            egui::Stroke::new(1.5, theme::c().accent),
         ));
         if let Some(first) = pts.first() {
             painter.circle_stroke(
                 to_pt(first.0, first.1),
                 5.0,
-                egui::Stroke::new(1.5, theme::ACCENT),
+                egui::Stroke::new(1.5, theme::c().accent),
             );
         }
         for p in pts {
-            painter.circle_filled(to_pt(p.0, p.1), 2.5, theme::ACCENT);
+            painter.circle_filled(to_pt(p.0, p.1), 2.5, theme::c().accent);
         }
     }
     if let Some(pts) = &app.frame_pen {
         let line: Vec<egui::Pos2> = pts.iter().map(|p| to_pt(p.0, p.1)).collect();
         painter.add(egui::Shape::line(
             line,
-            egui::Stroke::new(1.5, theme::ACCENT),
+            egui::Stroke::new(1.5, theme::c().accent),
         ));
     }
 
@@ -691,7 +691,7 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
                     to_pt(a.0, b.1),
                     to_pt(a.0, a.1),
                 ],
-                egui::Stroke::new(2.0, theme::ACCENT),
+                egui::Stroke::new(2.0, theme::c().accent),
             ));
         } else {
             // The divide preview shows the GUTTER, not just the cut (owner,
@@ -717,13 +717,13 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
                             to_pt(a.0 + hx * s, a.1 + hy * s),
                             to_pt(b.0 + hx * s, b.1 + hy * s),
                         ],
-                        egui::Stroke::new(1.5, theme::ACCENT),
+                        egui::Stroke::new(1.5, theme::c().accent),
                     );
                 }
             } else {
                 painter.line_segment(
                     [to_pt(a.0, a.1), to_pt(b.0, b.1)],
-                    egui::Stroke::new(2.0, theme::ACCENT),
+                    egui::Stroke::new(2.0, theme::c().accent),
                 );
             }
         }
@@ -766,7 +766,7 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
             let pts: Vec<egui::Pos2> = s.points.iter().map(|p| to_pt(p.0, p.1)).collect();
             painter.add(egui::Shape::line(
                 pts.clone(),
-                egui::Stroke::new(1.5, theme::ACCENT),
+                egui::Stroke::new(1.5, theme::c().accent),
             ));
             // Two handle classes, Clip Studio's convention: SQUARES are the
             // special points — today the stroke's two ENDPOINTS, and the
@@ -782,12 +782,12 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
                     painter.rect_stroke(
                         hrect,
                         1.0,
-                        egui::Stroke::new(1.2, theme::ACCENT),
+                        egui::Stroke::new(1.2, theme::c().accent),
                         egui::StrokeKind::Inside,
                     );
                 } else {
                     painter.circle_filled(pts[i], 3.4, egui::Color32::WHITE);
-                    painter.circle_stroke(pts[i], 3.4, egui::Stroke::new(1.2, theme::ACCENT));
+                    painter.circle_stroke(pts[i], 3.4, egui::Stroke::new(1.2, theme::c().accent));
                 }
             }
         }
@@ -809,7 +809,7 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
                 }
                 painter.add(egui::Shape::line(
                     pts,
-                    egui::Stroke::new(1.5, theme::ACCENT),
+                    egui::Stroke::new(1.5, theme::c().accent),
                 ));
                 for p in &f.points {
                     let c = to_pt(p[0], p[1]);
@@ -818,7 +818,7 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
                     painter.rect_stroke(
                         hrect,
                         1.0,
-                        egui::Stroke::new(1.2, theme::ACCENT),
+                        egui::Stroke::new(1.2, theme::c().accent),
                         egui::StrokeKind::Inside,
                     );
                 }
@@ -852,7 +852,7 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
                     painter.rect_stroke(
                         hr,
                         1.0,
-                        egui::Stroke::new(1.2, theme::ACCENT),
+                        egui::Stroke::new(1.2, theme::c().accent),
                         egui::StrokeKind::Inside,
                     );
                 };
@@ -867,8 +867,8 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
                 // Rotation lollipop: stem up from the top-centre.
                 let stem0 = egui::pos2(brect.center().x, brect.top());
                 let stem1 = egui::pos2(stem0.x, stem0.y - 26.0);
-                painter.line_segment([stem0, stem1], egui::Stroke::new(1.2, theme::ACCENT));
-                painter.circle_stroke(stem1, 4.5, egui::Stroke::new(1.5, theme::ACCENT));
+                painter.line_segment([stem0, stem1], egui::Stroke::new(1.2, theme::c().accent));
+                painter.circle_stroke(stem1, 4.5, egui::Stroke::new(1.5, theme::c().accent));
                 // Shared-gutter markers (yellow, along the shared edge).
                 let yellow = egui::Color32::from_rgb(238, 198, 60);
                 let tpl = template_lines(app);
@@ -938,7 +938,7 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
                     let pts: Vec<egui::Pos2> = line.iter().map(|p| to_pt(p[0], p[1])).collect();
                     painter.add(egui::Shape::line(
                         pts,
-                        egui::Stroke::new(1.5, theme::ACCENT),
+                        egui::Stroke::new(1.5, theme::c().accent),
                     ));
                 }
                 for (pos, h) in b.handles() {
@@ -950,12 +950,12 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
                         painter.rect_stroke(
                             hrect,
                             1.0,
-                            egui::Stroke::new(1.2, theme::ACCENT),
+                            egui::Stroke::new(1.2, theme::c().accent),
                             egui::StrokeKind::Inside,
                         );
                     } else {
                         painter.circle_filled(c, 3.6, egui::Color32::WHITE);
-                        painter.circle_stroke(c, 3.6, egui::Stroke::new(1.2, theme::ACCENT));
+                        painter.circle_stroke(c, 3.6, egui::Stroke::new(1.2, theme::c().accent));
                     }
                 }
                 // The Operation tool's blue box (CSP shows one around any
@@ -968,7 +968,7 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
                 painter.rect_stroke(
                     boxr,
                     0.0,
-                    egui::Stroke::new(1.2, theme::ACCENT),
+                    egui::Stroke::new(1.2, theme::c().accent),
                     egui::StrokeKind::Inside,
                 );
                 let mid =
@@ -987,11 +987,11 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
                 ];
                 for p in corners.into_iter().chain(mids) {
                     let r = egui::Rect::from_center_size(p, egui::vec2(8.0, 8.0));
-                    painter.rect_filled(r, 1.0, theme::PANEL);
+                    painter.rect_filled(r, 1.0, theme::c().panel);
                     painter.rect_stroke(
                         r,
                         1.0,
-                        egui::Stroke::new(1.4, theme::ACCENT),
+                        egui::Stroke::new(1.4, theme::c().accent),
                         egui::StrokeKind::Inside,
                     );
                 }
@@ -999,10 +999,10 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
                 let lolly = egui::pos2(boxr.center().x, boxr.top() - 26.0);
                 painter.line_segment(
                     [egui::pos2(boxr.center().x, boxr.top()), lolly],
-                    egui::Stroke::new(1.2, theme::ACCENT),
+                    egui::Stroke::new(1.2, theme::c().accent),
                 );
-                painter.circle_filled(lolly, 4.5, theme::PANEL);
-                painter.circle_stroke(lolly, 4.5, egui::Stroke::new(1.4, theme::ACCENT));
+                painter.circle_filled(lolly, 4.5, theme::c().panel);
+                painter.circle_stroke(lolly, 4.5, egui::Stroke::new(1.4, theme::c().accent));
             }
         }
     }
@@ -1010,7 +1010,7 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
     // Balloon tool: live preview of the drag (bubble outline / freehand trail /
     // tail line).
     if let Some(pts) = &app.balloon_drag {
-        let col = theme::ACCENT;
+        let col = theme::c().accent;
         match app.balloon_mode {
             BalloonMode::Draw => {
                 let line: Vec<egui::Pos2> = pts.iter().map(|p| to_pt(p[0], p[1])).collect();
@@ -1060,7 +1060,7 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
     // Figure tool: live preview of the shape being dragged / the polygon
     // vertices placed so far.
     if let Some((a, b)) = &app.figure_drag {
-        let col = theme::ACCENT;
+        let col = theme::c().accent;
         let pts: Vec<egui::Pos2> = app
             .figure_path(*a, *b)
             .iter()
@@ -1073,11 +1073,11 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
         }
     }
     if let Some(pts) = &app.figure_poly {
-        let col = theme::ACCENT;
+        let col = theme::c().accent;
         for p in pts {
             let c = to_pt(p.0, p.1);
             painter.circle_filled(c, 3.2, col);
-            painter.circle_stroke(c, 3.2, egui::Stroke::new(1.0, theme::PANEL));
+            painter.circle_stroke(c, 3.2, egui::Stroke::new(1.0, theme::c().panel));
         }
         if pts.len() >= 2 {
             let line: Vec<egui::Pos2> = pts.iter().map(|p| to_pt(p.0, p.1)).collect();
@@ -1089,14 +1089,14 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
         if let Some(last) = pts.last() {
             painter.line_segment(
                 [to_pt(last.0, last.1), to_pt(mx, my)],
-                egui::Stroke::new(1.0, theme::TEXT_WEAK),
+                egui::Stroke::new(1.0, theme::c().text_weak),
             );
         }
     }
 
     // Gradient tool: the ramp line with end markers.
     if let Some((a, b)) = &app.grad_drag {
-        let col = theme::ACCENT;
+        let col = theme::c().accent;
         let pa = to_pt(a.0, a.1);
         let pb = to_pt(b.0, b.1);
         painter.line_segment([pa, pb], egui::Stroke::new(2.0, col));
@@ -1134,7 +1134,7 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
         }
         painter.add(egui::Shape::line(
             pts,
-            egui::Stroke::new(1.2, theme::ACCENT),
+            egui::Stroke::new(1.2, theme::c().accent),
         ));
         if with_handles {
             for (pos, h) in item.handles(rot_off) {
@@ -1144,17 +1144,17 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
                     let top = item.to_canvas([item.size[0] * 0.5, 0.0]);
                     painter.line_segment(
                         [to_pt(top[0], top[1]), c],
-                        egui::Stroke::new(1.0, theme::ACCENT),
+                        egui::Stroke::new(1.0, theme::c().accent),
                     );
                     painter.circle_filled(c, 4.0, egui::Color32::WHITE);
-                    painter.circle_stroke(c, 4.0, egui::Stroke::new(1.2, theme::ACCENT));
+                    painter.circle_stroke(c, 4.0, egui::Stroke::new(1.2, theme::c().accent));
                 } else {
                     let hrect = egui::Rect::from_center_size(c, egui::vec2(7.0, 7.0));
                     painter.rect_filled(hrect, 1.0, egui::Color32::WHITE);
                     painter.rect_stroke(
                         hrect,
                         1.0,
-                        egui::Stroke::new(1.2, theme::ACCENT),
+                        egui::Stroke::new(1.2, theme::c().accent),
                         egui::StrokeKind::Inside,
                     );
                 }
@@ -1451,7 +1451,7 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
         line.push(pts[0]);
         painter.add(egui::Shape::line(
             line,
-            egui::Stroke::new(1.5, theme::ACCENT),
+            egui::Stroke::new(1.5, theme::c().accent),
         ));
         // Corner handles (squares, CSP-style); the grabbed one is larger.
         let active_corner = match drag.gesture.as_ref().map(|g| g.grab) {
@@ -1461,7 +1461,7 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
         for (i, pt) in pts.iter().enumerate() {
             let half = if active_corner == Some(i) { 5.0 } else { 4.0 };
             let rect = egui::Rect::from_center_size(*pt, egui::vec2(half * 2.0, half * 2.0));
-            painter.rect_filled(rect, 1.0, theme::ACCENT);
+            painter.rect_filled(rect, 1.0, theme::c().accent);
             painter.rect_stroke(
                 rect,
                 1.0,
@@ -1485,7 +1485,7 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
             painter.rect_stroke(
                 rect,
                 1.0,
-                egui::Stroke::new(1.0, theme::ACCENT),
+                egui::Stroke::new(1.0, theme::c().accent),
                 egui::StrokeKind::Inside,
             );
         }
@@ -1496,10 +1496,10 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
         for d in [egui::vec2(1.0, 0.0), egui::vec2(0.0, 1.0)] {
             painter.line_segment(
                 [pv - d * arm, pv + d * arm],
-                egui::Stroke::new(1.5, theme::ACCENT),
+                egui::Stroke::new(1.5, theme::c().accent),
             );
         }
-        painter.circle_filled(pv, 2.0, theme::ACCENT);
+        painter.circle_filled(pv, 2.0, theme::c().accent);
     }
 
     // Panel reading order (owner top item 2026-08-18): numbered badges on
@@ -1556,14 +1556,14 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
             let a = l.last_anchor();
             painter.line_segment(
                 [to_pt(a.0 as f32 + 0.5, a.1 as f32 + 0.5), cursor],
-                egui::Stroke::new(1.0, theme::ACCENT.gamma_multiply(0.6)),
+                egui::Stroke::new(1.0, theme::c().accent.gamma_multiply(0.6)),
             );
         }
         for (i, a) in l.anchors().iter().enumerate() {
             let p = to_pt(a.0 as f32 + 0.5, a.1 as f32 + 0.5);
-            painter.circle_filled(p, 2.5, theme::ACCENT);
+            painter.circle_filled(p, 2.5, theme::c().accent);
             if i == 0 {
-                painter.circle_stroke(p, 5.0, egui::Stroke::new(1.5, theme::ACCENT));
+                painter.circle_stroke(p, 5.0, egui::Stroke::new(1.5, theme::c().accent));
             }
         }
         // The ants only crawl while something asks for the next frame.

@@ -230,7 +230,7 @@ pub(crate) fn sec_text_ruby(ui: &mut egui::Ui, app: &mut App) {
         ui.label(
             egui::RichText::new("Along")
                 .size(10.5)
-                .color(theme::TEXT_WEAK),
+                .color(theme::c().text_weak),
         );
         let mut align = st.align;
         for (label, value, tip) in [
@@ -426,7 +426,7 @@ pub(crate) fn sec_text_auto_tcy(ui: &mut egui::Ui, app: &mut App) {
         ui.label(
             egui::RichText::new("自動縦中横")
                 .size(10.5)
-                .color(theme::TEXT_WEAK),
+                .color(theme::c().text_weak),
         );
         for n in 0..=mn_core::text::AUTO_TCY_MAX {
             let label = if n == 0 {

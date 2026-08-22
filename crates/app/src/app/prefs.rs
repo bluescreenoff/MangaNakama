@@ -95,6 +95,11 @@ pub struct Prefs {
     /// 2026-08-21: "a bit bigger by default, and a setting"). The toggle
     /// strip above the list derives from it at 0.8×.
     pub palette_icon_px: f32,
+    /// The chrome's colour scheme, by `ui::theme` built-in name. A name this
+    /// build does not know resolves to `dark` at read time and is otherwise
+    /// left alone — same rule as `new_preset`, and the reason a theme from a
+    /// newer build survives a downgrade instead of being rewritten to `dark`.
+    pub theme: String,
     /// `k=v` lines this build does not recognise, kept so saving here does
     /// not delete a newer build's settings.
     unknown: Vec<String>,
@@ -117,6 +122,7 @@ impl Default for Prefs {
             new_preset: String::new(),
             export_reminder: true,
             palette_icon_px: PALETTE_ICON_PX,
+            theme: THEME.to_owned(),
             unknown: Vec::new(),
             dirty: false,
         }
@@ -125,6 +131,9 @@ impl Default for Prefs {
 
 /// Default Layers-palette command-icon size, px.
 pub const PALETTE_ICON_PX: f32 = 20.0;
+/// The colour scheme a fresh install starts in — the one every screenshot in
+/// `docs/` was taken in.
+pub const THEME: &str = "dark";
 
 /// Clamp that also catches NaN and infinity — `f32::clamp` passes NaN
 /// straight through, and a NaN fit margin is a canvas that never appears.
@@ -181,7 +190,7 @@ impl Prefs {
     /// wrote that this one does not understand, verbatim.
     fn to_body(&self) -> String {
         let mut body = format!(
-            "autosave_min={}\nautosave_every_op={}\nundo_depth={}\nmouse_smooth_px={}\nnew_canvas_w={}\nnew_canvas_h={}\nfit_margin={}\nwheel_step={}\nrotate_step_deg={}\nrecent_depth={}\ntext_size_pt={}\nnew_preset={}\nexport_reminder={}\npalette_icon_px={}\n",
+            "autosave_min={}\nautosave_every_op={}\nundo_depth={}\nmouse_smooth_px={}\nnew_canvas_w={}\nnew_canvas_h={}\nfit_margin={}\nwheel_step={}\nrotate_step_deg={}\nrecent_depth={}\ntext_size_pt={}\nnew_preset={}\nexport_reminder={}\npalette_icon_px={}\ntheme={}\n",
             self.autosave_min,
             u8::from(self.autosave_every_op),
             self.undo_depth,
@@ -196,6 +205,7 @@ impl Prefs {
             self.new_preset.replace('\n', ""),
             u8::from(self.export_reminder),
             self.palette_icon_px,
+            self.theme.replace('\n', ""),
         );
         for line in &self.unknown {
             body.push_str(line);
@@ -242,6 +252,16 @@ impl Prefs {
                 }
             }
             "palette_icon_px" => self.palette_icon_px = v.parse().unwrap_or(self.palette_icon_px),
+            // Not validated here on purpose: an unrecognised name resolves to
+            // `dark` at read time (`ui::theme::by_name`) and the file keeps
+            // what it said, so a theme added in a newer build is not deleted
+            // by an older one. An EMPTY value is the one exception — that is
+            // a mangled line, not a choice.
+            "theme" => {
+                if !v.is_empty() {
+                    self.theme = v.to_owned();
+                }
+            }
             // A key we do not know is a key from a NEWER build. Keep the
             // line so the next save writes it back out instead of eating it.
             _ if !k.is_empty() => self.unknown.push(line.to_owned()),
@@ -272,6 +292,12 @@ impl Prefs {
         self.rotate_step_deg = finite(self.rotate_step_deg, ROTATE_STEP_DEG, 1.0, 90.0);
         self.recent_depth = self.recent_depth.clamp(1, 32);
         self.text_size_pt = finite(self.text_size_pt, TEXT_SIZE_PT, 4.0, 72.0);
+        // A blank name would be written back out as a blank `theme=` line —
+        // the only "clamp" a theme name gets. An UNKNOWN name is left alone
+        // (see `apply_kv`); it simply paints `dark`.
+        if self.theme.trim().is_empty() {
+            self.theme = THEME.to_owned();
+        }
     }
 
     pub(super) fn load() -> Self {
@@ -347,6 +373,48 @@ mod tests {
             p.new_preset_setup().name,
             mn_core::PageSetup::presets()[0].name
         );
+    }
+
+    /// The theme name is a plain string that round-trips, and an unknown one
+    /// is NOT rewritten — a `prefs.txt` naming a theme a newer build added
+    /// must come back with that name after this build has saved over it,
+    /// even though this build paints `dark` meanwhile.
+    #[test]
+    fn theme_roundtrips_and_an_unknown_name_paints_dark() {
+        assert_eq!(Prefs::default().theme, "dark");
+        assert_eq!(
+            crate::ui::theme::by_name(&Prefs::default().theme),
+            crate::ui::theme::DARK
+        );
+
+        let mut me = Prefs::default();
+        me.theme = "violet".to_owned();
+        let back = from_body(&me.to_body());
+        assert_eq!(back.theme, "violet");
+        assert_eq!(
+            crate::ui::theme::by_name(&back.theme),
+            crate::ui::theme::VIOLET
+        );
+
+        // From the future: kept verbatim, painted as dark, written back out.
+        let future = from_body("theme=solarized-2027\n");
+        assert_eq!(future.theme, "solarized-2027");
+        assert_eq!(
+            crate::ui::theme::by_name(&future.theme),
+            crate::ui::theme::DARK,
+            "an unknown theme must fall back rather than wedge start-up"
+        );
+        assert!(future.to_body().contains("theme=solarized-2027\n"));
+        assert_eq!(
+            future.to_body().matches("theme=").count(),
+            1,
+            "and it must not ALSO be kept as an unknown key: {}",
+            future.to_body()
+        );
+
+        // A mangled line keeps the default, like every other key here — and
+        // must not write a blank `theme=` back out.
+        assert_eq!(from_body("theme=\n").theme, "dark");
     }
 
     #[test]

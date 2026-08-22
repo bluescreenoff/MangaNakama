@@ -1106,6 +1106,10 @@ impl TouchProbe {
 impl App {
     pub fn new(renderer: Renderer, client: (u32, u32), ppp: f32) -> Self {
         let prefs = Prefs::load();
+        // BEFORE `Shell::new`, which is what calls `theme::apply` on the
+        // fresh context: set the palette first and the first frame is
+        // already in the user's theme, with no flash of the default.
+        crate::ui::theme::set_by_name(&prefs.theme);
         // `Document::default()` is `DEFAULT_SIZE`; the preference IS that
         // constant until the owner changes it in the panel.
         let doc = Document::new(prefs.new_canvas.0, prefs.new_canvas.1);
@@ -2044,7 +2048,7 @@ impl App {
     /// Same, for something that failed. Never a panic: a bad file must not take
     /// the drawing down with it.
     /// A refusal or a failure. Same line as `set_status`, painted in
-    /// [`ui::theme::WARN`] — the whole difference between "nothing happened"
+    /// [`ui::theme::c().warn`] — the whole difference between "nothing happened"
     /// and "nothing happened, and here is why" is whether the eye lands on
     /// it.
     pub fn set_error(&mut self, msg: impl Into<String>) {

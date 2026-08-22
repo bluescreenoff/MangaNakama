@@ -18,13 +18,13 @@ fn step_row(ui: &mut egui::Ui, n: usize, label: &str, state: Step) -> egui::Resp
     let text = egui::RichText::new(format!("{n}. {label}"))
         .size(11.0)
         .color(match state {
-            Step::Now => theme::TEXT_STRONG,
-            Step::Past => theme::TEXT,
-            Step::Redo => theme::TEXT_WEAK,
+            Step::Now => theme::c().text_strong,
+            Step::Past => theme::c().text,
+            Step::Redo => theme::c().text_weak,
         });
     let text = if state == Step::Now { text.strong() } else { text };
     let fill = if state == Step::Now {
-        theme::SEL_ROW
+        theme::c().sel_row
     } else {
         egui::Color32::TRANSPARENT
     };
@@ -75,7 +75,7 @@ pub fn history_palette(ui: &mut egui::Ui, app: &mut App) {
             ui.label(
                 egui::RichText::new(format!("— current ({} undone) —", future.len()))
                     .size(10.5)
-                    .color(theme::TEXT_WEAK),
+                    .color(theme::c().text_weak),
             );
         }
         // Future steps: clicking future step j (0-based, oldest first)

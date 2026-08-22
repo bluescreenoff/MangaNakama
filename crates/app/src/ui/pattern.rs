@@ -50,7 +50,7 @@ pub(super) fn pattern_window(ctx: &egui::Context, app: &mut App) {
             if !(app.wrap_x && app.wrap_y) {
                 ui.horizontal(|ui| {
                     ui.colored_label(
-                        super::theme::WARN,
+                        super::theme::c().warn,
                         "wrap is off — strokes will seam at the edges",
                     );
                     if ui.small_button("turn wrap on").clicked() {

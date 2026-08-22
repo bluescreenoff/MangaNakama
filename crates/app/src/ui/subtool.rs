@@ -63,14 +63,14 @@ fn mode_row(ui: &mut egui::Ui, selected: bool, icon: Icon, name: &str) -> egui::
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 22.0), egui::Sense::click());
     let p = ui.painter();
     if selected {
-        p.rect_filled(rect, 2.0, theme::SEL_ROW);
+        p.rect_filled(rect, 2.0, theme::c().sel_row);
         p.rect_filled(
             egui::Rect::from_min_size(rect.min, egui::vec2(2.0, rect.height())),
             0.0,
-            theme::ACCENT,
+            theme::c().accent,
         );
     } else if resp.hovered() {
-        p.rect_filled(rect, 2.0, theme::HOVER);
+        p.rect_filled(rect, 2.0, theme::c().hover);
     }
     let ir = egui::Rect::from_center_size(
         egui::pos2(rect.left() + 15.0, rect.center().y),
@@ -81,15 +81,15 @@ fn mode_row(ui: &mut egui::Ui, selected: bool, icon: Icon, name: &str) -> egui::
         ir,
         icon,
         if selected {
-            theme::TEXT_STRONG
+            theme::c().text_strong
         } else {
-            theme::TEXT
+            theme::c().text
         },
     );
     let color = if selected {
-        theme::TEXT_STRONG
+        theme::c().text_strong
     } else {
-        theme::TEXT
+        theme::c().text
     };
     let galley = super::widgets::ellipsis(
         ui,
@@ -640,14 +640,14 @@ fn subtool_row(
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 22.0), egui::Sense::click());
     let p = ui.painter();
     if selected {
-        p.rect_filled(rect, 2.0, theme::SEL_ROW);
+        p.rect_filled(rect, 2.0, theme::c().sel_row);
         p.rect_filled(
             egui::Rect::from_min_size(rect.min, egui::vec2(2.0, rect.height())),
             0.0,
-            theme::ACCENT,
+            theme::c().accent,
         );
     } else if resp.hovered() {
-        p.rect_filled(rect, 2.0, theme::HOVER);
+        p.rect_filled(rect, 2.0, theme::c().hover);
     }
     let ir = egui::Rect::from_min_size(
         egui::pos2(
@@ -666,20 +666,20 @@ fn subtool_row(
             );
         }
         None => {
-            p.rect_filled(ir, 2.0, theme::FIELD);
+            p.rect_filled(ir, 2.0, theme::c().field);
         }
     }
     p.rect_stroke(
         ir,
         2.0,
-        egui::Stroke::new(1.0, theme::BORDER),
+        egui::Stroke::new(1.0, theme::c().border),
         egui::StrokeKind::Inside,
     );
     let tx = ir.right() + 7.0;
     let color = if selected {
-        theme::TEXT_STRONG
+        theme::c().text_strong
     } else {
-        theme::TEXT
+        theme::c().text
     };
     let galley = super::widgets::ellipsis(
         ui,

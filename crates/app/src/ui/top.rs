@@ -855,7 +855,7 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                          and a phantom undo mid-stroke costs more than the gesture saves.",
                     )
                     .size(10.0)
-                    .color(theme::TEXT_WEAK),
+                    .color(theme::c().text_weak),
                 );
             });
             ui.separator();
@@ -1050,7 +1050,7 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
             f.layout_no_wrap(
                 title,
                 egui::FontId::proportional(10.5),
-                theme::TEXT_WEAK.gamma_multiply(0.8),
+                theme::c().text_weak.gamma_multiply(0.8),
             )
         });
         let (half_w, pad) = (galley.size().x * 0.5, 8.0);
@@ -1067,7 +1067,7 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
             ui.painter().galley(
                 egui::pos2(cx - half_w, c.y - galley.size().y * 0.5),
                 galley,
-                theme::TEXT_WEAK.gamma_multiply(0.8),
+                theme::c().text_weak.gamma_multiply(0.8),
             );
         }
 
@@ -1149,7 +1149,7 @@ fn command_row(ui: &mut egui::Ui, app: &mut App) {
                 egui::RichText::new(format!("{:>4.0}%", app.viewport.zoom * 100.0))
                     .monospace()
                     .size(10.5)
-                    .color(theme::TEXT_WEAK),
+                    .color(theme::c().text_weak),
             );
             if icon_btn(ui, Icon::ZoomIn, S, false, true, "Zoom in").clicked() {
                 app.push_cmd(AppCmd::ZoomStep(1.25));
@@ -1220,14 +1220,14 @@ fn caption_button(ui: &mut egui::Ui, app: &mut App, kind: Caption) {
     let bg = if hover && kind == Caption::Close {
         egui::Color32::from_rgb(0xe8, 0x11, 0x23)
     } else if hover {
-        theme::HOVER
+        theme::c().hover
     } else {
-        theme::WINDOW
+        theme::c().window
     };
     let color = if hover {
-        theme::TEXT_STRONG
+        theme::c().text_strong
     } else {
-        theme::TEXT_WEAK
+        theme::c().text_weak
     };
     let p = ui.painter();
     if hover {
@@ -1322,7 +1322,8 @@ pub(super) fn doc_tab(ui: &mut egui::Ui, app: &mut App) {
     let mut x = rect.left() + 6.0;
 
     for (i, (label, dirty)) in tabs.iter().enumerate() {
-        let galley = ui.fonts_mut(|f| f.layout_no_wrap(label.clone(), font.clone(), theme::TEXT));
+        let galley =
+            ui.fonts_mut(|f| f.layout_no_wrap(label.clone(), font.clone(), theme::c().text));
         let dot_w = if *dirty { 11.0 } else { 0.0 };
         let want = galley.size().x + 12.0 + dot_w + 22.0;
         let share = (avail / tabs.len() as f32).max(60.0);
@@ -1357,11 +1358,11 @@ pub(super) fn doc_tab(ui: &mut egui::Ui, app: &mut App) {
             tab,
             radius,
             if is_active {
-                theme::PANEL
+                theme::c().panel
             } else if tresp.hovered() {
-                theme::HOVER
+                theme::c().hover
             } else {
-                theme::HEADER
+                theme::c().header
             },
         );
         // Accent edge along the top of the ACTIVE tab, Photoshop-style.
@@ -1369,7 +1370,7 @@ pub(super) fn doc_tab(ui: &mut egui::Ui, app: &mut App) {
             p.rect_filled(
                 egui::Rect::from_min_size(tab.min, egui::vec2(tab.width(), 2.0)),
                 radius,
-                theme::ACCENT,
+                theme::c().accent,
             );
         }
         let ty = tab.center().y + 0.5;
@@ -1384,27 +1385,27 @@ pub(super) fn doc_tab(ui: &mut egui::Ui, app: &mut App) {
             egui::pos2(tab.left() + 8.0, ty - galley.size().y * 0.5),
             galley.clone(),
             if is_active {
-                theme::TEXT
+                theme::c().text
             } else {
-                theme::TEXT_WEAK
+                theme::c().text_weak
             },
         );
         if *dirty {
             let dx =
                 (tab.left() + 8.0 + galley.size().x.min(text_room) + 6.0).min(close.left() - 5.0);
-            p.circle_filled(egui::pos2(dx, ty), 2.5, theme::TEXT_WEAK);
+            p.circle_filled(egui::pos2(dx, ty), 2.5, theme::c().text_weak);
         }
         if cresp.hovered() {
-            p.rect_filled(close, 2.0, theme::HOVER);
+            p.rect_filled(close, 2.0, theme::c().hover);
         }
         icons::paint(
             p,
             close.shrink(3.5),
             Icon::Close,
             if cresp.hovered() {
-                theme::TEXT_STRONG
+                theme::c().text_strong
             } else {
-                theme::TEXT_WEAK
+                theme::c().text_weak
             },
         );
 
@@ -1445,7 +1446,7 @@ pub(super) fn status_bar(ui: &mut egui::Ui, app: &mut App) {
                 egui::RichText::new(v)
                     .monospace()
                     .size(10.5)
-                    .color(theme::TEXT),
+                    .color(theme::c().text),
             );
             ui.separator();
         };
@@ -1488,15 +1489,15 @@ pub(super) fn status_bar(ui: &mut egui::Ui, app: &mut App) {
         ui.label(
             egui::RichText::new(size_txt)
                 .size(10.5)
-                .color(theme::TEXT_WEAK),
+                .color(theme::c().text_weak),
         );
         if !app.status.is_empty() {
             ui.separator();
             ui.label(egui::RichText::new(app.status.clone()).size(10.5).color(
                 if app.status_warn {
-                    theme::WARN
+                    theme::c().warn
                 } else {
-                    theme::TEXT_WEAK
+                    theme::c().text_weak
                 },
             ));
         }
@@ -1511,7 +1512,7 @@ pub(super) fn status_bar(ui: &mut egui::Ui, app: &mut App) {
                 .get(app.doc.active)
                 .map(|l| l.name.clone())
                 .unwrap_or_default();
-            ui.label(egui::RichText::new(layer).size(10.5).color(theme::TEXT));
+            ui.label(egui::RichText::new(layer).size(10.5).color(theme::c().text));
             ui.separator();
             ui.label(
                 egui::RichText::new(format!(
@@ -1523,7 +1524,7 @@ pub(super) fn status_bar(ui: &mut egui::Ui, app: &mut App) {
                     if app.eraser_active() { "  [erase]" } else { "" }
                 ))
                 .size(10.5)
-                .color(theme::TEXT),
+                .color(theme::c().text),
             );
             unexported_chip(ui, app);
         });
@@ -1555,8 +1556,12 @@ fn unexported_chip(ui: &mut egui::Ui, app: &mut App) {
     };
     let hit = ui
         .add(
-            egui::Label::new(egui::RichText::new(text).size(10.5).color(theme::TEXT_WEAK))
-                .sense(egui::Sense::click()),
+            egui::Label::new(
+                egui::RichText::new(text)
+                    .size(10.5)
+                    .color(theme::c().text_weak),
+            )
+            .sense(egui::Sense::click()),
         )
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text(
@@ -1626,7 +1631,7 @@ fn paper_menu(ui: &mut egui::Ui, app: &mut App) {
                  The eye is not, and never does.",
             )
             .size(10.0)
-            .color(theme::TEXT_WEAK),
+            .color(theme::c().text_weak),
         );
     });
 }

@@ -47,9 +47,9 @@ enum StepOp {
 }
 
 const BTN: f32 = 15.0;
-/// Recording red — the one colour in the palette that is not a theme token,
-/// because "armed" reads as red everywhere and nowhere else in the app.
-const REC: egui::Color32 = egui::Color32::from_rgb(0xe5, 0x4b, 0x4b);
+// Recording red is `theme::c().rec` now. It stays red in every built-in
+// theme — "armed" reads as red everywhere and nowhere else in the app — but
+// it is a token rather than a private const, so a theme CAN move it.
 
 pub fn actions_palette(ui: &mut egui::Ui, app: &mut App) {
     let mut dirty = false;
@@ -66,8 +66,8 @@ pub fn actions_palette(ui: &mut egui::Ui, app: &mut App) {
         }
         if app.action_recording.is_some() {
             let (r, _) = ui.allocate_exact_size(egui::vec2(9.0, 9.0), egui::Sense::hover());
-            super::icons::paint(ui.painter(), r, Icon::Record, REC);
-            ui.colored_label(REC, "recording");
+            super::icons::paint(ui.painter(), r, Icon::Record, theme::c().rec);
+            ui.colored_label(theme::c().rec, "recording");
         }
     });
     ui.separator();
@@ -217,9 +217,9 @@ fn action_steps(ui: &mut egui::Ui, app: &mut App, i: usize, recording: bool) -> 
                     gr,
                     Icon::Grip,
                     if gresp.hovered() || gresp.dragged() {
-                        theme::TEXT
+                        theme::c().text
                     } else {
-                        theme::TEXT_WEAK
+                        theme::c().text_weak
                     },
                 );
                 if gresp.drag_started() {
@@ -268,9 +268,16 @@ fn action_steps(ui: &mut egui::Ui, app: &mut App, i: usize, recording: bool) -> 
                 .pointer_interact_pos()
                 .is_some_and(|p| p.y < row.rect.center().y);
             let slot = if above { si } else { si + 1 };
-            let y = if above { row.rect.top() } else { row.rect.bottom() };
-            ui.painter()
-                .hline(row.rect.x_range(), y, egui::Stroke::new(2.0, theme::ACCENT));
+            let y = if above {
+                row.rect.top()
+            } else {
+                row.rect.bottom()
+            };
+            ui.painter().hline(
+                row.rect.x_range(),
+                y,
+                egui::Stroke::new(2.0, theme::c().accent),
+            );
             if row.dnd_release_payload::<StepDrag>().is_some() {
                 op = Some(StepOp::Move(d.1, slot));
             }
@@ -281,7 +288,7 @@ fn action_steps(ui: &mut egui::Ui, app: &mut App, i: usize, recording: bool) -> 
             ui.horizontal(|ui| {
                 ui.add_space(26.0);
                 egui::Frame::new()
-                    .fill(theme::HEADER)
+                    .fill(theme::c().header)
                     .inner_margin(egui::Margin::same(4))
                     .corner_radius(theme::R_CTRL)
                     .show(ui, |ui| {
@@ -339,7 +346,7 @@ fn action_steps(ui: &mut egui::Ui, app: &mut App, i: usize, recording: bool) -> 
                     } else {
                         format!("insert step at {}", slot + 1)
                     })
-                    .color(theme::TEXT_WEAK)
+                    .color(theme::c().text_weak)
                     .size(10.0),
                 );
                 egui::ScrollArea::vertical()

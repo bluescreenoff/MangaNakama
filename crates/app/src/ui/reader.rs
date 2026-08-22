@@ -20,7 +20,7 @@ pub(super) fn reader_overlay(ui: &mut egui::Ui, app: &mut App) {
         .resizable(false)
         .frame(
             egui::Frame::new()
-                .fill(theme::FIELD)
+                .fill(theme::c().field)
                 .inner_margin(egui::Margin::symmetric(8, 4)),
         )
         .show(ui, |ui| reader_bar(ui, app));
@@ -34,7 +34,7 @@ pub(super) fn reader_overlay(ui: &mut egui::Ui, app: &mut App) {
             .show_separator_line(false)
             .frame(
                 egui::Frame::new()
-                    .fill(theme::FIELD)
+                    .fill(theme::c().field)
                     .inner_margin(egui::Margin::symmetric(8, 6)),
             )
             .show(ui, |ui| reader_flags_panel(ui, app));

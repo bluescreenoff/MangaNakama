@@ -22,10 +22,11 @@ use crate::cmd::{AppCmd, SubTool, Tool};
 /// the palette's "Preferences ▸ …" rows open the window with one of these
 /// lit (`ui::dialogs::pref_head`). Renaming a header here without renaming
 /// it there only costs the highlight, never the row.
-const PREF_SECTIONS: [&str; 6] = [
+const PREF_SECTIONS: [&str; 7] = [
     "Saving",
     "Drawing",
     "Canvas & view",
+    "Interface",
     "Text",
     "History",
     "Performance",
@@ -683,8 +684,8 @@ pub fn command_palette(ctx: &egui::Context, app: &mut App) {
         .show(ctx, |ui| {
             let shadow = ui.style().visuals.window_shadow;
             egui::Frame::new()
-                .fill(theme::PANEL)
-                .stroke(egui::Stroke::new(1.0, theme::BORDER))
+                .fill(theme::c().panel)
+                .stroke(egui::Stroke::new(1.0, theme::c().border))
                 .corner_radius(6.0)
                 .inner_margin(egui::Margin::same(8))
                 .shadow(shadow)
@@ -740,14 +741,14 @@ fn palette_row(ui: &mut egui::Ui, e: &Entry, selected: bool) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 20.0), egui::Sense::click());
     let p = ui.painter();
     if selected {
-        p.rect_filled(rect, 3.0, theme::SEL_ROW);
+        p.rect_filled(rect, 3.0, theme::c().sel_row);
     } else if resp.hovered() {
-        p.rect_filled(rect, 3.0, theme::HOVER);
+        p.rect_filled(rect, 3.0, theme::c().hover);
     }
     let color = if selected {
-        theme::TEXT_STRONG
+        theme::c().text_strong
     } else {
-        theme::TEXT
+        theme::c().text
     };
     p.text(
         egui::pos2(rect.left() + 6.0, rect.center().y),
@@ -761,7 +762,7 @@ fn palette_row(ui: &mut egui::Ui, e: &Entry, selected: bool) -> egui::Response {
         egui::Align2::RIGHT_CENTER,
         &e.path,
         egui::FontId::proportional(10.5),
-        theme::TEXT_WEAK,
+        theme::c().text_weak,
     );
     resp
 }

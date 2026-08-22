@@ -182,7 +182,7 @@ pub(super) fn property_detail_window(ctx: &egui::Context, app: &mut App) {
                             ui.label(
                                 egui::RichText::new(title.to_owned())
                                     .size(11.5)
-                                    .color(super::theme::TEXT_STRONG),
+                                    .color(super::theme::c().text_strong),
                             );
                         });
                         body(ui, app);
@@ -647,9 +647,9 @@ fn pref_head(ui: &mut egui::Ui, text: &str, focus: Option<&str>) {
     // header is already on screen; the only thing missing is where to look.
     let lit = focus == Some(text);
     ui.label(egui::RichText::new(text).strong().color(if lit {
-        super::theme::ACCENT
+        super::theme::c().accent
     } else {
-        super::theme::TEXT_STRONG
+        super::theme::c().text_strong
     }));
     ui.add_space(2.0);
 }
@@ -681,6 +681,7 @@ pub(super) fn prefs_window(ctx: &egui::Context, app: &mut App) {
     let mut changed = false;
     let mut reset = false;
     let mut preset_pick: Option<String> = None;
+    let mut theme_pick: Option<&'static str> = None;
     let autosave_before = app.prefs.autosave_min;
     let preset_now = app.prefs.new_preset_setup().name;
     // Read before the window borrows `app.prefs`. Live rather than cached:
@@ -888,6 +889,29 @@ pub(super) fn prefs_window(ctx: &egui::Context, app: &mut App) {
                 });
             ui.weak("New canvas and preset apply to the next document you create.");
 
+            // The theme picker is deliberately three words in a row rather
+            // than a dropdown: with three built-ins, a combo box hides two
+            // of them behind a click, and the whole point of a theme is that
+            // you try them. The full editor (custom themes, per-token
+            // colour pickers) waits for the Preferences rework.
+            pref_head(ui, "Interface", focus);
+            egui::Grid::new("mn.prefs.interface")
+                .num_columns(2)
+                .spacing([10.0, 5.0])
+                .show(ui, |ui| {
+                    ui.label("Theme");
+                    let now = theme::resolved_name(&p.theme);
+                    ui.horizontal(|ui| {
+                        for (name, _) in theme::BUILT_INS {
+                            if ui.selectable_label(now == *name, *name).clicked() && now != *name {
+                                theme_pick = Some(*name);
+                            }
+                        }
+                    });
+                    ui.end_row();
+                });
+            ui.weak("Applies immediately. Only dark themes ship for now.");
+
             pref_head(ui, "Text", focus);
             egui::Grid::new("mn.prefs.text")
                 .num_columns(2)
@@ -962,6 +986,17 @@ pub(super) fn prefs_window(ctx: &egui::Context, app: &mut App) {
     if reset {
         app.prefs.reset();
         app.new_doc_draft.setup = app.prefs.new_preset_setup();
+        theme_pick = Some(theme::resolved_name(&app.prefs.theme));
+    }
+    if let Some(name) = theme_pick {
+        app.prefs.theme = name.to_owned();
+        // Live, this frame: swap the tokens, then push them through egui's
+        // own widget visuals. Immediate mode redraws everything anyway, so
+        // there is nothing else to invalidate — and the dock derives its
+        // style from `Style::from_egui` every frame, so it follows too.
+        theme::set_by_name(name);
+        theme::apply(ctx);
+        changed = true;
     }
     if let Some(name) = preset_pick {
         app.prefs.new_preset = name;
@@ -1051,8 +1086,8 @@ fn tone_curve_editor(ui: &mut egui::Ui, pts: &mut [[f32; 2]; mn_core::TONE_CURVE
         ]
     };
 
-    painter.rect_filled(rect, 2.0, theme::FIELD);
-    let grid = egui::Stroke::new(1.0, theme::OUTLINE);
+    painter.rect_filled(rect, 2.0, theme::c().field);
+    let grid = egui::Stroke::new(1.0, theme::c().outline);
     for k in 1..4 {
         let f = k as f32 / 4.0;
         let x = rect.left() + f * rect.width();
@@ -1077,16 +1112,16 @@ fn tone_curve_editor(ui: &mut egui::Ui, pts: &mut [[f32; 2]; mn_core::TONE_CURVE
         .collect();
     painter.add(egui::Shape::line(
         line,
-        egui::Stroke::new(2.0, theme::ACCENT),
+        egui::Stroke::new(2.0, theme::c().accent),
     ));
 
     let count = (*n as usize).min(mn_core::TONE_CURVE_MAX);
     for (i, p) in pts[..count].iter().enumerate() {
         let pos = to_px(*p);
         let hot = drag == Some(i);
-        painter.circle_filled(pos, if hot { 5.5 } else { 4.0 }, theme::ACCENT);
+        painter.circle_filled(pos, if hot { 5.5 } else { 4.0 }, theme::c().accent);
         if hot {
-            painter.circle_stroke(pos, 5.5, egui::Stroke::new(1.5, theme::TEXT_STRONG));
+            painter.circle_stroke(pos, 5.5, egui::Stroke::new(1.5, theme::c().text_strong));
         }
     }
 

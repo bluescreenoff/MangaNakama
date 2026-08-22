@@ -498,7 +498,7 @@ fn canvas_pane_body(ui: &mut egui::Ui, app: &mut App) {
         egui::vec2(ui.available_width(), super::top::DOC_TAB_H),
     );
     ui.painter()
-        .rect_filled(strip, egui::CornerRadius::ZERO, theme::HEADER);
+        .rect_filled(strip, egui::CornerRadius::ZERO, theme::c().header);
     super::top::doc_tab(ui, app);
 
     let hole = ui.available_rect_before_wrap();
@@ -524,7 +524,7 @@ fn page_view_body(ui: &mut egui::Ui, app: &mut App, page: usize) {
             egui::Align2::CENTER_CENTER,
             format!("No page {} in this work", page + 1),
             egui::FontId::proportional(12.0),
-            theme::TEXT_WEAK,
+            theme::c().text_weak,
         );
         return;
     }
@@ -599,7 +599,7 @@ fn page_view_body(ui: &mut egui::Ui, app: &mut App, page: usize) {
     ui.painter().rect_stroke(
         fit,
         0.0,
-        egui::Stroke::new(1.0, theme::BORDER),
+        egui::Stroke::new(1.0, theme::c().border),
         egui::StrokeKind::Outside,
     );
 
@@ -614,9 +614,9 @@ fn page_view_body(ui: &mut egui::Ui, app: &mut App, page: usize) {
         caption,
         egui::FontId::proportional(11.0),
         if current {
-            theme::TEXT
+            theme::c().text
         } else {
-            theme::TEXT_WEAK
+            theme::c().text_weak
         },
     );
 
@@ -630,7 +630,7 @@ fn page_view_body(ui: &mut egui::Ui, app: &mut App, page: usize) {
             ui.painter().rect_stroke(
                 fit,
                 0.0,
-                egui::Stroke::new(1.5, theme::ACCENT),
+                egui::Stroke::new(1.5, theme::c().accent),
                 egui::StrokeKind::Outside,
             );
         }
@@ -681,8 +681,8 @@ pub fn open_page_pane(app: &mut App, page: usize) {
 fn dock_style(ui: &egui::Ui) -> Style {
     let mut s = Style::from_egui(ui.style());
 
-    s.tab_bar.bg_fill = theme::HEADER;
-    s.tab_bar.hline_color = theme::BORDER;
+    s.tab_bar.bg_fill = theme::c().header;
+    s.tab_bar.hline_color = theme::c().border;
     s.tab_bar.height = 20.0;
     // CSP tab strips: tabs divide the bar evenly and long titles ellipsize
     // (the vendored truncation patch) instead of overflowing the × buttons.
@@ -691,26 +691,26 @@ fn dock_style(ui: &egui::Ui) -> Style {
     let tab_state = |bg: egui::Color32, text: egui::Color32| egui_dock::TabInteractionStyle {
         bg_fill: bg,
         text_color: text,
-        outline_color: theme::BORDER,
+        outline_color: theme::c().border,
         corner_radius: egui::CornerRadius::same(0),
     };
-    s.tab.active = tab_state(theme::PANEL, theme::TEXT_STRONG);
-    s.tab.inactive = tab_state(theme::HEADER, theme::TEXT_WEAK);
-    s.tab.hovered = tab_state(theme::HOVER, theme::TEXT);
-    s.tab.focused = tab_state(theme::HOVER, theme::TEXT_STRONG);
+    s.tab.active = tab_state(theme::c().panel, theme::c().text_strong);
+    s.tab.inactive = tab_state(theme::c().header, theme::c().text_weak);
+    s.tab.hovered = tab_state(theme::c().hover, theme::c().text);
+    s.tab.focused = tab_state(theme::c().hover, theme::c().text_strong);
     s.tab.active_with_kb_focus = s.tab.active.clone();
     s.tab.inactive_with_kb_focus = s.tab.inactive.clone();
     s.tab.focused_with_kb_focus = s.tab.focused.clone();
     s.tab.spacing = 0.0;
     s.tab.hline_below_active_tab_name = false;
 
-    s.tab.tab_body.bg_fill = theme::PANEL;
+    s.tab.tab_body.bg_fill = theme::c().panel;
     s.tab.tab_body.stroke = egui::Stroke::NONE;
     s.tab.tab_body.corner_radius = egui::CornerRadius::same(0);
 
-    s.separator.color_idle = theme::BORDER;
-    s.separator.color_hovered = theme::ACCENT;
-    s.separator.color_dragged = theme::ACCENT;
+    s.separator.color_idle = theme::c().border;
+    s.separator.color_hovered = theme::c().accent;
+    s.separator.color_dragged = theme::c().accent;
     s.separator.width = 1.0;
     // Easy to hit with a pen (upstream's 2.0 total ≈ 1pt per side — the owner
     // reported the resize cursor only appearing on an exact hit).
@@ -718,27 +718,27 @@ fn dock_style(ui: &egui::Ui) -> Style {
 
     // Tab × / floating-window buttons: transparent until hovered, our greys.
     let b = &mut s.buttons;
-    b.close_tab_bg_fill = theme::HOVER;
-    b.close_tab_color = theme::TEXT_WEAK;
-    b.close_tab_active_color = theme::TEXT_STRONG;
-    b.add_tab_bg_fill = theme::HOVER;
-    b.add_tab_color = theme::TEXT_WEAK;
-    b.add_tab_active_color = theme::TEXT_STRONG;
-    b.add_tab_border_color = theme::BORDER;
-    b.close_all_tabs_bg_fill = theme::HOVER;
-    b.close_all_tabs_color = theme::TEXT_WEAK;
-    b.close_all_tabs_active_color = theme::TEXT_STRONG;
-    b.close_all_tabs_border_color = theme::BORDER;
-    b.collapse_tabs_bg_fill = theme::HOVER;
-    b.collapse_tabs_color = theme::TEXT_WEAK;
-    b.collapse_tabs_active_color = theme::TEXT_STRONG;
-    b.collapse_tabs_border_color = theme::BORDER;
-    b.minimize_window_bg_fill = theme::HOVER;
-    b.minimize_window_color = theme::TEXT_WEAK;
-    b.minimize_window_active_color = theme::TEXT_STRONG;
-    b.minimize_window_border_color = theme::BORDER;
-    b.show_tab_bar_color = theme::TEXT_WEAK;
-    b.show_tab_bar_active_color = theme::TEXT_STRONG;
+    b.close_tab_bg_fill = theme::c().hover;
+    b.close_tab_color = theme::c().text_weak;
+    b.close_tab_active_color = theme::c().text_strong;
+    b.add_tab_bg_fill = theme::c().hover;
+    b.add_tab_color = theme::c().text_weak;
+    b.add_tab_active_color = theme::c().text_strong;
+    b.add_tab_border_color = theme::c().border;
+    b.close_all_tabs_bg_fill = theme::c().hover;
+    b.close_all_tabs_color = theme::c().text_weak;
+    b.close_all_tabs_active_color = theme::c().text_strong;
+    b.close_all_tabs_border_color = theme::c().border;
+    b.collapse_tabs_bg_fill = theme::c().hover;
+    b.collapse_tabs_color = theme::c().text_weak;
+    b.collapse_tabs_active_color = theme::c().text_strong;
+    b.collapse_tabs_border_color = theme::c().border;
+    b.minimize_window_bg_fill = theme::c().hover;
+    b.minimize_window_color = theme::c().text_weak;
+    b.minimize_window_active_color = theme::c().text_strong;
+    b.minimize_window_border_color = theme::c().border;
+    b.show_tab_bar_color = theme::c().text_weak;
+    b.show_tab_bar_active_color = theme::c().text_strong;
 
     s.main_surface_border_stroke = egui::Stroke::NONE;
     s.dock_area_padding = Some(egui::Margin::same(1));

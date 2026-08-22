@@ -427,9 +427,11 @@ fn material_cell(ui: &mut egui::Ui, app: &mut App, i: usize, size: egui::Vec2) {
 
     if ui.is_rect_visible(rect) {
         if selected {
-            ui.painter().rect_filled(rect, theme::R_CTRL, theme::SEL_ROW);
+            ui.painter()
+                .rect_filled(rect, theme::R_CTRL, theme::c().sel_row);
         } else if resp.hovered() {
-            ui.painter().rect_filled(rect, theme::R_CTRL, theme::HOVER);
+            ui.painter()
+                .rect_filled(rect, theme::R_CTRL, theme::c().hover);
         }
         let thumb_px = app.material_thumb_px;
         let box_ = egui::Rect::from_center_size(
@@ -444,7 +446,8 @@ fn material_cell(ui: &mut egui::Ui, app: &mut App, i: usize, size: egui::Vec2) {
                 if let Some(t) = load_thumb(app, &thumb_path, thumb_px) {
                     app.material_thumbs.insert(path.clone(), t);
                 } else {
-                    ui.painter().rect_filled(box_, theme::R_CTRL, theme::FIELD);
+                    ui.painter()
+                        .rect_filled(box_, theme::R_CTRL, theme::c().field);
                 }
             }
         }
@@ -462,9 +465,9 @@ fn material_cell(ui: &mut egui::Ui, app: &mut App, i: usize, size: egui::Vec2) {
             egui::TextStyle::Small,
         );
         let col = if selected {
-            theme::TEXT_STRONG
+            theme::c().text_strong
         } else {
-            theme::TEXT_WEAK
+            theme::c().text_weak
         };
         ui.painter().galley(
             egui::pos2(
@@ -631,7 +634,8 @@ fn info_strip(ui: &mut egui::Ui, app: &mut App) {
                         app.material_thumbs.insert(path.clone(), t);
                     }
                     None => {
-                        ui.painter().rect_filled(rect, theme::R_CTRL, theme::FIELD);
+                        ui.painter()
+                            .rect_filled(rect, theme::R_CTRL, theme::c().field);
                     }
                 },
             }

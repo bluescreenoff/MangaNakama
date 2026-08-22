@@ -67,7 +67,7 @@ pub(super) fn layer_property(ui: &mut egui::Ui, app: &mut App) {
     ui.label(
         egui::RichText::new(name)
             .size(11.5)
-            .color(theme::TEXT_STRONG),
+            .color(theme::c().text_strong),
     );
     let (mut reference, mut draft) = (l.reference, l.draft);
     match (frames, balloons) {
@@ -730,23 +730,10 @@ const FOLDER_ROW_H: f32 = 34.0;
 /// the old right-edge badges).
 const FLAG_COL_W: f32 = 16.0;
 
-/// The status marks carry their own hue so the column reads at a glance
-/// without being deciphered (owner 2026-08-21): red for the reference
-/// lighthouse, blue for the draft pencil. Both sit at the ACCENT's weight —
-/// desaturated enough not to glow against the dark rail.
-const REF_MARK: egui::Color32 = egui::Color32::from_rgb(0xcf, 0x5d, 0x59);
-
-/// See [`REF_MARK`] — the draft pencil's blue.
-const DRAFT_MARK: egui::Color32 = egui::Color32::from_rgb(0x66, 0x9e, 0xd6);
-
-/// The active row's fill. CSP paints the editing row an unmissable blue;
-/// the audit round toned ours from the original #2f5e99 glare down to
-/// CSP's own weight — the 1px lighter edges (below) keep it unmissable in
-/// a 60-layer stack without out-shouting the thumbnails.
-const SEL_ACTIVE: egui::Color32 = egui::Color32::from_rgb(0x3c, 0x47, 0x59);
-
-/// The 1px top/bottom edge lines on the active row.
-const SEL_EDGE: egui::Color32 = egui::Color32::from_rgb(0x5a, 0x6b, 0x86);
+// The status marks (`ref_mark`/`draft_mark`), the active row's fill
+// (`sel_active`) and its 1px edge lines (`sel_edge`) used to be four private
+// consts here. They are Theme fields now, so a theme can move them together
+// with everything else — see `ui/theme.rs`.
 
 /// The per-type marker a palette row carries beside its thumbnail, CSP's
 /// layer-type glyph. `None` = a plain raster layer: the common case stays
@@ -885,7 +872,7 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
             a_reference,
             true,
             "Reference layer",
-            Some(REF_MARK),
+            Some(theme::c().ref_mark),
         )
         .clicked()
         {
@@ -898,7 +885,7 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
             a_draft,
             true,
             "Draft layer",
-            Some(DRAFT_MARK),
+            Some(theme::c().draft_mark),
         )
         .clicked()
         {
@@ -1033,7 +1020,7 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
                                 ui.painter().rect_stroke(
                                     r,
                                     3.0,
-                                    egui::Stroke::new(2.0, theme::TEXT_STRONG),
+                                    egui::Stroke::new(2.0, theme::c().text_strong),
                                     egui::StrokeKind::Inside,
                                 );
                             }
@@ -1264,21 +1251,21 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
         // bars; CSP keeps the whole left gutter dark on the selected row).
         let fill_rect = egui::Rect::from_min_max(egui::pos2(pen_col, rect.top()), rect.max);
         if selected {
-            p.rect_filled(fill_rect, 0.0, SEL_ACTIVE);
+            p.rect_filled(fill_rect, 0.0, theme::c().sel_active);
             p.hline(
                 fill_rect.x_range(),
                 rect.top() + 0.5,
-                egui::Stroke::new(1.0, SEL_EDGE),
+                egui::Stroke::new(1.0, theme::c().sel_edge),
             );
             p.hline(
                 fill_rect.x_range(),
                 rect.bottom() - 0.5,
-                egui::Stroke::new(1.0, SEL_EDGE),
+                egui::Stroke::new(1.0, theme::c().sel_edge),
             );
         } else if multi {
-            p.rect_filled(fill_rect, 0.0, theme::SEL_ROW);
+            p.rect_filled(fill_rect, 0.0, theme::c().sel_row);
         } else if resp.hovered() {
-            p.rect_filled(fill_rect, 0.0, theme::HOVER);
+            p.rect_filled(fill_rect, 0.0, theme::c().hover);
         }
         // The rail cells paint over the row fill. With a palette colour the
         // eye cell takes the dimmed shade and the pen cell the full one
@@ -1294,11 +1281,11 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
                 let ic = if lum > 140.0 {
                     egui::Color32::from_rgb(0x16, 0x16, 0x18)
                 } else {
-                    theme::TEXT_STRONG
+                    theme::c().text_strong
                 };
                 (dim, egui::Color32::from_rgb(r, g, b), ic)
             }
-            None => (theme::FIELD, theme::PANEL, theme::TEXT),
+            None => (theme::c().field, theme::c().panel, theme::c().text),
         };
         p.rect_filled(eye_cell, 0.0, cell_a);
         p.rect_filled(pen_cell, 0.0, cell_b);
@@ -1308,7 +1295,7 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
             pen_cell.right(),
             flag_cell.right(),
         ] {
-            p.vline(x, rect.y_range(), egui::Stroke::new(1.0, theme::BORDER));
+            p.vline(x, rect.y_range(), egui::Stroke::new(1.0, theme::c().border));
         }
         // Status column: the reference mark above the draft mark, one alone
         // centres. A layer with neither stays EMPTY — the round before this
@@ -1326,26 +1313,26 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
                         p,
                         egui::Rect::from_center_size(up, fs),
                         Icon::Reference,
-                        REF_MARK,
+                        theme::c().ref_mark,
                     );
                     icons::paint(
                         p,
                         egui::Rect::from_center_size(dn, fs),
                         Icon::Draft,
-                        DRAFT_MARK,
+                        theme::c().draft_mark,
                     );
                 }
                 (true, false) => icons::paint(
                     p,
                     egui::Rect::from_center_size(egui::pos2(cx, cy), fs),
                     Icon::Reference,
-                    REF_MARK,
+                    theme::c().ref_mark,
                 ),
                 (false, true) => icons::paint(
                     p,
                     egui::Rect::from_center_size(egui::pos2(cx, cy), fs),
                     Icon::Draft,
-                    DRAFT_MARK,
+                    theme::c().draft_mark,
                 ),
                 (false, false) => unreachable!(),
             }
@@ -1391,7 +1378,11 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
         let indent = row.depth as f32 * 12.0;
         for d in 1..=row.depth as usize {
             let gx = pen_col + 8.0 + (d - 1) as f32 * 12.0;
-            p.vline(gx, rect.y_range(), egui::Stroke::new(1.0, theme::BORDER));
+            p.vline(
+                gx,
+                rect.y_range(),
+                egui::Stroke::new(1.0, theme::c().border),
+            );
         }
         let mut disclose: Option<egui::Rect> = None;
         if row.folder {
@@ -1403,7 +1394,7 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
             );
             let c = dr.center();
             let ch = egui::Color32::from_rgb(0x9a, 0x9a, 0x9a);
-            let stroke = egui::Stroke::new(1.5, if selected { theme::TEXT_STRONG } else { ch });
+            let stroke = egui::Stroke::new(1.5, if selected { theme::c().text_strong } else { ch });
             let pts = if row.open {
                 vec![
                     egui::pos2(c.x - 4.0, c.y - 2.0),
@@ -1453,9 +1444,9 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
                 ir,
                 icon,
                 if selected {
-                    theme::TEXT_STRONG
+                    theme::c().text_strong
                 } else {
-                    theme::TEXT
+                    theme::c().text
                 },
             );
         } else {
@@ -1474,13 +1465,13 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
                     );
                 }
                 None => {
-                    p.rect_filled(tr, 2.0, theme::FIELD);
+                    p.rect_filled(tr, 2.0, theme::c().field);
                 }
             }
             p.rect_stroke(
                 tr,
                 2.0,
-                egui::Stroke::new(1.0, theme::BORDER),
+                egui::Stroke::new(1.0, theme::c().border),
                 egui::StrokeKind::Inside,
             );
         }
@@ -1496,7 +1487,7 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
                 ),
                 0.0,
                 if row.clip_dangling {
-                    theme::TEXT_WEAK
+                    theme::c().text_weak
                 } else {
                     egui::Color32::from_rgb(0xe5, 0x4b, 0x4b)
                 },
@@ -1528,7 +1519,7 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
                 } else {
                     Icon::LockAlpha
                 },
-                theme::TEXT_WEAK,
+                theme::c().text_weak,
             );
             fx -= 13.0;
         }
@@ -1546,9 +1537,9 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
                 fr,
                 icon,
                 if selected {
-                    theme::TEXT_STRONG
+                    theme::c().text_strong
                 } else {
-                    theme::TEXT_WEAK
+                    theme::c().text_weak
                 },
             );
             meta_x = fr.right() + 4.0;
@@ -1570,7 +1561,11 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
             Some(lpi) => format!("{lpi:.1} LPI · {}", bname(row.blend)),
             None => format!("{:.0} % {}", row.opacity * 100.0, bname(row.blend)),
         };
-        let meta_col = if selected { theme::TEXT } else { theme::TEXT_WEAK };
+        let meta_col = if selected {
+            theme::c().text
+        } else {
+            theme::c().text_weak
+        };
         let mut mjob = egui::text::LayoutJob::simple(
             meta,
             egui::FontId::proportional(10.0),
@@ -1604,15 +1599,15 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
             let bg = if amb {
                 egui::Color32::from_rgb(196, 158, 46)
             } else if pinned {
-                theme::ACCENT
+                theme::c().accent
             } else {
-                theme::FIELD
+                theme::c().field
             };
             p.rect_filled(br, 3.0, bg);
             p.rect_stroke(
                 br,
                 3.0,
-                egui::Stroke::new(1.0, theme::BORDER),
+                egui::Stroke::new(1.0, theme::c().border),
                 egui::StrokeKind::Inside,
             );
             p.text(
@@ -1627,7 +1622,7 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
                 if amb || pinned {
                     egui::Color32::BLACK
                 } else {
-                    theme::TEXT_STRONG
+                    theme::c().text_strong
                 },
             );
             if pinned {
@@ -1675,11 +1670,11 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
         // The name line. A draft row's name dims (CSP greys the 下書き
         // layer); narrow columns ELLIPSIZE the name, never wrap it.
         let name_color = if row.draft {
-            theme::TEXT_WEAK
+            theme::c().text_weak
         } else if selected {
-            theme::TEXT_STRONG
+            theme::c().text_strong
         } else {
-            theme::TEXT
+            theme::c().text
         };
         let mut job = egui::text::LayoutJob::simple(
             row.name.clone(),
@@ -1697,7 +1692,7 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
         p.hline(
             rect.x_range(),
             rect.bottom(),
-            egui::Stroke::new(1.0, theme::BORDER),
+            egui::Stroke::new(1.0, theme::c().border),
         );
 
         let disclose_clicked = disclose.is_some_and(|dr| {
@@ -1771,7 +1766,7 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
             };
             let y = if above { rect.top() } else { rect.bottom() };
             ui.painter()
-                .hline(rect.x_range(), y, egui::Stroke::new(2.0, theme::ACCENT));
+                .hline(rect.x_range(), y, egui::Stroke::new(2.0, theme::c().accent));
             if let Some(from) = resp.dnd_release_payload::<LayerDrag>() {
                 drop = Some((from.0, slot, depth));
             }
@@ -1794,9 +1789,9 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
         let cy = rect.center().y;
         let p = ui.painter();
         if selected {
-            p.rect_filled(rect, 0.0, SEL_ACTIVE);
+            p.rect_filled(rect, 0.0, theme::c().sel_active);
         } else if resp.hovered() {
-            p.rect_filled(rect, 2.0, theme::HOVER);
+            p.rect_filled(rect, 2.0, theme::c().hover);
         }
         // Same rail geometry as a layer row: eye cell | pen cell | content.
         let eye_cell =
@@ -1805,16 +1800,16 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
             egui::pos2(eye_cell.right(), rect.top()),
             egui::pos2(eye_cell.right() + 20.0, rect.bottom()),
         );
-        p.rect_filled(eye_cell, 0.0, theme::FIELD);
-        p.rect_filled(pen_cell, 0.0, theme::PANEL);
+        p.rect_filled(eye_cell, 0.0, theme::c().field);
+        p.rect_filled(pen_cell, 0.0, theme::c().panel);
         for x in [eye_cell.left(), eye_cell.right(), pen_cell.right()] {
-            p.vline(x, rect.y_range(), egui::Stroke::new(1.0, theme::BORDER));
+            p.vline(x, rect.y_range(), egui::Stroke::new(1.0, theme::c().border));
         }
         let eye_r = egui::Rect::from_center_size(
             egui::pos2(eye_cell.center().x, cy),
             egui::vec2(15.0, 15.0),
         );
-        icons::paint(p, eye_r.shrink(1.5), Icon::Eye, theme::TEXT_WEAK);
+        icons::paint(p, eye_r.shrink(1.5), Icon::Eye, theme::c().text_weak);
         let tr = egui::Rect::from_min_size(
             egui::pos2(pen_cell.right() + 7.0, cy - 16.0),
             egui::vec2(32.0, 32.0),
@@ -1825,13 +1820,13 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
         p.rect_stroke(
             tr,
             2.0,
-            egui::Stroke::new(1.0, theme::BORDER),
+            egui::Stroke::new(1.0, theme::c().border),
             egui::StrokeKind::Inside,
         );
         let text_col = if selected {
-            theme::TEXT_STRONG
+            theme::c().text_strong
         } else {
-            theme::TEXT_WEAK
+            theme::c().text_weak
         };
         // Two lines like a layer row: the sheet glyph + role on top, the
         // name underneath.
@@ -1839,13 +1834,13 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
             egui::pos2(tr.right() + 14.0, rect.top() + 12.0),
             egui::vec2(12.0, 12.0),
         );
-        icons::paint(p, gr, Icon::Paper, theme::TEXT_WEAK);
+        icons::paint(p, gr, Icon::Paper, theme::c().text_weak);
         p.text(
             egui::pos2(gr.right() + 4.0, rect.top() + 12.0),
             egui::Align2::LEFT_CENTER,
             "the page's ground",
             egui::FontId::proportional(10.0),
-            theme::TEXT_WEAK,
+            theme::c().text_weak,
         );
         p.text(
             egui::pos2(tr.right() + 8.0, rect.bottom() - 14.0),
@@ -1889,7 +1884,7 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
                                 ui.painter().rect_stroke(
                                     r,
                                     3.0,
-                                    egui::Stroke::new(2.0, theme::TEXT_STRONG),
+                                    egui::Stroke::new(2.0, theme::c().text_strong),
                                     egui::StrokeKind::Inside,
                                 );
                             }

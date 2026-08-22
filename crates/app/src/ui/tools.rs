@@ -115,6 +115,6 @@ fn group_rule(ui: &mut egui::Ui, grid_w: f32) {
     ui.painter().hline(
         egui::Rangef::new(left, left + grid_w),
         rect.center().y,
-        egui::Stroke::new(1.0, theme::OUTLINE),
+        egui::Stroke::new(1.0, theme::c().outline),
     );
 }

@@ -63,9 +63,9 @@ pub(super) fn selection_launcher(ui: &mut egui::Ui, app: &mut App, canvas: egui:
             .id_salt("mn.sel.launcher"),
         |ui| {
             egui::Frame::new()
-                .fill(theme::WINDOW)
+                .fill(theme::c().window)
                 .inner_margin(egui::Margin::symmetric(4, 2))
-                .stroke(egui::Stroke::new(1.0, theme::BORDER))
+                .stroke(egui::Stroke::new(1.0, theme::c().border))
                 .corner_radius(4.0)
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {

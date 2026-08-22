@@ -161,11 +161,11 @@ fn pages_body(ui: &mut egui::Ui, app: &mut App) {
                 );
                 let p = ui.painter();
                 // CSP-style spread container: a darker well with a border.
-                p.rect_filled(box_rect, 3.0, theme::FIELD.gamma_multiply(0.75));
+                p.rect_filled(box_rect, 3.0, theme::c().field.gamma_multiply(0.75));
                 p.rect_stroke(
                     box_rect,
                     3.0,
-                    egui::Stroke::new(1.0, theme::BORDER),
+                    egui::Stroke::new(1.0, theme::c().border),
                     egui::StrokeKind::Inside,
                 );
 
@@ -276,11 +276,11 @@ fn pages_body(ui: &mut egui::Ui, app: &mut App) {
                         None => {}
                     }
                     let stroke = if selected {
-                        egui::Stroke::new(2.0, theme::ACCENT)
+                        egui::Stroke::new(2.0, theme::c().accent)
                     } else if resp.hovered() {
-                        egui::Stroke::new(1.0, theme::TEXT_WEAK)
+                        egui::Stroke::new(1.0, theme::c().text_weak)
                     } else {
-                        egui::Stroke::new(1.0, theme::BORDER)
+                        egui::Stroke::new(1.0, theme::c().border)
                     };
                     p.rect_stroke(cell_rect, 2.0, stroke, egui::StrokeKind::Outside);
                     p.text(
@@ -289,9 +289,9 @@ fn pages_body(ui: &mut egui::Ui, app: &mut App) {
                         format!("{}", i + 1),
                         egui::FontId::proportional(10.0),
                         if selected {
-                            theme::TEXT_STRONG
+                            theme::c().text_strong
                         } else {
-                            theme::TEXT_WEAK
+                            theme::c().text_weak
                         },
                     );
 
@@ -329,7 +329,7 @@ fn pages_body(ui: &mut egui::Ui, app: &mut App) {
                         ui.painter().vline(
                             x,
                             cell_rect.y_range(),
-                            egui::Stroke::new(2.0, theme::ACCENT),
+                            egui::Stroke::new(2.0, theme::c().accent),
                         );
                         if let Some(from) = resp.dnd_release_payload::<PageDrag>() {
                             drop = Some((from.0, slot));

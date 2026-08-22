@@ -6,7 +6,9 @@ use super::icons::{self, Icon};
 use super::theme;
 
 pub(super) fn chrome_frame(margin: egui::Margin) -> egui::Frame {
-    egui::Frame::new().fill(theme::WINDOW).inner_margin(margin)
+    egui::Frame::new()
+        .fill(theme::c().window)
+        .inner_margin(margin)
 }
 
 // --- shared little widgets ----------------------------------------------
@@ -47,38 +49,38 @@ pub(super) fn icon_btn_tint(
     let pressed = enabled && resp.is_pointer_button_down_on();
     let p = ui.painter();
     if selected {
-        p.rect_filled(rect, 3.0, theme::SEL_ROW);
+        p.rect_filled(rect, 3.0, theme::c().sel_row);
         p.rect_stroke(
             rect,
             3.0,
-            egui::Stroke::new(1.0, theme::ACCENT),
+            egui::Stroke::new(1.0, theme::c().accent),
             egui::StrokeKind::Inside,
         );
     } else if pressed {
-        p.rect_filled(rect, 3.0, theme::ACTIVE);
+        p.rect_filled(rect, 3.0, theme::c().active);
         p.rect_stroke(
             rect,
             3.0,
-            egui::Stroke::new(1.0, theme::BORDER),
+            egui::Stroke::new(1.0, theme::c().border),
             egui::StrokeKind::Inside,
         );
     } else if enabled && resp.hovered() {
-        p.rect_filled(rect, 3.0, theme::HOVER);
+        p.rect_filled(rect, 3.0, theme::c().hover);
         p.rect_stroke(
             rect,
             3.0,
-            egui::Stroke::new(1.0, theme::OUTLINE),
+            egui::Stroke::new(1.0, theme::c().outline),
             egui::StrokeKind::Inside,
         );
     }
     let color = if !enabled {
-        theme::TEXT_WEAK.gamma_multiply(0.55)
+        theme::c().text_weak.gamma_multiply(0.55)
     } else if selected || resp.hovered() {
-        tint.unwrap_or(theme::TEXT_STRONG)
+        tint.unwrap_or(theme::c().text_strong)
     } else {
         // Idle a tinted glyph sits back at the palette's own weight: two
         // coloured toggles must not out-shout the grey ones beside them.
-        tint.map_or(theme::TEXT, |c| c.gamma_multiply(0.8))
+        tint.map_or(theme::c().text, |c| c.gamma_multiply(0.8))
     };
     let mut glyph = rect.shrink(size * 0.18);
     if pressed {
@@ -115,17 +117,18 @@ pub(super) fn group_caption(ui: &mut egui::Ui, label: &str) {
     let (rect, _) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 15.0), egui::Sense::hover());
     let font = egui::FontId::proportional(9.5);
-    let galley = ui.fonts_mut(|f| f.layout_no_wrap(label.to_uppercase(), font, theme::TEXT_WEAK));
+    let galley =
+        ui.fonts_mut(|f| f.layout_no_wrap(label.to_uppercase(), font, theme::c().text_weak));
     let p = ui.painter();
     p.galley(
         egui::pos2(rect.left() + 2.0, rect.center().y - galley.size().y * 0.5),
         galley.clone(),
-        theme::TEXT_WEAK,
+        theme::c().text_weak,
     );
     p.hline(
         egui::Rangef::new(rect.left() + galley.size().x + 8.0, rect.right() - 2.0),
         rect.center().y,
-        egui::Stroke::new(1.0, theme::OUTLINE),
+        egui::Stroke::new(1.0, theme::c().outline),
     );
 }
 

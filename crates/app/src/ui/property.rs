@@ -52,7 +52,7 @@ fn tool_property_body(ui: &mut egui::Ui, app: &mut App) {
         ui.label(
             egui::RichText::new(context_title(app))
                 .size(11.5)
-                .color(theme::TEXT_STRONG),
+                .color(theme::c().text_strong),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if icon_btn(
@@ -88,7 +88,7 @@ fn transform_property(ui: &mut egui::Ui, app: &mut App) {
     ui.label(
         egui::RichText::new("Transform")
             .size(11.5)
-            .color(theme::TEXT_STRONG),
+            .color(theme::c().text_strong),
     );
     ui.add_space(3.0);
     ui.horizontal(|ui| {

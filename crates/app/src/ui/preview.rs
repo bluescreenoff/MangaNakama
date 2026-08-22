@@ -196,7 +196,7 @@ fn fill_layer(doc: &mut Document, rgb: [f32; 3]) {
 
 /// Composite layer 0 over the theme's field colour, 2x2 box downsample.
 fn composite(doc: &Document) -> egui::ColorImage {
-    let bg = theme::FIELD;
+    let bg = theme::c().field;
     let (br, bg_, bb) = (bg.r() as f32, bg.g() as f32, bg.b() as f32);
     let layer = doc.layers.first();
     let sample = |x: i32, y: i32| -> [f32; 4] {

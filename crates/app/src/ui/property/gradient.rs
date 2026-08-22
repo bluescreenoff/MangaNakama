@@ -88,7 +88,7 @@ pub(crate) fn ramp_bar(
     p.rect_stroke(
         bar,
         0.0,
-        egui::Stroke::new(1.0, theme::BORDER),
+        egui::Stroke::new(1.0, theme::c().border),
         egui::StrokeKind::Inside,
     );
 
@@ -104,9 +104,9 @@ pub(crate) fn ramp_bar(
             egui::Stroke::new(
                 if picked { 2.0 } else { 1.0 },
                 if picked {
-                    theme::ACCENT
+                    theme::c().accent
                 } else {
-                    theme::OUTLINE
+                    theme::c().outline
                 },
             ),
         );
@@ -378,7 +378,7 @@ pub(crate) fn ramp_preview(ui: &mut egui::Ui, ramp: &mn_core::Ramp, h: f32) {
     p.rect_stroke(
         rect,
         0.0,
-        egui::Stroke::new(1.0, theme::BORDER),
+        egui::Stroke::new(1.0, theme::c().border),
         egui::StrokeKind::Inside,
     );
 }

@@ -5,7 +5,7 @@ pub(crate) fn pen_property(ui: &mut egui::Ui, app: &mut App) {
         ui.label(
             egui::RichText::new(app.brush_name().to_owned())
                 .size(11.5)
-                .color(theme::TEXT_STRONG),
+                .color(theme::c().text_strong),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if icon_btn(
@@ -172,23 +172,23 @@ pub(crate) fn dynamics_editor(ui: &mut egui::Ui, app: &mut App) {
     };
 
     // Chrome: field, zero-lines, then the curve.
-    painter.rect_filled(rect, 2.0, theme::FIELD);
+    painter.rect_filled(rect, 2.0, theme::c().field);
     let mid_y = to_px((0.0, 0.0));
     if rect.top() < mid_y.y && mid_y.y < rect.bottom() {
         painter.line_segment(
             [pos2(rect.left(), mid_y.y), pos2(rect.right(), mid_y.y)],
-            egui::Stroke::new(1.0, theme::OUTLINE),
+            egui::Stroke::new(1.0, theme::c().outline),
         );
     }
     if x0 < 0.0 {
         let mid_x = to_px((0.0, 0.0));
         painter.line_segment(
             [pos2(mid_x.x, rect.top()), pos2(mid_x.x, rect.bottom())],
-            egui::Stroke::new(1.0, theme::OUTLINE),
+            egui::Stroke::new(1.0, theme::c().outline),
         );
     }
     if app.curve_edit_points.len() >= 2 {
-        let stroke = egui::Stroke::new(2.0, theme::ACCENT);
+        let stroke = egui::Stroke::new(2.0, theme::c().accent);
         for pair in app.curve_edit_points.windows(2) {
             painter.line_segment([to_px(pair[0]), to_px(pair[1])], stroke);
         }
@@ -196,9 +196,9 @@ pub(crate) fn dynamics_editor(ui: &mut egui::Ui, app: &mut App) {
     for (i, p) in app.curve_edit_points.iter().enumerate() {
         let pos = to_px(*p);
         let hot = app.curve_drag == Some(i);
-        painter.circle_filled(pos, if hot { 5.0 } else { 3.5 }, theme::ACCENT);
+        painter.circle_filled(pos, if hot { 5.0 } else { 3.5 }, theme::c().accent);
         if hot {
-            painter.circle_stroke(pos, 5.0, egui::Stroke::new(1.5, theme::TEXT_STRONG));
+            painter.circle_stroke(pos, 5.0, egui::Stroke::new(1.5, theme::c().text_strong));
         }
     }
 

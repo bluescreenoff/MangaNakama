@@ -215,7 +215,9 @@ fn ref_row(ui: &mut egui::Ui, app: &mut App, i: usize) -> bool {
     };
 
     let label = if missing {
-        egui::RichText::new(name.clone()).small().color(theme::WARN)
+        egui::RichText::new(name.clone())
+            .small()
+            .color(theme::c().warn)
     } else {
         egui::RichText::new(name.clone()).small()
     };
@@ -332,7 +334,7 @@ fn viewer_body(ui: &mut egui::Ui, app: &mut App, v: &mut RefView) {
     let Some((tex, iw, ih)) = ensure_full(app, &v.path) else {
         if matches!(app.refs.full.get(&v.path), Some(None)) {
             ui.colored_label(
-                theme::WARN,
+                theme::c().warn,
                 "this file is missing — renamed, moved, or on a drive that is not mounted",
             );
             ui.weak(v.path.display().to_string());
@@ -500,14 +502,14 @@ pub fn thumb_image(path: &Path, cap: u32) -> (egui::ColorImage, bool) {
 /// The placeholder: a dark plate with a warning-coloured cross.
 fn missing_image(size: u32) -> egui::ColorImage {
     let n = size as usize;
-    let mut ci = egui::ColorImage::filled([n, n], theme::FIELD);
+    let mut ci = egui::ColorImage::filled([n, n], theme::c().field);
     let edge = (n / 5).max(2);
     for i in edge..n.saturating_sub(edge) {
         let t = (i - edge) as f32 / ((n - 2 * edge).max(1)) as f32;
         let j = edge + (t * (n - 2 * edge) as f32) as usize;
         for (x, y) in [(i, j), (i, n - 1 - j)] {
             if x < n && y < n {
-                ci.pixels[y * n + x] = theme::WARN;
+                ci.pixels[y * n + x] = theme::c().warn;
             }
         }
     }
@@ -531,7 +533,7 @@ mod tests {
         assert!(img.size[0] >= 16 && img.size[1] >= 16, "drawable placeholder");
         assert_eq!(img.pixels.len(), img.size[0] * img.size[1]);
         assert!(
-            img.pixels.iter().any(|p| *p == theme::WARN),
+            img.pixels.iter().any(|p| *p == theme::c().warn),
             "the placeholder must be visibly marked, not a blank plate"
         );
         // A directory is not an image either, and must degrade the same way.

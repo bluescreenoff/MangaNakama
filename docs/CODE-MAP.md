@@ -247,8 +247,19 @@ The recurring failure shapes, in order of how often they have shipped:
 
 ## UI chrome (`app/ui/*`)
 
-- Colors come from theme tokens in `ui/theme.rs` — a hardcoded color in
-  ui code will be wrong in one theme and invisible in review.
+- Colors come from theme tokens in `ui/theme.rs`, read as `theme::c().<token>`
+  — a hardcoded color in ui code will be wrong in one theme and invisible in
+  review. There are three built-in themes (`dark` the default, `sepia`,
+  `violet`), chosen by `theme=` in `prefs.txt` and switched live in
+  Preferences ▸ Interface: pick with `theme::set*`, then call `theme::apply`
+  so egui's own widget visuals follow. Canvas-SEMANTIC colours (marching
+  ants, guides, ruler marks in `ui/overlay.rs`) are meaning, not decoration,
+  and stay literal on purpose.
+- **egui_dock must be styled from `Style::from_egui`, never
+  `Style::default()`** — 0.21's default is a LIGHT style, and using it paints
+  white tab bodies over a dark app (owner bug report 2026-08-16). `dock.rs`
+  `dock_style` does this correctly and re-derives per frame, which is also
+  why a live theme switch reaches the dock for free.
 - `vendor/egui_dock` is patched (see PATCHES.md); dock ids, DnD payload
   keys, and the tear-off behavior are ours. Upstream-updating the crate
   without replaying the patches breaks palette drag silently.

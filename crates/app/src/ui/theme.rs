@@ -9,43 +9,207 @@
 //! darker than everything so the artwork is the brightest thing on screen.
 
 use egui::{Color32, CornerRadius, Stroke};
+use std::sync::RwLock;
 
 // --- design tokens -------------------------------------------------------
 
-/// Window chrome: menu bar, status bar, and the gutters between palettes.
-pub const WINDOW: Color32 = Color32::from_rgb(0x1f, 0x1f, 0x22);
-/// Palette bodies.
-pub const PANEL: Color32 = Color32::from_rgb(0x2a, 0x2a, 0x2e);
-/// Palette title strips (a step darker than the body, Rebelle-style).
-pub const HEADER: Color32 = Color32::from_rgb(0x24, 0x24, 0x27);
-/// Inset controls: slider troughs, list wells, text edits, combo boxes.
-pub const FIELD: Color32 = Color32::from_rgb(0x1c, 0x1c, 0x1f);
-/// Hovered rows/buttons.
-pub const HOVER: Color32 = Color32::from_rgb(0x35, 0x35, 0x3b);
-/// Pressed/open widgets.
-pub const ACTIVE: Color32 = Color32::from_rgb(0x3e, 0x3e, 0x46);
-/// The accent — selection, active tool, filled slider bars.
-pub const ACCENT: Color32 = Color32::from_rgb(0x4f, 0x8c, 0xd2);
-/// Accent-tinted fill for value bars (quieter than raw accent).
-pub const ACCENT_FILL: Color32 = Color32::from_rgb(0x37, 0x5a, 0x84);
-/// Accent-tinted selected-row background.
-pub const SEL_ROW: Color32 = Color32::from_rgb(0x2e, 0x41, 0x59);
-/// 1px seams between regions.
-pub const BORDER: Color32 = Color32::from_rgb(0x15, 0x15, 0x17);
-/// Subtle outline on raised controls.
-pub const OUTLINE: Color32 = Color32::from_rgb(0x3c, 0x3c, 0x44);
-pub const TEXT: Color32 = Color32::from_rgb(0xd4, 0xd4, 0xd8);
-pub const TEXT_WEAK: Color32 = Color32::from_rgb(0x8e, 0x8e, 0x96);
-pub const TEXT_STRONG: Color32 = Color32::from_rgb(0xf2, 0xf2, 0xf4);
+/// Every colour the chrome is allowed to use, in one `Copy` bundle.
+///
+/// These were seventeen bare `pub const`s until themes arrived. The switch to
+/// a struct read through [`c()`] is what lets the whole app repaint in
+/// another palette without threading a `&Theme` through several hundred
+/// painting functions — immediate mode redraws everything every frame
+/// anyway, so a global read is all a theme switch needs to be.
+///
+/// **Canvas-semantic colours are NOT tokens.** The overlay's selection
+/// marching ants, guide lines and ruler marks are meaning, not decoration:
+/// they stay literal `Color32` in `overlay.rs`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Theme {
+    /// Window chrome: menu bar, status bar, and the gutters between palettes.
+    pub window: Color32,
+    /// Palette bodies.
+    pub panel: Color32,
+    /// Palette title strips (a step darker than the body, Rebelle-style).
+    pub header: Color32,
+    /// Inset controls: slider troughs, list wells, text edits, combo boxes.
+    pub field: Color32,
+    /// Hovered rows/buttons.
+    pub hover: Color32,
+    /// Pressed/open widgets.
+    pub active: Color32,
+    /// Raised button faces — a hair lighter than `panel`, so a button reads
+    /// as a button before it is hovered.
+    pub button: Color32,
+    /// The accent — selection, active tool, filled slider bars.
+    pub accent: Color32,
+    /// Accent-tinted fill for value bars (quieter than raw accent).
+    pub accent_fill: Color32,
+    /// Accent-tinted selected-row background.
+    pub sel_row: Color32,
+    /// The Layers palette's *editing* row. CSP paints it an unmissable blue;
+    /// ours sits at CSP's weight rather than the original glare.
+    pub sel_active: Color32,
+    /// The 1px top/bottom edge lines on that active row.
+    pub sel_edge: Color32,
+    /// 1px seams between regions.
+    pub border: Color32,
+    /// Subtle outline on raised controls.
+    pub outline: Color32,
+    pub text: Color32,
+    pub text_weak: Color32,
+    pub text_strong: Color32,
+    /// Something did not happen and the user needs to notice. The status bar
+    /// paints refusals in this instead of `text_weak` — a grey line at the
+    /// bottom of the window is indistinguishable from no feedback at all
+    /// (owner, 2026-08-19: "dragging a .txt does not seem to do much" — it
+    /// did, and it said so, in grey).
+    pub warn: Color32,
+    /// The layer status column's reference-lighthouse mark: red, so the
+    /// column reads at a glance without being deciphered (owner 2026-08-21).
+    pub ref_mark: Color32,
+    /// See [`Theme::ref_mark`] — the draft pencil's blue.
+    pub draft_mark: Color32,
+    /// Auto Actions' armed dot. "Armed" reads as red everywhere, so this one
+    /// barely moves between themes.
+    pub rec: Color32,
+}
 
-/// Something did not happen and the user needs to notice. The status bar
-/// paints refusals in this instead of TEXT_WEAK — a grey line at the bottom
-/// of the window is indistinguishable from no feedback at all (owner,
-/// 2026-08-19: "dragging a .txt does not seem to do much" — it did, and it
-/// said so, in grey).
-pub const WARN: Color32 = Color32::from_rgb(0xe0, 0xa0, 0x4a);
+/// The default, and the palette every screenshot in `docs/` was taken in:
+/// Photoshop's layered greys — chrome darkest, panel bodies a step lighter,
+/// inset fields darker again — under a CSP-weight blue accent.
+pub const DARK: Theme = Theme {
+    window: Color32::from_rgb(0x1f, 0x1f, 0x22),
+    panel: Color32::from_rgb(0x2a, 0x2a, 0x2e),
+    header: Color32::from_rgb(0x24, 0x24, 0x27),
+    field: Color32::from_rgb(0x1c, 0x1c, 0x1f),
+    hover: Color32::from_rgb(0x35, 0x35, 0x3b),
+    active: Color32::from_rgb(0x3e, 0x3e, 0x46),
+    button: Color32::from_rgb(0x32, 0x32, 0x38),
+    accent: Color32::from_rgb(0x4f, 0x8c, 0xd2),
+    accent_fill: Color32::from_rgb(0x37, 0x5a, 0x84),
+    sel_row: Color32::from_rgb(0x2e, 0x41, 0x59),
+    sel_active: Color32::from_rgb(0x3c, 0x47, 0x59),
+    sel_edge: Color32::from_rgb(0x5a, 0x6b, 0x86),
+    border: Color32::from_rgb(0x15, 0x15, 0x17),
+    outline: Color32::from_rgb(0x3c, 0x3c, 0x44),
+    text: Color32::from_rgb(0xd4, 0xd4, 0xd8),
+    text_weak: Color32::from_rgb(0x8e, 0x8e, 0x96),
+    text_strong: Color32::from_rgb(0xf2, 0xf2, 0xf4),
+    warn: Color32::from_rgb(0xe0, 0xa0, 0x4a),
+    ref_mark: Color32::from_rgb(0xcf, 0x5d, 0x59),
+    draft_mark: Color32::from_rgb(0x66, 0x9e, 0xd6),
+    rec: Color32::from_rgb(0xe5, 0x4b, 0x4b),
+};
 
-/// Corner rounding: palettes 4, controls 2.
+/// The same greys pulled towards brown, under an amber accent — a warm
+/// drawing room instead of a cold one. Long inking sessions on a bright
+/// monitor are the case this is for.
+pub const SEPIA: Theme = Theme {
+    window: Color32::from_rgb(0x22, 0x1f, 0x1b),
+    panel: Color32::from_rgb(0x2f, 0x2a, 0x24),
+    header: Color32::from_rgb(0x28, 0x23, 0x1e),
+    field: Color32::from_rgb(0x1e, 0x1b, 0x17),
+    hover: Color32::from_rgb(0x3b, 0x35, 0x2d),
+    active: Color32::from_rgb(0x46, 0x3f, 0x35),
+    button: Color32::from_rgb(0x37, 0x31, 0x2a),
+    accent: Color32::from_rgb(0xd0, 0x92, 0x4c),
+    accent_fill: Color32::from_rgb(0x83, 0x5c, 0x30),
+    sel_row: Color32::from_rgb(0x4a, 0x39, 0x25),
+    sel_active: Color32::from_rgb(0x53, 0x43, 0x2c),
+    sel_edge: Color32::from_rgb(0x83, 0x6c, 0x48),
+    border: Color32::from_rgb(0x17, 0x14, 0x11),
+    outline: Color32::from_rgb(0x44, 0x3d, 0x33),
+    text: Color32::from_rgb(0xdf, 0xd7, 0xc9),
+    text_weak: Color32::from_rgb(0x9a, 0x90, 0x82),
+    text_strong: Color32::from_rgb(0xf6, 0xf0, 0xe4),
+    // The accent is amber here, so the "that did not happen" colour has to
+    // leave amber alone or refusals would read as ordinary chrome.
+    warn: Color32::from_rgb(0xe8, 0x6a, 0x4c),
+    ref_mark: Color32::from_rgb(0xd2, 0x66, 0x4f),
+    draft_mark: Color32::from_rgb(0x74, 0x9d, 0xc0),
+    rec: Color32::from_rgb(0xe5, 0x4b, 0x4b),
+};
+
+/// Cool and dim: near-black plum chrome under a muted violet accent. The
+/// darkest of the three — night work, and the one that makes the page glow
+/// most.
+pub const VIOLET: Theme = Theme {
+    window: Color32::from_rgb(0x1c, 0x1a, 0x24),
+    panel: Color32::from_rgb(0x26, 0x23, 0x30),
+    header: Color32::from_rgb(0x20, 0x1d, 0x29),
+    field: Color32::from_rgb(0x19, 0x16, 0x22),
+    hover: Color32::from_rgb(0x32, 0x2e, 0x40),
+    active: Color32::from_rgb(0x3b, 0x37, 0x4c),
+    button: Color32::from_rgb(0x2e, 0x2a, 0x3a),
+    accent: Color32::from_rgb(0x96, 0x7a, 0xdc),
+    accent_fill: Color32::from_rgb(0x57, 0x46, 0x85),
+    sel_row: Color32::from_rgb(0x36, 0x2e, 0x4f),
+    sel_active: Color32::from_rgb(0x42, 0x3a, 0x5c),
+    sel_edge: Color32::from_rgb(0x6d, 0x63, 0xa0),
+    border: Color32::from_rgb(0x13, 0x11, 0x19),
+    outline: Color32::from_rgb(0x3f, 0x3a, 0x52),
+    text: Color32::from_rgb(0xd6, 0xd2, 0xe0),
+    text_weak: Color32::from_rgb(0x91, 0x8d, 0xa0),
+    text_strong: Color32::from_rgb(0xf2, 0xf0, 0xf8),
+    warn: Color32::from_rgb(0xe0, 0xa0, 0x4a),
+    ref_mark: Color32::from_rgb(0xd0, 0x60, 0x7e),
+    draft_mark: Color32::from_rgb(0x7d, 0x8f, 0xe0),
+    rec: Color32::from_rgb(0xe5, 0x4b, 0x4b),
+};
+
+/// The built-ins, in picker order. `dark` is first because it is the
+/// default and the one every screenshot was taken in. A LIGHT theme is
+/// deliberately absent: [`apply`]'s widget visuals are dark-tuned, and
+/// shipping a light one without its own eye pass would ship a broken one.
+pub const BUILT_INS: &[(&str, Theme)] = &[("dark", DARK), ("sepia", SEPIA), ("violet", VIOLET)];
+
+/// An unknown name is the DEFAULT, never a panic and never a blank window:
+/// `prefs.txt` is a text file people hand-edit, and a `theme=drak` typo must
+/// cost a wrong colour scheme, not a start-up failure.
+pub fn by_name(name: &str) -> Theme {
+    BUILT_INS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map_or(DARK, |(_, t)| *t)
+}
+
+/// The canonical name for what `name` actually resolves to — what the picker
+/// shows as selected when `prefs.txt` holds a name this build never heard of.
+pub fn resolved_name(name: &str) -> &'static str {
+    BUILT_INS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map_or("dark", |(n, _)| *n)
+}
+
+static ACTIVE: RwLock<Theme> = RwLock::new(DARK);
+
+/// The live palette. `Theme` is `Copy` and this is a read lock, so calling it
+/// per widget is fine; in a tight painting loop, read it once into a local.
+pub fn c() -> Theme {
+    // A poisoned lock means a panic while a theme was being swapped. The
+    // right answer to that is still "paint something", so take the value
+    // that is in there rather than propagating the panic into every frame.
+    ACTIVE.read().map_or(DARK, |g| *g)
+}
+
+/// Swap the live palette. Callers that hold an `egui::Context` should follow
+/// this with [`apply`], which is what pushes the new tokens into egui's own
+/// widget visuals.
+pub fn set(t: Theme) {
+    if let Ok(mut g) = ACTIVE.write() {
+        *g = t;
+    }
+}
+
+/// `set(by_name(name))` — the `prefs.txt` door.
+pub fn set_by_name(name: &str) {
+    set(by_name(name));
+}
+
+/// Corner rounding: palettes 4, controls 2. Not themed — rounding is this
+/// app's build quality, not a colour scheme's opinion.
 pub const R_PANEL: u8 = 4;
 pub const R_CTRL: u8 = 2;
 
@@ -156,11 +320,12 @@ impl<'a> ValueBar<'a> {
             }
         }
         let hot = resp.hovered() || resp.dragged();
+        let th = c();
         let p = ui.painter();
         // The row itself is not a control surface any more — only the hover
         // wash says "this is draggable".
         if hot {
-            p.rect_filled(rect, CornerRadius::same(R_CTRL), HOVER);
+            p.rect_filled(rect, CornerRadius::same(R_CTRL), th.hover);
         }
         // The track: a hairline strip along the bottom edge, empty part
         // inset-dark, filled part accent. Full width, so the drag mapping
@@ -170,11 +335,11 @@ impl<'a> ValueBar<'a> {
             rect.right_bottom(),
         );
         let cr = CornerRadius::same(1);
-        p.rect_filled(track, cr, FIELD);
+        p.rect_filled(track, cr, th.field);
         let t = self.to_t(*v);
         let fill_w = t * track.width();
         if fill_w > 0.5 {
-            let fill = if hot { ACCENT } else { ACCENT_FILL };
+            let fill = if hot { th.accent } else { th.accent_fill };
             let clip = egui::Rect::from_min_max(
                 track.min,
                 egui::pos2(track.left() + fill_w, track.bottom()),
@@ -189,7 +354,7 @@ impl<'a> ValueBar<'a> {
             egui::Align2::LEFT_CENTER,
             self.label,
             font.clone(),
-            TEXT,
+            th.text,
         );
         let value_text = self
             .display
@@ -199,14 +364,19 @@ impl<'a> ValueBar<'a> {
             egui::Align2::RIGHT_CENTER,
             value_text,
             font,
-            TEXT_STRONG,
+            th.text_strong,
         );
         resp.on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
     }
 }
 
-/// Everything `egui::Style`, in one pass over the context.
+/// Everything `egui::Style`, in one pass over the context. Call it again
+/// after [`set`] — this is what a live theme switch costs.
 pub fn apply(ctx: &egui::Context) {
+    let t = c();
+    // Every built-in is a DARK theme (see [`BUILT_INS`]): egui's own dark
+    // preference is the right base for all of them, and the tokens below
+    // then overwrite everything that shows.
     ctx.set_theme(egui::ThemePreference::Dark);
     ctx.all_styles_mut(|s| {
         // CSP density: palettes are lists of small rows, ~40 visible at a
@@ -229,9 +399,9 @@ pub fn apply(ctx: &egui::Context) {
             .insert(Heading, egui::FontId::new(12.5, Proportional));
 
         let v = &mut s.visuals;
-        v.panel_fill = WINDOW;
-        v.window_fill = PANEL;
-        v.window_stroke = Stroke::new(1.0, BORDER);
+        v.panel_fill = t.window;
+        v.window_fill = t.panel;
+        v.window_stroke = Stroke::new(1.0, t.border);
         v.window_corner_radius = CornerRadius::same(R_PANEL + 2);
         v.window_shadow = egui::Shadow {
             offset: [0, 6],
@@ -245,34 +415,34 @@ pub fn apply(ctx: &egui::Context) {
             spread: 0,
             color: Color32::from_black_alpha(110),
         };
-        v.extreme_bg_color = FIELD; // text edits, scroll wells
-        v.faint_bg_color = HEADER; // striped rows
-        v.selection.bg_fill = SEL_ROW;
-        v.selection.stroke = Stroke::new(1.0, ACCENT);
-        v.hyperlink_color = ACCENT;
-        v.override_text_color = Some(TEXT);
+        v.extreme_bg_color = t.field; // text edits, scroll wells
+        v.faint_bg_color = t.header; // striped rows
+        v.selection.bg_fill = t.sel_row;
+        v.selection.stroke = Stroke::new(1.0, t.accent);
+        v.hyperlink_color = t.accent;
+        v.override_text_color = Some(t.text);
 
         let w = &mut v.widgets;
-        w.noninteractive.bg_fill = PANEL;
-        w.noninteractive.weak_bg_fill = PANEL;
-        w.noninteractive.bg_stroke = Stroke::new(1.0, OUTLINE);
-        w.noninteractive.fg_stroke = Stroke::new(1.0, TEXT_WEAK);
-        w.inactive.bg_fill = HOVER; // slider handles etc.
-        w.inactive.weak_bg_fill = Color32::from_rgb(0x32, 0x32, 0x38); // buttons
+        w.noninteractive.bg_fill = t.panel;
+        w.noninteractive.weak_bg_fill = t.panel;
+        w.noninteractive.bg_stroke = Stroke::new(1.0, t.outline);
+        w.noninteractive.fg_stroke = Stroke::new(1.0, t.text_weak);
+        w.inactive.bg_fill = t.hover; // slider handles etc.
+        w.inactive.weak_bg_fill = t.button; // buttons
         w.inactive.bg_stroke = Stroke::new(1.0, Color32::TRANSPARENT);
-        w.inactive.fg_stroke = Stroke::new(1.0, TEXT);
-        w.hovered.bg_fill = ACTIVE;
-        w.hovered.weak_bg_fill = HOVER;
-        w.hovered.bg_stroke = Stroke::new(1.0, OUTLINE);
-        w.hovered.fg_stroke = Stroke::new(1.2, TEXT_STRONG);
-        w.active.bg_fill = ACCENT;
-        w.active.weak_bg_fill = ACTIVE;
-        w.active.bg_stroke = Stroke::new(1.0, ACCENT);
-        w.active.fg_stroke = Stroke::new(1.2, TEXT_STRONG);
-        w.open.bg_fill = ACTIVE;
-        w.open.weak_bg_fill = ACTIVE;
-        w.open.bg_stroke = Stroke::new(1.0, OUTLINE);
-        w.open.fg_stroke = Stroke::new(1.0, TEXT_STRONG);
+        w.inactive.fg_stroke = Stroke::new(1.0, t.text);
+        w.hovered.bg_fill = t.active;
+        w.hovered.weak_bg_fill = t.hover;
+        w.hovered.bg_stroke = Stroke::new(1.0, t.outline);
+        w.hovered.fg_stroke = Stroke::new(1.2, t.text_strong);
+        w.active.bg_fill = t.accent;
+        w.active.weak_bg_fill = t.active;
+        w.active.bg_stroke = Stroke::new(1.0, t.accent);
+        w.active.fg_stroke = Stroke::new(1.2, t.text_strong);
+        w.open.bg_fill = t.active;
+        w.open.weak_bg_fill = t.active;
+        w.open.bg_stroke = Stroke::new(1.0, t.outline);
+        w.open.fg_stroke = Stroke::new(1.0, t.text_strong);
         for wv in [
             &mut w.noninteractive,
             &mut w.inactive,
@@ -283,4 +453,101 @@ pub fn apply(ctx: &egui::Context) {
             wv.corner_radius = CornerRadius::same(R_CTRL);
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The load-bearing test of the themes round: `dark` is the seventeen
+    /// constants this file shipped before `Theme` existed, to the byte.
+    ///
+    /// Spelled out as literals ON PURPOSE — asserting `DARK.accent ==
+    /// DARK.accent` would pass no matter what drifted. If one of these ever
+    /// fails, the refactor that was supposed to change nothing changed the
+    /// look of every screenshot in `docs/`, and the fix is the token, not
+    /// this test.
+    #[test]
+    fn dark_is_byte_identical_to_the_pre_theme_constants() {
+        let rgb = |c: Color32| (c.r(), c.g(), c.b());
+        let t = DARK;
+        assert_eq!(rgb(t.window), (0x1f, 0x1f, 0x22), "WINDOW");
+        assert_eq!(rgb(t.panel), (0x2a, 0x2a, 0x2e), "PANEL");
+        assert_eq!(rgb(t.header), (0x24, 0x24, 0x27), "HEADER");
+        assert_eq!(rgb(t.field), (0x1c, 0x1c, 0x1f), "FIELD");
+        assert_eq!(rgb(t.hover), (0x35, 0x35, 0x3b), "HOVER");
+        assert_eq!(rgb(t.active), (0x3e, 0x3e, 0x46), "ACTIVE");
+        assert_eq!(rgb(t.accent), (0x4f, 0x8c, 0xd2), "ACCENT");
+        assert_eq!(rgb(t.accent_fill), (0x37, 0x5a, 0x84), "ACCENT_FILL");
+        assert_eq!(rgb(t.sel_row), (0x2e, 0x41, 0x59), "SEL_ROW");
+        assert_eq!(rgb(t.border), (0x15, 0x15, 0x17), "BORDER");
+        assert_eq!(rgb(t.outline), (0x3c, 0x3c, 0x44), "OUTLINE");
+        assert_eq!(rgb(t.text), (0xd4, 0xd4, 0xd8), "TEXT");
+        assert_eq!(rgb(t.text_weak), (0x8e, 0x8e, 0x96), "TEXT_WEAK");
+        assert_eq!(rgb(t.text_strong), (0xf2, 0xf2, 0xf4), "TEXT_STRONG");
+        assert_eq!(rgb(t.warn), (0xe0, 0xa0, 0x4a), "WARN");
+        // The five shadow tokens folded in from `layers.rs` and `actions.rs`,
+        // which were private consts rather than `theme::` constants.
+        assert_eq!(rgb(t.ref_mark), (0xcf, 0x5d, 0x59), "layers.rs REF_MARK");
+        assert_eq!(
+            rgb(t.draft_mark),
+            (0x66, 0x9e, 0xd6),
+            "layers.rs DRAFT_MARK"
+        );
+        assert_eq!(
+            rgb(t.sel_active),
+            (0x3c, 0x47, 0x59),
+            "layers.rs SEL_ACTIVE"
+        );
+        assert_eq!(rgb(t.sel_edge), (0x5a, 0x6b, 0x86), "layers.rs SEL_EDGE");
+        assert_eq!(rgb(t.rec), (0xe5, 0x4b, 0x4b), "actions.rs REC");
+        // The button face was a bare literal inside `apply` itself.
+        assert_eq!(rgb(t.button), (0x32, 0x32, 0x38), "apply's button fill");
+        assert_eq!((R_PANEL, R_CTRL), (4, 2), "the radii are not themed");
+    }
+
+    /// A name from a newer build, or a typo in a hand-edited `prefs.txt`,
+    /// must cost a wrong colour scheme — never a panic and never a start-up
+    /// that dies before the window appears.
+    #[test]
+    fn an_unknown_theme_name_is_dark() {
+        assert_eq!(by_name("drak"), DARK);
+        assert_eq!(by_name(""), DARK);
+        assert_eq!(by_name("light"), DARK, "there is no light theme yet");
+        assert_eq!(resolved_name("whatever a 2027 build called it"), "dark");
+        assert_eq!(resolved_name("violet"), "violet");
+    }
+
+    /// Every built-in must actually be a distinct, complete theme: a variant
+    /// that forgot to move a token would ship as `dark` with two colours
+    /// changed, which is worse than not shipping it.
+    #[test]
+    fn the_built_ins_are_named_distinct_and_dark() {
+        assert_eq!(BUILT_INS[0].0, "dark", "the default is first in the picker");
+        for (name, t) in BUILT_INS {
+            assert_eq!(by_name(name), *t, "{name} must be reachable by its name");
+            // Dark-tuned widget visuals (see `apply`): the panel body has to
+            // stay darker than the text on it, in every one of them.
+            let lum = |c: Color32| c.r() as u32 + c.g() as u32 + c.b() as u32;
+            assert!(lum(t.panel) < lum(t.text), "{name}: panel is not dark");
+            assert!(
+                lum(t.window) < lum(t.panel),
+                "{name}: chrome is not the darkest surface"
+            );
+        }
+        assert_ne!(SEPIA, DARK);
+        assert_ne!(VIOLET, DARK);
+        assert_ne!(SEPIA, VIOLET);
+    }
+
+    /// `set` then `c` is the whole switching mechanism. Restores `dark`,
+    /// because the global outlives the test.
+    #[test]
+    fn setting_a_theme_changes_what_c_returns() {
+        set_by_name("sepia");
+        assert_eq!(c(), SEPIA);
+        set_by_name("nonsense");
+        assert_eq!(c(), DARK, "an unknown name falls back rather than sticking");
+        set(DARK);
+    }
 }

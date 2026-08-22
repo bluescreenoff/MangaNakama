@@ -91,11 +91,11 @@ pub(super) fn color_slots(ui: &mut egui::Ui, app: &mut App) {
 /// bright hairline under the pointer, the panel's own outline otherwise.
 fn chip_stroke(p: &egui::Painter, rect: egui::Rect, active: bool, hovered: bool) {
     let stroke = if active {
-        egui::Stroke::new(2.0, theme::ACCENT)
+        egui::Stroke::new(2.0, theme::c().accent)
     } else if hovered {
-        egui::Stroke::new(1.0, theme::TEXT_STRONG)
+        egui::Stroke::new(1.0, theme::c().text_strong)
     } else {
-        egui::Stroke::new(1.0, theme::OUTLINE)
+        egui::Stroke::new(1.0, theme::c().outline)
     };
     p.rect_stroke(rect, 2.0, stroke, egui::StrokeKind::Inside);
 }
@@ -238,8 +238,8 @@ pub(super) fn color_section(ui: &mut egui::Ui, app: &mut App) {
         ring.add_triangle(a + 1, a + 3, a + 2);
     }
     p.add(egui::Shape::mesh(ring));
-    p.circle_stroke(centre, r_out, egui::Stroke::new(1.0, theme::BORDER));
-    p.circle_stroke(centre, r_in, egui::Stroke::new(1.0, theme::BORDER));
+    p.circle_stroke(centre, r_out, egui::Stroke::new(1.0, theme::c().border));
+    p.circle_stroke(centre, r_in, egui::Stroke::new(1.0, theme::c().border));
 
     // SV square: v * mix(white, hue, s) is bilinear in RGB, so a small grid
     // mesh renders it exactly (up to triangle interpolation, invisible at 12²).
@@ -272,7 +272,7 @@ pub(super) fn color_section(ui: &mut egui::Ui, app: &mut App) {
     p.rect_stroke(
         sq,
         0.0,
-        egui::Stroke::new(1.0, theme::BORDER),
+        egui::Stroke::new(1.0, theme::c().border),
         egui::StrokeKind::Outside,
     );
 
@@ -328,7 +328,7 @@ pub(super) fn color_section(ui: &mut egui::Ui, app: &mut App) {
             ui.label(
                 egui::RichText::new(*label)
                     .size(10.5)
-                    .color(theme::TEXT_WEAK),
+                    .color(theme::c().text_weak),
             );
             let r = ui.add_sized(
                 [dw, 16.0],
@@ -373,7 +373,7 @@ fn hex_field(ui: &mut egui::Ui, app: &mut App, rgb: [f32; 3]) {
         ui.label(
             egui::RichText::new("#")
                 .size(10.5)
-                .color(theme::TEXT_WEAK),
+                .color(theme::c().text_weak),
         );
         let w = (ui.available_width() - 6.0).clamp(46.0, 78.0);
         done = ui
@@ -411,16 +411,16 @@ fn history_strip(ui: &mut egui::Ui, app: &mut App) {
         ui.label(
             egui::RichText::new("Recent")
                 .size(9.5)
-                .color(theme::TEXT_WEAK),
+                .color(theme::c().text_weak),
         );
         for rgb in &app.color_history {
             let (rect, resp) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
             let p = ui.painter();
             p.rect_filled(rect, 2.0, rgb32(*rgb));
             let stroke = if resp.hovered() {
-                egui::Stroke::new(1.5, theme::TEXT_STRONG)
+                egui::Stroke::new(1.5, theme::c().text_strong)
             } else {
-                egui::Stroke::new(1.0, theme::OUTLINE)
+                egui::Stroke::new(1.0, theme::c().outline)
             };
             p.rect_stroke(rect, 2.0, stroke, egui::StrokeKind::Inside);
             let resp = resp.on_hover_text(mn_core::palette::hex_string(*rgb));
@@ -460,9 +460,9 @@ pub(super) fn swatch_grid(ui: &mut egui::Ui, app: &mut App) {
             let p = ui.painter();
             p.rect_filled(rect, 2.0, rgb32(sw.rgb));
             let stroke = if resp.hovered() {
-                egui::Stroke::new(1.5, theme::TEXT_STRONG)
+                egui::Stroke::new(1.5, theme::c().text_strong)
             } else {
-                egui::Stroke::new(1.0, theme::OUTLINE)
+                egui::Stroke::new(1.0, theme::c().outline)
             };
             p.rect_stroke(rect, 2.0, stroke, egui::StrokeKind::Inside);
             // An imported palette's own name for the colour, when it has

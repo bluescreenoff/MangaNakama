@@ -126,7 +126,7 @@ pub fn build(ui: &mut egui::Ui, app: &mut App) {
                 ),
             ] {
                 if r.is_positive() {
-                    p.rect_filled(r, 0.0, theme::WINDOW);
+                    p.rect_filled(r, 0.0, theme::c().window);
                 }
             }
         }
