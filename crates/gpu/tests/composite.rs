@@ -933,3 +933,80 @@ fn cpu_matches_gpu_with_a_two_tone_layer() {
     doc.set_layer_sub_colour(li, Some([255, 255, 255]));
     assert_agrees(&mut r, &doc, "layer colour, white sub");
 }
+
+/// Upload path: a full-page rebuild pushes HUNDREDS of tiles in one frame
+/// (a real doc open uploaded 964). Those go through one shared staging
+/// buffer, flushed in batches, so this pins the two things batching can get
+/// wrong and a per-tile `write_texture` never could:
+///
+/// * a tile written at the wrong buffer offset (colours swap between tiles —
+///   every tile here has its own colour, so a swap is a visible block), and
+/// * a tile dropped at a batch boundary (600 tiles crosses it twice).
+///
+/// The five masked tiles are scattered on purpose. LM-005 folds a layer mask
+/// into the uploaded pixels, so those are the tiles that hand the batcher an
+/// OWNED buffer instead of a borrowed tile slice, and each still has to land
+/// at the same offset as its unmasked neighbours.
+#[test]
+fn cpu_matches_gpu_for_a_many_tile_upload() {
+    let _serial = gpu_guard();
+    let Some(mut r) = renderer() else { return };
+
+    let (tw, th) = (20usize, 15usize);
+    let mut doc = Document::new((tw * TILE_SIZE) as u32, (th * TILE_SIZE) as u32);
+    for ty in 0..th {
+        for tx in 0..tw {
+            let k = (ty * tw + tx) as f32 / (tw * th) as f32;
+            fill(
+                &mut doc,
+                0,
+                TileIdx::new(tx as i32, ty as i32),
+                [k, 1.0 - k, (tx as f32) / tw as f32, 1.0],
+            );
+        }
+    }
+    let li = doc.add_layer("ramps");
+    for ty in 0..th {
+        for tx in 0..tw {
+            let k = (tx as f32) / tw as f32;
+            fill_ramp(
+                &mut doc,
+                li,
+                TileIdx::new(tx as i32, ty as i32),
+                [1.0 - k, k, 0.5],
+            );
+        }
+    }
+
+    // Five masked tiles, each a different half-covered pattern.
+    let mut m = mn_core::doc::LayerMask {
+        enabled: true,
+        revision: 1,
+        tiles: std::collections::HashMap::new(),
+    };
+    for (n, (tx, ty)) in [(0usize, 0usize), (7, 3), (11, 8), (19, 14), (4, 12)]
+        .into_iter()
+        .enumerate()
+    {
+        let mut t = mn_core::Tile::new_transparent();
+        for y in 0..TILE_SIZE {
+            for x in 0..TILE_SIZE {
+                let cov = if (x + y + n) % 3 == 0 { 32768 } else { 8000 };
+                t.set_pixel(x, y, [cov, cov, cov, cov]);
+            }
+        }
+        m.tiles
+            .insert(TileIdx::new(tx as i32, ty as i32), std::sync::Arc::new(t));
+    }
+    doc.layers[li].mask = Some(m);
+
+    let t0 = std::time::Instant::now();
+    assert_agrees(&mut r, &doc, "many-tile upload");
+    let stats = r.frame_stats();
+    println!(
+        "[test] many-tile upload: {} tiles, {:.1} ms in-renderer, {:.1} ms wall (incl. readback)",
+        stats.uploads,
+        stats.ms,
+        t0.elapsed().as_secs_f32() * 1000.0
+    );
+}

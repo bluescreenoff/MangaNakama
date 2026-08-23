@@ -37,6 +37,7 @@
 //! per frame, and layer opacity is applied per-fragment rather than with a blend
 //! constant (exact, but it means one instance per layer per damaged tile).
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use mn_core::{Document, Paper, TILE_SIZE, TileIdx};
@@ -61,6 +62,21 @@ const TILE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Uint;
 const GROUP_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 /// Max recycled tile textures kept alive (32 KiB each — see `tile_pool`).
 const TILE_POOL_CAP: usize = 2048;
+/// One tile's footprint in a linear upload buffer.
+///
+/// 64 px * 4 ch * 2 bytes = 512 bytes per row, already a multiple of wgpu's
+/// 256-byte `COPY_BYTES_PER_ROW_ALIGNMENT`, so a whole tile is one legal
+/// copy with no per-row padding; 64 rows of that is 32 KiB. Being a multiple
+/// of 256 also makes every batch slot a legal `copy_buffer_to_texture`
+/// offset.
+const TILE_UPLOAD_BYTES: usize = TILE_SIZE * TILE_SIZE * 4 * 2;
+/// Tiles per staging buffer in [`flush_tile_uploads`].
+///
+/// Opening a page uploads ~1000 tiles; one buffer for all of them would be a
+/// 30 MB transient allocation, so they go in batches. 256 tiles = 8 MiB,
+/// which turns the worst frame's thousand driver allocations into four
+/// without holding a page's pixels twice.
+const UPLOAD_BATCH: usize = 256;
 const TRANSPARENT: wgpu::Color = wgpu::Color {
     r: 0.0,
     g: 0.0,
@@ -563,6 +579,83 @@ fn make_tile_texture(device: &wgpu::Device, bgl: &wgpu::BindGroupLayout) -> Cach
         bind_group,
         revision: 0,
     }
+}
+
+/// Push a batch of tile pixels to their textures through ONE staging buffer,
+/// then clear the batch.
+///
+/// This replaces the obvious `queue.write_texture` per tile. That call is not
+/// the thin memcpy it looks like: wgpu-core allocates AND maps a fresh
+/// staging buffer inside every single one (`StagingBuffer::new`), so opening
+/// a page paid ~1000 driver allocations plus ~1000 pending-write records.
+/// One buffer of `n` tile slots plus `n` `copy_buffer_to_texture` commands
+/// moves the same bytes with one allocation and one submit.
+///
+/// Submitted on its own encoder rather than folded into the composite
+/// encoder on purpose: `update_canvas` can decide, after uploading, that it
+/// has nothing to draw and return early (an invisible layer's tiles upload
+/// but never become a region). Those uploads must still land — the cache
+/// already recorded their revisions.
+fn flush_tile_uploads(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    batch: &mut Vec<(wgpu::Texture, Cow<'_, [u16]>)>,
+) {
+    if batch.is_empty() {
+        return;
+    }
+    let staging = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("mn.tile.staging"),
+        size: (batch.len() * TILE_UPLOAD_BYTES) as u64,
+        usage: wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: true,
+    });
+    {
+        // Infallible in practice: the whole range of a buffer that was just
+        // created `mapped_at_creation`, with no other view alive.
+        let mut mapped = staging
+            .slice(..)
+            .get_mapped_range_mut()
+            .expect("map a freshly created staging buffer");
+        for (i, (_, data)) in batch.iter().enumerate() {
+            let bytes: &[u8] = bytemuck::cast_slice(data);
+            debug_assert_eq!(bytes.len(), TILE_UPLOAD_BYTES, "tile is not tile-sized");
+            let off = i * TILE_UPLOAD_BYTES;
+            // `.slice()`, not indexing: mapped memory can be write-combining,
+            // so wgpu 30 only hands out a write-only view of it.
+            mapped.slice(off..off + bytes.len()).copy_from_slice(bytes);
+        }
+    }
+    staging.unmap();
+
+    let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("mn.tile.upload"),
+    });
+    for (i, (texture, _)) in batch.iter().enumerate() {
+        enc.copy_buffer_to_texture(
+            wgpu::TexelCopyBufferInfo {
+                buffer: &staging,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: (i * TILE_UPLOAD_BYTES) as u64,
+                    bytes_per_row: Some((TILE_SIZE * 4 * 2) as u32),
+                    rows_per_image: Some(TILE_SIZE as u32),
+                },
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d {
+                width: TILE_SIZE as u32,
+                height: TILE_SIZE as u32,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+    queue.submit([enc.finish()]);
+    batch.clear();
 }
 
 /// One isolation buffer level (canvas-sized).
@@ -1567,11 +1660,24 @@ impl Renderer {
     }
 
     /// One-line human-readable adapter identity for the console + (later) HUD.
+    ///
+    /// Also the KEY the measured GPU-inking verdict is filed under, so its
+    /// exact bytes matter: DX12 reports an empty `driver_info`, and joining
+    /// it unconditionally left a trailing space on every Windows launch.
+    /// The stored copy is trimmed when read, so the two never compared
+    /// equal — the measured default could never apply. Build the driver
+    /// half conditionally and there is no stray space to lose.
     pub fn adapter_line(&self) -> String {
         let i = &self.adapter_info;
+        let driver = match (i.driver.trim(), i.driver_info.trim()) {
+            ("", "") => "unknown".to_string(),
+            (d, "") => d.to_string(),
+            ("", info) => info.to_string(),
+            (d, info) => format!("{d} {info}"),
+        };
         format!(
-            "{} | backend {:?} | type {:?} | driver {} {}",
-            i.name, i.backend, i.device_type, i.driver, i.driver_info
+            "{} | backend {:?} | type {:?} | driver {}",
+            i.name, i.backend, i.device_type, driver
         )
     }
 
@@ -2040,6 +2146,11 @@ impl Renderer {
         let mut present: std::collections::HashSet<TileKey> = Default::default();
         let mut regions_all: std::collections::BTreeSet<TileIdx> = Default::default();
         let mut uploads: u32 = 0;
+        // Tiles waiting on a staging buffer, flushed every `UPLOAD_BATCH` and
+        // once more when the walk ends. Holds texture handles (cheap clones)
+        // and either a borrowed tile slice or a masked copy of one.
+        let mut batch: Vec<(wgpu::Texture, Cow<[u16]>)> =
+            Vec::with_capacity(UPLOAD_BATCH);
 
         for (li, layer) in doc.layers.iter().enumerate() {
             let pixel_tiles = layer
@@ -2096,8 +2207,12 @@ impl Renderer {
                 // samples — noted in the round-64 handoff). Mask edits go
                 // through invalidate() (full rebuild), so the content
                 // revision alone still gates this upload correctly.
-                let upload: Vec<u16> = if is_mask {
-                    tile.data().to_vec()
+                //
+                // `Cow` because the common case has no mask: those pixels go
+                // to the staging buffer straight from the tile, and the copy
+                // it used to make (964 of them on a page open) is gone.
+                let upload: Cow<[u16]> = if is_mask {
+                    Cow::Borrowed(tile.data())
                 } else {
                     layer
                         .mask
@@ -2114,35 +2229,23 @@ impl Renderer {
                                     out[p * 4 + c] = (td[p * 4 + c] as u32 * cov / 32768) as u16;
                                 }
                             }
-                            out
+                            Cow::Owned(out)
                         })
-                        .unwrap_or_else(|| tile.data().to_vec())
+                        .unwrap_or(Cow::Borrowed(tile.data()))
                 };
-                // 64 px * 4 ch * 2 bytes = 512 bytes/row: already a multiple of
-                // the 256-byte copy alignment, so a whole-tile write is legal.
-                self.queue.write_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &entry.texture,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    bytemuck::cast_slice(&upload),
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some((TILE_SIZE * 4 * 2) as u32),
-                        rows_per_image: Some(TILE_SIZE as u32),
-                    },
-                    wgpu::Extent3d {
-                        width: TILE_SIZE as u32,
-                        height: TILE_SIZE as u32,
-                        depth_or_array_layers: 1,
-                    },
-                );
+                batch.push((entry.texture.clone(), upload));
                 entry.revision = tile.revision();
                 uploads += 1;
+                if batch.len() >= UPLOAD_BATCH {
+                    flush_tile_uploads(&self.device, &self.queue, &mut batch);
+                }
             }
         }
+        flush_tile_uploads(&self.device, &self.queue, &mut batch);
+        // Everything up to here — canvas sizing, the layer walk, the tile
+        // uploads — so the batching above stays honest. Reported under
+        // MN_DEBUG_PASSES below, next to the composite script it precedes.
+        let upload_ms = t0.elapsed().as_secs_f32() * 1000.0;
 
         // --- evict tiles that no longer exist --------------------------------
         // Undo can delete a tile and layer removal can delete a whole layer's
@@ -2773,7 +2876,7 @@ impl Renderer {
         // --- execute ---------------------------------------------------------
         if std::env::var("MN_DEBUG_PASSES").is_ok() {
             eprintln!(
-                "[gpu] script: full={} regions={} instances={}",
+                "[gpu] script: full={} regions={} instances={} uploads={uploads} ({upload_ms:.1} ms)",
                 full,
                 regions.len(),
                 instances.len()
@@ -3307,9 +3410,18 @@ fn request_gpu(
     };
 
     let info = adapter.get_info();
+    // Log-only twin of `adapter_line` (which cannot be called before the
+    // Renderer exists) — same match, same rule: no trailing space when
+    // driver_info is empty. That shape caused the fingerprint bug.
+    let driver = match (info.driver.trim(), info.driver_info.trim()) {
+        ("", "") => "unknown".to_string(),
+        (d, "") => d.to_string(),
+        ("", i) => i.to_string(),
+        (d, i) => format!("{d} {i}"),
+    };
     println!(
-        "[gpu] adapter: {} | backend {:?} | type {:?} | driver {} {}",
-        info.name, info.backend, info.device_type, info.driver, info.driver_info
+        "[gpu] adapter: {} | backend {:?} | type {:?} | driver {driver}",
+        info.name, info.backend, info.device_type
     );
 
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
