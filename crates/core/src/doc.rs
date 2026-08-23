@@ -1181,13 +1181,12 @@ pub struct Document {
     /// PA-001: the paper under the stack. Drive it with `set_paper_colour`
     /// (undoable) / `set_paper_visible` (view state, like a layer's eye).
     pub paper: Paper,
-    /// The ruler set (TODO #3). **Session-only**: nothing writes it to
-    /// `.ora`/`.mnc` and nothing reads it back — rulers are working aids,
-    /// and the undo history they now ride is session-only too, so
-    /// non-persistence costs nothing. `doc_to_bytes` → `bytes_to_doc`
-    /// therefore returns a document with `Rulers::default()`, which is why
-    /// the app carries them across a page switch itself
-    /// (`App::adopt_page_doc`).
+    /// The ruler set (TODO #3). Persists as its own `mnc/rulers.json` zip
+    /// entry (skipped when empty, so ruler-less files keep their old
+    /// bytes) — perspective grids used to die with the session. A page
+    /// decoded WITHOUT its own set still inherits the tab's working set
+    /// (`App::adopt_page_doc`), so rulers keep following the artist onto
+    /// fresh pages.
     ///
     /// It lives on the Document rather than the App so the document's ONE
     /// undo history can own ruler edits ([`UndoGroup::Rulers`]) — an
@@ -1394,15 +1393,16 @@ impl Document {
     /// as it was when the gesture began, and the live `self.rulers` is
     /// already in its finished state. A no-op gesture pushes nothing.
     ///
-    /// Deliberately does NOT `touch()`: rulers are not saved, so a ruler
-    /// edit must not move `revision` and make a page look re-encodable
-    /// (page stashing skips a page whose revision did not move).
+    /// DOES `touch()` since rulers persist (`mnc/rulers.json`): a ruler
+    /// edit must move `revision` or page stashing would skip the page and
+    /// the edit would never reach disk.
     pub fn record_rulers(&mut self, before: crate::ruler::Rulers, label: &str) -> bool {
         if before == self.rulers {
             return false;
         }
         self.history
             .push_labeled(label, UndoGroup::Rulers { rulers: before });
+        self.touch();
         true
     }
 

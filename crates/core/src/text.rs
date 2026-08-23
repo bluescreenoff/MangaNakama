@@ -599,6 +599,54 @@ pub fn prev_word_boundary(s: &str, u: u32) -> u32 {
     pos
 }
 
+/// Double-click target: the run of same-class characters around `u` — one
+/// Latin word, one kanji run, one kana run, one run of punctuation.
+///
+/// NOT `prev_word_boundary`..`next_word_boundary`: those are the Ctrl+arrow
+/// targets and the forward one swallows the space AFTER the word, so a
+/// double-click built out of them selects "word ␣" and typing over it eats the
+/// gap. A line break never joins a run either — double-clicking at the end of
+/// a line selects that line's last word, not the two words either side of the
+/// break.
+pub fn word_range(s: &str, u: u32) -> (u32, u32) {
+    let mut cs: Vec<(u32, char)> = Vec::new();
+    let mut n = 0u32;
+    for c in s.chars() {
+        cs.push((n, c));
+        n += c.len_utf16() as u32;
+    }
+    // The character `u` sits in front of; at the end of the text (or in front
+    // of a line break) the one behind it, so a caret past the last glyph still
+    // has a word to select.
+    let mut hit = match cs.iter().position(|&(i, c)| u < i + c.len_utf16() as u32) {
+        Some(i) => i,
+        None => match cs.len().checked_sub(1) {
+            Some(i) => i,
+            None => return (0, 0),
+        },
+    };
+    // A caret in front of whitespace belongs to the word BEHIND it: clicking
+    // the gap after a word — or at the end of a line — selects that word.
+    if cs[hit].1.is_whitespace()
+        && let Some(i) = hit.checked_sub(1)
+        && !cs[i].1.is_whitespace()
+    {
+        hit = i;
+    }
+    if cs[hit].1 == '\n' {
+        return (cs[hit].0, cs[hit].0);
+    }
+    let cls = class_of(cs[hit].1);
+    let (mut a, mut b) = (hit, hit);
+    while a > 0 && cs[a - 1].1 != '\n' && class_of(cs[a - 1].1) == cls {
+        a -= 1;
+    }
+    while b + 1 < cs.len() && cs[b + 1].1 != '\n' && class_of(cs[b + 1].1) == cls {
+        b += 1;
+    }
+    (cs[a].0, cs[b].0 + cs[b].1.len_utf16() as u32)
+}
+
 // --- rotation helpers -------------------------------------------------------
 
 fn rot(v: [f32; 2], a: f32) -> [f32; 2] {
@@ -1342,6 +1390,35 @@ mod tests {
         assert_eq!(next_word_boundary(jp, 4), 6);
         assert_eq!(prev_word_boundary(jp, 6), 4);
         assert_eq!(prev_word_boundary(jp, 4), 2);
+    }
+
+    /// What a double-click selects. Script changes are word edges (a JP
+    /// editor's rule), the space after a word is NOT part of it, and a line
+    /// break stops the run.
+    #[test]
+    fn word_range_selects_one_run() {
+        let s = "hello world";
+        assert_eq!(word_range(s, 0), (0, 5), "clicked in the first word");
+        assert_eq!(word_range(s, 3), (0, 5));
+        assert_eq!(word_range(s, 5), (0, 5), "the caret after 'hello'");
+        assert_eq!(word_range(s, 6), (6, 11));
+        assert_eq!(word_range(s, 11), (6, 11), "past the last glyph");
+
+        // Mixed JP: 漢字 かな カナ ABC 123 each stand alone.
+        let jp = "漢字かなカナABC123";
+        assert_eq!(word_range(jp, 1), (0, 2), "kanji run");
+        assert_eq!(word_range(jp, 3), (2, 4), "hiragana run");
+        assert_eq!(word_range(jp, 5), (4, 6), "katakana run");
+        assert_eq!(word_range(jp, 7), (6, 12), "ABC123 is one Word run");
+
+        // A break is a wall, in both directions.
+        let two = "ab\ncd";
+        assert_eq!(word_range(two, 2), (0, 2), "end of line 1 takes 'ab'");
+        assert_eq!(word_range(two, 3), (3, 5));
+        assert_eq!(word_range("", 0), (0, 0), "an empty box selects nothing");
+
+        // Surrogate pairs count as the 2 UTF-16 units they are.
+        assert_eq!(word_range("a𠮷b", 1), (1, 3), "the pair is its own run");
     }
 
     #[test]

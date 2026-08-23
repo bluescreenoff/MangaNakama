@@ -47,6 +47,10 @@ pub struct FillOpts {
     /// escapes into the margin cannot run all the way round the page.
     /// Defaults OFF — the behaviour every earlier build had.
     pub refer_border: bool,
+    /// P0-4 (CSP 拡縮方法): the SHAPE `expand_px` scales by. Defaults to
+    /// [`ExpandMode::Rect`], which is the square dilation every earlier
+    /// build ran — so existing fills stay byte-identical.
+    pub expand_mode: ExpandMode,
     /// Measure `gap_close_px` and `expand_px` from the lineart around the
     /// click instead of taking them from the fields ([`measure_auto`]).
     /// Defaults OFF: with it off every field above is honoured verbatim,
@@ -80,6 +84,25 @@ pub enum FillRefer {
     Reference,
 }
 
+/// P0-4, CSP's 拡縮方法 ("scaling method") — the SHAPE area scaling grows in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ExpandMode {
+    /// 矩形: a square (Chebyshev) ball. Corners grow as far as edges, which
+    /// is what every build before P0-4 did, so it stays the default.
+    #[default]
+    Rect,
+    /// 円形: a Euclidean disc. Rounds off the corners a square dilation
+    /// leaves on a diagonal boundary, so it never covers more than [`Rect`].
+    Round,
+    /// 最も濃いピクセルまで: walk outward and STOP at the darkest pixel of
+    /// the reference image. The JP-standard mode for anti-aliased lineart —
+    /// the fill tucks exactly to the core of the line instead of a fixed
+    /// distance that overshoots straight past a thin one. Only the POSITIVE
+    /// half has a "darkest pixel" to aim at; a negative `expand_px` erodes
+    /// with the [`Rect`] shape, as it always did.
+    ToDarkest,
+}
+
 impl Default for FillOpts {
     fn default() -> Self {
         Self {
@@ -89,6 +112,7 @@ impl Default for FillOpts {
             refer: FillRefer::All,
             refer_drafts: true,
             refer_border: false,
+            expand_mode: ExpandMode::Rect,
             auto: false,
         }
     }
@@ -194,7 +218,6 @@ fn region_from_src(
     start: usize,
     opts: &FillOpts,
 ) -> Vec<bool> {
-    let n = w * h;
     let mut barrier = barrier_from(src, src[start], opts.tolerance);
     let barrier_orig = barrier.clone();
 
@@ -216,10 +239,24 @@ fn region_from_src(
         }
     }
 
-    // 3. Fatten the barrier to seal gaps.
-    for _ in 0..opts.gap_close_px {
-        barrier = dilate(&barrier, w, h);
-    }
+    // 3. Fatten the barrier to seal gaps. ONE window pass, whatever the
+    // radius: `gap_close_px` rounds of 3×3 dilation IS the Chebyshev ball of
+    // that radius, and [`dilate_by`] computes the ball directly (the
+    // `Selection::grow` prefix-sum shape). The barrier is not confined to
+    // any region yet, so this is the one morphology call that must see the
+    // whole canvas.
+    dilate_by(
+        &mut barrier,
+        w,
+        &Rect {
+            x0: 0,
+            y0: 0,
+            x1: w,
+            y1: h,
+        },
+        opts.gap_close_px as usize,
+        false,
+    );
 
     // Flood (4-connected BFS) over non-barrier. A seed that landed on the
     // FATTENED barrier means gap closing ate it: fall back to the seed's own
@@ -230,27 +267,63 @@ fn region_from_src(
         flood(&barrier, w, h, start)
     };
 
-    // 4. Recover the margin the fat barrier stole — but never cross real lines.
-    for _ in 0..opts.gap_close_px {
-        let grown = dilate(&region, w, h);
-        for i in 0..n {
-            if grown[i] && !barrier_orig[i] {
-                region[i] = true;
+    // 4. Recover the margin the fat barrier stole — but never cross real
+    // lines. This one CANNOT collapse into a window pass: every round is
+    // re-clipped against `barrier_orig`, so the reachable set depends on the
+    // previous round. It is bbox-clipped instead — the region grows by at
+    // most 1 px a round, so `bbox + gap_close_px` is all it can ever touch,
+    // and a small fill on a B4 page stops paying for the whole page.
+    let gap = opts.gap_close_px as usize;
+    if gap > 0 {
+        let rect = mask_rect(&region, w, h, gap);
+        let (rw, rh) = (rect.x1 - rect.x0, rect.y1 - rect.y0);
+        let mut grown = vec![false; rw * rh];
+        for _ in 0..gap {
+            for j in 0..rh {
+                for i in 0..rw {
+                    let (x, y) = (rect.x0 + i, rect.y0 + j);
+                    // 8-connected, clamped at the canvas border exactly as
+                    // the old per-pixel dilation was.
+                    let x1 = (x + 1).min(w - 1);
+                    let y1 = (y + 1).min(h - 1);
+                    grown[j * rw + i] = region[y * w + x]
+                        || (x.saturating_sub(1)..=x1)
+                            .any(|nx| (y.saturating_sub(1)..=y1).any(|ny| region[ny * w + nx]));
+                }
+            }
+            for j in 0..rh {
+                for i in 0..rw {
+                    let o = (rect.y0 + j) * w + rect.x0 + i;
+                    if grown[j * rw + i] && !barrier_orig[o] {
+                        region[o] = true;
+                    }
+                }
             }
         }
     }
-    // 5. Signed area scaling (FI-016). Positive = overfill, tucking the
-    // region under the anti-aliased lineart; negative = underfill, eroding
-    // it so a hard-edged fill does not touch the line at all. Erosion is
-    // dilation of the complement, the same identity `Selection::shrink`
-    // uses — and it inherits that identity's edge rule: `dilate` clamps at
-    // the canvas border, so a region running off the page does not pull
-    // back from the page edge, only from real boundaries.
-    for _ in 0..opts.expand_px.max(0) {
-        region = dilate(&region, w, h);
-    }
-    for _ in 0..(-opts.expand_px).max(0) {
-        region = erode(&region, w, h);
+    // 5. Signed area scaling (FI-016), in the shape P0-4's `expand_mode`
+    // asks for. Positive = overfill, tucking the region under the
+    // anti-aliased lineart; negative = underfill, eroding it so a
+    // hard-edged fill does not touch the line at all. Erosion is dilation
+    // of the complement, the same identity `Selection::shrink` uses — and
+    // it inherits that identity's edge rule: the window clamps at the
+    // canvas border, so a region running off the page does not pull back
+    // from the page edge, only from real boundaries.
+    let r = opts.expand_px.unsigned_abs() as usize;
+    if r > 0 {
+        if opts.expand_px > 0 && opts.expand_mode == ExpandMode::ToDarkest {
+            expand_to_darkest(&mut region, src, w, h, r);
+        } else {
+            // ToDarkest has no darkest pixel to aim at when it is SHRINKING,
+            // so a negative scaling erodes with the square ball, as always.
+            let rect = mask_rect(&region, w, h, r);
+            let round = opts.expand_mode == ExpandMode::Round;
+            if opts.expand_px < 0 {
+                erode_by(&mut region, w, &rect, r, round);
+            } else {
+                dilate_by(&mut region, w, &rect, r, round);
+            }
+        }
     }
     region
 }
@@ -797,38 +870,210 @@ fn layer_over_white(layer: &crate::doc::Layer, size: (u32, u32)) -> Vec<[u8; 3]>
     out
 }
 
-/// One step of 8-connected erosion — dilation of the complement, the same
-/// identity `Selection::shrink` is built on. Used by the negative half of
-/// FI-016's signed area scaling.
-fn erode(mask: &[bool], w: usize, h: usize) -> Vec<bool> {
-    let inv: Vec<bool> = mask.iter().map(|&m| !m).collect();
-    let grown = dilate(&inv, w, h);
-    grown.iter().map(|&g| !g).collect()
+// --- morphology ----------------------------------------------------------
+//
+// GPU audit queue #2, CPU half. The old shape was a naive 3×3 pass RUN ONCE
+// PER MORPHOLOGY PIXEL, over the whole canvas, allocating a fresh canvas-sized
+// Vec each round: `expand_px = 8` on a B4 page at 600 dpi cost eight full-page
+// passes and eight full-page allocations to grow a fill by 8 px. Two changes
+// fix it and neither moves a pixel:
+//
+// * N rounds of 3×3 dilation IS the Chebyshev ball of radius N, and a
+//   Chebyshev ball is separable — a horizontal window OR then a vertical one,
+//   each answered from a prefix sum, so ANY radius costs one pass. That is
+//   `Selection::grow`'s trick, ported here.
+// * Nothing but the flood's own bounding box (plus the radius) can change, so
+//   the passes run over that sub-rect instead of the page.
+
+/// A half-open pixel rect, `x1`/`y1` exclusive.
+struct Rect {
+    x0: usize,
+    y0: usize,
+    x1: usize,
+    y1: usize,
 }
 
-/// One step of 8-connected dilation.
-fn dilate(mask: &[bool], w: usize, h: usize) -> Vec<bool> {
-    let mut out = mask.to_vec();
+/// `mask`'s bounding box grown by `margin` and clipped to the canvas — the
+/// only ground a `margin`-radius morphology on `mask` can reach. Empty (and
+/// so a no-op for every pass below) when the mask is.
+fn mask_rect(mask: &[bool], w: usize, h: usize, margin: usize) -> Rect {
+    let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0usize, 0usize);
     for y in 0..h {
         for x in 0..w {
             if mask[y * w + x] {
+                x0 = x0.min(x);
+                y0 = y0.min(y);
+                x1 = x1.max(x + 1);
+                y1 = y1.max(y + 1);
+            }
+        }
+    }
+    if x1 == 0 {
+        return Rect {
+            x0: 0,
+            y0: 0,
+            x1: 0,
+            y1: 0,
+        };
+    }
+    Rect {
+        x0: x0.saturating_sub(margin),
+        y0: y0.saturating_sub(margin),
+        x1: (x1 + margin).min(w),
+        y1: (y1 + margin).min(h),
+    }
+}
+
+/// Dilate `mask` in place by radius `r` — a Euclidean disc when `round`, the
+/// square (Chebyshev) ball otherwise, the latter being exactly `r` rounds of
+/// the 3×3 dilation this replaced. Only `rect` is read or written, so callers
+/// MUST pass a rect that already contains the mask's bounding box grown by
+/// `r` (that is what [`mask_rect`] is for); pixels outside it cannot be
+/// reached by a radius-`r` ball anyway. Windows clip to `rect`, which where
+/// `rect` meets the page reproduces the old pass's canvas-border clamping.
+fn dilate_by(mask: &mut [bool], w: usize, rect: &Rect, r: usize, round: bool) {
+    let (rw, rh) = (rect.x1 - rect.x0, rect.y1 - rect.y0);
+    if r == 0 || rw == 0 || rh == 0 {
+        return;
+    }
+    // Row prefix sums: `run[j][a..b]` is set iff prefix[b] > prefix[a].
+    let stride = rw + 1;
+    let mut prefix = vec![0u32; stride * rh];
+    for j in 0..rh {
+        let base = (rect.y0 + j) * w + rect.x0;
+        for i in 0..rw {
+            prefix[j * stride + i + 1] = prefix[j * stride + i] + mask[base + i] as u32;
+        }
+    }
+    let row_hit = |j: usize, i: usize, hw: usize| {
+        let lo = i.saturating_sub(hw);
+        let hi = (i + hw + 1).min(rw);
+        prefix[j * stride + hi] > prefix[j * stride + lo]
+    };
+    if round {
+        // A disc is a stack of rows whose half-width falls off as
+        // √(r²−dy²). Not separable, so it costs r row-window lookups per
+        // pixel — but each is O(1) off the same prefix sums, and it is
+        // still ONE pass over the rect instead of r of them.
+        let half: Vec<usize> = (0..=r)
+            .map(|dy| ((r * r - dy * dy) as f64).sqrt() as usize)
+            .collect();
+        for j in 0..rh {
+            for i in 0..rw {
+                let on = (0..=r).any(|dy| {
+                    (j + dy < rh && row_hit(j + dy, i, half[dy]))
+                        || (dy <= j && row_hit(j - dy, i, half[dy]))
+                });
+                mask[(rect.y0 + j) * w + rect.x0 + i] = on;
+            }
+        }
+    } else {
+        // Separable: horizontal window OR, then vertical.
+        let mut tmp = vec![false; rw * rh];
+        for j in 0..rh {
+            for i in 0..rw {
+                tmp[j * rw + i] = row_hit(j, i, r);
+            }
+        }
+        let mut col = vec![0u32; rh + 1];
+        for i in 0..rw {
+            for j in 0..rh {
+                col[j + 1] = col[j] + tmp[j * rw + i] as u32;
+            }
+            for j in 0..rh {
+                let lo = j.saturating_sub(r);
+                let hi = (j + r + 1).min(rh);
+                mask[(rect.y0 + j) * w + rect.x0 + i] = col[hi] > col[lo];
+            }
+        }
+    }
+}
+
+/// Erode by radius `r` — dilation of the complement, the identity
+/// `Selection::shrink` is built on. Same `rect` contract as [`dilate_by`]:
+/// outside it the mask is empty, so its complement is solid and erodes to
+/// nothing, which is what leaving those pixels alone already says.
+fn erode_by(mask: &mut [bool], w: usize, rect: &Rect, r: usize, round: bool) {
+    for y in rect.y0..rect.y1 {
+        for x in rect.x0..rect.x1 {
+            mask[y * w + x] = !mask[y * w + x];
+        }
+    }
+    dilate_by(mask, w, rect, r, round);
+    for y in rect.y0..rect.y1 {
+        for x in rect.x0..rect.x1 {
+            mask[y * w + x] = !mask[y * w + x];
+        }
+    }
+}
+
+/// Rec.601 luma of a straight-RGB source pixel, ×1000 so it stays integer.
+fn luma(p: [u8; 3]) -> u32 {
+    p[0] as u32 * 299 + p[1] as u32 * 587 + p[2] as u32 * 114
+}
+
+/// [`ExpandMode::ToDarkest`] (CSP 最も濃いピクセルまで拡張): from every pixel
+/// on the region's boundary, walk outward up to `r` px in each of the eight
+/// directions and stop at the first LOCAL LUMINANCE MINIMUM of the reference
+/// image — the [`barrier_run`] ray walk, reading darkness instead of barrier
+/// membership. On an anti-aliased line that lands the fill's edge exactly on
+/// the line's darkest pixel: it steps through the pale skirt (each pixel
+/// darker than the last), reaches the core, and refuses the first pixel that
+/// is lighter again, so a thin line is never stepped over the way a fixed
+/// radius steps over it. Where the boundary faces open paper nothing gets
+/// darker, so nothing expands — the mode has no target there, and inventing
+/// one is what the fixed radius already does.
+fn expand_to_darkest(region: &mut [bool], src: &[[u8; 3]], w: usize, h: usize, r: usize) {
+    const DIRS: [(i32, i32); 8] = [
+        (1, 0),
+        (-1, 0),
+        (0, 1),
+        (0, -1),
+        (1, 1),
+        (1, -1),
+        (-1, 1),
+        (-1, -1),
+    ];
+    // Collected first, applied after: the walk must see the boundary the
+    // flood left, not one it grew itself half a scan ago.
+    let mut add: Vec<usize> = Vec::new();
+    let rect = mask_rect(region, w, h, 0);
+    for y in rect.y0..rect.y1 {
+        for x in rect.x0..rect.x1 {
+            let i = y * w + x;
+            if !region[i] {
                 continue;
             }
-            let x0 = x.saturating_sub(1);
-            let x1 = (x + 1).min(w - 1);
-            let y0 = y.saturating_sub(1);
-            let y1 = (y + 1).min(h - 1);
-            'n: for ny in y0..=y1 {
-                for nx in x0..=x1 {
-                    if mask[ny * w + nx] {
-                        out[y * w + x] = true;
-                        break 'n;
+            let edge = (x > 0 && !region[i - 1])
+                || (x + 1 < w && !region[i + 1])
+                || (y > 0 && !region[i - w])
+                || (y + 1 < h && !region[i + w]);
+            if !edge {
+                continue;
+            }
+            for (dx, dy) in DIRS {
+                let mut prev = luma(src[i]);
+                let (mut cx, mut cy) = (x as i32, y as i32);
+                for _ in 0..r {
+                    cx += dx;
+                    cy += dy;
+                    if cx < 0 || cy < 0 || cx as usize >= w || cy as usize >= h {
+                        break;
                     }
+                    let j = cy as usize * w + cx as usize;
+                    let l = luma(src[j]);
+                    if l >= prev {
+                        break; // the darkest pixel on this ray is behind us
+                    }
+                    add.push(j);
+                    prev = l;
                 }
             }
         }
     }
-    out
+    for j in add {
+        region[j] = true;
+    }
 }
 
 #[cfg(test)]
@@ -1070,6 +1315,9 @@ mod tests {
         let d = FillOpts::default();
         assert_eq!(d.expand_px, 1, "the 1 px overfill default is unchanged");
         assert!(!d.refer_border, "the page rim is not a wall unless asked");
+        // P0-4: `Rect` IS the square dilation every earlier build ran, so
+        // the new 拡縮方法 field costs the default fill nothing.
+        assert_eq!(d.expand_mode, ExpandMode::Rect, "the square ball as before");
 
         // And prove it end to end: the same box fills the same way as
         // before through the defaults.
@@ -1389,6 +1637,182 @@ mod tests {
             ..manual
         };
         assert!(bucket_fill(&mut doc, (40, 120), [1.0, 0.0, 0.0], &on_the_line) > 0);
+    }
+
+    // --- GPU audit queue #2: the morphology rewrite ----------------------
+
+    /// The pass the rewrite replaced, kept here as the ORACLE: one 3×3
+    /// 8-connected dilation over the whole canvas, clamped at the border.
+    fn dilate_once(mask: &[bool], w: usize, h: usize) -> Vec<bool> {
+        let mut out = mask.to_vec();
+        for y in 0..h {
+            for x in 0..w {
+                if mask[y * w + x] {
+                    continue;
+                }
+                let x1 = (x + 1).min(w - 1);
+                let y1 = (y + 1).min(h - 1);
+                'n: for ny in y.saturating_sub(1)..=y1 {
+                    for nx in x.saturating_sub(1)..=x1 {
+                        if mask[ny * w + nx] {
+                            out[y * w + x] = true;
+                            break 'n;
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// An L: a shape with no symmetry in either axis and two concave
+    /// corners, so a window that got its bounds off by one anywhere shows
+    /// up. Touches the canvas edge too, to pin the border clamping.
+    fn l_shape(w: usize, h: usize) -> Vec<bool> {
+        let mut m = vec![false; w * h];
+        for y in 6..26 {
+            for x in 0..7 {
+                m[y * w + x] = true; // the tall stroke, flush to x = 0
+            }
+        }
+        for y in 21..26 {
+            for x in 0..19 {
+                m[y * w + x] = true; // the foot
+            }
+        }
+        m
+    }
+
+    /// The equivalence the whole rewrite rests on: N rounds of the old 3×3
+    /// dilation ARE the Chebyshev ball of radius N, so one window pass may
+    /// stand in for N passes. Checked pixel for pixel on the L, at every
+    /// radius the UI and auto mode can produce, and with the bbox clip on —
+    /// which is the "bbox-clip changes nothing" identity as well, since a
+    /// full-canvas rect and the mask's own bbox+r must agree exactly.
+    #[test]
+    fn window_dilate_equals_the_iterated_3x3_pass() {
+        let (w, h) = (32usize, 32usize);
+        let base = l_shape(w, h);
+        for r in 0..=8usize {
+            let mut oracle = base.clone();
+            for _ in 0..r {
+                oracle = dilate_once(&oracle, w, h);
+            }
+
+            let mut windowed = base.clone();
+            dilate_by(&mut windowed, w, &mask_rect(&base, w, h, r), r, false);
+            assert_eq!(windowed, oracle, "bbox-clipped window disagrees at r={r}");
+
+            let mut full = base.clone();
+            let whole = Rect {
+                x0: 0,
+                y0: 0,
+                x1: w,
+                y1: h,
+            };
+            dilate_by(&mut full, w, &whole, r, false);
+            assert_eq!(full, oracle, "full-canvas window disagrees at r={r}");
+            assert_eq!(full, windowed, "the bbox clip moved a pixel at r={r}");
+
+            // And the erosion identity, against the same oracle applied to
+            // the complement.
+            let inv: Vec<bool> = base.iter().map(|&b| !b).collect();
+            let mut eroded_oracle = inv.clone();
+            for _ in 0..r {
+                eroded_oracle = dilate_once(&eroded_oracle, w, h);
+            }
+            let eroded_oracle: Vec<bool> = eroded_oracle.iter().map(|&b| !b).collect();
+            let mut eroded = base.clone();
+            erode_by(&mut eroded, w, &mask_rect(&base, w, h, r), r, false);
+            assert_eq!(eroded, eroded_oracle, "erosion disagrees at r={r}");
+        }
+    }
+
+    /// P0-4 Round: a disc is inside the square it fits in, so it can only
+    /// ever cover LESS — and strictly less as soon as a corner is involved.
+    /// A diagonal stroke is corners all the way down.
+    #[test]
+    fn round_area_scaling_covers_less_than_square_on_a_diagonal() {
+        let (w, h) = (64usize, 64usize);
+        let mut diag = vec![false; w * h];
+        for i in 8..56 {
+            diag[i * w + i] = true;
+        }
+        let rect_r = mask_rect(&diag, w, h, 4);
+        let mut square = diag.clone();
+        dilate_by(&mut square, w, &rect_r, 4, false);
+        let mut round = diag.clone();
+        dilate_by(&mut round, w, &rect_r, 4, true);
+        let n = |m: &[bool]| m.iter().filter(|&&b| b).count();
+        assert!(
+            n(&round) < n(&square),
+            "round must be the smaller ball ({} vs {})",
+            n(&round),
+            n(&square)
+        );
+        // Subset, not merely smaller.
+        assert!(
+            round.iter().zip(&square).all(|(r, s)| !r || *s),
+            "the disc must sit inside the square"
+        );
+        // The corner of the square 4 px out on BOTH axes is outside a
+        // radius-4 disc (4²+4² > 4²); the straight 4 px out is inside it.
+        let mid = 32usize;
+        assert!(square[(mid - 4) * w + mid + 4], "square reaches the corner");
+        assert!(!round[(mid - 4) * w + mid + 4], "the disc does not");
+        assert!(round[mid * w + mid + 4], "but it does reach straight out");
+    }
+
+    /// P0-4 ToDarkest (最も濃いピクセルまで), the mode this exists for: a
+    /// 1 px black line with a soft anti-aliased edge on either side. A
+    /// 4 px SQUARE expansion walks straight over the whole line and out the
+    /// far side — the overshoot that ruins a fill against thin lineart.
+    /// ToDarkest steps through the near skirt, stops ON the black column,
+    /// and refuses the lighter pixel past it.
+    #[test]
+    fn to_darkest_stops_on_the_line_instead_of_stepping_over_it() {
+        let (w, h) = (128usize, 128i32);
+        let mut doc = Document::new(w as u32, h as u32);
+        // Columns 59 | 60 | 61 | 62 | 63 = paper | skirt | CORE | skirt | paper
+        let skirt = [0, 0, 0, (FIX15_ONE / 4) as u16];
+        for y in 0..h {
+            paint_px(&mut doc, 60, y, skirt);
+            paint(&mut doc, 61, y);
+            paint_px(&mut doc, 62, y, skirt);
+        }
+        let base = FillOpts {
+            gap_close_px: 0,
+            expand_px: 4,
+            ..Default::default()
+        };
+        let row = 64usize * w;
+
+        let square = flood_region(&doc, (30, 64), &base).expect("region");
+        assert!(square[row + 59], "the flood stops at the skirt");
+        assert!(
+            square[row + 62] && square[row + 63],
+            "a 4 px square expansion walks over the line and out the far side"
+        );
+
+        let darkest = flood_region(
+            &doc,
+            (30, 64),
+            &FillOpts {
+                expand_mode: ExpandMode::ToDarkest,
+                ..base
+            },
+        )
+        .expect("region");
+        assert!(darkest[row + 60], "it tucks under the pale skirt");
+        assert!(darkest[row + 61], "and lands ON the darkest column");
+        assert!(
+            !darkest[row + 62],
+            "and refuses the lighter pixel past the core — no overshoot"
+        );
+        assert!(!darkest[row + 63], "so the far side stays clean");
+        // The left-hand boundary is the page edge, not a line: nothing to
+        // aim at, so nothing is invented there.
+        assert!(darkest[row], "the area itself is intact");
     }
 
     #[test]

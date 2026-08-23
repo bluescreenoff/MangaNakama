@@ -789,24 +789,39 @@ impl TextEngine {
         })))
     }
 
-    /// Box-local point → UTF-16 caret position (leading/trailing resolved to
-    /// the nearest insertion point).
-    pub fn hit_test_point(&self, item: &TextItem, dpi: u32, p: [f32; 2]) -> Result<u32> {
+    /// Box-local point → UTF-16 caret position, plus **affinity**: true when
+    /// the point landed on the trailing half of the character, so the caret
+    /// belongs to the END of the line that character is on rather than the
+    /// start of the next one. At a soft wrap those are the same position and
+    /// two different places on the page — see `caret`.
+    pub fn hit_test_point(&self, item: &TextItem, dpi: u32, p: [f32; 2]) -> Result<(u32, bool)> {
         let layout = self.layout(item, dpi)?;
         let mut trailing = BOOL::default();
         let mut inside = BOOL::default();
         let mut m = DWRITE_HIT_TEST_METRICS::default();
         unsafe { layout.HitTestPoint(p[0], p[1], &mut trailing, &mut inside, &mut m)? };
-        Ok(m.textPosition + if trailing.as_bool() { m.length } else { 0 })
+        let t = trailing.as_bool();
+        Ok((m.textPosition + if t { m.length } else { 0 }, t))
     }
 
     /// Caret geometry at a UTF-16 position.
-    pub fn caret(&self, item: &TextItem, dpi: u32, pos: u32) -> Result<CaretPos> {
+    ///
+    /// `affinity` = the caret trails the character before it. It only matters
+    /// where a line WRAPPED: position N is both the end of the wrapped line
+    /// and the start of the next, and DirectWrite's leading answer is always
+    /// the second one — which is why End used to drop the caret onto the line
+    /// below. Asking for the trailing edge of N−1 gets the first.
+    pub fn caret(&self, item: &TextItem, dpi: u32, pos: u32, affinity: bool) -> Result<CaretPos> {
         let layout = self.layout(item, dpi)?;
         let mut x = 0f32;
         let mut y = 0f32;
         let mut m = DWRITE_HIT_TEST_METRICS::default();
-        unsafe { layout.HitTestTextPosition(pos, false, &mut x, &mut y, &mut m)? };
+        let (at, trailing) = if affinity && pos > 0 {
+            (pos - 1, true)
+        } else {
+            (pos, false)
+        };
+        unsafe { layout.HitTestTextPosition(at, trailing, &mut x, &mut y, &mut m)? };
         Ok(CaretPos {
             point: [x, y],
             cell: [m.left, m.top, m.width, m.height],
@@ -845,15 +860,21 @@ impl TextEngine {
     /// Up/down caret motion: one visual line (or vertical column) in `dir`
     /// (+1 = next line in reading order). `goal` preserves the cross-axis
     /// coordinate across repeated presses; pass the previous return value.
+    ///
+    /// Takes the caret's `affinity` (so Up from an end-of-wrapped-line caret
+    /// starts from the line it is drawn on, not the one below) and returns the
+    /// landing affinity: stepping onto a SHORTER line clamps the goal past its
+    /// last glyph, and that landing is an end-of-line caret in its own right.
     pub fn line_move(
         &self,
         item: &TextItem,
         dpi: u32,
         pos: u32,
+        affinity: bool,
         dir: i32,
         goal: Option<f32>,
-    ) -> Result<(u32, f32)> {
-        let cp = self.caret(item, dpi, pos)?;
+    ) -> Result<(u32, f32, bool)> {
+        let cp = self.caret(item, dpi, pos, affinity)?;
         let (target, kept_goal);
         if item.vertical {
             // Columns advance right-to-left: next line = one column left.
@@ -867,7 +888,8 @@ impl TextEngine {
             target = [g, cp.cell[1] + cp.cell[3] * 0.5 + dir as f32 * step];
             kept_goal = g;
         }
-        Ok((self.hit_test_point(item, dpi, target)?, kept_goal))
+        let (landed, trailing) = self.hit_test_point(item, dpi, target)?;
+        Ok((landed, kept_goal, trailing))
     }
 
     /// Start and end (before any trailing newline) of the visual line
@@ -1012,7 +1034,7 @@ mod tests {
         let e = engine();
         let t = item("", false);
         assert!(e.render(&t, 96).unwrap().is_none());
-        let c = e.caret(&t, 96, 0).unwrap();
+        let c = e.caret(&t, 96, 0, false).unwrap();
         assert!(c.cell[3] > 1.0, "empty layout still has a line height");
     }
 
@@ -1135,11 +1157,11 @@ mod tests {
         let mut t = item("あいうえお あいうえお", false);
         t.size = [200.0, 400.0];
         t.auto_size = false;
-        let lead = e.caret(&t, 96, 0).unwrap().point[0];
+        let lead = e.caret(&t, 96, 0, false).unwrap().point[0];
         t.align = Align::Center;
-        let mid = e.caret(&t, 96, 0).unwrap().point[0];
+        let mid = e.caret(&t, 96, 0, false).unwrap().point[0];
         t.align = Align::Trailing;
-        let trail = e.caret(&t, 96, 0).unwrap().point[0];
+        let trail = e.caret(&t, 96, 0, false).unwrap().point[0];
         assert!(
             mid > lead + 4.0,
             "centered line starts right of leading ({lead} {mid})"
@@ -1154,9 +1176,9 @@ mod tests {
         let mut b = item("あ", false);
         b.size = [400.0, 300.0];
         b.auto_size = false;
-        let near_y = e.caret(&b, 96, 0).unwrap().point[1];
+        let near_y = e.caret(&b, 96, 0, false).unwrap().point[1];
         b.frame_align = FrameAlign::Far;
-        let far_y = e.caret(&b, 96, 0).unwrap().point[1];
+        let far_y = e.caret(&b, 96, 0, false).unwrap().point[1];
         assert!(
             far_y > near_y + 100.0,
             "Far sinks the block ({near_y} {far_y})"
@@ -1167,15 +1189,15 @@ mod tests {
     fn hit_testing_roundtrips() {
         let e = engine();
         let t = item("abc\ndef", false);
-        let c = e.caret(&t, 96, 2).unwrap();
+        let c = e.caret(&t, 96, 2, false).unwrap();
         let back = e
             .hit_test_point(&t, 96, [c.point[0] + 0.1, c.point[1] + c.cell[3] * 0.5])
             .unwrap();
-        assert_eq!(back, 2);
+        assert_eq!(back, (2, false), "leading half of the character at 2");
         let rects = e.selection_rects(&t, 96, 0, 3).unwrap();
         assert!(!rects.is_empty());
         // Line motion: from "b" down into the second line.
-        let (down, _) = e.line_move(&t, 96, 1, 1, None).unwrap();
+        let (down, _, _) = e.line_move(&t, 96, 1, false, 1, None).unwrap();
         assert!((4..=7).contains(&down), "moved into line 2: {down}");
         let (start, end) = e.line_bounds(&t, 96, 1).unwrap();
         assert_eq!((start, end), (0, 3));
@@ -1183,12 +1205,69 @@ mod tests {
         assert_eq!((s2, e2), (4, 7));
     }
 
+    /// A soft wrap has ONE UTF-16 position for two places on the page: the
+    /// end of the line that wrapped and the start of the line under it.
+    /// Pressing End (or clicking past the last glyph) means the first, and
+    /// DirectWrite only answers that when it is asked with `trailing`.
+    #[test]
+    fn caret_at_a_soft_wrap_stays_on_the_line_that_ended() {
+        let e = engine();
+        let mut t = item("aaaa bbbb cccc dddd", false);
+        t.size = [120.0, 400.0]; // narrow enough to wrap
+        let (_, end) = e.line_bounds(&t, 96, 0).unwrap();
+        assert!(
+            end > 0 && end < t.utf16_len(),
+            "the string wrapped somewhere: {end}"
+        );
+        let home = e.caret(&t, 96, 0, false).unwrap();
+        let at_end = e.caret(&t, 96, end, true).unwrap();
+        assert!(
+            (at_end.point[1] - home.point[1]).abs() < 1.0,
+            "End stays on line 1 ({} vs {})",
+            at_end.point[1],
+            home.point[1]
+        );
+        assert!(
+            at_end.point[0] > home.point[0] + 10.0,
+            "and sits at the END of it ({} vs {})",
+            at_end.point[0],
+            home.point[0]
+        );
+        // Without the trailing bit the same position is the start of line 2 —
+        // the bug this pins.
+        let leading = e.caret(&t, 96, end, false).unwrap();
+        assert!(
+            leading.point[1] > home.point[1],
+            "the leading answer is the next line down"
+        );
+
+        // Vertical: columns instead of rows, same ambiguity.
+        let mut v = item("あいうえおかきくけこさしすせそ", true);
+        v.size = [400.0, 120.0];
+        let (_, vend) = e.line_bounds(&v, 96, 0).unwrap();
+        assert!(vend > 0 && vend < v.utf16_len(), "the column wrapped: {vend}");
+        let vhome = e.caret(&v, 96, 0, false).unwrap();
+        let vtail = e.caret(&v, 96, vend, true).unwrap();
+        assert!(
+            (vtail.point[0] - vhome.point[0]).abs() < 1.0,
+            "End stays in column 1 ({} vs {})",
+            vtail.point[0],
+            vhome.point[0]
+        );
+        assert!(
+            vtail.point[1] > vhome.point[1] + 10.0,
+            "at the bottom of it ({} vs {})",
+            vtail.point[1],
+            vhome.point[1]
+        );
+    }
+
     #[test]
     fn vertical_line_move_walks_columns() {
         let e = engine();
         let t = item("あい\nうえ", true);
         // Caret in column 1 (あい); next line = column to the LEFT.
-        let (moved, _) = e.line_move(&t, 96, 0, 1, None).unwrap();
+        let (moved, _, _) = e.line_move(&t, 96, 0, false, 1, None).unwrap();
         assert!((3..=6).contains(&moved), "into second column: {moved}");
     }
 
@@ -1504,7 +1583,7 @@ mod tcy_render_tests {
             a[1] > b[1] + 1.0,
             "sideways, the digits took their own advance instead: {a:?} -> {b:?}"
         );
-        let cb = e.caret(&marked, 96, 4).unwrap();
+        let cb = e.caret(&marked, 96, 4, false).unwrap();
         assert!(
             (cb.cell[1] - em * 3.0).abs() < 1.0,
             "時 starts the fourth cell: {cb:?}"
@@ -1559,8 +1638,8 @@ mod tcy_render_tests {
         );
         // 時 is position 4 either way: a full character cell, not one of the
         // two half-cells the run was replaced by.
-        let full = e.caret(&t, 96, 4).unwrap();
-        let inside = e.caret(&t, 96, 2).unwrap();
+        let full = e.caret(&t, 96, 4, false).unwrap();
+        let inside = e.caret(&t, 96, 2, false).unwrap();
         assert!((full.cell[3] - em).abs() < 1.0, "position 4 is 時: {full:?}");
         assert!(
             (inside.cell[3] - em / 2.0).abs() < 1.0,

@@ -11,7 +11,7 @@
 //! ruler exactly like Krita/CSP.
 
 /// One ruler's geometry, canvas px.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Ruler {
     /// A straight edge through `a` and `b` (the infinite line, not the
     /// segment — CSP's linear ruler guides along its whole length).
@@ -501,12 +501,79 @@ impl Default for Rulers {
     }
 }
 
+/// The `mnc/rulers.json` envelope. Items and curves are raw values so a
+/// file written by a NEWER build with an unknown ruler kind loses that one
+/// ruler here, not the whole set (the actions.json lesson).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RulersFile {
+    #[serde(default)]
+    on: bool,
+    #[serde(default = "yes")]
+    special_on: bool,
+    #[serde(default)]
+    items: Vec<serde_json::Value>,
+    #[serde(default)]
+    curves: Vec<serde_json::Value>,
+}
+
+fn yes() -> bool {
+    true
+}
+
 impl Rulers {
     /// Is this ruler's family currently snappable? (`Symmetric` is not a
     /// snap source at all, but the app gates its mirroring on the same
     /// special-family switch.)
     pub fn special_active(&self) -> bool {
         self.on && self.special_on
+    }
+
+    /// Serialize for the `mnc/rulers.json` zip entry. Deterministic:
+    /// struct field order + Vec order, no maps.
+    pub fn to_json(&self) -> String {
+        let f = RulersFile {
+            on: self.on,
+            special_on: self.special_on,
+            items: self
+                .items
+                .iter()
+                .filter_map(|r| serde_json::to_value(r).ok())
+                .collect(),
+            curves: self
+                .curves
+                .iter()
+                .filter_map(|c| serde_json::to_value(c).ok())
+                .collect(),
+        };
+        serde_json::to_string(&f).unwrap_or_else(|_| "{}".into())
+    }
+
+    /// Parse the entry back. Never fails the load: garbage gives the
+    /// default set, an unknown ruler kind is skipped item-by-item.
+    pub fn from_json(s: &str) -> Rulers {
+        let Ok(f) = serde_json::from_str::<RulersFile>(s) else {
+            return Rulers::default();
+        };
+        Rulers {
+            items: f
+                .items
+                .into_iter()
+                .filter_map(|v| serde_json::from_value(v).ok())
+                .collect(),
+            curves: f
+                .curves
+                .into_iter()
+                .filter_map(|v| serde_json::from_value(v).ok())
+                .collect(),
+            on: f.on,
+            special_on: f.special_on,
+        }
+    }
+
+    /// Anything worth writing to disk? (`on` alone is not — snap state
+    /// with no geometry is not a ruler set.)
+    pub fn has_geometry(&self) -> bool {
+        !self.items.is_empty() || !self.curves.is_empty()
     }
 
     /// RL-030 vs RL-031: the master `on` gates every ruler; the special
@@ -941,7 +1008,7 @@ mod move_tests {
 
 /// A curve ruler (part 2): a drawn polyline; snaps onto the nearest
 /// SEGMENT (finite, unlike the line ruler — the curve is the path).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CurveRuler {
     pub pts: Vec<[f32; 2]>,
 }

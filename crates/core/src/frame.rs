@@ -134,6 +134,60 @@ fn cross(a: [f32; 2], b: [f32; 2]) -> f32 {
     a[0] * b[1] - a[1] * b[0]
 }
 
+/// Does `o` sit ACROSS the gutter from the edge `a`–`b` (whose outward
+/// normal is `nrm`), and if so, which of its vertices form the facing edge?
+///
+/// Returns `(distance, vertex indices)`. `None` when `o` is not "the next
+/// panel over": its projection onto the edge's own direction must OVERLAP
+/// the edge — a panel off to the side is beside this one, not facing it.
+/// The distance is to the NEAREST vertex in front of the edge; the returned
+/// indices are every vertex within 1.5 px of that depth, i.e. the whole
+/// facing edge (both corners of a rectangle's near side).
+///
+/// This is what "Keep gutters aligned" moves: drag one panel's border and
+/// the facing border of its neighbour travels with it, so the gutter keeps
+/// its width instead of silently closing (audit P0-4).
+pub fn facing_vertices(
+    o: &Frame,
+    a: [f32; 2],
+    b: [f32; 2],
+    nrm: [f32; 2],
+) -> Option<(f32, Vec<usize>)> {
+    if o.points.len() < 3 {
+        return None;
+    }
+    let e = sub(b, a);
+    let len = dot(e, e).sqrt();
+    if len < 1e-3 {
+        return None;
+    }
+    let dir = [e[0] / len, e[1] / len];
+    let (lo, hi) = (dot(dir, a).min(dot(dir, b)), dot(dir, a).max(dot(dir, b)));
+    let base = dot(nrm, a);
+    let (mut olo, mut ohi) = (f32::INFINITY, f32::NEG_INFINITY);
+    let mut near = f32::INFINITY;
+    for p in &o.points {
+        let s = dot(dir, *p);
+        olo = olo.min(s);
+        ohi = ohi.max(s);
+        let t = dot(nrm, *p) - base;
+        if t > 0.01 {
+            near = near.min(t);
+        }
+    }
+    if ohi <= lo || olo >= hi || !near.is_finite() {
+        return None;
+    }
+    let idx: Vec<usize> = o
+        .points
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| (dot(nrm, **p) - base - near).abs() <= 1.5)
+        .map(|(k, _)| k)
+        .collect();
+    Some((near, idx))
+}
+
 impl Frame {
     pub fn rect(x0: f32, y0: f32, x1: f32, y1: f32) -> Self {
         Self {
@@ -807,31 +861,14 @@ impl FrameSet {
         b: [f32; 2],
         nrm: [f32; 2],
     ) -> Option<f32> {
-        let e = sub(b, a);
-        let len = dot(e, e).sqrt();
-        let dir = [e[0] / len, e[1] / len];
-        let (lo, hi) = (dot(dir, a).min(dot(dir, b)), dot(dir, a).max(dot(dir, b)));
-        let base = dot(nrm, a);
         let mut best: Option<f32> = None;
         for (i, o) in self.frames.iter().enumerate() {
-            if i == skip || o.points.len() < 3 {
+            if i == skip {
                 continue;
             }
-            let (mut olo, mut ohi) = (f32::INFINITY, f32::NEG_INFINITY);
-            let mut near = f32::INFINITY;
-            for p in &o.points {
-                let s = dot(dir, *p);
-                olo = olo.min(s);
-                ohi = ohi.max(s);
-                let t = dot(nrm, *p) - base;
-                if t > 0.01 {
-                    near = near.min(t);
-                }
+            if let Some((near, _)) = facing_vertices(o, a, b, nrm) {
+                best = Some(best.map_or(near, |x: f32| x.min(near)));
             }
-            if ohi <= lo || olo >= hi || !near.is_finite() {
-                continue;
-            }
-            best = Some(best.map_or(near, |x: f32| x.min(near)));
         }
         best
     }
@@ -1102,6 +1139,55 @@ impl FrameSet {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The geometry "Keep gutters aligned" rides on: which panel is across
+    /// the gutter, and which of its corners form the border facing back.
+    #[test]
+    fn facing_vertices_finds_the_panel_across_the_gutter() {
+        // A's right edge, points 1 -> 2 of a rect, outward normal +x.
+        let a = [100.0, 0.0];
+        let b = [100.0, 100.0];
+        let nrm = [1.0, 0.0];
+
+        // Straight across a 40 px gutter: both left corners, at 40.
+        let across = Frame::rect(140.0, 0.0, 240.0, 100.0);
+        let (d, idx) = facing_vertices(&across, a, b, nrm).expect("faces the edge");
+        assert!((d - 40.0).abs() < 1e-4, "gutter width: {d}");
+        assert_eq!(idx.len(), 2, "the whole facing border: {idx:?}");
+        for k in &idx {
+            assert!((across.points[*k][0] - 140.0).abs() < 1e-4);
+        }
+
+        // Two stacked panels share one gutter: each reports 40.
+        let top = Frame::rect(140.0, 0.0, 240.0, 50.0);
+        let bot = Frame::rect(140.0, 50.0, 240.0, 100.0);
+        for f in [&top, &bot] {
+            assert!((facing_vertices(f, a, b, nrm).unwrap().0 - 40.0).abs() < 1e-4);
+        }
+
+        // Off to the side (no projection overlap onto the edge's own
+        // direction) is BESIDE this panel, not facing it.
+        let beside = Frame::rect(140.0, 120.0, 240.0, 200.0);
+        assert!(facing_vertices(&beside, a, b, nrm).is_none());
+
+        // Behind the edge (the wrong side) does not face it either.
+        let behind = Frame::rect(-100.0, 0.0, -20.0, 100.0);
+        assert!(facing_vertices(&behind, a, b, nrm).is_none());
+
+        // A skewed neighbour reports its NEAREST corner, and only that one
+        // is the facing vertex.
+        let skew = Frame {
+            points: vec![
+                [140.0, 0.0],
+                [240.0, 0.0],
+                [240.0, 100.0],
+                [180.0, 100.0],
+            ],
+        };
+        let (d, idx) = facing_vertices(&skew, a, b, nrm).unwrap();
+        assert!((d - 40.0).abs() < 1e-4);
+        assert_eq!(idx, vec![0], "only the near corner: {idx:?}");
+    }
 
     #[test]
     fn rotate_and_scale_around_anchor() {

@@ -14,8 +14,9 @@
 //! The committed resample walks DESTINATION pixels and inverse-maps into the
 //! source (no holes, no double-writes). Bilinear filtering on premultiplied
 //! fix15 — premultiplied means the filter is correct at alpha edges without a
-//! divide. The GPU path (mn-gpu `transform_region`) implements the same
-//! inverse-map + bilinear contract; `Affine2` here is the shared math.
+//! divide. A GPU resample path does not exist yet — the `resampled`
+//! parameter below is its designed seam; `Affine2` here is the shared math
+//! either path would use.
 //!
 //! Only raster layers transform. Vector layers (frame/balloon/text) keep
 //! their geometry editable through their own Object-tool paths instead —
@@ -322,10 +323,11 @@ pub fn clear_lifted(layer: &mut Layer, rect: [i32; 4], selection: Option<&Select
 /// non-destructive layer mask instead, and must NOT also clamp here or the
 /// coverage would apply twice (a feathered edge would square).
 ///
-/// `resampled`: pass the GPU path's output when available
-/// (`mn-gpu Renderer::transform_region`) — a full destination pixel buffer
-/// with its bounds. Pass `None` to resample here on the CPU. Both paths use
-/// the same inverse-map + bilinear contract, so results agree.
+/// `resampled`: the seam for a future GPU resample — a full destination
+/// pixel buffer with its bounds. No such path exists yet (nothing named
+/// `transform_region` is implemented anywhere); every caller passes `None`
+/// and resamples here on the CPU, under the inverse-map + bilinear
+/// contract a GPU port would have to match.
 pub fn commit_transform(
     doc: &mut Document,
     src: &FloatSource,

@@ -38,7 +38,11 @@ pub struct FocusLinesParams {
 
 /// 流線 — speed lines: `count` parallel segments along `angle` degrees,
 /// lengths in [len_min, len_max], scattered across the canvas perpendic.
-#[derive(Clone, Debug)]
+///
+/// `Default` exists for the `..Default::default()` shorthand and zeroes
+/// every knob, which for the density fields is exactly the legacy meaning
+/// (uniform-random scatter, no bundling, no split jitters).
+#[derive(Clone, Debug, Default)]
 pub struct SpeedLinesParams {
     pub angle_deg: f32,
     pub count: u32,
@@ -55,8 +59,36 @@ pub struct SpeedLinesParams {
     /// wants; `None` is parallel. A NEAR point turns the block into
     /// focus lines, which is the other tool's job.
     pub converge: Option<[f32; 2]>,
+    /// >0 — WALK the normal extent in steps of `gap_px` instead of
+    /// scattering `count` runs at uniform-random offsets. The scatter is
+    /// what makes a generated 流線 block read as noise: uniform-random
+    /// positions CLUMP (three runs a pixel apart, then a bald strip),
+    /// which is precisely what a hand-ruled block never does. 0 keeps the
+    /// scatter, bit for bit, for every file saved before this existed.
+    pub gap_px: f32,
+    /// まとまり — bundle `group` runs at `gap_px`, then leave a hole of
+    /// `group_gap` × `gap_px` before the next bundle. 0/1 = no bundling.
+    /// Only read on the walk (`gap_px` > 0).
+    pub group: u32,
+    /// The hole between bundles, in multiples of `gap_px` (see `group`).
+    pub group_gap: f32,
+    /// 0..1 — positional wobble as a fraction of `gap_px`, so the walk is
+    /// even without being mechanical. Walk only; 0 = dead even.
+    pub jit_gap: f32,
+    /// 0..1 — per-run length wobble, a fraction pulled off the drawn
+    /// length. Walk only; 0 = the `len_min`..`len_max` spread alone.
+    pub jit_len: f32,
+    /// 0..1 — per-run width wobble, a fraction pulled off `width`. Walk
+    /// only; 0 = every run at the nominal width.
+    pub jit_width: f32,
     pub seed: u64,
 }
+
+/// The walk's hard ceiling on runs. `gap_px` comes from a UI field and a
+/// sub-pixel gap over a 600 dpi B4's ~10 000 px normal extent is an
+/// unbounded rasterization, not a slow one (the same class of hang the
+/// [`segment`] bbox clip fixed).
+const MAX_RUNS: u32 = 20_000;
 
 /// ウニフラッシュ — sea-urchin flash: `count` FILLED triangular spikes
 /// around `center`, needle-pointed at `r_in` and `width` px wide at
@@ -295,9 +327,42 @@ pub fn render_speed(p: &SpeedLinesParams, size: (u32, u32)) -> HashMap<TileIdx, 
         lo = lo.min(t);
         hi = hi.max(t);
     }
-    for _ in 0..p.count.max(1) {
-        let t = lo + rand(&mut seed) * (hi - lo);
-        let len = p.len_min + rand(&mut seed) * (p.len_max - p.len_min).max(0.0);
+    // Where the runs sit along the normal. The WALK (gap_px > 0) steps a
+    // fixed gap with optional bundling; the legacy path scatters `count`
+    // of them at uniform-random offsets and is kept bit for bit, so no
+    // saved layer redraws (`legacy_renders_are_bit_stable`). Every new
+    // `rand` call lives behind a `> 0.0` guard for the same reason: the
+    // draw sequence has to be untouched when the new knobs are absent.
+    let mut offsets: Vec<f32> = Vec::new();
+    if p.gap_px > 0.0 {
+        let gap = p.gap_px.max(0.25);
+        let ggap = if p.group > 1 { p.group_gap.max(1.0) } else { 1.0 };
+        let mut t = lo;
+        let mut i = 0u32;
+        while t <= hi && (offsets.len() as u32) < MAX_RUNS {
+            offsets.push(t);
+            let bundle_end = p.group > 1 && (i + 1) % p.group == 0;
+            t += if bundle_end { gap * ggap } else { gap };
+            i += 1;
+        }
+    }
+    let n = if offsets.is_empty() {
+        p.count.max(1)
+    } else {
+        offsets.len() as u32
+    };
+    for i in 0..n {
+        let mut t = match offsets.get(i as usize) {
+            Some(t) => *t,
+            None => lo + rand(&mut seed) * (hi - lo),
+        };
+        if p.jit_gap > 0.0 {
+            t += (rand(&mut seed) - 0.5) * p.jit_gap.clamp(0.0, 1.0) * p.gap_px.max(0.25);
+        }
+        let mut len = p.len_min + rand(&mut seed) * (p.len_max - p.len_min).max(0.0);
+        if p.jit_len > 0.0 {
+            len *= 1.0 - rand(&mut seed) * p.jit_len.clamp(0.0, 0.9);
+        }
         // Start offset along the direction so the run crosses the canvas.
         // `t` is already the ABSOLUTE normal coordinate (corner
         // projection) — no canvas-centre offset.
@@ -318,11 +383,15 @@ pub fn render_speed(p: &SpeedLinesParams, size: (u32, u32)) -> HashMap<TileIdx, 
             None => dir,
         };
         let tip = [base[0] + run[0] * len, base[1] + run[1] * len];
+        let mut hw = p.width * 0.5;
+        if p.jit_width > 0.0 {
+            hw *= 1.0 - rand(&mut seed) * p.jit_width.clamp(0.0, 0.9);
+        }
         segment(
             &mut map,
             base,
             tip,
-            (p.width * 0.5).max(0.5),
+            hw.max(0.5),
             p.taper.clamp(0.0, 1.0),
             size,
         );
@@ -491,6 +560,7 @@ mod tests {
                 taper: 0.0,
                 converge: None,
                 seed: 3,
+                ..Default::default()
             },
             (512, 512),
         );
@@ -594,10 +664,74 @@ mod tests {
             taper: 0.0,
             converge: None,
             seed: 3,
+            ..Default::default()
         };
         assert_eq!(
             fingerprint(&render_speed(&s, (512, 512))),
             (57, 25119, 6_096_450_357_538_070_854)
+        );
+
+        // Density round, 2026-08-23: the legacy speed set THROUGH THE
+        // SPEC, with every new attribute at its serde default. `gap_px` 0
+        // must still mean the uniform scatter, the split jitters 0 the
+        // single `jitter`, `gap_deg` 0 "use `count`" and `color` black —
+        // so a saved layer regenerates onto the pixels it was saved with.
+        // (The focus half is pinned the same way by
+        // `pre_flash_specs_load_with_the_old_meaning`, which compares the
+        // spec's raster to explicit params rather than to a constant.)
+        assert_eq!(
+            fingerprint(&GenLinesSpec {
+                focus: false,
+                a: 20.0,
+                b: 100.0,
+                c: 300.0,
+                count: 80,
+                width: 4.0,
+                seed: 3,
+                ..Default::default()
+            }
+            .render((512, 512))),
+            (57, 25119, 6_096_450_357_538_070_854)
+        );
+    }
+
+    /// `gap_deg` is the same fan expressed in CSP's unit: 360/gap rays,
+    /// and setting it to the gap the count already implied draws the same
+    /// set. 0 keeps the count (pinned above).
+    #[test]
+    fn gap_deg_derives_the_ray_count() {
+        let by_count = GenLinesSpec {
+            focus: true,
+            a: 256.0,
+            b: 256.0,
+            c: 100.0,
+            d: 240.0,
+            count: 90,
+            width: 6.0,
+            jitter: 0.3,
+            seed: 7,
+            ..Default::default()
+        };
+        assert_eq!(by_count.ray_count(), 90);
+        let by_gap = GenLinesSpec {
+            count: 1,
+            gap_deg: 4.0,
+            ..by_count
+        };
+        assert_eq!(by_gap.ray_count(), 90, "360 / 4°");
+        assert_eq!(
+            fingerprint(&by_count.render((512, 512))),
+            fingerprint(&by_gap.render((512, 512))),
+            "the same fan, said the other way round"
+        );
+        // A silly gap is capped rather than allowed to hang the UI.
+        assert_eq!(
+            GenLinesSpec {
+                gap_deg: 0.01,
+                ..by_count
+            }
+            .ray_count(),
+            4096
         );
     }
 
@@ -613,6 +747,7 @@ mod tests {
             taper: 0.0,
             converge: None,
             seed: 3,
+            ..Default::default()
         };
         let m = render_speed(&p, (512, 512));
         let mut rows = 0;
@@ -715,6 +850,7 @@ mod tests {
             taper: 0.0,
             converge: None,
             seed: 5,
+            ..Default::default()
         };
         let flat = fingerprint(&render_speed(&p, (512, 512)));
         let tapered = fingerprint(&render_speed(
@@ -744,6 +880,7 @@ mod tests {
             taper: 0.0,
             converge: Some([256.0, -4000.0]),
             seed: 9,
+            ..Default::default()
         };
         let m = render_speed(&p, (512, 512));
         assert!(!m.is_empty(), "the fan landed on the canvas");
@@ -871,6 +1008,161 @@ mod tests {
         assert!(both < 40, "the two polarities barely overlap ({both})");
     }
 
+    /// The rows a set of horizontal runs occupies at one column, as the
+    /// gaps between consecutive bands. The measure the density round is
+    /// actually about: a hand-ruled 流線 block has ONE gap repeated, the
+    /// old uniform-random scatter has gaps from 1 px to a bald strip.
+    fn band_gaps(m: &HashMap<TileIdx, Arc<Tile>>, w: i32, h: i32) -> Vec<i32> {
+        let mut centres = Vec::new();
+        let mut run: Option<(i32, i32)> = None;
+        for y in 0..h {
+            if (0..w).any(|x| ink_at(m, x, y)) {
+                run = Some(match run {
+                    Some((a, _)) => (a, y),
+                    None => (y, y),
+                });
+            } else if let Some((a, b)) = run.take() {
+                centres.push((a + b) / 2);
+            }
+        }
+        if let Some((a, b)) = run {
+            centres.push((a + b) / 2);
+        }
+        centres.windows(2).map(|w| w[1] - w[0]).collect()
+    }
+
+    /// `gap_px` walks the normal extent instead of scattering, so the
+    /// spacing is EVEN — the clumping the owner called "dogshit".
+    ///
+    /// Short runs on purpose: the along-the-direction start offset can
+    /// still drop a run clean off the canvas (that is the legacy scatter
+    /// and stays), and its odds fall with the run length, so a stray
+    /// double gap does not have to be tolerated by a loose bound.
+    #[test]
+    fn speed_lines_gap_spacing_is_even() {
+        let p = SpeedLinesParams {
+            angle_deg: 0.0,
+            count: 0,
+            len_min: 20.0,
+            len_max: 20.0,
+            width: 2.0,
+            gap_px: 16.0,
+            seed: 5,
+            ..Default::default()
+        };
+        let m = render_speed(&p, (512, 512));
+        let gaps = band_gaps(&m, 512, 512);
+        assert!(
+            gaps.len() > 20,
+            "the walk filled the extent ({})",
+            gaps.len()
+        );
+        let lo = *gaps.iter().min().unwrap();
+        let hi = *gaps.iter().max().unwrap();
+        let nominal = gaps.iter().filter(|g| (**g - 16).abs() <= 1).count();
+        assert!(
+            hi <= lo * 2 + 2 && nominal * 10 >= gaps.len() * 9,
+            "one gap, repeated ({lo}..{hi}, {nominal}/{} at 16)",
+            gaps.len()
+        );
+
+        // And the same number of runs through the SCATTER path clumps —
+        // this is the before picture, and it is why the field exists.
+        let sg = band_gaps(
+            &render_speed(
+                &SpeedLinesParams {
+                    count: gaps.len() as u32 + 1,
+                    gap_px: 0.0,
+                    ..p.clone()
+                },
+                (512, 512),
+            ),
+            512,
+            512,
+        );
+        let s_hi = *sg.iter().max().unwrap();
+        let s_lo = *sg.iter().min().unwrap();
+        assert!(
+            s_hi > s_lo * 4,
+            "the old scatter really is uneven ({s_lo}..{s_hi})"
+        );
+    }
+
+    /// まとまり: bundles of `group` runs with a hole between them — so the
+    /// gap histogram has two values, not one, and the hole is the bigger.
+    #[test]
+    fn speed_lines_grouping_leaves_holes() {
+        let m = render_speed(
+            &SpeedLinesParams {
+                angle_deg: 0.0,
+                count: 0,
+                len_min: 20.0,
+                len_max: 20.0,
+                width: 2.0,
+                gap_px: 12.0,
+                group: 3,
+                group_gap: 3.0,
+                seed: 5,
+                ..Default::default()
+            },
+            (512, 512),
+        );
+        let gaps = band_gaps(&m, 512, 512);
+        assert!(gaps.len() > 10, "enough bands to see the pattern");
+        let tight = *gaps.iter().min().unwrap();
+        assert!((tight - 12).abs() <= 1, "the bundle's own gap ({tight})");
+        // The hole is 3 × the gap, and there are two tight gaps (a bundle
+        // of three) for every one of them. A run that the along-the-
+        // direction offset dropped off the canvas merges two neighbours,
+        // so the counts are compared loosely — the SHAPE is the claim.
+        let holes = gaps.iter().filter(|g| (**g - 36).abs() <= 2).count();
+        let tights = gaps.iter().filter(|g| (**g - 12).abs() <= 1).count();
+        assert!(holes >= 5, "bundles stand apart ({gaps:?})");
+        assert!(
+            tights * 2 >= holes * 3,
+            "and each bundle is three tight runs ({tights} tight, {holes} holes)"
+        );
+    }
+
+    /// The colour field: a white run on a black page is the knockout the
+    /// black-only generator could not draw. Alpha is untouched.
+    #[test]
+    fn spec_color_paints_the_ink() {
+        let mut spec = GenLinesSpec {
+            focus: true,
+            a: 256.0,
+            b: 256.0,
+            c: 60.0,
+            d: 240.0,
+            count: 32,
+            width: 6.0,
+            jitter: 0.2,
+            seed: 7,
+            ..Default::default()
+        };
+        let black = spec.render((512, 512));
+        spec.color = [255, 255, 255];
+        let white = spec.render((512, 512));
+        assert_eq!(
+            fingerprint(&black),
+            fingerprint(&white),
+            "colour moves no pixel"
+        );
+        let mut seen = 0;
+        for t in white.values() {
+            for y in 0..TILE_SIZE {
+                for x in 0..TILE_SIZE {
+                    let p = t.pixel(x, y);
+                    if p[3] > 0 {
+                        seen += 1;
+                        assert_eq!([p[0], p[1], p[2]], [FIX15_ONE as u16; 3], "white ink");
+                    }
+                }
+            }
+        }
+        assert!(seen > 0, "something was inked to check");
+    }
+
     /// A degenerate flash (radius smaller than one spike) must not panic:
     /// the half-width cap is floored before `clamp`, which PANICS on
     /// min > max and would abort through wndproc (audit B).
@@ -940,6 +1232,78 @@ pub struct GenLinesSpec {
     /// Speed lines only: [`SpeedLinesParams::converge`]. Absent = None.
     #[serde(default)]
     pub converge: Option<[f32; 2]>,
+
+    // --- density round, 2026-08-23. EVERY field below is
+    // `#[serde(default)]` and 0 MUST keep meaning exactly what a file
+    // written before them meant, same rule as `kind`: the bit-stability
+    // pin and `pre_flash_specs_load_with_the_old_meaning` are the guards.
+    /// Radial kinds: the angular gap in DEGREES between neighbouring rays
+    /// — CSP's tutorials size a 集中線 by gap (≈3° dense, ≈10° sparse),
+    /// not by a count that means something different on every page size.
+    /// >0 derives `count`; 0 keeps the stored `count`.
+    #[serde(default)]
+    pub gap_deg: f32,
+    /// Speed lines: [`SpeedLinesParams::gap_px`]. 0 = the old scatter.
+    #[serde(default)]
+    pub gap_px: f32,
+    /// Speed lines: [`SpeedLinesParams::group`] (まとまり).
+    #[serde(default)]
+    pub group: u32,
+    /// Speed lines: [`SpeedLinesParams::group_gap`].
+    #[serde(default)]
+    pub group_gap: f32,
+    /// 0 = fall back to the single `jitter` (which is what every older
+    /// file has). Split because a printed set wants a lot of length
+    /// wobble and almost no angular wobble, and one knob cannot say that.
+    #[serde(default)]
+    pub jit_gap: f32,
+    #[serde(default)]
+    pub jit_len: f32,
+    #[serde(default)]
+    pub jit_width: f32,
+    /// The ink colour, sRGB. Absent = `[0, 0, 0]` = the black every older
+    /// file drew — which is also the only value that touches no pixel
+    /// (see [`recolor`]), so the legacy raster is bit-identical.
+    #[serde(default)]
+    pub color: [u8; 3],
+
+    // --- screen-side only: these drive the Object tool's handles and
+    // never reach a renderer, so they cannot move a saved raster.
+    /// Radial kinds: the angle (degrees) the r_in/r_out driver handles sit
+    /// at — the direction the placing drag was made in, so the handles
+    /// land where the gesture did instead of always due east (and off the
+    /// page for a burst near the right edge). 0 = +x, the old placement.
+    #[serde(default)]
+    pub hand_deg: f32,
+    /// Speed lines: where the blue reference line and its handles are
+    /// anchored — the placing drag's midpoint. `None` = the canvas
+    /// centre, which is where they used to be for every run on the page.
+    #[serde(default)]
+    pub anchor: Option<[f32; 2]>,
+}
+
+/// Repaint an already-rendered set from black to `color`, premultiplied.
+///
+/// A post-pass rather than a colour argument threaded through four
+/// rasterizers: the generators ink FULL alpha only, so premultiplied
+/// recolouring is exact, and `[0, 0, 0]` returns without touching a pixel
+/// — which is what keeps every saved layer bit-identical.
+fn recolor(map: &mut HashMap<TileIdx, Arc<Tile>>, color: [u8; 3]) {
+    if color == [0, 0, 0] {
+        return;
+    }
+    let c = color.map(|v| ((v as u32 * FIX15_ONE as u32) / 255) as u16);
+    for tile in map.values_mut() {
+        let t = Arc::make_mut(tile);
+        let d = t.data_mut();
+        for px in d.chunks_exact_mut(4) {
+            if px[3] > 0 {
+                px[0] = c[0];
+                px[1] = c[1];
+                px[2] = c[2];
+            }
+        }
+    }
 }
 
 impl GenLinesSpec {
@@ -962,35 +1326,51 @@ impl GenLinesSpec {
         self.kind == 1 || self.kind == 2 || self.focus
     }
 
+    /// How many rays/spikes a radial kind draws: gap-driven when
+    /// `gap_deg` is set (CSP's own unit for a 集中線), else the stored
+    /// count. Capped — a 0.05° gap is 7 200 rays and a UI hang.
+    pub fn ray_count(&self) -> u32 {
+        if self.gap_deg > 0.0 {
+            ((360.0 / self.gap_deg).ceil() as u32).clamp(1, 4096)
+        } else {
+            self.count.max(1)
+        }
+    }
+
+    /// One of the split jitters, falling back to the single legacy
+    /// `jitter` while it is 0 — the whole back-compat rule in one place.
+    fn jit(&self, v: f32) -> f32 {
+        if v > 0.0 { v } else { self.jitter }
+    }
+
     /// Rasterize the spec into tiles (the shared source with the dialog).
     pub fn render(&self, size: (u32, u32)) -> HashMap<TileIdx, Arc<Tile>> {
-        if self.kind == 1 || self.kind == 2 {
-            return render_urchin(
+        let mut map = if self.kind == 1 || self.kind == 2 {
+            render_urchin(
                 &UrchinParams {
                     center: [self.a, self.b],
                     r_in: self.c,
                     r_out: self.d,
-                    count: self.count.max(1),
+                    count: self.ray_count(),
                     width: self.width,
-                    angle_jitter: self.jitter,
-                    length_jitter: self.jitter,
+                    angle_jitter: self.jit(self.jit_gap),
+                    length_jitter: self.jit(self.jit_len),
                     solid: self.kind == 2,
                     seed: self.seed,
                 },
                 size,
-            );
-        }
-        if self.focus {
+            )
+        } else if self.focus {
             render_focus(
                 &FocusLinesParams {
                     center: [self.a, self.b],
                     r_in: self.c,
                     r_out: self.d,
-                    count: self.count.max(1),
+                    count: self.ray_count(),
                     width: self.width,
-                    angle_jitter: self.jitter,
-                    width_jitter: self.jitter,
-                    length_jitter: self.jitter,
+                    angle_jitter: self.jit(self.jit_gap),
+                    width_jitter: self.jit(self.jit_width),
+                    length_jitter: self.jit(self.jit_len),
                     taper: self.taper.clamp(0.0, 1.0),
                     seed: self.seed,
                 },
@@ -1006,11 +1386,19 @@ impl GenLinesSpec {
                     width: self.width,
                     taper: self.taper,
                     converge: self.converge,
+                    gap_px: self.gap_px,
+                    group: self.group,
+                    group_gap: self.group_gap,
+                    jit_gap: self.jit_gap,
+                    jit_len: self.jit_len,
+                    jit_width: self.jit_width,
                     seed: self.seed,
                 },
                 size,
             )
-        }
+        };
+        recolor(&mut map, self.color);
+        map
     }
 }
 

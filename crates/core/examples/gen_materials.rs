@@ -8,8 +8,9 @@
 //!
 //! `cargo run -p mn-core --example gen_materials [-- <out-dir>]`
 //! Default out-dir is the repo's `assets/materials`. Writes
-//! `<out-dir>/tones/*.png` (+ its `tags.txt`) and refreshes the
-//! `<stem>.png` thumbnail beside every `<stem>.gen.json` it finds.
+//! `<out-dir>/tones/*.png` (+ each flat sheet's `<stem>.tone.json`
+//! sidecar and the folder's `tags.txt`) and refreshes the `<stem>.png`
+//! thumbnail beside every `<stem>.gen.json` it finds.
 //!
 //! Deliberately an example rather than a `#[test]`, following
 //! `mn-gpu`'s `offscreen` example: it WRITES files into the working
@@ -26,6 +27,7 @@ use image::{GrayImage, Luma};
 use mn_core::genlines::GenLinesSpec;
 use mn_core::tile::{FIX15_ONE, TILE_SIZE, Tile, TileIdx};
 use mn_core::tone::{ToneDensity, ToneParams, TonePattern, rasterize_tile};
+use serde::Serialize;
 
 /// Print resolution the sheets are authored at. A screentone is an
 /// inch-relative thing (LPI), so a sheet without a dpi is meaningless —
@@ -63,6 +65,7 @@ fn main() {
             let side = tile_side(lpi);
             write_sheet(&tones, &name, &p, side, Ramp::Flat);
             check(&tones.join(&name), side, pct as f32 / 100.0);
+            write_tone_sidecar(&tones, &name, &p, pct as f32 / 100.0);
             tags += &format!(
                 "{name}=screentone, tone, dots, halftone, {pct}%, {} lpi, 45\n",
                 trim(lpi)
@@ -85,6 +88,7 @@ fn main() {
         let side = tile_side(lpi);
         write_sheet(&tones, &name, &p, side, Ramp::Flat);
         check(&tones.join(&name), side, pct as f32 / 100.0);
+        write_tone_sidecar(&tones, &name, &p, pct as f32 / 100.0);
         tags += &format!(
             "{name}=screentone, tone, lines, line screen, hatching, {pct}%, {} lpi, 45\n",
             trim(lpi)
@@ -108,6 +112,7 @@ fn main() {
         let name = "tone-noise-30lpi-30.png".to_string();
         write_sheet(&tones, &name, &p, NOMINAL, Ramp::Flat);
         check(&tones.join(&name), NOMINAL, 0.3);
+        write_tone_sidecar(&tones, &name, &p, 0.3);
         tags += &format!("{name}=screentone, tone, noise, grain, sand, random, FM, 30%\n");
         written += 1;
     }
@@ -117,6 +122,11 @@ fn main() {
     // left-to-right ramp, so the sheet fades from paper to solid. Not a
     // tiling sheet (a ramp has no period) — the side is the 60 LPI one
     // anyway so it sits beside its flat siblings at the same scale.
+    //
+    // And NO `.tone.json`: a live tone layer is one flat density, so this
+    // sheet is the one that must keep arriving as PIXELS. It is also why
+    // the app's inference insists on reading a density before it calls
+    // anything a tone — this sheet states a frequency and no grade.
     {
         let p = ToneParams {
             pattern: TonePattern::Dots,
@@ -158,6 +168,30 @@ fn main() {
         thumbs += 1;
     }
     println!("[gen] {thumbs} generator thumbnails refreshed");
+}
+
+/// The `<stem>.tone.json` sidecar that makes a sheet a TONE material
+/// rather than a bitmap one — the app's `materials::ToneSpec`, whose
+/// field names this must match (it is the app that reads these back).
+///
+/// It is spelled out here rather than imported because `mn-core` cannot
+/// depend on `mn-app`; the app's `gen_materials_sidecars_round_trip` test
+/// reads these very files back through `read_tone_spec`, which is what
+/// keeps the two shapes honest.
+#[derive(Serialize)]
+struct ToneSidecar<'a> {
+    tone: &'a ToneParams,
+    density: f32,
+}
+
+/// Write one sheet's sidecar beside it. A tone material's screen is
+/// canvas-absolute, so what ships is the PARAMETERS — the PNG stays only
+/// as the palette's picture of them.
+fn write_tone_sidecar(dir: &Path, name: &str, p: &ToneParams, density: f32) {
+    let stem = name.strip_suffix(".png").unwrap_or(name);
+    let text = serde_json::to_string_pretty(&ToneSidecar { tone: p, density })
+        .expect("serialize the tone sidecar");
+    std::fs::write(dir.join(format!("{stem}.tone.json")), text).expect("write the tone sidecar");
 }
 
 /// `60.0` -> `60`, `27.5` -> `27.5` — file names read like the tone

@@ -64,6 +64,16 @@ pub struct ProjectMeta {
     /// set; the preflight flags a multi-page work with no cover.
     #[serde(default)]
     pub cover: Option<usize>,
+    /// Template page (tekno B2) — reading-order index whose bytes seed
+    /// every NEW page instead of a blank. Index-bound like `cover`
+    /// (reorder/delete does not chase it). `None` = blanks.
+    #[serde(default)]
+    pub template_page: Option<usize>,
+    /// Publisher/printer target (ROADMAP M2) — drives preflight norms
+    /// (page-count multiple, screen ruling) and the export finish. `None`
+    /// = no target picked; nothing checks or preselects.
+    #[serde(default)]
+    pub profile: Option<crate::profile::PublisherProfile>,
     /// Page file names inside the zip, reading order.
     pages: Vec<String>,
 }
@@ -98,6 +108,11 @@ impl ProjectMeta {
             expression,
             spine_mm,
             cover,
+            // Not a preflight input — the checks never read it. (The
+            // PROFILE is one; `run_preflight` sets it after construction
+            // so this signature does not grow a parameter per field.)
+            template_page: None,
+            profile: None,
             pages: Vec::new(),
         }
     }
@@ -121,6 +136,8 @@ impl Project {
                 expression: Expression::default(),
                 spine_mm: 0.0,
                 cover: None,
+                template_page: None,
+                profile: None,
                 pages: Vec::new(),
             },
             pages: Vec::new(),
@@ -301,6 +318,12 @@ pub struct FolderMeta {
     /// Cover page designation — page index in reading order. Preflight input.
     #[serde(default)]
     pub cover: Option<usize>,
+    /// Template page — see `ProjectMeta::template_page`.
+    #[serde(default)]
+    pub template_page: Option<usize>,
+    /// Publisher/printer target — see `ProjectMeta::profile`.
+    #[serde(default)]
+    pub profile: Option<crate::profile::PublisherProfile>,
     /// Next free page identity; ids are never reused inside a work.
     pub next_id: u32,
     /// Pages in READING order — the list order is the page order, the file
@@ -335,6 +358,8 @@ pub struct WorkFolder {
     pub expression: Expression,
     pub spine_mm: f32,
     pub cover: Option<usize>,
+    pub template_page: Option<usize>,
+    pub profile: Option<crate::profile::PublisherProfile>,
     pub next_id: u32,
     pub pages: Vec<FolderPage>,
 }
@@ -424,6 +449,8 @@ pub fn save_folder(
         expression: wf.expression,
         spine_mm: wf.spine_mm,
         cover: wf.cover,
+        template_page: wf.template_page,
+        profile: wf.profile.clone(),
         next_id,
         pages: wf
             .pages
@@ -533,6 +560,8 @@ pub fn load_folder(path: &Path) -> Result<WorkFolder, OraError> {
         expression: meta.expression,
         spine_mm: meta.spine_mm,
         cover: meta.cover,
+        template_page: meta.template_page,
+        profile: meta.profile,
         next_id,
         pages,
     })
@@ -543,12 +572,12 @@ mod tests {
     use super::*;
     use crate::tile::{FIX15_ONE, TileIdx};
 
-    /// Rulers are SESSION-only working aids: they ride the `Document` so
-    /// the one undo history owns them, but nothing writes them into the
-    /// bytes and nothing reads them back. (The app therefore carries them
-    /// across a page switch itself — `App::adopt_page_doc`.)
+    /// Rulers RIDE the document bytes (contract inverted 2026-08-23 —
+    /// they were session-only, and perspective grids died with every
+    /// restart). Page stash → decode keeps the set; `App::adopt_page_doc`
+    /// now only fills in pages that saved none.
     #[test]
-    fn rulers_never_ride_the_document_bytes() {
+    fn rulers_ride_the_document_bytes() {
         let mut d = Document::new(64, 64);
         d.rulers.items.push(crate::ruler::Ruler::Line {
             a: [1.0, 2.0],
@@ -559,11 +588,7 @@ mod tests {
         });
         d.rulers.on = true;
         let back = bytes_to_doc(&doc_to_bytes(&d).unwrap()).unwrap();
-        assert_eq!(
-            back.rulers,
-            crate::ruler::Rulers::default(),
-            "a decoded page starts with no rulers"
-        );
+        assert_eq!(back.rulers, d.rulers, "a decoded page keeps its rulers");
     }
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
@@ -592,6 +617,8 @@ mod tests {
             expression: Expression::Mono,
             spine_mm: 6.2,
             cover: Some(1),
+            template_page: Some(0),
+            profile: crate::profile::PublisherProfile::builtins().pop(),
             next_id: 0,
             pages: vec![
                 FolderPage {
@@ -624,6 +651,12 @@ mod tests {
         assert_eq!(back.expression, Expression::Mono);
         assert!((back.spine_mm - 6.2).abs() < 1e-6);
         assert_eq!(back.cover, Some(1));
+        assert_eq!(back.template_page, Some(0), "tekno B2 rides the index");
+        assert_eq!(
+            back.profile.as_ref().map(|p| p.name.clone()),
+            crate::profile::PublisherProfile::builtins().pop().map(|p| p.name),
+            "M2: the publisher profile rides the index too"
+        );
         let _ = ids;
 
         // The pre-132 index shape: every new key absent.

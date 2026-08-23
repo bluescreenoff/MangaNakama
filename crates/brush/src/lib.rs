@@ -44,6 +44,23 @@ pub use mybrush::{
 };
 pub use surface::{TileOracle, set_tile_oracle};
 
+/// The engine a preset asks for through its optional `mn-engine` key
+/// (`"grid"` / `"hairy"` / `"curve"` / `"dyna"`), or `None` for an ordinary
+/// MyPaint `.myb`.
+///
+/// `.myb` is JSON with an open schema, so a procedural sub-tool identity rides
+/// in one extra key instead of a second preset format. The SNIFF lives here,
+/// below the app, because several readers need the same answer — the live
+/// engine, the Sub Tool swatch, the property panel's test strip — and a reader
+/// that sniffed it its own way is exactly how a preset ends up drawing as one
+/// brush and previewing as another. Returns the raw name (not an engine) so
+/// this crate does not need to know the app's `EngineKind`.
+pub fn preset_engine_key(path: &std::path::Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let j: serde_json::Value = serde_json::from_str(&text).ok()?;
+    Some(j.get("mn-engine")?.as_str()?.to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -549,15 +566,7 @@ mod tests {
             eprintln!("stroking {name}");
             // `mn-engine` sub-tools (TODO #7) exercise their own engine;
             // MyBrush::load skips the key, so stroke each engine directly.
-            let engine = std::fs::read_to_string(path).ok().and_then(|t| {
-                serde_json::from_str::<serde_json::Value>(&t)
-                    .ok()
-                    .and_then(|j| {
-                        j.get("mn-engine")
-                            .and_then(|v| v.as_str())
-                            .map(str::to_owned)
-                    })
-            });
+            let engine = preset_engine_key(path);
             let samples: Vec<PenSample> = (0..40)
                 .map(|i| PenSample {
                     x: 10.0 + i as f32 * 2.8,

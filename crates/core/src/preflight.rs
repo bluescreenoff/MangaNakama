@@ -146,6 +146,33 @@ pub fn run_work(meta: &ProjectMeta, page_count: usize) -> Vec<PreflightFinding> 
         )),
         _ => {}
     }
+    // Publisher profile (M2): the picked target's norms become checks —
+    // offset printing's 台 rule, and paper geometry drifting away from
+    // what the profile restated at pick time.
+    if let Some(p) = &meta.profile {
+        if let Some(m) = p.page_count_multiple
+            && m > 0
+            && page_count % m as usize != 0
+        {
+            out.push(warn(
+                "profile.page_count",
+                format!(
+                    "{page_count} pages is not a multiple of {m} — \"{}\" binds in sheets of {m}",
+                    p.name
+                ),
+            ));
+        }
+        if p.setup.paper_mm != setup.paper_mm || p.setup.trim_mm != setup.trim_mm {
+            out.push(warn(
+                "profile.setup_drift",
+                format!(
+                    "the work's paper/trim no longer matches \"{}\" — re-apply the profile \
+                     in Work Settings or confirm the change is deliberate",
+                    p.name
+                ),
+            ));
+        }
+    }
     out
 }
 
@@ -430,6 +457,30 @@ pub fn run_page(
             ));
         }
     }
+    // Publisher profile (M2): the target's screen ruling is a norm the
+    // page's tones can violate. One finding per offending ruling, not per
+    // layer — a page toned entirely at 55 lpi is one decision to revisit.
+    if let Some(p) = &meta.profile
+        && p.lpi > 0.0
+    {
+        let mut flagged: Vec<f32> = Vec::new();
+        for c in &carriers {
+            if (c.lpi - p.lpi).abs() <= 0.5 || flagged.iter().any(|f| (f - c.lpi).abs() <= 0.5) {
+                continue;
+            }
+            flagged.push(c.lpi);
+            out.push(warn(
+                "profile.lpi",
+                format!(
+                    "page {}: tone at {} lpi — \"{}\" prints {} lpi screens",
+                    page_index + 1,
+                    round1(c.lpi),
+                    p.name,
+                    round1(p.lpi),
+                ),
+            ));
+        }
+    }
     if meta.expression == crate::project::Expression::Mono {
         for c in &carriers {
             if !has_grey_edges(&c.source) {
@@ -528,6 +579,37 @@ mod tests {
         m.cover = Some(3); // == page_count: out of range (0-based index 3 with 3 pages)
         let f = run_work(&m, 3);
         assert!(f.iter().any(|x| x.check == "cover.out_of_range"));
+    }
+
+    /// M2: a picked publisher profile turns its norms into checks — the 台
+    /// page-count rule, and paper geometry drifting from what the profile
+    /// restated. No profile = no findings, byte-for-byte the old preflight.
+    #[test]
+    fn publisher_profile_norms_fire_and_absence_is_silent() {
+        let doujin = crate::profile::PublisherProfile::builtins()
+            .into_iter()
+            .find(|p| p.page_count_multiple.is_some())
+            .expect("a builtin with the 台 rule");
+        let mult = doujin.page_count_multiple.unwrap() as usize;
+        let mut m = meta(Some(doujin.setup.clone()));
+        m.profile = Some(doujin.clone());
+        // Wrong count: the 台 rule fires; matching geometry stays silent.
+        let f = run_work(&m, mult + 1);
+        let ids: Vec<_> = f.iter().map(|x| x.check).collect();
+        assert!(ids.contains(&"profile.page_count"), "{ids:?}");
+        assert!(!ids.contains(&"profile.setup_drift"), "{ids:?}");
+        // Right count: silent.
+        let f = run_work(&m, mult * 2);
+        assert!(!f.iter().any(|x| x.check == "profile.page_count"));
+        // Drift the paper: the drift check fires.
+        let mut drifted = m.clone();
+        drifted.setup.as_mut().unwrap().paper_mm.0 += 10.0;
+        let f = run_work(&drifted, mult);
+        assert!(f.iter().any(|x| x.check == "profile.setup_drift"));
+        // No profile: neither check can fire.
+        m.profile = None;
+        let f = run_work(&m, mult + 1);
+        assert!(!f.iter().any(|x| x.check.starts_with("profile.")));
     }
 
     #[test]

@@ -337,6 +337,15 @@ pub fn save_to_with<W: Write + Seek>(
         zw.write_all(png)?;
     }
 
+    // 6. mnc/rulers.json — rulers persist with the page (they used to be
+    // session-only, which lost perspective grids on every restart). Own
+    // namespace like the preview; the entry is skipped when there is no
+    // geometry, so ruler-less documents keep their exact old bytes.
+    if doc.rulers.has_geometry() {
+        zw.start_file("mnc/rulers.json", deflated)?;
+        zw.write_all(doc.rulers.to_json().as_bytes())?;
+    }
+
     zw.finish()?;
     Ok(())
 }
@@ -770,6 +779,12 @@ pub fn load_from<R: Read + Seek>(source: R) -> Result<Document, OraError> {
         doc.layers.push(Layer::new("Layer 1"));
     }
     doc.comps = comps;
+    // Rulers ride their own entry; absent (every pre-persistence file) =
+    // the empty default, and a bad item degrades item-by-item inside
+    // `from_json` — never a load failure.
+    if let Some(b) = read_entry(&mut zip, "mnc/rulers.json") {
+        doc.rulers = crate::ruler::Rulers::from_json(&String::from_utf8_lossy(&b));
+    }
     doc.normalize_depths();
     doc.active = doc.layers.len() - 1;
     doc.clear_history();
@@ -1509,6 +1524,54 @@ mod tests {
             255,
             "reloaded: the hole still reveals its ink"
         );
+    }
+
+    /// Rulers persist (2026-08-23, owner-class loss: perspective grids
+    /// died with the session): the whole set — line/VP/curve geometry and
+    /// both switches — survives save→load; a document with NO geometry
+    /// writes NO `mnc/rulers.json` entry (old files keep their old shape);
+    /// and an unknown ruler kind from a newer build loses that one item,
+    /// never the set.
+    #[test]
+    fn rulers_round_trip_and_degrade_item_by_item() {
+        use crate::ruler::{CurveRuler, Ruler, Rulers};
+        let mut doc = crate::doc::Document::new(64, 64);
+        doc.rulers.items.push(Ruler::VanishingPoint {
+            c: [10.0, 20.0],
+            rays: 24,
+            angle0: 0.5,
+        });
+        doc.rulers.items.push(Ruler::Perspective {
+            a: [0.0, 30.0],
+            b: [64.0, 30.0],
+        });
+        doc.rulers.curves.push(CurveRuler {
+            pts: vec![[1.0, 2.0], [3.0, 4.0]],
+        });
+        doc.rulers.on = true;
+        doc.rulers.special_on = false;
+        let mut buf = Cursor::new(Vec::new());
+        save_to(&doc, &mut buf).unwrap();
+        let back = load_from(Cursor::new(buf.into_inner())).unwrap();
+        assert_eq!(back.rulers, doc.rulers, "the whole set survives");
+
+        // No geometry → no entry, byte-shape preserved for old files.
+        let plain_doc = crate::doc::Document::new(64, 64);
+        let mut plain = Cursor::new(Vec::new());
+        save_to(&plain_doc, &mut plain).unwrap();
+        let mut zip = zip::ZipArchive::new(Cursor::new(plain.into_inner())).unwrap();
+        assert!(
+            zip.by_name("mnc/rulers.json").is_err(),
+            "ruler-less saves carry no entry"
+        );
+
+        // Tolerant parse: one good item + one from-the-future item.
+        let r = Rulers::from_json(
+            r#"{"on":true,"items":[{"Line":{"a":[0,0],"b":[9,9]}},{"Wormhole":{"z":1}}]}"#,
+        );
+        assert_eq!(r.items.len(), 1, "the unknown kind is skipped, not fatal");
+        assert!(r.on && r.special_on, "absent special_on defaults on");
+        assert_eq!(Rulers::from_json("garbage"), Rulers::default());
     }
 
     /// Owner preview tier (2026-08-18): `mnc/preview.png` round trips
