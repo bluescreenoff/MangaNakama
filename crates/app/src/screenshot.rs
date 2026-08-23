@@ -150,7 +150,7 @@ pub fn run(
             &mut app,
             crate::cmd::AppCmd::SetTool(crate::cmd::Tool::Text),
         );
-        app.text_tool_down(1560.0, 360.0, false);
+        app.text_tool_down(1560.0, 360.0, false, 1);
         app.text_tool_up(1560.0, 360.0);
         for unit in "こんにちは".encode_utf16().collect::<Vec<u16>>() {
             app.text_char(unit);
@@ -249,8 +249,9 @@ pub fn run(
             .transform_drag
             .as_ref()
             .ok_or("shot: no transform drag")?;
-        // Grab the bbox's bottom-right corner; move it out and up (scale +
-        // rotate in one gesture).
+        // Grab the bbox's bottom-right corner; move it out and up. A corner
+        // SCALES (both axes, anchored at the top-left) — it no longer
+        // rotates, so the shot shows a plain resize.
         let [bx, by] = drag.bbox[2];
         let (sx, sy) = app.viewport.to_screen(bx, by);
         app.canvas_down(sx, sy, PointerKind::Mouse, &[]);

@@ -11,7 +11,12 @@ use super::widgets::icon_btn;
 
 // --- left column: Tool / Sub Tool / Tool Property palettes ---------------
 
-const STRIP_TOOLS: [(Tool, Icon); 16] = [
+/// The strip's own tools. `Tool::SelPen`/`Tool::SelEraser` are deliberately
+/// ABSENT (owner, 2026-08-23: "select pen duplicates the G-pen with the same
+/// icon"): CSP files 選択ペン / 選択消し as SUB tools of the Selection tool
+/// with a fixed create-type, and so do we — they live in `ui/subtool.rs`'s
+/// Selection list, reachable there, from Ctrl+K, and from the `,`/`.` cycle.
+const STRIP_TOOLS: [(Tool, Icon); 14] = [
     (Tool::Pen, Icon::Pen),
     (Tool::Eraser, Icon::Eraser),
     (Tool::Figure, Icon::Figure),
@@ -19,8 +24,6 @@ const STRIP_TOOLS: [(Tool, Icon); 16] = [
     (Tool::Fill, Icon::Fill),
     (Tool::Tone, Icon::Tone),
     (Tool::Select, Icon::Select),
-    (Tool::SelPen, Icon::Select),
-    (Tool::SelEraser, Icon::Eraser),
     (Tool::Wand, Icon::Wand),
     (Tool::Object, Icon::Object),
     (Tool::Frame, Icon::Frame),
@@ -42,6 +45,7 @@ fn tool_key(t: Tool) -> &'static str {
         // table is where one would go.
         Tool::Tone => "",
         Tool::Select => "M",
+        // Sub tools of Select now, not strip cells — no key of their own.
         Tool::SelPen | Tool::SelEraser => "",
         Tool::Wand => "W",
         Tool::Object => "O",
@@ -56,7 +60,7 @@ fn tool_key(t: Tool) -> &'static str {
 /// Tool families, in `STRIP_TOOLS` order: draw+erase+fill, selection,
 /// objects+utility. CSP separates its tool palette into exactly three such
 /// blocks (`csp/150_tools_0002.png`, the numbered orange boxes).
-const GROUPS: [usize; 3] = [6, 4, 6];
+const GROUPS: [usize; 3] = [6, 2, 6];
 
 /// Icon cell. CSP's cell metric is ~34 px including its padding; ours is the
 /// icon square plus [`GAP`], which lands in the same place.
@@ -117,4 +121,51 @@ fn group_rule(ui: &mut egui::Ui, grid_w: f32) {
         rect.center().y,
         egui::Stroke::new(1.0, theme::c().outline),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cmd::SubTool;
+
+    /// The group counts ARE the strip: a mismatch silently drops the tail of
+    /// the list (the iterator simply runs out), which is how a removed cell
+    /// would take an unrelated tool with it.
+    #[test]
+    fn the_groups_cover_every_strip_tool() {
+        assert_eq!(
+            GROUPS.iter().sum::<usize>(),
+            STRIP_TOOLS.len(),
+            "every strip tool belongs to exactly one family block"
+        );
+    }
+
+    /// The fold-in, both halves: the selection pen and eraser are gone from
+    /// the strip AND still reachable — as Selection sub tools, which is
+    /// where CSP keeps them.
+    #[test]
+    fn the_selection_paint_tools_moved_into_the_sub_tool_list() {
+        for t in [Tool::SelPen, Tool::SelEraser] {
+            assert!(
+                !STRIP_TOOLS.iter().any(|(s, _)| *s == t),
+                "{t:?} is a Selection sub tool, not a strip cell"
+            );
+            assert!(
+                SubTool::ALL.iter().any(|s| s.tool() == t),
+                "{t:?} must stay reachable from the Sub Tool list and Ctrl+K"
+            );
+        }
+    }
+
+    /// Two tools may never share a glyph — that is the whole complaint the
+    /// fold-in came from ("select pen duplicates the G-pen with the same
+    /// icon"), and it would come back the moment someone reused one.
+    #[test]
+    fn every_strip_tool_has_its_own_icon() {
+        for (i, (t, icon)) in STRIP_TOOLS.iter().enumerate() {
+            for (other, other_icon) in &STRIP_TOOLS[i + 1..] {
+                assert_ne!(icon, other_icon, "{t:?} and {other:?} share a glyph");
+            }
+        }
+    }
 }

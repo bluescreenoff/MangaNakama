@@ -60,7 +60,7 @@ pub(crate) fn sec_tone_region(ui: &mut egui::Ui, app: &mut App) {
         .on_hover_text("seals breaks in the lineart so the tone cannot escape the area")
         .changed();
     o.region.gap_close_px = gap as u32;
-    changed |= area_scaling_row(ui, &mut o.region);
+    changed |= area_scaling_row(ui, "mn.tone.expand", &mut o.region);
     let mut pick: Option<mn_core::FillRefer> = None;
     egui::ComboBox::from_id_salt("mn.tone.refer")
         .width(ui.available_width() - 8.0)

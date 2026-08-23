@@ -33,8 +33,8 @@ delete from the sub tool list itself.
 **Canvas and layers.** A tiled canvas at print resolution with a GPU
 compositor (layer blending, group flattening, tile upload, display) and a
 software-adapter fallback that is the *same* code path, not a second
-implementation. Fifteen blend modes with the CPU and GPU results pinned equal
-by tests. Layer masks, layer colour tint, reference layers, layer comps
+implementation. Twenty-seven blend modes with the CPU and GPU results pinned
+equal by tests. Layer masks, layer colour tint, reference layers, layer comps
 (recording visibility, opacity, blend mode and layer colour — one press to
 apply, one undo to take back; comps saved by older builds still restore
 exactly what they recorded),

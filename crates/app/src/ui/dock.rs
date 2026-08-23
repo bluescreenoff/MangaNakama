@@ -184,26 +184,38 @@ pub fn default_left() -> DockColumn {
     let mut dock = DockState::new(vec![Palette::Tool]);
     // split_*(parent, fraction, tabs) -> [retained_parent, new_node]; the
     // new node carries the tabs, so that is the one to split next.
+    //
+    // Fractions approximate each fixed palette's CONTENT height over the
+    // ~780pt dock column of the shipped 1280×860 window — CSP palettes hug
+    // their content and the old seeds (0.34/0.62/0.6) left the Tool leaf
+    // two-thirds empty (parity audit T1). The slack goes to the palettes
+    // `fills()` names (Sub Tool, Pages). Drag a separator and the tree
+    // remembers; these only seed.
     let tree = dock.main_surface_mut();
-    let [_, sub] = tree.split_below(NodeIndex::root(), 0.34, vec![Palette::SubTool]);
+    let [_, sub] = tree.split_below(NodeIndex::root(), 0.22, vec![Palette::SubTool]);
     let [_, prop] = tree.split_below(
         sub,
-        0.62,
+        0.38,
         vec![Palette::ToolProperty, Palette::LayerProperty],
     );
-    tree.split_below(prop, 0.6, vec![Palette::Pages]);
+    tree.split_below(prop, 0.55, vec![Palette::Pages]);
     dock
 }
 
-/// The default right column: (Color | Color Set) above (Layers | Auto
-/// Actions) — the actions tab sits beside Layers like CSP's.
+/// The default right column: (Color | Color Set) above (Navigator |
+/// Materials) above (Layers | Auto Actions) — the actions tab sits beside
+/// Layers like CSP's, and Navigator + Materials ship visible (parity audit
+/// T3: they existed only in the enum, and there is no Window-style menu, so
+/// a new user never learned they exist).
 pub fn default_right() -> DockColumn {
     let mut dock = DockState::new(vec![Palette::Color, Palette::ColorSet]);
-    dock.main_surface_mut().split_below(
+    let tree = dock.main_surface_mut();
+    let [_, nav] = tree.split_below(
         NodeIndex::root(),
-        0.5,
-        vec![Palette::Layers, Palette::Actions],
+        0.36,
+        vec![Palette::Navigator, Palette::Materials],
     );
+    tree.split_below(nav, 0.3, vec![Palette::Layers, Palette::Actions]);
     dock
 }
 

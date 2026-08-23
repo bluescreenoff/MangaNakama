@@ -17,6 +17,8 @@
 use std::path::{Path, PathBuf};
 
 use mn_core::genlines::GenLinesSpec;
+use mn_core::tone::{ToneDensity, ToneParams, TonePattern};
+use serde::{Deserialize, Serialize};
 
 use super::App;
 
@@ -43,14 +45,16 @@ pub struct MaterialItem {
     pub kind: MaterialKind,
 }
 
-/// A material's two flavours. Bitmaps are the original bank (paste as the
-/// move/scale float); a generator material places the thing itself — a
+/// A material's three flavours. Bitmaps are the original bank (paste as
+/// the move/scale float); a generator material places the thing itself — a
 /// layer carrying its [`GenLinesSpec`], editable with the Object tool from
-/// the first click instead of baked pixels nobody can re-aim.
+/// the first click instead of baked pixels nobody can re-aim; a TONE
+/// material places a live tone layer (see [`ToneSpec`]).
 #[derive(Clone, Debug, PartialEq)]
 pub enum MaterialKind {
     Image,
     GenLines(GenLinesSpec),
+    Tone(ToneSpec),
 }
 
 /// A generator material's file suffix. `focus-lines.gen.json` IS the
@@ -58,31 +62,78 @@ pub enum MaterialKind {
 /// is only that material's THUMBNAIL, never a second material.
 pub const GEN_SUFFIX: &str = ".gen.json";
 
+/// A tone material's file suffix, the same idiom: `tone-dot-60lpi-30.tone.json`
+/// IS the material, the same-stem PNG is only its palette picture.
+pub const TONE_SUFFIX: &str = ".tone.json";
+
+/// What a TONE material places — the two halves of
+/// [`mn_core::FillKind::Tone`], so a drop is a straight hand-over.
+///
+/// A screentone is a SCREEN, not a picture: in CSP (and in our engine) a
+/// tone is a fill layer plus a mask, and the screen — frequency, angle,
+/// density — is canvas-absolute. It never scales with the area it covers,
+/// which is precisely why a tone material must not arrive as a raster
+/// float: resizing that float resized the dots.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ToneSpec {
+    /// The screen itself. Its own `density` field is overwritten by the
+    /// fill layer (`ToneDensity::Specified`), so the two agree by
+    /// construction; it is written out anyway so the sidecar reads as the
+    /// exact parameters the sheet was rendered with.
+    pub tone: ToneParams,
+    /// Flat ink coverage 0..1 — the Density slider's value.
+    pub density: f32,
+}
+
 impl MaterialItem {
     pub fn is_generator(&self) -> bool {
         matches!(self.kind, MaterialKind::GenLines(_))
     }
 
-    /// Where the palette cell's picture comes from: the same-stem PNG for
-    /// a generator material, the image itself for a bitmap. A generator
-    /// with no PNG beside it simply shows as a name (the decode fails, as
-    /// it always has for an unreadable image).
-    pub fn thumb_path(&self) -> PathBuf {
+    /// The tone this material places, if it is one.
+    pub fn tone_spec(&self) -> Option<ToneSpec> {
         match self.kind {
-            MaterialKind::Image => self.path.clone(),
-            MaterialKind::GenLines(_) => self.path.with_file_name(format!("{}.png", self.name)),
+            MaterialKind::Tone(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// Where the palette cell's picture comes from: the same-stem PNG for
+    /// a SIDECAR material (`.gen.json` / `.tone.json`), the image itself
+    /// for anything that is its own file — which includes a tone INFERRED
+    /// from a plain sheet, whose picture is that sheet. A sidecar with no
+    /// PNG beside it simply shows as a name (the decode fails, as it
+    /// always has for an unreadable image).
+    pub fn thumb_path(&self) -> PathBuf {
+        if self
+            .path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("json"))
+        {
+            self.path.with_file_name(format!("{}.png", self.name))
+        } else {
+            self.path.clone()
         }
     }
 }
 
 /// `focus-lines.gen.json` → `focus-lines`; anything else → `None`.
 pub fn gen_material_stem(path: &Path) -> Option<String> {
+    sidecar_stem(path, GEN_SUFFIX)
+}
+
+/// `tone-dot-60lpi-30.tone.json` → `tone-dot-60lpi-30`.
+pub fn tone_material_stem(path: &Path) -> Option<String> {
+    sidecar_stem(path, TONE_SUFFIX)
+}
+
+fn sidecar_stem(path: &Path, suffix: &str) -> Option<String> {
     let n = path.file_name()?.to_str()?;
     // The lowercased copy is byte-for-byte the same length, so the split
     // below can never land inside a multi-byte character.
     n.to_ascii_lowercase()
-        .ends_with(GEN_SUFFIX)
-        .then(|| n[..n.len() - GEN_SUFFIX.len()].to_owned())
+        .ends_with(suffix)
+        .then(|| n[..n.len() - suffix.len()].to_owned())
 }
 
 /// The spec a generator material carries. `None` when the path is not a
@@ -99,6 +150,135 @@ pub fn write_gen_spec(dir: &Path, stem: &str, spec: &GenLinesSpec) -> Option<Pat
     let text = serde_json::to_string_pretty(spec).ok()?;
     std::fs::write(&p, text).ok()?;
     Some(p)
+}
+
+/// The tone a `<stem>.tone.json` carries — the CANONICAL source, the same
+/// contract as [`read_gen_spec`]: not a tone sidecar, unreadable, or
+/// corrupt all read as "no tone here".
+pub fn read_tone_spec(path: &Path) -> Option<ToneSpec> {
+    tone_material_stem(path)?;
+    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+}
+
+/// Write `<stem>.tone.json` into `dir`, returning the path on success.
+/// Test-only today; the material-properties dialog (M8 follow-up) is the
+/// production caller this is waiting for.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn write_tone_spec(dir: &Path, stem: &str, spec: &ToneSpec) -> Option<PathBuf> {
+    let p = dir.join(format!("{stem}{TONE_SUFFIX}"));
+    let text = serde_json::to_string_pretty(spec).ok()?;
+    std::fs::write(&p, text).ok()?;
+    Some(p)
+}
+
+// --- inference, for banks with no sidecars -------------------------------
+
+/// Guess a tone out of a sheet's NAME and TAGS, for the thousands of
+/// ripped CSP tones nobody is going to hand-write a sidecar for.
+///
+/// Two gates, both deliberately narrow, because the failure mode is
+/// hijacking somebody's photo:
+///
+/// 1. It must SAY it is a tone — a `tone` / `screentone` tag, or the
+///    bank's own `tone-` file-name prefix. A photo called `60lpi.png`
+///    passes neither and stays an image.
+/// 2. A DENSITY must be readable. A sheet with a frequency but no grade
+///    is not a flat tone — our own `tone-dot-60lpi-gradient` sheet is
+///    exactly that, a ramp no `FillKind::Tone` can reproduce, so it must
+///    keep arriving as pixels.
+///
+/// The frequency is optional (60 LPI, the manga default, when absent) and
+/// the pattern falls back to dots, since a sheet that names neither is
+/// still far more useful as an editable tone than as a scaled bitmap.
+pub fn infer_tone_spec(stem: &str, tags: &str) -> Option<ToneSpec> {
+    let named = tags.split(',').any(|t| {
+        let t = t.trim().to_ascii_lowercase();
+        t == "tone" || t == "screentone"
+    });
+    if !named && !stem.to_ascii_lowercase().starts_with("tone-") {
+        return None;
+    }
+    let pct = number_before(tags, "%")
+        .or_else(|| number_before(stem, "%"))
+        .or_else(|| trailing_pct(stem))?;
+    if !(1.0..=100.0).contains(&pct) {
+        return None;
+    }
+    let lpi = number_before(tags, "lpi").or_else(|| number_before(stem, "lpi"));
+    let pattern = tone_pattern_word(tags)
+        .or_else(|| tone_pattern_word(stem))
+        .unwrap_or(TonePattern::Dots);
+    let density = pct / 100.0;
+    Some(ToneSpec {
+        tone: ToneParams {
+            pattern,
+            lpi: lpi.unwrap_or(60.0),
+            density: ToneDensity::Specified(density),
+            ..Default::default()
+        },
+        density,
+    })
+}
+
+/// The number written just before `unit`: `"60 lpi"`, `"60lpi"`, `"27.5 LPI"`,
+/// `"10%"`. `unit` must be lowercase ASCII.
+fn number_before(s: &str, unit: &str) -> Option<f32> {
+    let s = s.to_ascii_lowercase();
+    let mut from = 0usize;
+    while let Some(i) = s[from..].find(unit) {
+        let at = from + i;
+        let head = s[..at].trim_end();
+        // Digits and `.` are ASCII, so counting bytes back from the end
+        // always lands on a character boundary.
+        let n = head
+            .bytes()
+            .rev()
+            .take_while(|b| b.is_ascii_digit() || *b == b'.')
+            .count();
+        if n > 0
+            && let Ok(v) = head[head.len() - n..].parse::<f32>()
+        {
+            return Some(v);
+        }
+        from = at + unit.len();
+    }
+    None
+}
+
+/// `tone-dot-60lpi-30` → 30 %. Our own generator (and most rips) writes the
+/// grade as the trailing token with no `%` sign.
+fn trailing_pct(stem: &str) -> Option<f32> {
+    let tok = stem.rsplit(['-', '_', ' ']).next()?;
+    if tok.is_empty() || !tok.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    tok.parse().ok()
+}
+
+/// The screen shape a name or tag line spells out. Order matters: the
+/// first word that appears wins, and `dot` is last because "halftone
+/// dots" is the common case that everything else has to be checked
+/// against first.
+fn tone_pattern_word(s: &str) -> Option<TonePattern> {
+    let s = s.to_ascii_lowercase();
+    [
+        ("noise", TonePattern::Noise),
+        ("grain", TonePattern::Noise),
+        ("random", TonePattern::Noise),
+        ("cross", TonePattern::Cross),
+        ("lozenge", TonePattern::Lozenge),
+        ("diamond", TonePattern::Lozenge),
+        ("ellipse", TonePattern::Ellipse),
+        ("square", TonePattern::Square),
+        ("asterisk", TonePattern::Asterisk),
+        ("star", TonePattern::Star),
+        ("line", TonePattern::Lines),
+        ("hatch", TonePattern::Lines),
+        ("dot", TonePattern::Dots),
+    ]
+    .into_iter()
+    .find(|(w, _)| s.contains(w))
+    .map(|(_, p)| p)
 }
 
 /// How deep a registered folder is walked. A material bank is a shallow
@@ -144,16 +324,31 @@ fn scan_dir(dir: &Path, rel: PathBuf, fi: usize, depth: usize, out: &mut Vec<Mat
             Err(_) => {}
         }
     }
-    // Generator stems first: a `<stem>.png` beside a `<stem>.gen.json` is
-    // that generator's thumbnail, so it must not scan as its own material.
-    let gen_stems: std::collections::HashSet<String> = paths
+    // Sidecar stems first: a `<stem>.png` beside a `<stem>.gen.json` (or a
+    // `<stem>.tone.json`) is that material's thumbnail, so it must not scan
+    // as its own material.
+    let sidecar_stems: std::collections::HashSet<String> = paths
         .iter()
-        .filter_map(|p| gen_material_stem(p).map(|s| s.to_lowercase()))
+        .filter_map(|p| {
+            gen_material_stem(p)
+                .or_else(|| tone_material_stem(p))
+                .map(|s| s.to_lowercase())
+        })
         .collect();
     out.extend(paths.iter().filter_map(|p| {
-        let (name, kind) = match gen_material_stem(p) {
-            Some(stem) => (stem, MaterialKind::GenLines(read_gen_spec(p)?)),
-            None => {
+        let file = p.file_name()?.to_string_lossy().into_owned();
+        let mut tags = side.get(&file).to_owned();
+        let (name, kind) = match (gen_material_stem(p), tone_material_stem(p)) {
+            (Some(stem), _) => (stem, MaterialKind::GenLines(read_gen_spec(p)?)),
+            (_, Some(stem)) => {
+                // The sheet's own tags describe the tone, so carry them
+                // over from the PNG when the sidecar has none of its own.
+                if tags.is_empty() {
+                    tags = side.get(&format!("{stem}.png")).to_owned();
+                }
+                (stem, MaterialKind::Tone(read_tone_spec(p)?))
+            }
+            _ => {
                 let ext = p
                     .extension()
                     .and_then(|x| x.to_str())
@@ -163,13 +358,18 @@ fn scan_dir(dir: &Path, rel: PathBuf, fi: usize, depth: usize, out: &mut Vec<Mat
                     return None;
                 }
                 let name = p.file_stem()?.to_string_lossy().into_owned();
-                if gen_stems.contains(&name.to_lowercase()) {
+                if sidecar_stems.contains(&name.to_lowercase()) {
                     return None;
                 }
-                (name, MaterialKind::Image)
+                // No sidecar: a sheet that SAYS it is a tone and states a
+                // density places as one anyway (the owner's ripped banks).
+                let kind = match infer_tone_spec(&name, &tags) {
+                    Some(s) => MaterialKind::Tone(s),
+                    None => MaterialKind::Image,
+                };
+                (name, kind)
             }
         };
-        let tags = side.get(&p.file_name()?.to_string_lossy()).to_owned();
         Some(MaterialItem {
             name,
             path: p.clone(),
@@ -470,6 +670,18 @@ impl App {
             &self.user_material_folders(),
             &serde_json::to_string(&self.material_uses).unwrap_or_default(),
         );
+    }
+
+    /// The tone `path` places, if it places one. The BANK is asked first —
+    /// it already holds the inferred tones, whose evidence is the folder's
+    /// `tags.txt` — and a path the bank has never seen falls back to its
+    /// own sidecar (a drag/drop or a script can name any file).
+    pub fn material_tone_spec(&self, path: &Path) -> Option<ToneSpec> {
+        self.materials
+            .iter()
+            .find(|m| m.path == path)
+            .and_then(MaterialItem::tone_spec)
+            .or_else(|| read_tone_spec(path))
     }
 
     /// The user-added folders as persisted strings (the shipped starter
@@ -786,11 +998,12 @@ fn material_import_files(src: &Path, dst: &Path) -> Vec<String> {
             .and_then(|x| x.to_str())
             .map(|x| x.to_ascii_lowercase())
             .unwrap_or_default();
-        // Generator sidecars ride along with the images: importing a
-        // folder that holds them and leaving the specs behind would turn
-        // live materials into their own thumbnails.
+        // Sidecars ride along with the images: importing a folder that
+        // holds them and leaving the specs behind would turn live
+        // materials into their own thumbnails.
         if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp")
             && gen_material_stem(&p).is_none()
+            && tone_material_stem(&p).is_none()
         {
             continue;
         }

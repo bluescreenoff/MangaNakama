@@ -296,10 +296,20 @@ pub fn test_stroke_image(
     let w = width.clamp(TEST_W_MIN, TEST_W_MAX);
     let h = TEST_H;
 
-    let kind = match preset.and_then(|p| MyBrush::load(p).ok()) {
-        Some(b) => EngineKind::My(Box::new(b)),
-        None => EngineKind::Dab(mn_brush::SimpleDab::new()),
-    };
+    // A procedural preset (`mn-engine`) is not a MyPaint file, so it has to be
+    // sniffed BEFORE `MyBrush::load` — which rejects it, dropping the strip to
+    // the fallback dab and showing a plain round line for a lattice/bristle
+    // brush. Same sniff as the Sub Tool swatch and the live tool.
+    // A procedural preset (`mn-engine`) is not a MyPaint file, so it has to be
+    // sniffed BEFORE `MyBrush::load` — which rejects it, dropping the strip to
+    // the fallback dab and showing a plain round line for a lattice/bristle
+    // brush. Same sniff as the Sub Tool swatch and the live tool.
+    let kind = preset
+        .and_then(|p| {
+            crate::app::preset_engine(p)
+                .or_else(|| MyBrush::load(p).ok().map(|b| EngineKind::My(Box::new(b))))
+        })
+        .unwrap_or_else(|| EngineKind::Dab(mn_brush::SimpleDab::new()));
     let mut engine = Engine::new(kind);
     engine.apply_props_all(props, texture);
     // Also unconditionally, so the fallback dab (whose `apply_props` has no
@@ -586,6 +596,58 @@ mod test_stroke_tests {
                 "{name}: the swatch is a uniform field — the engine inked nothing"
             );
         }
+    }
+
+    fn krita(name: &str) -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../assets/brushes/krita/{name}.myb"))
+    }
+
+    /// How many separated islands of ink the strip holds, counted along x. A
+    /// continuous brush lays down ONE run; a lattice engine lays down a row of
+    /// them, which is the visible difference the swatch exists to show.
+    fn ink_runs(img: &egui::ColorImage) -> usize {
+        let mut runs = 0;
+        let mut prev = false;
+        for x in 0..img.size[0] {
+            let inked = (0..img.size[1]).any(|y| img[(x, y)].r() < 200);
+            if inked && !prev {
+                runs += 1;
+            }
+            prev = inked;
+        }
+        runs
+    }
+
+    /// T5a: the property panel's test strip handed every preset to
+    /// `MyBrush::load`, which REJECTS a procedural (`mn-engine`) preset — so
+    /// the strip silently dropped to the fallback round dab and the grid /
+    /// hairy / curve / dyna sub tools were tuned against a brush that was not
+    /// theirs. (Fails against that path: the strip came out pixel-identical to
+    /// the no-preset fallback.)
+    #[test]
+    fn the_test_strip_runs_the_procedural_engine_too() {
+        let props = ToolProps {
+            size_px: 24.0,
+            ..Default::default()
+        };
+        let fallback = test_stroke_image(None, &props, [0.0, 0.0, 0.0], false, None, 180);
+        for name in ["grid-dots", "hairy-bristles", "curve-brush", "dyna-spring"] {
+            let img = test_stroke_image(Some(&krita(name)), &props, [0.0, 0.0, 0.0], false, None, 180);
+            assert!(inked(&img) > 100, "{name}: the strip inked nothing");
+            assert_ne!(
+                img.pixels, fallback.pixels,
+                "{name}: the strip still rendered the fallback dab"
+            );
+        }
+        // And the grid engine specifically reads as a LATTICE: dots with paper
+        // between them, not one continuous line.
+        let img = test_stroke_image(Some(&krita("grid-dots")), &props, [0.0, 0.0, 0.0], false, None, 180);
+        let runs = ink_runs(&img);
+        assert!(
+            runs >= 4,
+            "the grid engine must break into separate dots (got {runs} run(s))"
+        );
+        assert_eq!(ink_runs(&fallback), 1, "a plain dab is one continuous run");
     }
 
     /// Ink height of every column that has ink, left to right — the stroke's

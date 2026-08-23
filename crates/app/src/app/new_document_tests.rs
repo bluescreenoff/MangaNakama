@@ -114,3 +114,58 @@ fn every_page_of_a_new_comic_matches_its_book_side() {
     assert_eq!(p2, p4, "pages 2 and 4 are both right pages");
     assert_ne!(p1, p2, "facing pages mirror the binding offset");
 }
+
+/// Creating a comic remembers its preset (owner, 2026-08-23): the NEXT
+/// New Comic — including after a restart, via prefs — opens on the one
+/// last used, not the app default. A hand-renamed/unknown setup name must
+/// NOT be written: it would silently read back as the default preset.
+#[test]
+fn new_comic_remembers_the_last_used_preset() {
+    let Some(mut app) = headless() else { return };
+    small_draft(&mut app, 1, "");
+    let pick = mn_core::page::PageSetup::presets()
+        .into_iter()
+        .find(|p| p.name != app.prefs.new_preset_setup().name)
+        .expect("a second preset exists");
+    let name = pick.name.clone();
+    app.new_doc_draft.setup = pick;
+    app.new_doc_draft.setup.dpi = 72;
+    dispatch(&mut app, AppCmd::NewComicCreate);
+    assert_eq!(app.prefs.new_preset, name);
+
+    // Unknown name: the pref keeps the last real preset.
+    app.new_doc_draft.setup.name = "not a preset".into();
+    dispatch(&mut app, AppCmd::NewComicCreate);
+    assert_eq!(app.prefs.new_preset, name);
+}
+
+/// Tekno B2: a designated template page seeds Add Page with its BYTES —
+/// the new page is a copy (panel skeleton, guides, ink and all), and
+/// clearing the designation goes back to blanks.
+#[test]
+fn add_page_clones_the_template_page() {
+    let Some(mut app) = headless() else { return };
+    small_draft(&mut app, 1, "");
+    dispatch(&mut app, AppCmd::NewComicCreate);
+    scribble(&mut app);
+    app.template_page = Some(0);
+    dispatch(&mut app, AppCmd::AddPage);
+    assert_eq!(app.page_index, 1, "Add Page lands on the new page");
+    // Compare both pages DECODED: page bytes are 8-bit ORA, the live doc
+    // is 15-bit — comparing live ink against its own round trip differs
+    // by quantization, which is not what this test is about.
+    let ink_of = |app: &mut App, i: usize| {
+        dispatch(app, AppCmd::SelectPage(i));
+        all_ink(app)
+    };
+    let template_ink = ink_of(&mut app, 0);
+    let copy_ink = ink_of(&mut app, 1);
+    assert_eq!(copy_ink, template_ink, "the new page is a copy of page 1");
+    app.template_page = None;
+    dispatch(&mut app, AppCmd::AddPage);
+    assert_ne!(
+        all_ink(&app),
+        template_ink,
+        "no template designated = blank again"
+    );
+}

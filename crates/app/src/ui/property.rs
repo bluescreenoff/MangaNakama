@@ -145,6 +145,19 @@ fn transform_property(ui: &mut egui::Ui, app: &mut App) {
     let c1 = field(ui, "Scale X", &mut sx, 1.0, "%");
     let c2 = field(ui, "Scale Y", &mut sy, 1.0, "%");
     let c3 = field(ui, "Rotation", &mut rot, 1.0, "°");
+    // CSP 縦横比固定, on by default: corner and side handles scale both axes
+    // by one ratio. (Shift does the same for a single drag.)
+    let mut keep = app.transform_keep_aspect;
+    if ui
+        .checkbox(&mut keep, "Keep aspect ratio")
+        .on_hover_text(
+            "Handles scale width and height together.\n\
+             Hold Shift while dragging to do it for one drag.",
+        )
+        .changed()
+    {
+        app.transform_keep_aspect = keep;
+    }
     group_caption(ui, "Position");
     let c4 = field(ui, "X", &mut px, 1.0, "");
     let c5 = field(ui, "Y", &mut py, 1.0, "");
@@ -205,6 +218,11 @@ fn context_title(app: &App) -> String {
         if let Some((li, _)) = app.balloon_sel {
             if let Some(l) = app.doc.layers.get(li) {
                 return format!("Balloon — {}", l.name);
+            }
+        }
+        if let Some(li) = app.gen_sel {
+            if let Some(l) = app.doc.layers.get(li) {
+                return format!("Effect lines — {}", l.name);
             }
         }
         if let Some((li, _)) = app.object_sel {
@@ -348,6 +366,28 @@ fn prop_sections_for_tool(app: &App) -> Vec<Section> {
                         id: "obj.balloon.tail",
                         title: "Tail",
                         body: sec_obj_tail,
+                    },
+                    SEC_OBJ_GUIDE,
+                ]
+            } else if app
+                .gen_sel
+                .is_some_and(|li| app.doc.layers.get(li).is_some_and(|l| l.genlines.is_some()))
+            {
+                // Owner's fix 7 again, for the one object family that never
+                // got it: with a run selected the palette said "click a
+                // text box, balloon or panel" and offered nothing, so a
+                // placed effect-line set could only be re-tuned by deleting
+                // it and dragging a new one.
+                vec![
+                    Section {
+                        id: "obj.gen",
+                        title: "Effect lines",
+                        body: sec_obj_genlines,
+                    },
+                    Section {
+                        id: "obj.gen.density",
+                        title: "Density",
+                        body: sec_obj_genlines_density,
                     },
                     SEC_OBJ_GUIDE,
                 ]

@@ -716,33 +716,153 @@ pub struct FigureLineOpts {
     /// the pre-2026-08-22 look and stays the default — an existing drag
     /// must not change shape because the knob appeared.
     pub taper: f32,
+    /// Radial: the angular gap in degrees ([`mn_core::genlines::
+    /// GenLinesSpec::gap_deg`]). >0 drives `count`.
+    pub gap_deg: f32,
+    /// Stream: the spacing between runs in canvas px, and the bundling
+    /// around it (see the same-named `GenLinesSpec` fields).
+    pub gap_px: f32,
+    pub group: u32,
+    pub group_gap: f32,
+    pub jit_gap: f32,
+    pub jit_len: f32,
+    pub jit_width: f32,
     pub seed: u64,
 }
 
 impl FigureLineOpts {
+    /// The sub tool presets, in the units a manga tutorial states them in
+    /// — an ANGULAR gap for 集中線 (CSP's own rule of thumb: ≈3° for a
+    /// dense burst, ≈10° for a sparse one) and MILLIMETRES for a 流線
+    /// spacing and every line width. Both are the units that mean the
+    /// same thing on a 600 dpi B4 and a 72 dpi draft; a count and a pixel
+    /// width are not, which is half of why the generated sets have never
+    /// looked like the reference pages.
+    ///
+    /// `dpi` is the caller's `tone_dpi()` — the page's, or the manga
+    /// standard 600 for a pixel canvas (at 96 a 0.2 mm line rounds to
+    /// under one pixel and the whole set turns to hairline noise).
+    fn from_mm(dpi: u32, width_mm: f32, gap_mm: f32) -> Self {
+        let px = |mm: f32| mm / 25.4 * dpi as f32;
+        Self {
+            count: 60,
+            width: px(width_mm).max(0.5),
+            jitter: 0.0,
+            r_in_frac: 0.0,
+            taper: 0.5,
+            gap_deg: 0.0,
+            gap_px: px(gap_mm),
+            group: 0,
+            group_gap: 0.0,
+            jit_gap: 0.0,
+            jit_len: 0.0,
+            jit_width: 0.0,
+            seed: 1,
+        }
+    }
+
     // Default tapers are NOT 0: a flat-width effect line is the "flat
     // noise field" the pro-page audit flagged — printed 流線/集中線 thin
     // to needles. Tool defaults are free to be right (nothing saved
     // regenerates through them; the 0-means-legacy rule guards SPECS).
     pub fn stream_default() -> Self {
-        Self {
-            count: 60,
-            width: 3.0,
-            jitter: 0.0,
-            r_in_frac: 0.0,
-            taper: 0.5,
-            seed: 1,
-        }
+        Self::stream_dpi(600)
     }
     pub fn focus_default() -> Self {
+        Self::focus_dpi(600)
+    }
+
+    /// 流線, the everyday one: 1 mm between runs, 0.20 mm wide, in
+    /// bundles of 4 with a two-and-a-half-gap hole between bundles
+    /// (まとまり — the single biggest quality lever a generated speed
+    /// block has, and the thing the uniform scatter could not express).
+    pub fn stream_dpi(dpi: u32) -> Self {
         Self {
-            count: 96,
-            width: 4.0,
-            jitter: 0.35,
-            r_in_frac: 0.4,
-            taper: 0.5,
-            seed: 1,
+            group: 4,
+            group_gap: 2.5,
+            jit_gap: 0.25,
+            jit_len: 0.3,
+            jit_width: 0.25,
+            ..Self::from_mm(dpi, 0.20, 1.0)
         }
+    }
+
+    /// A tighter 流線 block: 0.6 mm gap, 0.15 mm lines, bundles of 6.
+    pub fn dense_stream_dpi(dpi: u32) -> Self {
+        Self {
+            group: 6,
+            group_gap: 2.0,
+            jit_gap: 0.25,
+            jit_len: 0.3,
+            jit_width: 0.25,
+            ..Self::from_mm(dpi, 0.15, 0.6)
+        }
+    }
+
+    /// A sparse 流線 block — the same rule read the other way: gaps you
+    /// can see between the runs, so no bundling on top of them.
+    pub fn sparse_stream_dpi(dpi: u32) -> Self {
+        Self {
+            jit_gap: 0.3,
+            jit_len: 0.35,
+            jit_width: 0.25,
+            ..Self::from_mm(dpi, 0.30, 2.5)
+        }
+    }
+
+    /// 集中線: a 3.5° gap, 0.35 mm rays needling to the convergence, and
+    /// a 40 % hole for the art.
+    pub fn focus_dpi(dpi: u32) -> Self {
+        Self {
+            gap_deg: 3.5,
+            gap_px: 0.0,
+            taper: 0.6,
+            r_in_frac: 0.40,
+            jitter: 0.25,
+            jit_gap: 0.25,
+            jit_len: 0.25,
+            jit_width: 0.3,
+            ..Self::from_mm(dpi, 0.35, 0.0)
+        }
+    }
+
+    /// The dense end of the 3°/10° rule: a 2° gap on 0.25 mm rays.
+    pub fn dense_focus_dpi(dpi: u32) -> Self {
+        Self {
+            gap_deg: 2.0,
+            ..Self::focus_dpi(dpi)
+        }
+    }
+
+    /// A black burst: rays at a 1.2° gap, twice the weight, small hole.
+    pub fn dark_burst_dpi(dpi: u32) -> Self {
+        Self {
+            gap_deg: 1.2,
+            r_in_frac: 0.22,
+            jitter: 0.5,
+            width: (0.7 / 25.4 * dpi as f32).max(0.5),
+            ..Self::focus_dpi(dpi)
+        }
+    }
+
+    /// The two flash kinds ride `figure_focus` (same gesture, same
+    /// knobs), but their `width` is a spike BASE in px and their teeth
+    /// are counted, not gapped — so they keep the count-driven preset.
+    pub fn flash_dpi(dpi: u32, count: u32, width_mm: f32, r_in_frac: f32) -> Self {
+        Self {
+            count,
+            gap_deg: 0.0,
+            jitter: 0.25,
+            r_in_frac,
+            taper: 0.0,
+            ..Self::from_mm(dpi, width_mm, 0.0)
+        }
+    }
+
+    /// Do two presets describe the same set? The seed rerolls on every
+    /// placement, so it can never take part in "is this row armed".
+    pub fn same_as(&self, other: &Self) -> bool {
+        Self { seed: 0, ..*self } == Self { seed: 0, ..*other }
     }
 }
 
@@ -915,14 +1035,14 @@ impl FrameMode {
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum DivideContents {
     /// CSP "Create empty folder": the new half gets a fresh White + empty
-    /// draw layer. Our behaviour before this option existed, and the right
-    /// one while you are still laying out the page — which is most of the
-    /// time, so it stays the default.
-    #[default]
+    /// draw layer. Our behaviour before this option existed.
     CreateEmpty,
     /// CSP "Duplicate layer": the new half gets a COPY of the folder's
     /// contents, so the drawing survives in both halves, each masked to its
-    /// own shape. The answer when you cut a panel you have already drawn.
+    /// own shape. The DEFAULT because it is the owner's own CSP setting
+    /// (csp-tools.json `CutFrameCutFolderType = 0`) and it never loses
+    /// work — an empty half is one Delete away, a lost half is not.
+    #[default]
     Duplicate,
     /// CSP "Do not change": draw the border only — no new folder, the art
     /// and the layer structure are untouched. Identical in effect to the
@@ -1066,6 +1186,12 @@ pub enum SubTool {
     Tone(mn_core::tone::TonePattern),
     Wand(mn_core::FillRefer),
     Select(SelectMode),
+    /// The Selection tool's PAINT sub tools (CSP 選択ペン / 選択消し). Not a
+    /// mode enum: each is a fixed create-type that switches `Tool`, because
+    /// the canvas stroke paths key off `Tool::SelPen`/`SelEraser`. A future
+    /// "Selection pen (soft)" is one more variant here, one row there.
+    SelectPen,
+    SelectEraser,
     Frame(FrameMode),
     Balloon(BalloonMode),
     Text,
@@ -1103,6 +1229,8 @@ impl SubTool {
             SubTool::Select(SelectMode::Lasso),
             SubTool::Select(SelectMode::Magnetic),
             SubTool::Select(SelectMode::Shrink),
+            SubTool::SelectPen,
+            SubTool::SelectEraser,
             SubTool::Frame(FrameMode::Rect),
             SubTool::Frame(FrameMode::Polyline),
             SubTool::Frame(FrameMode::Pen),
@@ -1141,6 +1269,8 @@ impl SubTool {
             SubTool::Tone(_) => Tool::Tone,
             SubTool::Wand(_) => Tool::Wand,
             SubTool::Select(_) => Tool::Select,
+            SubTool::SelectPen => Tool::SelPen,
+            SubTool::SelectEraser => Tool::SelEraser,
             SubTool::Frame(_) => Tool::Frame,
             SubTool::Balloon(_) => Tool::Balloon,
             SubTool::Text => Tool::Text,
@@ -1169,7 +1299,9 @@ impl SubTool {
             SubTool::Select(SelectMode::Rect) => "Rectangle",
             SubTool::Select(SelectMode::Lasso) => "Lasso",
             SubTool::Select(SelectMode::Magnetic) => "Magnetic lasso",
-            SubTool::Select(SelectMode::Shrink) => "Shrink (flats)",
+            SubTool::Select(SelectMode::Shrink) => "Shrink selection",
+            SubTool::SelectPen => "Selection pen",
+            SubTool::SelectEraser => "Erase selection",
             SubTool::Frame(FrameMode::Rect) => "Rectangle frame",
             SubTool::Frame(FrameMode::Polyline) => "Polyline frame",
             SubTool::Frame(FrameMode::Pen) => "Frame border pen",
@@ -1196,7 +1328,9 @@ impl SubTool {
             SubTool::FillRefer(_) | SubTool::Fill(_) => "Sub Tool ▸ Fill",
             SubTool::Tone(_) => "Sub Tool ▸ Tone",
             SubTool::Wand(_) => "Sub Tool ▸ Auto select",
-            SubTool::Select(_) => "Sub Tool ▸ Selection",
+            SubTool::Select(_) | SubTool::SelectPen | SubTool::SelectEraser => {
+                "Sub Tool ▸ Selection"
+            }
             SubTool::Frame(_) => "Sub Tool ▸ Frame border",
             SubTool::Balloon(_) => "Sub Tool ▸ Balloon",
             SubTool::Text => "Sub Tool ▸ Text",
@@ -1579,19 +1713,21 @@ pub enum AppCmd {
     /// generated layer becomes active after the first drag, so the dialog
     /// rule would silently overwrite drag 1 with drag 2 (CSP places a new
     /// layer per drag; adjusting an existing one is the Object tool's job).
-    GenLinesPlace {
-        focus: bool,
-        /// `GenLinesSpec::kind` — 0 focus/speed, 1 urchin, 2 solid flash.
-        kind: u8,
-        a: f32,
-        b: f32,
-        c: f32,
-        d: f32,
-        count: u32,
-        width: f32,
-        jitter: f32,
-        taper: f32,
-        seed: u64,
+    ///
+    /// Carries the whole spec rather than a field list: the generator has
+    /// grown density, jitter, colour and handle attributes, and spelling
+    /// each of them out twice is how `kind` came to be droppable by the
+    /// dialog's own Apply (see `GenLinesApply`'s carry comment).
+    GenLinesPlace(mn_core::genlines::GenLinesSpec),
+    /// The Tool Property editor's commit for an ALREADY PLACED run: the
+    /// selected layer's own spec, regenerated in place. Unlike
+    /// `GenLinesApply` it names its layer instead of keying on the active
+    /// one, because the Object tool can select a run that is not active.
+    /// One press per drag — the editor buffers and pushes on release, so
+    /// this never runs per frame (regen re-rasterizes the whole layer).
+    GenLinesApplyTo {
+        layer: usize,
+        spec: mn_core::genlines::GenLinesSpec,
     },
     /// CV-004: drop the whole undo history (frees memory, irreversible).
     ClearHistory,
@@ -2719,10 +2855,13 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
         } => {
             app.gen_open = false;
             // The dialog only knows the original nine parameters, so it
-            // must CARRY the layer's kind/taper/converge rather than
-            // rebuild them: applying it to a flash layer would otherwise
+            // must CARRY everything else the layer holds rather than
+            // rebuild it: applying it to a flash layer would otherwise
             // silently turn the spikes back into plain focus lines, with
-            // the raster following on the same press.
+            // the raster following on the same press. Carrying the WHOLE
+            // spec (`..carry`) means the density round's attributes are
+            // covered by that rule automatically, instead of the dialog
+            // resetting a gap or a colour it has never heard of.
             let carry = app.doc.active_layer().genlines.unwrap_or_default();
             let spec = mn_core::genlines::GenLinesSpec {
                 focus,
@@ -2734,9 +2873,11 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 width,
                 jitter,
                 seed,
-                kind: carry.kind,
-                taper: carry.taper,
-                converge: carry.converge,
+                // The dialog counts lines, so a gap-driven layer edited
+                // there becomes count-driven — otherwise its Lines field
+                // would be a no-op that silently did nothing.
+                gap_deg: 0.0,
+                ..carry
             };
             // SF-004/005: re-applying on the layer the params came from
             // regenerates IN PLACE (the layer keeps name/stack/blend);
@@ -2760,38 +2901,23 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 None => app.set_status("generator produced nothing — widen the parameters"),
             }
         }
-        AppCmd::GenLinesPlace {
-            focus,
-            kind,
-            a,
-            b,
-            c,
-            d,
-            count,
-            width,
-            jitter,
-            taper,
-            seed,
-        } => {
-            let spec = mn_core::genlines::GenLinesSpec {
-                focus,
-                a,
-                b,
-                c,
-                d,
-                count,
-                width,
-                jitter,
-                seed,
-                kind,
-                taper,
-                ..Default::default()
-            };
+        AppCmd::GenLinesPlace(spec) => {
             match genlines_new_layer(app, spec) {
                 Some(name) => app.set_status(format!(
                     "{name} placed — the Object tool's handles (or Layer ▸ effect lines) adjust it"
                 )),
                 None => app.set_status("no lines landed on the canvas — drag further out"),
+            }
+        }
+        AppCmd::GenLinesApplyTo { layer, spec } => {
+            // Spec-on-success, exactly like the dialog's Apply: a regen
+            // that renders nothing leaves BOTH halves alone, so the
+            // stored parameters always describe the pixels on screen.
+            if app.doc.regen_genlines(layer, spec) {
+                app.set_status("effect lines regenerated");
+                app.mark_dirty();
+            } else {
+                app.set_status("generator produced nothing — widen the parameters");
             }
         }
         AppCmd::HistoryTo { keep } => {
@@ -2861,6 +2987,16 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             // exactly as it did when there was only ever one.
             app.push_doc_slot();
             let d = app.new_doc_draft.clone();
+            // Remember the preset actually used (owner, 2026-08-23): the next
+            // New Comic opens on it. Only a known preset name is written —
+            // hand-tweaked paper values keep the name they started from, and
+            // an unknown name would just fall back to the default on read.
+            if mn_core::PageSetup::presets().iter().any(|p| p.name == d.setup.name)
+                && app.prefs.new_preset != d.setup.name
+            {
+                app.prefs.new_preset = d.setup.name.clone();
+                app.prefs.mark_dirty();
+            }
             let (w, h) = d.setup.paper_px();
             app.page = d.setup.has_guides().then(|| d.setup.clone());
             app.seed_frame_folder = d.frame_folder;
@@ -3055,12 +3191,34 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             app.mark_dirty();
         }
         AppCmd::AddPage => {
-            let blank = mn_core::project::doc_to_bytes(&app.blank_page_doc()).ok();
+            // Template page (tekno B2): when one is designated, its bytes
+            // seed the new page — panel skeleton, guide layers, whatever
+            // the artist built once. The ACTIVE page's bytes live in `doc`,
+            // so it stashes first; any failure falls back to a blank.
+            let seed = app
+                .template_page
+                .filter(|&t| t < app.pages.len())
+                .and_then(|t| {
+                    if t == app.page_index {
+                        app.stash_current_page().ok()?;
+                    }
+                    app.pages[t].bytes.clone()
+                });
+            let from_template = seed.is_some();
+            let blank =
+                seed.or_else(|| mn_core::project::doc_to_bytes(&app.blank_page_doc()).ok());
             let at = app.page_index + 1;
             let e = app.fresh_page(blank, None);
             app.pages.insert(at, e);
             app.mark_pages_dirty();
-            app.set_status(format!("page {} added", at + 1));
+            if from_template {
+                app.set_status(format!(
+                    "page {} added from the template page",
+                    at + 1
+                ));
+            } else {
+                app.set_status(format!("page {} added", at + 1));
+            }
             app.switch_page(at);
         }
         AppCmd::DeletePage => {
@@ -3178,6 +3336,7 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 expression: app.expression,
                 spine_mm: app.spine_mm,
                 cover: app.cover,
+                profile: app.profile.clone(),
             };
             app.work_settings_open = true;
             app.mark_dirty();
@@ -3190,6 +3349,7 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             app.expression = d.expression;
             app.spine_mm = d.spine_mm;
             app.cover = d.cover;
+            app.profile = d.profile;
             // Metadata edits do not bump the doc revision — tell the
             // preflight cache by hand.
             app.preflight_stale = true;
@@ -3338,8 +3498,25 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 // dot pitch the page was drawn against.
                 let scale = mn_core::export::finish_scale(app.export_all_dpi, app.work_dpi());
                 let colour = app.export_all_colour;
-                let finish =
-                    |img: image::RgbaImage| mn_core::export::finish_image(img, scale, colour);
+                // M2: crop + exact-height ride the finish when asked for;
+                // Paper + 0 takes the exact old path, byte-identical.
+                let crop = app.export_all_crop;
+                let px_h = app.export_all_px_height;
+                let setup = app.page.clone();
+                let finish = |img: image::RgbaImage| {
+                    let full = [0, 0, img.width(), img.height()];
+                    let r = match &setup {
+                        Some(s) => {
+                            mn_core::export::crop_rect_px(s, (img.width(), img.height()), crop)
+                        }
+                        None => full,
+                    };
+                    if r != full || px_h > 0 {
+                        mn_core::export::finish_image_cropped(img, r, scale, px_h, colour)
+                    } else {
+                        mn_core::export::finish_image(img, scale, colour)
+                    }
+                };
                 let mut ok = 0usize;
                 let mut files = 0usize;
                 // Which pages this run actually wrote — the export
@@ -3482,6 +3659,8 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                                     expression,
                                     spine_mm,
                                     cover,
+                                    template_page,
+                                    profile,
                                     next_id,
                                     pages,
                                 } = wf;
@@ -3496,6 +3675,8 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                                 app.expression = expression;
                                 app.spine_mm = spine_mm;
                                 app.cover = cover;
+                                app.template_page = template_page;
+                                app.profile = profile;
                                 app.pages = pages
                                     .into_iter()
                                     .enumerate()
@@ -3554,6 +3735,8 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                                 app.expression = proj.meta.expression;
                                 app.spine_mm = proj.meta.spine_mm;
                                 app.cover = proj.meta.cover;
+                                app.template_page = proj.meta.template_page;
+                                app.profile = proj.meta.profile.clone();
                                 app.pages = proj
                                     .pages
                                     .into_iter()
@@ -3643,6 +3826,8 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                             proj.meta.expression = app.expression;
                             proj.meta.spine_mm = app.spine_mm;
                             proj.meta.cover = app.cover;
+                            proj.meta.template_page = app.template_page;
+                            proj.meta.profile = app.profile.clone();
                             proj.pages = app
                                 .pages
                                 .iter()
@@ -3711,6 +3896,8 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                     proj.meta.expression = app.expression;
                     proj.meta.spine_mm = app.spine_mm;
                     proj.meta.cover = app.cover;
+                    proj.meta.template_page = app.template_page;
+                    proj.meta.profile = app.profile.clone();
                     proj.pages = app
                         .pages
                         .iter()
@@ -3928,17 +4115,22 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
         }
         // --- frames (koma) --------------------------------------------------
         AppCmd::NewFrameLayer => {
+            // The 基本枠 is mirrored per book side — `inner_rect_px()` alone is
+            // the RIGHT-page orientation and put a left page's folder 2×offset
+            // off the purple guides it is drawn against.
+            let right = app.current_page_right().unwrap_or(true);
             let rect = app
                 .page
                 .as_ref()
                 .filter(|p| p.has_guides())
-                .map(|p| p.inner_rect_px())
+                .map(|p| p.inner_rect_px_on(right))
                 .unwrap_or_else(|| {
                     let (w, h) = (app.doc.size.0 as f32, app.doc.size.1 as f32);
                     [w * 0.08, h * 0.08, w * 0.92, h * 0.92]
                 });
-            // CSP's default frame border is 0.8 mm thick.
-            let border = app.mm_to_px(0.8).max(2.0);
+            // Same width the frame create sub tools use (owner's CSP value);
+            // this arm used to hardcode CSP's factory 0.8 mm instead.
+            let border = app.mm_to_px(app.frame_border_mm).max(2.0);
             let n = app.doc.layers.iter().filter(|l| l.is_frame()).count() + 1;
             app.doc
                 .add_frame_folder(format!("Frame {n}"), FrameSet::single_rect(rect, border));
@@ -3950,11 +4142,35 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             app.mark_dirty();
         }
         AppCmd::FrameDivide { a, b } => {
-            let li = if app.doc.active_layer().is_frame() {
+            // The folder the cut LANDS in is the one whose panel the drag
+            // actually crossed — after the first folder-divide the active
+            // layer is a draw layer, and "topmost frame layer" sent every
+            // later cut to the newest folder regardless of where the pen
+            // was (owner-class bug, 2026-08-23 audit). Active still wins
+            // when it was crossed too, so nothing changes mid-panel.
+            let crosses = |l: &mn_core::Layer| {
+                l.is_frame()
+                    && l.frames().is_some_and(|fs| {
+                        fs.frames
+                            .iter()
+                            .any(|f| f.segment_touches([a.0, a.1], [b.0, b.1]))
+                    })
+            };
+            let li = if app.doc.active_layer().is_frame() && crosses(app.doc.active_layer()) {
                 Some(app.doc.active)
             } else {
-                app.doc.layers.iter().rposition(|l| l.is_frame())
-            };
+                app.doc.layers.iter().rposition(crosses)
+            }
+            // Nothing crossed: fall back to the old resolution so the
+            // "drag across a panel" status below still has a folder to say
+            // it about.
+            .or_else(|| {
+                if app.doc.active_layer().is_frame() {
+                    Some(app.doc.active)
+                } else {
+                    app.doc.layers.iter().rposition(|l| l.is_frame())
+                }
+            });
             let Some(li) = li else {
                 app.set_status("no frame layer — Layer > New frame border folder first");
                 return;
@@ -4225,7 +4441,7 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                     }
                     app.frame_delete_armed = Some((layer, frame));
                     app.set_status(
-                        "that is the folder's last frame — Delete again to                          remove the folder AND its layers",
+                        "that is the folder's last frame — Delete again to remove the folder AND its layers",
                     );
                     return;
                 }
@@ -4299,7 +4515,14 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                     return;
                 }
             };
-            let (gx, gy) = app.gutter_border_mm;
+            // The pair the ACTIVE cut sub tool owns — this always read the
+            // tight divide-border gutters (1.69/2.29 mm), so "divide into
+            // tiers" with the folder sub tool ignored his 9.74 mm 上下 value.
+            let (gx, gy) = if app.frame_mode == FrameMode::DivideBorder {
+                app.gutter_border_mm
+            } else {
+                app.gutter_folder_mm
+            };
             let cells = fs.frames[fi].divide_equally(
                 cols,
                 rows,
@@ -4806,6 +5029,45 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                         "that generator material produced nothing on this canvas — Layer ▸ Edit effect lines to widen it",
                     ),
                 }
+                return;
+            }
+            // A TONE material places a LIVE TONE LAYER, never pixels.
+            //
+            // CSP's model, which our engine already implements: a tone is a
+            // fill layer plus a mask, and the SCREEN — frequency, angle,
+            // density — is canvas-absolute. It does not scale with the area
+            // it covers. Pasting a tone sheet as a raster float broke both
+            // halves of that: resizing the float resized the DOTS (owner
+            // report), and a sheet dropped on a page covered one rectangle
+            // instead of the page. So: fill the selection, or the whole
+            // canvas when there is none, with parameters that stay editable
+            // in Layer Property a week later.
+            if let Some(spec) = app.material_tone_spec(&path) {
+                app.material_note_use(&path);
+                // `add_fill_layer` cuts the window from the selection and
+                // records ONE structural undo step — the same single press
+                // the Tone tool's gesture costs.
+                let from_sel = app.doc.selection.is_some();
+                let i = app.doc.add_fill_layer(
+                    mn_core::FillKind::Tone {
+                        tone: spec.tone,
+                        density: spec.density,
+                    },
+                    from_sel,
+                );
+                app.refresh_tones();
+                app.renderer.invalidate();
+                // What actually happened, not what was asked for: an empty
+                // selection yields no mask, and that is the whole page.
+                let where_ = if app.doc.layers[i].mask.is_some() {
+                    "the selection"
+                } else {
+                    "the page"
+                };
+                app.set_status(format!(
+                    "tone filled {where_} — Frequency/Density/Angle in Layer Property"
+                ));
+                app.mark_dirty();
                 return;
             }
             // Same paste-to-position rule as Ctrl+V (owner HIGH): a tone
@@ -5358,6 +5620,8 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                     proj.meta.expression = app.expression;
                     proj.meta.spine_mm = app.spine_mm;
                     proj.meta.cover = app.cover;
+                    proj.meta.template_page = app.template_page;
+                    proj.meta.profile = app.profile.clone();
                     proj.pages = app
                         .pages
                         .iter()
@@ -6331,6 +6595,9 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 SubTool::Tone(p) => app.tone_opts.tone.pattern = p,
                 SubTool::Wand(r) => app.wand_opts.refer = r,
                 SubTool::Select(m) => dispatch(app, AppCmd::SetSelectMode(m)),
+                // The create-type IS the tool, and `SetTool(s.tool())`
+                // above already switched to it.
+                SubTool::SelectPen | SubTool::SelectEraser => {}
                 SubTool::Frame(m) => {
                     app.frame_mode = m;
                     app.frame_poly = None;

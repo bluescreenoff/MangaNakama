@@ -6,7 +6,7 @@
 //! the if-chain: rotating → panning → drawing → transform → text →
 //! object/balloon drags → frame → select) — do not reorder it.
 
-use super::{App, PointerKind, TransformGesture, TransformGrab};
+use super::{App, PointerKind, TransformGesture};
 use crate::cmd::{
     AppCmd, BalloonMode, FigureMode, FillMode, FrameMode, GradMode, ObjectMode, PanMode, RulerKind,
     SelectMode, Tool,
@@ -85,6 +85,50 @@ pub struct RulerMove {
     pub before: mn_core::Rulers,
 }
 
+/// A point clamped inside the page, with a margin so a handle drawn on
+/// the very edge is still grabbable.
+fn on_page(p: [f32; 2], size: (u32, u32)) -> [f32; 2] {
+    let m = 6.0;
+    [
+        p[0].clamp(m, (size.0 as f32 - m).max(m)),
+        p[1].clamp(m, (size.1 as f32 - m).max(m)),
+    ]
+}
+
+/// Is `p` inside the page (with the same margin `on_page` clamps to)?
+fn is_on_page(p: [f32; 2], size: (u32, u32)) -> bool {
+    on_page(p, size) == p
+}
+
+/// A radial driver handle at radius `r`: on the ray the placing drag was
+/// made along if that lands on the page, else swept around the ring to
+/// the nearest angle that does.
+///
+/// A handle off the page cannot be clicked and is not drawn — which is
+/// how a burst placed near an edge ended up with no grabbable radius at
+/// all. Sweeping keeps the RADIUS exact (the drag math reads distance
+/// from the centre, so a straight clamp would make the grab jump); only
+/// the angle we show it at moves.
+fn radial_handle(c: [f32; 2], r: f32, base_deg: f32, size: (u32, u32)) -> [f32; 2] {
+    let at = |deg: f32| {
+        let (s, co) = deg.to_radians().sin_cos();
+        [c[0] + co * r, c[1] + s * r]
+    };
+    let p = at(base_deg);
+    if is_on_page(p, size) {
+        return p;
+    }
+    for k in 1..=12 {
+        for sign in [1.0f32, -1.0] {
+            let q = at(base_deg + sign * k as f32 * 15.0);
+            if is_on_page(q, size) {
+                return q;
+            }
+        }
+    }
+    on_page(p, size)
+}
+
 /// Where each driver handle sits, canvas px — the single source shared
 /// by the hit-test and the overlay so they can never disagree.
 pub fn gen_handle_points(
@@ -94,23 +138,92 @@ pub fn gen_handle_points(
     if spec.focus {
         let c = [spec.a, spec.b];
         vec![
-            (GenDragMode::Center, c),
-            (GenDragMode::RIn, [c[0] + spec.c, c[1]]),
-            (GenDragMode::ROut, [c[0] + spec.d, c[1]]),
+            (GenDragMode::Center, on_page(c, size)),
+            (
+                GenDragMode::RIn,
+                radial_handle(c, spec.c, spec.hand_deg, size),
+            ),
+            (
+                GenDragMode::ROut,
+                radial_handle(c, spec.d, spec.hand_deg, size),
+            ),
         ]
     } else {
         // Speed lines are canvas-wide parallels; the reference line runs
-        // through the canvas centre along the angle.
-        let a = [size.0 as f32 * 0.5, size.1 as f32 * 0.5];
+        // along the angle through the run's ANCHOR — the midpoint of the
+        // drag that placed it, so the handles are where the gesture was.
+        // (`None` = the canvas centre, where every pre-2026-08-23 run's
+        // handles sat.)
+        let a = gen_anchor(spec, size);
         let (s, co) = spec.a.to_radians().sin_cos();
         let dir = [co, s];
-        let at = |l: f32| [a[0] + dir[0] * l, a[1] + dir[1] * l];
+        let at = |l: f32| on_page([a[0] + dir[0] * l, a[1] + dir[1] * l], size);
         vec![
             (GenDragMode::Angle, at(spec.c * 0.5)),
             (GenDragMode::LenMin, at(spec.b)),
             (GenDragMode::LenMax, at(spec.c)),
         ]
     }
+}
+
+/// Does `layer` carry ink within `tol` px of (cx, cy)?
+///
+/// A generated run is HAIRLINES with paper between them, and the hit test
+/// used to read the ONE pixel under the cursor: to select a set you had
+/// to land on a line, at zero tolerance, which at any real zoom is not a
+/// thing a hand can do — the owner's "I cannot re-select them to edit
+/// properties". Every other object here has a tolerance; this one now
+/// does too, over the same `tol` disc the handles use.
+pub(crate) fn layer_ink_near(layer: &mn_core::Layer, cx: f32, cy: f32, tol: f32) -> bool {
+    let r = tol.clamp(1.0, 64.0);
+    let (x0, x1) = ((cx - r).floor() as i32, (cx + r).ceil() as i32);
+    let (y0, y1) = ((cy - r).floor() as i32, (cy + r).ceil() as i32);
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            if x < 0 || y < 0 {
+                continue;
+            }
+            let (dx, dy) = (x as f32 + 0.5 - cx, y as f32 + 0.5 - cy);
+            if dx * dx + dy * dy > r * r {
+                continue;
+            }
+            let idx = mn_core::TileIdx::of_pixel(x, y);
+            let hit = layer.tile(idx).is_some_and(|t| {
+                let (ox, oy) = idx.origin();
+                t.pixel((x - ox) as usize, (y - oy) as usize)[3] > 0
+            });
+            if hit {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// A speed run's reference anchor: its own, or the canvas centre.
+pub fn gen_anchor(spec: &mn_core::genlines::GenLinesSpec, size: (u32, u32)) -> [f32; 2] {
+    spec.anchor
+        .unwrap_or([size.0 as f32 * 0.5, size.1 as f32 * 0.5])
+}
+
+/// How far the ray from `a` along `dir` runs before it leaves the page —
+/// the ceiling the LenMax handle clamps to, so the handle stays on the
+/// paper the run is drawn on.
+fn page_reach(a: [f32; 2], dir: [f32; 2], size: (u32, u32)) -> f32 {
+    let mut best = f32::INFINITY;
+    for (p, d, hi) in [
+        (a[0], dir[0], size.0 as f32),
+        (a[1], dir[1], size.1 as f32),
+    ] {
+        if d.abs() < 1e-6 {
+            continue;
+        }
+        let t = if d > 0.0 { (hi - p) / d } else { -p / d };
+        if t > 0.0 {
+            best = best.min(t);
+        }
+    }
+    if best.is_finite() { best } else { 0.0 }
 }
 
 /// The spec as a drag would leave it (shared by the live overlay and
@@ -143,22 +256,31 @@ pub fn gen_drag_spec(d: &GenLinesDrag, size: (u32, u32)) -> mn_core::genlines::G
             }
         }
         GenDragMode::Angle => {
-            let a = [size.0 as f32 * 0.5, size.1 as f32 * 0.5];
+            let a = gen_anchor(&s, size);
             s.a = (d.cur.1 - a[1]).atan2(d.cur.0 - a[0]).to_degrees();
         }
         GenDragMode::LenMin => {
-            let a = [size.0 as f32 * 0.5, size.1 as f32 * 0.5];
+            let a = gen_anchor(&s, size);
             let (sin, cos) = s.a.to_radians().sin_cos();
             let l = (d.cur.0 - a[0]) * cos + (d.cur.1 - a[1]) * sin;
             s.b = l.clamp(8.0, (s.c - 8.0).max(8.0));
         }
         GenDragMode::LenMax => {
-            let a = [size.0 as f32 * 0.5, size.1 as f32 * 0.5];
+            let a = gen_anchor(&s, size);
             let (sin, cos) = s.a.to_radians().sin_cos();
             let l = (d.cur.0 - a[0]) * cos + (d.cur.1 - a[1]) * sin;
             let lo = s.b + 8.0;
-            if lo < ceil {
-                s.c = l.clamp(lo, ceil);
+            // The ceiling is the PAGE, not twice the diagonal: past the
+            // paper's edge the handle is invisible and ungrabbable, so
+            // the run could be lengthened and never shortened again. The
+            // reference line runs BOTH ways from the anchor, so the cap
+            // is whichever way reaches further — an anchor near the right
+            // edge must not cap a leftward block at 20 px.
+            let reach = page_reach(a, [cos, sin], size)
+                .max(page_reach(a, [-cos, -sin], size))
+                .min(ceil);
+            if lo < reach {
+                s.c = l.clamp(lo, reach);
             }
         }
     }
@@ -345,53 +467,46 @@ impl BalloonObjDrag {
 
 /// An in-progress Object-tool drag on a balloon; same lifecycle as
 /// [`ObjectDrag`] — the document keeps the original until release.
-/// Point-in-convex-quad (the bbox is a transformed rect, always convex):
-/// the cross product of every edge must agree on a side.
-fn point_in_quad(p: [f32; 2], q: [[f32; 2]; 4]) -> bool {
-    let mut sign = 0i32;
-    for i in 0..4 {
-        let a = q[i];
-        let b = q[(i + 1) % 4];
-        let cross = (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]);
-        let s = if cross > 0.0 {
-            1
-        } else if cross < 0.0 {
-            -1
-        } else {
-            0
-        };
-        if s != 0 {
-            if sign == 0 {
-                sign = s;
-            } else if sign != s {
-                return false;
-            }
-        }
-    }
-    true
-}
+// (`point_in_quad` moved to `app::transform`, next to the hit test that is
+// its only caller.)
 
 impl App {
     // --- canvas input: one place where a tool decides what a press means ---
+
+    /// How deep into a click run this press is: 1 plain, 2 double, 3 triple,
+    /// and on up. The window class has no `CS_DBLCLKS`, so `WM_LBUTTONDBLCLK`
+    /// never arrives and the run has to be timed here — same 4 px / 400 ms
+    /// test the curve ruler has always used.
+    fn click_run(&mut self, x: f32, y: f32) -> u8 {
+        let n = match self.last_click {
+            Some((lx, ly, t, n))
+                if (lx - x).abs() < 4.0
+                    && (ly - y).abs() < 4.0
+                    && t.elapsed().as_millis() < 400 =>
+            {
+                n.saturating_add(1)
+            }
+            _ => 1,
+        };
+        self.last_click = Some((x, y, std::time::Instant::now(), n));
+        n
+    }
 
     pub fn canvas_down(&mut self, x: f32, y: f32, kind: PointerKind, batch: &[PenSample]) {
         // The user is touching the canvas: the deferred startup fit stands
         // down and never adjusts their view again (see App::render).
         self.startup_fit_pending = false;
+        let clicks = self.click_run(x, y);
         // TODO #3: an armed ruler creation owns the next drag — CSP's
         // Layer ▸ Ruler ▸ …-then-draw flow. No tool switch, no painting.
         if self.ruler_pending.is_some() {
             let (cx, cy) = self.viewport.to_canvas(x, y);
             // Curve (part 2): click vertices; a double-click closes.
             if self.ruler_pending == Some(RulerKind::Curve) {
-                let double = self.last_click.is_some_and(|(lx, ly, t)| {
-                    (lx - x).abs() < 4.0 && (ly - y).abs() < 4.0 && t.elapsed().as_millis() < 400
-                });
-                if double {
+                if clicks >= 2 {
                     self.finish_curve_ruler();
                     return;
                 }
-                self.last_click = Some((x, y, std::time::Instant::now()));
                 self.curve_pending
                     .get_or_insert_with(Vec::new)
                     .push([cx, cy]);
@@ -630,14 +745,14 @@ impl App {
                     self.needs_redraw = true;
                     return;
                 }
-                if !self.text_object_hit(cx, cy) {
+                if !self.text_object_press(cx, cy, clicks) {
                     self.object_hit(cx, cy);
                 }
             }
             Tool::Text => {
                 let (cx, cy) = self.viewport.to_canvas(x, y);
                 let shift = self.shell.sync_modifiers().shift;
-                self.text_tool_down(cx, cy, shift);
+                self.text_tool_down(cx, cy, shift, clicks);
             }
             Tool::Pan => unreachable!("handled above"),
         }
@@ -1128,11 +1243,12 @@ impl App {
             let angle = (b.1 - a.1).atan2(b.0 - a.0).to_degrees();
             (angle, len * 0.7, len * 1.3, 0.0)
         };
-        self.push_cmd(AppCmd::GenLinesPlace {
+        let kind = self.figure_mode.gen_kind();
+        self.push_cmd(AppCmd::GenLinesPlace(mn_core::genlines::GenLinesSpec {
             // Kinds 1/2 keep focus = true: the Object tool's driver
             // handles and their clamps key on it (GenLinesSpec's doc).
             focus: radial,
-            kind: self.figure_mode.gen_kind(),
+            kind,
             a: pa,
             b: pb,
             c: pc,
@@ -1147,8 +1263,33 @@ impl App {
                 FigureMode::Focus | FigureMode::Stream => opts.taper,
                 _ => 0.0,
             },
+            // Density: the radial kinds are gap-driven in DEGREES, the
+            // stream in px — a flash counts its teeth and takes neither
+            // (its `width` is a spike base, and gapping it would fight
+            // the renderer's own neighbour clamp).
+            gap_deg: if radial && kind == 0 { opts.gap_deg } else { 0.0 },
+            gap_px: if radial { 0.0 } else { opts.gap_px },
+            group: if radial { 0 } else { opts.group },
+            group_gap: if radial { 0.0 } else { opts.group_gap },
+            jit_gap: opts.jit_gap,
+            jit_len: opts.jit_len,
+            jit_width: opts.jit_width,
+            // WHERE THE DRIVER HANDLES GO. Screen-side only — no
+            // renderer reads either — but without them a burst placed
+            // near the right edge put its radius handles off the page and
+            // a stream's reference line sat at the canvas centre instead
+            // of on the run you just drew: nothing to aim at, which is
+            // half of "I cannot re-select them" (owner, 2026-08-23).
+            hand_deg: if radial {
+                (b.1 - a.1).atan2(b.0 - a.0).to_degrees()
+            } else {
+                0.0
+            },
+            anchor: (!radial).then_some([(a.0 + b.0) * 0.5, (a.1 + b.1) * 0.5]),
+            converge: None,
+            color: [0, 0, 0],
             seed: opts.seed,
-        });
+        }));
     }
 
     /// Figure ▸ Polygon release: ink the clicked vertex loop.
@@ -1340,10 +1481,30 @@ impl App {
             .copied()
     }
 
+    /// Select the effect-line run on layer `li` — and MAKE THAT LAYER
+    /// ACTIVE. Selecting a run without activating it left three places
+    /// disagreeing about what you had picked: the canvas drew handles on
+    /// one run, the Layers palette highlighted another, and Layer ▸ Edit
+    /// effect lines (which keys on the ACTIVE layer) edited that other
+    /// one. Whatever is selected on the page is the layer you are on.
+    pub(crate) fn gen_select(&mut self, li: usize) {
+        self.gen_sel = Some(li);
+        // A half-finished Tool Property drag belongs to the run that was
+        // selected when it started; carried over, it would be applied to
+        // this one.
+        self.gen_edit = None;
+        self.text_sel = None;
+        self.object_sel = None;
+        self.balloon_sel = None;
+        if li < self.doc.layers.len() {
+            self.doc.active = li;
+        }
+    }
+
     /// Object tool press: find what the cursor grabbed, topmost vector layer
     /// first. Balloons: a control handle, then the body. Frames: a vertex
     /// handle, then an edge, then the panel body.
-    fn object_hit(&mut self, cx: f32, cy: f32) {
+    pub(crate) fn object_hit(&mut self, cx: f32, cy: f32) {
         let tol = (10.0 / self.viewport.zoom.max(0.01)).max(2.0);
         let mut frame_hit: Option<ObjectDrag> = None;
         let mut balloon_hit: Option<BalloonObjDrag> = None;
@@ -1359,8 +1520,7 @@ impl App {
             }
             for (mode, p) in gen_handle_points(&spec, self.doc.size) {
                 if (p[0] - cx).abs() + (p[1] - cy).abs() <= tol * 1.4 {
-                    self.gen_sel = Some(li);
-                    self.object_pick = Some((cx, cy));
+                    self.gen_select(li);
                     self.gen_drag = Some(GenLinesDrag {
                         layer: li,
                         mode,
@@ -1368,26 +1528,13 @@ impl App {
                         cur: (cx, cy),
                         orig: spec,
                     });
-                    self.object_sel = None;
-                    self.balloon_sel = None;
+                    self.object_pick = Some((cx, cy));
                     return;
                 }
             }
-            // Ink under the pointer selects (alpha at the pixel).
-            let idx = mn_core::TileIdx::of_pixel(cx as i32, cy as i32);
-            let ink = self.doc.layers[li]
-                .tile(idx)
-                .map(|t| {
-                    let (ox, oy) = idx.origin();
-                    t.pixel((cx as i32 - ox) as usize, (cy as i32 - oy) as usize)[3]
-                })
-                .unwrap_or(0)
-                > 0;
-            if ink {
-                self.gen_sel = Some(li);
+            if layer_ink_near(&self.doc.layers[li], cx, cy, tol) {
+                self.gen_select(li);
                 self.object_pick = Some((cx, cy));
-                self.object_sel = None;
-                self.balloon_sel = None;
                 self.set_status("effect lines selected — drag the blue handles");
                 return;
             }
@@ -1409,7 +1556,7 @@ impl App {
                         let bb = b.bbox();
                         let lolly = [
                             (bb[0] + bb[2]) * 0.5,
-                            bb[1] - 26.0 / self.viewport.zoom.max(0.01),
+                            bb[1] - super::ROTATE_STALK_SCREEN / self.viewport.zoom.max(0.01),
                         ];
                         let near = |p: [f32; 2]| (p[0] - cx).abs() + (p[1] - cy).abs() <= tol * 1.4;
                         let corners = [
@@ -1465,7 +1612,7 @@ impl App {
                     let b = f.bbox();
                     let lolly = [
                         (b[0] + b[2]) * 0.5,
-                        b[1] - 26.0 / self.viewport.zoom.max(0.01),
+                        b[1] - super::ROTATE_STALK_SCREEN / self.viewport.zoom.max(0.01),
                     ];
                     let near = |p: [f32; 2]| (p[0] - cx).abs() + (p[1] - cy).abs() <= tol * 1.4;
                     let corners = [[b[0], b[1]], [b[2], b[1]], [b[2], b[3]], [b[0], b[3]]];
@@ -1551,16 +1698,11 @@ impl App {
             if !l.visible || l.genlines.is_none() {
                 continue;
             }
-            let idx = mn_core::TileIdx::of_pixel(x as i32, y as i32);
-            let ink = l
-                .tile(idx)
-                .map(|t| {
-                    let (ox, oy) = idx.origin();
-                    t.pixel((x as i32 - ox) as usize, (y as i32 - oy) as usize)[3]
-                })
-                .unwrap_or(0)
-                > 0;
-            if ink {
+            // The SAME tolerance the click path uses — the doc comment
+            // above is a promise that the cycle order and the click order
+            // cannot disagree, and a tighter test here would break it.
+            let tol = (10.0 / self.viewport.zoom.max(0.01)).max(2.0);
+            if layer_ink_near(l, x, y, tol) {
                 out.push(ObjRef::Gen(li));
             }
         }
@@ -1617,7 +1759,8 @@ impl App {
         self.object_sel = None;
         match r {
             ObjRef::Text(li, ti) => self.text_sel = Some((li, ti)),
-            ObjRef::Gen(li) => self.gen_sel = Some(li),
+            // Cycling onto a run activates its layer, same as clicking it.
+            ObjRef::Gen(li) => self.gen_select(li),
             ObjRef::Balloon(li, bi) => self.balloon_sel = Some((li, bi)),
             ObjRef::Frame(li, fi) => self.object_sel = Some((li, fi)),
         }
@@ -1822,7 +1965,9 @@ impl App {
             // edges only, the manga-grid case; the gutter stay-put
             // behaviour needs the drag to LAND on the neighbour, and a
             // 1.5 px on-segment carry at release is what makes the two
-            // panels share the border afterwards.
+            // panels share the border afterwards. Panels separated by a
+            // real gutter never touch, so they are the facing carry's job
+            // ("Keep gutters aligned", canvas_up), not this snap's.
             let mut cur = (cx, cy);
             if let ObjectDragMode::Edge(i) = d.mode {
                 let n = d.orig.points.len();
@@ -2261,6 +2406,83 @@ impl App {
                                 // the shear commit. A genuine shared border
                                 // hits with BOTH its corners; a T-junction
                                 // hits once at interior t. Both still carry.
+                                // CSP "Keep gutters aligned = All" (audit
+                                // P0-4). The coincident carry below only
+                                // reaches vertices ON the dragged edge, so
+                                // the most-used paneling gesture — nudge a
+                                // border, keep the gutter — silently closed
+                                // the 3–10 mm gap instead. The facing carry
+                                // moves the border ACROSS the gutter by the
+                                // same delta. Only the NEAREST facing rank
+                                // travels (a gutter is shared by however
+                                // many panels line its far side, but not by
+                                // the row behind them), and only when that
+                                // gap is plausibly a gutter: twice the
+                                // widest cut-tool gutter pref, in px.
+                                let facing = self.gutter_align_all.then(|| {
+                                    let e = [b[0] - a[0], b[1] - a[1]];
+                                    let len = (e[0] * e[0] + e[1] * e[1]).sqrt();
+                                    let mut nrm = [e[1] / len, -e[0] / len];
+                                    let c = d.orig.centroid();
+                                    if (a[0] - c[0]) * nrm[0] + (a[1] - c[1]) * nrm[1] < 0.0 {
+                                        nrm = [-nrm[0], -nrm[1]];
+                                    }
+                                    nrm
+                                });
+                                let (gl, gt) = self.gutter_folder_mm;
+                                let (bl, bt) = self.gutter_border_mm;
+                                let reach =
+                                    2.0 * self.mm_to_px(gl.max(gt).max(bl).max(bt)).max(1.0);
+                                // The nearest facing gap on the whole page,
+                                // measured before anything moves.
+                                let mut nearest = f32::INFINITY;
+                                if let Some(nrm) = facing {
+                                    let mut scan = |set: &mn_core::FrameSet, skip: Option<usize>| {
+                                        for (si, sib) in set.frames.iter().enumerate() {
+                                            if Some(si) == skip {
+                                                continue;
+                                            }
+                                            if let Some((dist, _)) =
+                                                mn_core::frame::facing_vertices(sib, a, b, nrm)
+                                                && dist > 1.5
+                                            {
+                                                nearest = nearest.min(dist);
+                                            }
+                                        }
+                                    };
+                                    scan(&fs, Some(d.frame));
+                                    for (li, l) in self.doc.layers.iter().enumerate() {
+                                        if li != d.layer
+                                            && let Some(other) = l.frames()
+                                        {
+                                            scan(other, None);
+                                        }
+                                    }
+                                }
+                                // A panel is on this gutter when it faces the
+                                // edge at the nearest gap (1.5 px of slop, the
+                                // same the coincident carry uses); the page
+                                // edge, or anything further than a gutter,
+                                // means a plain resize.
+                                let carry_facing = move |sib: &mut mn_core::Frame| -> bool {
+                                    let Some(nrm) = facing else { return false };
+                                    if !(nearest.is_finite() && nearest <= reach) {
+                                        return false;
+                                    }
+                                    let Some((dist, idx)) =
+                                        mn_core::frame::facing_vertices(sib, a, b, nrm)
+                                    else {
+                                        return false;
+                                    };
+                                    if dist > nearest + 1.5 {
+                                        return false;
+                                    }
+                                    for k in idx {
+                                        sib.points[k][0] += ddx;
+                                        sib.points[k][1] += ddy;
+                                    }
+                                    true
+                                };
                                 let carry = |sib: &mut mn_core::Frame| -> bool {
                                     let hits: Vec<(usize, f32)> = sib
                                         .points
@@ -2283,7 +2505,11 @@ impl App {
                                     if si == d.frame {
                                         continue;
                                     }
-                                    if carry(sib) && !carried_frame_ok(sib) {
+                                    // Coincident first: a neighbour that
+                                    // SHARES the border is not across a
+                                    // gutter from it, and must not move twice.
+                                    let moved = carry(sib) || carry_facing(sib);
+                                    if moved && !carried_frame_ok(sib) {
                                         carried_breaks = true;
                                     }
                                 }
@@ -2300,7 +2526,7 @@ impl App {
                                     let mut other = other.clone();
                                     let mut changed = false;
                                     for sib in other.frames.iter_mut() {
-                                        if carry(sib) {
+                                        if carry(sib) || carry_facing(sib) {
                                             changed = true;
                                             if !carried_frame_ok(sib) {
                                                 carried_breaks = true;
@@ -2553,49 +2779,25 @@ impl App {
 
     // --- Edit ▸ Transform gestures -----------------------------------------
 
-    /// Press during an active Transform: pick what the press grabbed — a
-    /// bbox corner (scale+rotate), an edge midpoint (one-axis scale,
-    /// TR-004), the pivot marker (TR-003; Alt+click places it anywhere),
-    /// inside the bbox (move), outside (rotate).
+    /// Press during an active Transform: pick what the press grabbed — the
+    /// rotate stalk, a bbox corner (two-axis scale off the opposite corner),
+    /// an edge midpoint (one-axis scale off the opposite edge, TR-004), the
+    /// pivot marker (TR-003; Alt+press places it anywhere), inside the bbox
+    /// (move), outside (rotate). The decision itself is
+    /// [`TransformDrag::hit_test`], shared with the cursor.
     fn transform_down(&mut self, x: f32, y: f32) {
         let (cx, cy) = self.viewport.to_canvas(x, y);
+        let zoom = self.viewport.zoom;
+        // Read the modifiers BEFORE borrowing the drag: `sync_modifiers`
+        // wants `&mut self.shell`.
+        let alt = self.shell.sync_modifiers().alt;
         let Some(drag) = &mut self.transform_drag else {
             return;
         };
-        let tol = (10.0 / self.viewport.zoom.max(0.01)).max(2.0);
-        let mut grab = TransformGrab::Rotate;
-        let mut anchor = [cx, cy];
-        for (i, c) in drag.bbox.iter().enumerate() {
-            if (c[0] - cx).abs() + (c[1] - cy).abs() <= tol * 1.4 {
-                grab = TransformGrab::Corner(i);
-                anchor = *c;
-            }
-        }
-        if grab == TransformGrab::Rotate {
-            for i in 0..4 {
-                let (a, b) = (drag.bbox[i], drag.bbox[(i + 1) % 4]);
-                let m = [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5];
-                if (m[0] - cx).abs() + (m[1] - cy).abs() <= tol {
-                    grab = TransformGrab::Edge(i);
-                    anchor = m;
-                }
-            }
-        }
-        if grab == TransformGrab::Rotate {
-            let pv = drag.pivot();
-            let on_marker = (pv[0] - cx).abs() + (pv[1] - cy).abs() <= tol * 1.2;
-            if on_marker || self.shell.sync_modifiers().alt {
-                grab = TransformGrab::Pivot;
-                anchor = pv;
-            }
-        }
-        if grab == TransformGrab::Rotate && point_in_quad([cx, cy], drag.bbox) {
-            grab = TransformGrab::Move;
-        }
         drag.gesture = Some(TransformGesture {
-            grab,
+            grab: drag.hit_test([cx, cy], zoom, alt),
             start: [cx, cy],
-            anchor,
+            bbox0: drag.bbox,
             sx0: drag.sx,
             sy0: drag.sy,
             rad0: drag.rad,
@@ -2604,76 +2806,21 @@ impl App {
         });
     }
 
-    /// Pointer motion while a Transform gesture is down: fold it into the
-    /// absolute params. A corner drag keeps the grabbed corner under the
-    /// pointer — uniform scale by the distance ratio from the centre plus
-    /// the angle delta. An edge-midpoint drag (TR-004) scales ONE axis,
-    /// measured along the rotated axis so it tracks the pointer at any
-    /// standing rotation.
+    /// Pointer motion while a Transform gesture is down. The math is
+    /// [`TransformDrag::apply_gesture`] (pure, unit-tested); this arm only
+    /// collects the live modifiers and the Keep-aspect setting.
     fn transform_move(&mut self, cx: f32, cy: f32) {
+        // Same borrow order as `transform_down` — modifiers first.
+        let m = self.shell.sync_modifiers();
+        let (shift, alt) = (m.shift, m.alt);
+        let keep_aspect = self.transform_keep_aspect;
         let Some(drag) = &mut self.transform_drag else {
             return;
         };
         let Some(g) = drag.gesture else {
             return;
         };
-        // The transform's centre in canvas space at press time.
-        let pivot = drag.pivot();
-        let c = [pivot[0] + g.tx0, pivot[1] + g.ty0];
-        match g.grab {
-            TransformGrab::Move => {
-                drag.set_params(
-                    g.sx0,
-                    g.sy0,
-                    g.rad0,
-                    g.tx0 + (cx - g.start[0]),
-                    g.ty0 + (cy - g.start[1]),
-                );
-            }
-            TransformGrab::Corner(_) => {
-                let v0 = [g.anchor[0] - c[0], g.anchor[1] - c[1]];
-                let v1 = [cx - c[0], cy - c[1]];
-                let (l0, l1) = (
-                    (v0[0] * v0[0] + v0[1] * v0[1]).sqrt(),
-                    (v1[0] * v1[0] + v1[1] * v1[1]).sqrt(),
-                );
-                if l0 > 1e-3 && l1 > 1e-3 {
-                    let s = (g.sx0 * l1 / l0).clamp(0.02, 100.0);
-                    let da = v1[1].atan2(v1[0]) - v0[1].atan2(v0[0]);
-                    drag.set_params(s, s, g.rad0 + da, g.tx0, g.ty0);
-                }
-            }
-            TransformGrab::Edge(i) => {
-                // The local axes of the standing rotation: right/left
-                // edges scale x, top/bottom scale y. (`sin_cos` returns
-                // (sin, cos) — destructured in that order.)
-                let (sin, cos) = g.rad0.sin_cos();
-                let axis = if i % 2 == 1 { [cos, sin] } else { [-sin, cos] };
-                let v0 = [g.anchor[0] - c[0], g.anchor[1] - c[1]];
-                let v1 = [cx - c[0], cy - c[1]];
-                let p0 = v0[0] * axis[0] + v0[1] * axis[1];
-                let p1 = v1[0] * axis[0] + v1[1] * axis[1];
-                if p0.abs() > 1e-3 {
-                    let s = (if i % 2 == 1 { g.sx0 } else { g.sy0 } * (p1 / p0)).clamp(0.02, 100.0);
-                    if i % 2 == 1 {
-                        drag.set_params(s, g.sy0, g.rad0, g.tx0, g.ty0);
-                    } else {
-                        drag.set_params(g.sx0, s, g.rad0, g.tx0, g.ty0);
-                    }
-                }
-            }
-            TransformGrab::Pivot => {
-                drag.set_pivot([cx, cy]);
-            }
-            TransformGrab::Rotate => {
-                let v0 = [g.start[0] - c[0], g.start[1] - c[1]];
-                let v1 = [cx - c[0], cy - c[1]];
-                if v0[0] * v0[0] + v0[1] * v0[1] > 1e-6 && v1[0] * v1[0] + v1[1] * v1[1] > 1e-6 {
-                    let da = v1[1].atan2(v1[0]) - v0[1].atan2(v0[0]);
-                    drag.set_params(g.sx0, g.sy0, g.rad0 + da, g.tx0, g.ty0);
-                }
-            }
-        }
+        drag.apply_gesture(&g, [cx, cy], shift, alt, keep_aspect);
     }
 }
 

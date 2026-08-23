@@ -4,10 +4,19 @@
 //! (owner 2026-08-21: "auto actions still doesn't work like scratch
 //! programming"). Steps can be added by hand from a picker of every kind,
 //! retuned in place, dragged into a new order, duplicated and deleted.
-//! The model and the three rules that carry it live in `app::actions`.
+//! The model and the four rules that carry it live in `app::actions`.
 //!
-//! Three shapes worth knowing before editing this file:
+//! Five shapes worth knowing before editing this file:
 //!
+//! * **One command bar, at the bottom, aimed at the SELECTED action** —
+//!   ● record ▶ play ⧉ duplicate 🗑 delete. They used to repeat on every
+//!   row, which put four icons of chrome beside every name in a ~200 px
+//!   palette (parity audit T4: CSP has one bar). A row now carries only
+//!   what is ABOUT that row: its run tick and its name.
+//! * **Sets live in the file, not in `App`** (see `app::actions`, rule
+//!   four). The combo asks `App::action_sets`, which reads actions.json, so
+//!   the answer is cached in egui's temp store and re-asked only after a set
+//!   verb — this palette is the only thing that moves sets.
 //! * **A step is a Scratch BLOCK**, not a text row: a rounded frame filled
 //!   with its category's hue, its parameters as live widgets inside the
 //!   frame, and its on/off switch showing as the block going ghost-grey.
@@ -40,6 +49,17 @@ enum Pending {
     Record(usize),
     Delete(usize),
     Duplicate(usize),
+}
+
+/// Deferred set verbs. Same reason as [`Pending`], one level up: every one
+/// of them rewrites `app.actions` from the file, so none may run while the
+/// combo that raised it is still being laid out.
+enum SetOp {
+    Switch(String),
+    New(String),
+    Rename(String),
+    Delete,
+    Run,
 }
 
 /// Deferred step-list edits, applied to the open action after its rows.
@@ -124,8 +144,197 @@ fn block_frame(th: &Theme, cat: StepCategory, on: bool) -> egui::Frame {
         .inner_margin(egui::Margin::symmetric(5, 2))
 }
 
+/// The set combo and its verbs — CSP's `Default ▾` at the top of the
+/// palette. The sets other than the open one are on disk (`app::actions`,
+/// rule four), so the names are asked for once and cached in egui's temp
+/// store; every verb here clears the cache on its way out.
+fn set_row(ui: &mut egui::Ui, app: &mut App) {
+    let cache = egui::Id::new("mn.action.sets");
+    let draft_id = egui::Id::new("mn.action.set.draft");
+    let (names, current) = match ui.data(|d| d.get_temp::<(Vec<String>, String)>(cache)) {
+        Some(v) => v,
+        None => {
+            let v = app.action_sets();
+            ui.data_mut(|d| d.insert_temp(cache, v.clone()));
+            v
+        }
+    };
+    let mut op: Option<SetOp> = None;
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new("set")
+                    .color(theme::c().text_weak)
+                    .size(10.0),
+            )
+            .selectable(false),
+        );
+        egui::ComboBox::from_id_salt("mn.action.set")
+            .selected_text(current.as_str())
+            .width(120.0)
+            .show_ui(ui, |ui| {
+                for n in &names {
+                    if ui.selectable_label(*n == current, n).clicked() && *n != current {
+                        op = Some(SetOp::Switch(n.clone()));
+                    }
+                }
+                ui.separator();
+                // The two naming verbs open a draft row under the combo
+                // rather than a dialog — the same inline idiom the action
+                // rows rename with.
+                if ui.button("New set…").clicked() {
+                    ui.data_mut(|d| d.insert_temp(draft_id, (true, String::new())));
+                }
+                if ui.button("Rename set…").clicked() {
+                    ui.data_mut(|d| d.insert_temp(draft_id, (false, current.clone())));
+                }
+                if ui
+                    .add_enabled(names.len() > 1, egui::Button::new("Delete set"))
+                    .on_disabled_hover_text("the last set stays — it is where new actions go")
+                    .clicked()
+                {
+                    op = Some(SetOp::Delete);
+                }
+            });
+        if icon_btn_tint(
+            ui,
+            Icon::Play,
+            BTN,
+            false,
+            !app.actions.is_empty(),
+            "run every ticked action in this set, top to bottom — one undo takes it all back",
+            Some(theme::c().hue_create),
+        )
+        .clicked()
+        {
+            op = Some(SetOp::Run);
+        }
+    });
+    if let Some((new_set, mut text)) = ui.data(|d| d.get_temp::<(bool, String)>(draft_id)) {
+        let resp = ui
+            .horizontal(|ui| {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(if new_set { "new set" } else { "rename" })
+                            .color(theme::c().text_weak)
+                            .size(10.0),
+                    )
+                    .selectable(false),
+                );
+                ui.text_edit_singleline(&mut text)
+            })
+            .inner;
+        let (enter, escape) = ui.input(|inp| {
+            (
+                inp.key_pressed(egui::Key::Enter),
+                inp.key_pressed(egui::Key::Escape),
+            )
+        });
+        if enter {
+            op = Some(if new_set {
+                SetOp::New(text)
+            } else {
+                SetOp::Rename(text)
+            });
+            ui.data_mut(|d| d.remove::<(bool, String)>(draft_id));
+        } else if escape || resp.lost_focus() {
+            ui.data_mut(|d| d.remove::<(bool, String)>(draft_id));
+        } else {
+            resp.request_focus();
+            ui.data_mut(|d| d.insert_temp(draft_id, (new_set, text)));
+        }
+    }
+    if let Some(op) = op {
+        match op {
+            SetOp::Switch(n) => app.action_set_switch(&n),
+            SetOp::New(n) => app.action_set_new(n.trim()),
+            SetOp::Rename(n) => app.action_set_rename(n.trim()),
+            SetOp::Delete => app.action_set_delete(),
+            SetOp::Run => app.action_run_set(),
+        }
+        // The list may have moved under us — ask the file again next frame.
+        ui.data_mut(|d| d.remove::<(Vec<String>, String)>(cache));
+    }
+}
+
+/// The one command bar, at the foot of the palette: the four verbs that act
+/// on the SELECTED action, greyed when there is nothing to aim them at. They
+/// used to repeat on every row — four icons of chrome beside every name, in
+/// a palette that docks at ~200 px (parity audit T4).
+fn command_bar(ui: &mut egui::Ui, app: &App) -> Option<Pending> {
+    let mut pending: Option<Pending> = None;
+    let sel = app.action_selected.filter(|&i| i < app.actions.len());
+    // Everything but delete needs an action this build can read: the rest
+    // would write over a verbatim-carried copy (`Action::is_readable`).
+    let live = sel.is_some_and(|i| app.actions[i].is_readable());
+    let recording = matches!((app.action_recording, sel), (Some(r), Some(s)) if r == s);
+    ui.horizontal(|ui| {
+        // The two transport buttons carry colour, the two edit buttons do
+        // not: run is the green "makes something happen" hue, record and
+        // stop are the `rec` red that means armed everywhere in this app.
+        if icon_btn_tint(
+            ui,
+            if recording { Icon::Stop } else { Icon::Record },
+            BTN,
+            recording,
+            live,
+            if recording {
+                "stop recording"
+            } else {
+                "record layer commands into the selected action"
+            },
+            Some(theme::c().rec),
+        )
+        .clicked()
+        {
+            pending = sel.map(Pending::Record);
+        }
+        if icon_btn_tint(
+            ui,
+            Icon::Play,
+            BTN,
+            false,
+            live,
+            "run the selected action — one undo takes the whole run back",
+            Some(theme::c().hue_create),
+        )
+        .clicked()
+        {
+            pending = sel.map(Pending::Run);
+        }
+        if icon_btn(ui, Icon::Duplicate, BTN, false, live, "duplicate the selected action").clicked()
+        {
+            pending = sel.map(Pending::Duplicate);
+        }
+        if icon_btn(
+            ui,
+            Icon::Trash,
+            BTN,
+            false,
+            sel.is_some(),
+            "delete the selected action",
+        )
+        .clicked()
+        {
+            pending = sel.map(Pending::Delete);
+        }
+        if sel.is_none() {
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new("select an action")
+                        .color(theme::c().text_weak)
+                        .size(10.0),
+                )
+                .selectable(false),
+            );
+        }
+    });
+    pending
+}
+
 pub fn actions_palette(ui: &mut egui::Ui, app: &mut App) {
     let mut dirty = false;
+    set_row(ui, app);
     ui.horizontal(|ui| {
         if ui.button("＋ action").clicked() {
             app.actions
@@ -143,41 +352,56 @@ pub fn actions_palette(ui: &mut egui::Ui, app: &mut App) {
     });
     ui.separator();
     if app.actions.is_empty() {
-        ui.weak("no actions yet — ＋ action, then ＋ step (or press ● and do things to layers)");
+        ui.weak(
+            "no actions in this set yet — ＋ action, then ＋ step (or select it and press ● \
+             in the bar below, and do things to layers)",
+        );
         return;
     }
     let mut pending: Option<Pending> = None;
     // (name, this build can read it). An action carried verbatim out of a
-    // newer version's file gets one greyed row and a delete button — see
-    // `Action::is_readable`.
+    // newer version's file gets one greyed row that can be selected and
+    // binned, and nothing else — see `Action::is_readable`.
     let rows: Vec<(String, bool)> = app
         .actions
         .iter()
         .map(|a| (a.name.clone(), a.is_readable()))
         .collect();
-    egui::ScrollArea::vertical().show(ui, |ui| {
+    // Room kept for the command bar: the scroll area would otherwise eat the
+    // whole docked height and push the four verbs off the bottom edge.
+    let bar = BTN + 2.0 * ui.spacing().item_spacing.y + 6.0;
+    let room = (ui.available_height() - bar).max(64.0);
+    egui::ScrollArea::vertical().max_height(room).show(ui, |ui| {
         for (i, (name, readable)) in rows.iter().enumerate() {
             let readable = *readable;
-            let selected = readable && app.action_selected == Some(i);
+            let selected = app.action_selected == Some(i);
             let recording = app.action_recording == Some(i);
 
             if !readable {
                 ui.horizontal(|ui| {
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(format!("{name}  ·  newer version"))
-                                .color(theme::c().text_weak)
-                                .italics(),
+                    // No tick: an action this build cannot read is not going
+                    // to be run by a set either. The space keeps its name
+                    // aligned with the rows above and below it.
+                    ui.add_space(BTN + 4.0);
+                    let r = ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new(format!("{name}  ·  newer version"))
+                                    .color(theme::c().text_weak)
+                                    .italics(),
+                            )
+                            .selected(selected),
                         )
-                        .selectable(false),
-                    )
-                    .on_hover_text(
-                        "this action uses a step this build does not know. It is kept \
-                         exactly as it was found and written back untouched — open the \
-                         file in a newer MangaNakama to edit it.",
-                    );
-                    if icon_btn(ui, Icon::Trash, BTN, false, true, "delete action").clicked() {
-                        pending = Some(Pending::Delete(i));
+                        .on_hover_text(
+                            "this action uses a step this build does not know. It is kept \
+                             exactly as it was found and written back untouched — open the \
+                             file in a newer MangaNakama to edit it, or select it and use \
+                             the bin below to drop it.",
+                        );
+                    if r.clicked() {
+                        app.action_selected = if selected { None } else { Some(i) };
+                        app.action_picker = None;
+                        app.action_step_edit = None;
                     }
                 });
                 continue;
@@ -203,9 +427,27 @@ pub fn actions_palette(ui: &mut egui::Ui, app: &mut App) {
             }
 
             ui.horizontal(|ui| {
+                // CSP's first per-action checkbox, and the only per-row
+                // control left: is this action IN when the set runs (the ▶
+                // beside the set combo)? CSP's second checkbox — show the
+                // step's settings dialog while replaying — has nothing to
+                // switch here: no step kind opens a dialog, so the box would
+                // be a dead control on every row.
+                let mut run = app.actions[i].run;
+                if ui
+                    .checkbox(&mut run, "")
+                    .on_hover_text("include this action when the whole set runs")
+                    .changed()
+                {
+                    app.actions[i].run = run;
+                    dirty = true;
+                }
                 let r = ui
                     .add(egui::Button::new(name).selected(selected))
-                    .on_hover_text("click: show steps · double-click: rename");
+                    .on_hover_text(
+                        "click: select, and show its steps · double-click: rename\n\
+                         the bar at the bottom acts on the selected action",
+                    );
                 if r.double_clicked() {
                     app.action_renaming = Some((i, name.clone()));
                 } else if r.clicked() {
@@ -213,45 +455,10 @@ pub fn actions_palette(ui: &mut egui::Ui, app: &mut App) {
                     app.action_picker = None;
                     app.action_step_edit = None;
                 }
-                // The two transport buttons carry colour, the two edit
-                // buttons below them do not: run is the green "makes
-                // something happen" hue, record and stop are the `rec` red
-                // that means armed everywhere in this app.
-                if icon_btn_tint(
-                    ui,
-                    Icon::Play,
-                    BTN,
-                    false,
-                    true,
-                    "run — one undo takes the whole run back",
-                    Some(theme::c().hue_create),
-                )
-                .clicked()
-                {
-                    pending = Some(Pending::Run(i));
-                }
-                if icon_btn_tint(
-                    ui,
-                    if recording { Icon::Stop } else { Icon::Record },
-                    BTN,
-                    recording,
-                    true,
-                    if recording {
-                        "stop recording"
-                    } else {
-                        "record layer commands into this action"
-                    },
-                    Some(theme::c().rec),
-                )
-                .clicked()
-                {
-                    pending = Some(Pending::Record(i));
-                }
-                if icon_btn(ui, Icon::Duplicate, BTN, false, true, "duplicate action").clicked() {
-                    pending = Some(Pending::Duplicate(i));
-                }
-                if icon_btn(ui, Icon::Trash, BTN, false, true, "delete action").clicked() {
-                    pending = Some(Pending::Delete(i));
+                if recording {
+                    let (r, _) =
+                        ui.allocate_exact_size(egui::vec2(9.0, 9.0), egui::Sense::hover());
+                    super::icons::paint(ui.painter(), r, Icon::Record, theme::c().rec);
                 }
             });
 
@@ -260,6 +467,10 @@ pub fn actions_palette(ui: &mut egui::Ui, app: &mut App) {
             }
         }
     });
+    ui.separator();
+    if let Some(p) = command_bar(ui, app) {
+        pending = Some(p);
+    }
 
     match pending {
         Some(Pending::Run(i)) => app.push_cmd(AppCmd::ActionRun(i)),
@@ -465,7 +676,7 @@ fn action_steps(ui: &mut egui::Ui, app: &mut App, i: usize, recording: bool) -> 
             ui.weak(if recording {
                 "recording — layer commands land here"
             } else {
-                "empty — ＋ step, or press ● and do things to layers"
+                "empty — ＋ step, or press ● below and do things to layers"
             });
         });
     }

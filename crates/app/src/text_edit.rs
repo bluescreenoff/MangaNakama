@@ -28,10 +28,6 @@ use crate::cmd::{AppCmd, Tool};
 use mn_core::LayerKind;
 use mn_core::text::{self as ct, RenderedText, StyleFlag, TextHandle, TextItem, TextSet};
 
-/// How far (px, canvas at zoom 1 = screen-scaled by callers) the rotate
-/// lollipop floats above the box; screen-constant via /zoom at call sites.
-pub const ROTATE_OFFSET_SCREEN: f32 = 22.0;
-
 pub struct TextEditState {
     pub layer: usize,
     pub index: usize,
@@ -43,6 +39,13 @@ pub struct TextEditState {
     pub anchor: u32,
     /// Cross-axis goal for repeated up/down (column) motion.
     pub goal: Option<f32>,
+    /// The caret trails the character before it — set at a SOFT wrap, where
+    /// one UTF-16 position is both the end of the line that wrapped and the
+    /// start of the next. End, a click past the last glyph, and an up/down
+    /// landing that clamped past a shorter line's end all mean "the end of
+    /// the line I can see"; everything else clears it. See
+    /// `TextEngine::caret`.
+    pub affinity: bool,
     /// This session created the layer itself (an empty commit removes it).
     pub new_layer: bool,
     /// UTF-16 high surrogate waiting for its pair (WM_CHAR arrives in halves).
@@ -51,6 +54,9 @@ pub struct TextEditState {
     /// the caret to put back. Oldest first; capped, because a session is not
     /// a place to keep an unbounded history.
     pub undo: Vec<(TextItem, u32)>,
+    /// The other half of it: what Ctrl+Z took back, waiting for Ctrl+Shift+Z
+    /// (or Ctrl+Y). Any fresh edit throws it away, as everywhere else.
+    pub redo: Vec<(TextItem, u32)>,
     /// True while the last mutation was plain typing, so a run of characters
     /// collapses into ONE undo step. Anything else — a space, a newline, a
     /// deletion, a style or furigana change — ends the run, which is what
@@ -60,6 +66,21 @@ pub struct TextEditState {
     /// DRAG gets one pre-image instead of one per frame (`typing_run` for
     /// sliders). Any other edit clears it, the same way it ends a typing run.
     pub bar_run: bool,
+}
+
+/// Whether `want`ed trailing affinity is worth keeping at `pos`.
+///
+/// It only means anything at a SOFT wrap. At a hard break the position is
+/// unambiguous, and asking DirectWrite for the trailing edge of the newline
+/// draws the caret at the end of the line ABOVE the one it belongs to — the
+/// same bug affinity exists to fix, pointed the other way. So: no newline
+/// either side of the caret.
+fn wrap_affinity(text: &str, pos: u32, want: bool) -> bool {
+    if !want || pos == 0 {
+        return false;
+    }
+    let unit = |at: u32| text.encode_utf16().nth(at as usize);
+    unit(pos - 1) != Some(b'\n' as u16) && unit(pos) != Some(b'\n' as u16)
 }
 
 impl TextEditState {
@@ -75,7 +96,11 @@ impl TextEditState {
 /// T-tool press gesture: dragging a selection inside the edited item, or
 /// dragging out a fixed wrap box on empty canvas.
 pub enum TextGesture {
-    Select,
+    /// `clicks` is the click-run this drag started from (1 = plain, 2 =
+    /// double, 3+ = triple), and `base` what that press selected — a
+    /// double-click drag extends by whole words, a triple-click drag by whole
+    /// lines, and neither collapses when the mouse twitches.
+    Select { clicks: u8, base: (u32, u32) },
     Box { start: (f32, f32), cur: (f32, f32) },
 }
 
@@ -303,6 +328,9 @@ impl App {
         let Some(ed) = self.text_edit.as_mut() else {
             return;
         };
+        // A fresh edit is a new future: whatever Ctrl+Z had set aside for
+        // Ctrl+Shift+Z is unreachable now.
+        ed.redo.clear();
         if typing && ed.typing_run {
             return;
         }
@@ -333,16 +361,41 @@ impl App {
     /// the whole text box — the right LAST step, and it used to be the only
     /// one).
     pub fn text_undo_step(&mut self) -> bool {
+        self.text_history_step(false)
+    }
+
+    /// The other direction (Ctrl+Shift+Z / Ctrl+Y). False when there is
+    /// nothing to redo — and unlike undo there is no fall-through, because
+    /// committing the session would have cleared the document's redo stack
+    /// anyway: there is nothing behind this one.
+    pub fn text_redo_step(&mut self) -> bool {
+        self.text_history_step(true)
+    }
+
+    /// One step in either direction: pop the far stack, push what is on
+    /// screen onto the near one.
+    fn text_history_step(&mut self, redo: bool) -> bool {
+        let Some(cur) = self.edited_item().cloned() else {
+            return false;
+        };
         let Some(ed) = self.text_edit.as_mut() else {
             return false;
         };
-        let Some((item, caret)) = ed.undo.pop() else {
+        let from = if redo { &mut ed.redo } else { &mut ed.undo };
+        let Some((item, caret)) = from.pop() else {
             return false;
         };
+        let here = ed.caret;
+        if redo {
+            ed.undo.push((cur, here));
+        } else {
+            ed.redo.push((cur, here));
+        }
         ed.typing_run = false;
         ed.caret = caret;
         ed.anchor = caret;
         ed.goal = None;
+        ed.affinity = false;
         self.with_edited_item(move |it| *it = item);
         true
     }
@@ -406,13 +459,14 @@ impl App {
             return;
         };
         let dpi = self.doc_dpi();
-        let caret = match (at, self.text_engine.as_ref()) {
+        let (caret, trailing) = match (at, self.text_engine.as_ref()) {
             (Some(p), Some(e)) => {
                 let l = item.to_local(p);
-                e.hit_test_point(item, dpi, l).unwrap_or(0)
+                e.hit_test_point(item, dpi, l).unwrap_or((0, false))
             }
-            _ => item.utf16_len(),
+            _ => (item.utf16_len(), false),
         };
+        let affinity = wrap_affinity(&item.text, caret, trailing);
         self.text_edit = Some(TextEditState {
             layer,
             index,
@@ -420,9 +474,11 @@ impl App {
             caret,
             anchor: caret,
             goal: None,
+            affinity,
             new_layer: false,
             pending_surrogate: None,
             undo: Vec::new(),
+            redo: Vec::new(),
             typing_run: false,
             bar_run: false,
         });
@@ -517,9 +573,11 @@ impl App {
             caret: 0,
             anchor: 0,
             goal: None,
+            affinity: false,
             new_layer,
             pending_surrogate: None,
             undo: Vec::new(),
+            redo: Vec::new(),
             typing_run: false,
             bar_run: false,
         });
@@ -597,23 +655,57 @@ impl App {
 
     // --- T-tool pointer gestures -------------------------------------------
 
-    pub fn text_tool_down(&mut self, cx: f32, cy: f32, shift: bool) {
+    /// `clicks` is the click-run count from `App::click_run` — 2 selects the
+    /// word under the press, 3 the visual line (the Tool Property panel has
+    /// been telling people to "double-click the text to set furigana" since
+    /// the furigana field existed, and until now nothing happened).
+    pub fn text_tool_down(&mut self, cx: f32, cy: f32, shift: bool, clicks: u8) {
         // Click inside the edited box: move the caret (Shift extends).
         if let Some(item) = self.edited_item() {
             if item.contains([cx, cy], 2.0) {
                 let dpi = self.doc_dpi();
                 let l = item.to_local([cx, cy]);
-                if let Some(e) = self.text_engine.as_ref() {
-                    if let Ok(pos) = e.hit_test_point(item, dpi, l) {
-                        let ed = self.text_edit.as_mut().unwrap();
-                        ed.caret = pos;
-                        if !shift {
-                            ed.anchor = pos;
+                // Everything the engine has to answer while `item` is still
+                // borrowed, in one go.
+                let hit = self.text_engine.as_ref().and_then(|e| {
+                    let (pos, trailing) = e.hit_test_point(item, dpi, l).ok()?;
+                    // A trailing hit means the cursor was on the RIGHT half of
+                    // the character before `pos` — that character is the one
+                    // the user pointed at, and the one a word or line select
+                    // has to be asked about. (At the end of a wrapped line the
+                    // difference is a whole line.)
+                    let ix = if trailing { pos.saturating_sub(1) } else { pos };
+                    let run = match clicks {
+                        2 => Some(ct::word_range(&item.text, ix)),
+                        // Visual line, so a wrapped line selects what the eye
+                        // sees — and a vertical column selects the column.
+                        n if n >= 3 => e.line_bounds(item, dpi, ix).ok(),
+                        _ => None,
+                    };
+                    Some((pos, wrap_affinity(&item.text, pos, trailing), run))
+                });
+                let mut base = (0, 0);
+                if let Some((pos, affinity, run)) = hit {
+                    let ed = self.text_edit.as_mut().unwrap();
+                    match run {
+                        Some((a, b)) => {
+                            ed.anchor = a;
+                            ed.caret = b;
+                            ed.affinity = false;
+                            base = (a, b);
                         }
-                        ed.goal = None;
+                        None => {
+                            ed.caret = pos;
+                            if !shift {
+                                ed.anchor = pos;
+                            }
+                            ed.affinity = affinity;
+                            base = (ed.anchor, pos);
+                        }
                     }
+                    ed.goal = None;
                 }
-                self.text_gesture = Some(TextGesture::Select);
+                self.text_gesture = Some(TextGesture::Select { clicks, base });
                 self.mark_dirty();
                 return;
             }
@@ -628,7 +720,11 @@ impl App {
             if let Some(ts) = l.texts() {
                 if let Some(ti) = ts.text_at([cx, cy], 2.0) {
                     self.start_text_edit(li, ti, Some([cx, cy]));
-                    self.text_gesture = Some(TextGesture::Select);
+                    let c = self.text_edit.as_ref().map(|ed| ed.caret).unwrap_or(0);
+                    self.text_gesture = Some(TextGesture::Select {
+                        clicks: 1,
+                        base: (c, c),
+                    });
                     return;
                 }
             }
@@ -647,18 +743,44 @@ impl App {
                 *cur = (cx, cy);
                 self.mark_dirty();
             }
-            Some(TextGesture::Select) => {
+            Some(TextGesture::Select { clicks, base }) => {
+                let (clicks, base) = (*clicks, *base);
                 let Some(item) = self.edited_item() else {
                     return;
                 };
                 let dpi = self.doc_dpi();
                 let l = item.to_local([cx, cy]);
-                if let Some(e) = self.text_engine.as_ref() {
-                    if let Ok(pos) = e.hit_test_point(item, dpi, l) {
-                        if let Some(ed) = self.text_edit.as_mut() {
-                            ed.caret = pos;
-                            ed.goal = None;
+                let hit = self.text_engine.as_ref().and_then(|e| {
+                    let (pos, trailing) = e.hit_test_point(item, dpi, l).ok()?;
+                    // A drag that began as a double/triple click keeps
+                    // selecting in that unit, the way it does everywhere else.
+                    // Same trailing-half rule as the press.
+                    let ix = if trailing { pos.saturating_sub(1) } else { pos };
+                    let run = match clicks {
+                        2 => Some(ct::word_range(&item.text, ix)),
+                        n if n >= 3 => e.line_bounds(item, dpi, ix).ok(),
+                        _ => None,
+                    };
+                    Some((pos, wrap_affinity(&item.text, pos, trailing), run))
+                });
+                if let Some((pos, affinity, run)) = hit {
+                    if let Some(ed) = self.text_edit.as_mut() {
+                        match run {
+                            Some((a, b)) => {
+                                // The caret leads the drag; the anchor sits at
+                                // the far edge of everything covered so far.
+                                let (lo, hi) = (base.0.min(a), base.1.max(b));
+                                let forward = pos >= base.1;
+                                ed.anchor = if forward { lo } else { hi };
+                                ed.caret = if forward { hi } else { lo };
+                                ed.affinity = false;
+                            }
+                            None => {
+                                ed.caret = pos;
+                                ed.affinity = affinity;
+                            }
                         }
+                        ed.goal = None;
                     }
                 }
                 self.mark_dirty();
@@ -680,7 +802,7 @@ impl App {
                     self.start_new_text([start.0, start.1], None);
                 }
             }
-            Some(TextGesture::Select) | None => {}
+            Some(TextGesture::Select { .. }) | None => {}
         }
     }
 
@@ -735,6 +857,7 @@ impl App {
             ed.caret = a + add;
             ed.anchor = ed.caret;
             ed.goal = None;
+            ed.affinity = false;
         }
     }
 
@@ -764,15 +887,23 @@ impl App {
             ed.caret = a.min(b);
             ed.anchor = ed.caret;
             ed.goal = None;
+            ed.affinity = false;
         }
     }
 
+    /// Put the caret at `pos` and forget where it came from. Home/End/Ctrl+A
+    /// used to leave the old column goal standing, so the next Up/Down jumped
+    /// the caret back to the column it had been in three keys ago; the same
+    /// went for affinity. Motions that DO mean something by them —
+    /// `caret_line`, End — set them again after calling this.
     fn move_caret(&mut self, pos: u32, shift: bool) {
         if let Some(ed) = self.text_edit.as_mut() {
             ed.caret = pos;
             if !shift {
                 ed.anchor = pos;
             }
+            ed.goal = None;
+            ed.affinity = false;
         }
         self.mark_dirty();
     }
@@ -799,9 +930,6 @@ impl App {
             }
         };
         self.move_caret(pos, shift);
-        if let Some(ed) = self.text_edit.as_mut() {
-            ed.goal = None;
-        }
     }
 
     /// Caret motion across lines/columns: −1 = previous line, +1 = next.
@@ -811,6 +939,7 @@ impl App {
         };
         let goal = ed.goal;
         let caret = ed.caret;
+        let affinity = ed.affinity;
         let dpi = self.doc_dpi();
         let Some(item) = self.edited_item() else {
             return;
@@ -818,11 +947,22 @@ impl App {
         let Some(e) = self.text_engine.as_ref() else {
             return;
         };
-        if let Ok((pos, g)) = e.line_move(item, dpi, caret, dir, goal) {
-            self.move_caret(pos, shift);
-            if let Some(ed) = self.text_edit.as_mut() {
-                ed.goal = Some(g);
-            }
+        let Ok((pos, g, trailing)) = e.line_move(item, dpi, caret, affinity, dir, goal) else {
+            return;
+        };
+        // Up on the FIRST line goes to the start of the text, Down on the last
+        // to its end — every editor does this, and doing nothing instead reads
+        // as a dead key.
+        if pos == caret {
+            let end = if dir < 0 { 0 } else { item.utf16_len() };
+            self.move_caret(end, shift);
+            return;
+        }
+        let land = wrap_affinity(&item.text, pos, trailing);
+        self.move_caret(pos, shift);
+        if let Some(ed) = self.text_edit.as_mut() {
+            ed.goal = Some(g);
+            ed.affinity = land;
         }
     }
 
@@ -1055,13 +1195,26 @@ impl App {
                         _ => len,
                     }
                 };
+                // End means the end of the line you are LOOKING at. Where the
+                // line wrapped, that position is also the start of the next
+                // one, and without the affinity the caret drew itself down
+                // there (owner-visible: press End, caret jumps a line).
+                let land = self
+                    .edited_item()
+                    .map(|i| !ctrl && wrap_affinity(&i.text, pos, true))
+                    .unwrap_or(false);
                 self.move_caret(pos, shift);
+                if let Some(ed) = self.text_edit.as_mut() {
+                    ed.affinity = land;
+                }
             }
             0x41 if ctrl => {
                 // Ctrl+A
                 if let Some(ed) = self.text_edit.as_mut() {
                     ed.anchor = 0;
                     ed.caret = len;
+                    ed.goal = None;
+                    ed.affinity = false;
                 }
                 self.mark_dirty();
             }
@@ -1090,6 +1243,18 @@ impl App {
             0x42 if ctrl => self.toggle_style(StyleFlag::Bold), // Ctrl+B
             0x49 if ctrl => self.toggle_style(StyleFlag::Italic), // Ctrl+I
             0x55 if ctrl => self.toggle_style(StyleFlag::Underline), // Ctrl+U
+            0x5A if ctrl && shift => {
+                // Ctrl+Shift+Z REDOES. It used to fall into the arm below and
+                // undo — the one thing it must never do. Nothing to redo is a
+                // no-op, not a fall-through: committing the session to reach
+                // the document's redo stack would have cleared that stack.
+                self.text_redo_step();
+            }
+            0x59 if ctrl => {
+                // Ctrl+Y, the same thing under the other habit. It used to be
+                // swallowed silently.
+                self.text_redo_step();
+            }
             0x5A if ctrl => {
                 // Ctrl+Z steps back through THIS session's edits first
                 // (owner: "Ctrl+Z seems to remove an entire text rather than
@@ -1116,11 +1281,31 @@ impl App {
 
     // --- Object tool -------------------------------------------------------
 
+    /// Object-tool press with the click-run count: a DOUBLE-click on a text
+    /// box opens it for editing (CSP, and the only way most people ever get
+    /// into a text box), a single one selects it for dragging. Returns true
+    /// when a text item claimed the press.
+    pub fn text_object_press(&mut self, cx: f32, cy: f32, clicks: u8) -> bool {
+        if !self.text_object_hit(cx, cy) {
+            return false;
+        }
+        if clicks >= 2 && let Some((li, ti)) = self.text_sel {
+            // The press had already armed a move-drag; editing takes it back.
+            self.text_obj_drag = None;
+            self.object_pick = None;
+            self.start_text_edit(li, ti, Some([cx, cy]));
+            // Land in the Text tool, so the next click is a caret and not a
+            // drag on the box you are typing in.
+            self.push_cmd(AppCmd::SetTool(Tool::Text));
+        }
+        true
+    }
+
     /// Object-tool press: text boxes sit above balloons, so try them first.
     /// Returns true when a text item claimed the press.
     pub fn text_object_hit(&mut self, cx: f32, cy: f32) -> bool {
         let tol = (10.0 / self.viewport.zoom.max(0.01)).max(2.0);
-        let rot = ROTATE_OFFSET_SCREEN / self.viewport.zoom.max(0.01);
+        let rot = crate::app::ROTATE_STALK_SCREEN / self.viewport.zoom.max(0.01);
         for li in (0..self.doc.layers.len()).rev() {
             let l = &self.doc.layers[li];
             if !l.visible {
@@ -1213,7 +1398,7 @@ impl App {
         let item = self.edited_item()?;
         let e = self.text_engine.as_ref()?;
         let dpi = self.doc_dpi();
-        let c = e.caret(item, dpi, ed.caret).ok()?;
+        let c = e.caret(item, dpi, ed.caret, ed.affinity).ok()?;
         // The caret crosses the character cell: vertical bar for horizontal
         // text, horizontal bar (across the column) for vertical text.
         let caret = if item.vertical {
@@ -1648,5 +1833,315 @@ mod in_editor_undo_tests {
 
         assert!(app.text_key(0x5A, true, false));
         assert_eq!(typed(&app), "", "the very first press undid the typing");
+    }
+
+    // --- caret round (2026-08-23): selection, affinity, redo ---------------
+
+    /// Canvas point in the middle of the character at UTF-16 index `at` — a
+    /// click aimed at a letter rather than at a coordinate somebody guessed.
+    /// The CELL centre, so it reads the same in a vertical column.
+    fn point_at(app: &App, at: u32) -> (f32, f32) {
+        let item = app.edited_item().expect("an edited item");
+        let e = app.text_engine.as_ref().expect("the engine");
+        let dpi = app.doc_dpi();
+        let a = e.caret(item, dpi, at, false).unwrap();
+        let b = e.caret(item, dpi, at + 1, false).unwrap();
+        // Halfway between this caret and the next one is the middle of the
+        // glyph, along whichever axis the text reads on.
+        let l = if item.vertical {
+            [
+                a.cell[0] + a.cell[2] * 0.5,
+                (a.point[1] + b.point[1]) * 0.5,
+            ]
+        } else {
+            [
+                (a.point[0] + b.point[0]) * 0.5,
+                a.cell[1] + a.cell[3] * 0.5,
+            ]
+        };
+        let p = item.to_canvas(l);
+        (p[0], p[1])
+    }
+
+    /// `text_char` drops control characters (Enter is a VK, not a WM_CHAR),
+    /// so a test string with line breaks in it has to press the key.
+    fn type_lines(app: &mut App, s: &str) {
+        for (i, line) in s.split('\n').enumerate() {
+            if i > 0 {
+                app.text_key(0x0D, false, false);
+            }
+            type_str(app, line);
+        }
+    }
+
+    fn sel(app: &App) -> (u32, u32) {
+        app.text_edit.as_ref().expect("a session").selection()
+    }
+
+    /// The app boots into VERTICAL text at whatever size the prefs file last
+    /// held — it is a manga app, and `text_size_pt` comes off disk. A test
+    /// about lines and columns pins both or it reads the machine it ran on.
+    fn horizontal(app: &mut App) {
+        app.text_vertical = false;
+        app.text_size_pt = 24.0;
+    }
+
+    /// A narrow fixed box, so the text WRAPS and every soft-wrap question has
+    /// something to be asked about.
+    fn wrapped(app: &mut App, text: &str) -> (u32, u32) {
+        horizontal(app);
+        app.start_new_text([200.0, 200.0], Some([120.0, 300.0]));
+        type_str(app, text);
+        let item = app.edited_item().expect("an edited item");
+        let bounds = app
+            .text_engine
+            .as_ref()
+            .unwrap()
+            .line_bounds(item, app.doc_dpi(), 0)
+            .unwrap();
+        assert!(
+            bounds.1 > 0 && bounds.1 < item.utf16_len(),
+            "the string wrapped: {bounds:?} of {}",
+            item.utf16_len()
+        );
+        bounds
+    }
+
+    /// The Tool Property panel has been saying "double-click the text" since
+    /// furigana existed; the press did nothing, because nothing counted
+    /// clicks. Two selects the word under the cursor, three the visual line.
+    #[test]
+    fn double_click_selects_a_word_and_triple_click_the_visual_line() {
+        let Some(mut app) = headless() else {
+            println!("[test] SKIP: no usable adapter");
+            return;
+        };
+        horizontal(&mut app);
+        app.start_new_text([300.0, 300.0], None);
+        type_str(&mut app, "hello world");
+        let (x, y) = point_at(&app, 8); // inside "world"
+        app.text_tool_down(x, y, false, 2);
+        assert_eq!(sel(&app), (6, 11), "the word, and not the space before it");
+
+        // Dragging on from a double-click keeps taking WHOLE words — and a
+        // twitch of the mouse no longer collapses the selection to a caret.
+        let (bx, by) = point_at(&app, 1); // back into "hello"
+        app.text_tool_move(bx, by);
+        assert_eq!(sel(&app), (0, 11), "both words, whole");
+        app.text_tool_up(bx, by);
+
+        // Japanese: a script change is a word edge, so 漢字 / かな / ABC each
+        // come out on their own.
+        horizontal(&mut app);
+        app.start_new_text([300.0, 500.0], None);
+        type_str(&mut app, "漢字かなABC");
+        let (x, y) = point_at(&app, 0);
+        app.text_tool_down(x, y, false, 2);
+        assert_eq!(sel(&app), (0, 2), "漢字");
+        let (x, y) = point_at(&app, 3);
+        app.text_tool_down(x, y, false, 2);
+        assert_eq!(sel(&app), (2, 4), "かな");
+        let (x, y) = point_at(&app, 5);
+        app.text_tool_down(x, y, false, 2);
+        assert_eq!(sel(&app), (4, 7), "ABC");
+
+        // Three clicks take the VISUAL line — the wrapped part, not the whole
+        // string typed without a newline in it.
+        let (a, b) = wrapped(&mut app, "aaaa bbbb cccc dddd");
+        let (x, y) = point_at(&app, 1);
+        app.text_tool_down(x, y, false, 3);
+        assert_eq!(sel(&app), (a, b), "the first visual line");
+        assert!(
+            b < app.edited_item().unwrap().utf16_len(),
+            "and there is more text under it"
+        );
+    }
+
+    /// Vertical text lays lines out as columns; the same two presses have to
+    /// mean the same two things.
+    #[test]
+    fn word_and_line_select_work_in_a_vertical_column() {
+        let Some(mut app) = headless() else {
+            println!("[test] SKIP: no usable adapter");
+            return;
+        };
+        app.text_vertical = true;
+        app.start_new_text([400.0, 200.0], Some([300.0, 120.0]));
+        type_str(&mut app, "漢字かなカナあいうえお");
+        let (x, y) = point_at(&app, 0);
+        app.text_tool_down(x, y, false, 2);
+        assert_eq!(sel(&app), (0, 2), "漢字, read down the column");
+
+        let item = app.edited_item().expect("an edited item");
+        let (a, b) = app
+            .text_engine
+            .as_ref()
+            .unwrap()
+            .line_bounds(item, app.doc_dpi(), 0)
+            .unwrap();
+        assert!(b < item.utf16_len(), "the column wrapped: {b}");
+        let (x, y) = point_at(&app, 0);
+        app.text_tool_down(x, y, false, 3);
+        assert_eq!(sel(&app), (a, b), "the whole first column");
+    }
+
+    /// P0. End on a wrapped line put the caret at the START OF THE NEXT LINE
+    /// — the same UTF-16 position, the wrong place on the page. Asserted on
+    /// the overlay geometry, because that is what the owner sees.
+    #[test]
+    fn end_on_a_wrapped_line_leaves_the_caret_on_that_line() {
+        let Some(mut app) = headless() else {
+            println!("[test] SKIP: no usable adapter");
+            return;
+        };
+        let (_, end) = wrapped(&mut app, "aaaa bbbb cccc dddd");
+        app.text_key(0x24, true, false); // Ctrl+Home
+        let home = app.text_caret_overlay().expect("a caret").caret[0];
+
+        app.text_key(0x23, false, false); // End
+        assert_eq!(
+            app.text_edit.as_ref().unwrap().caret,
+            end,
+            "End went to the end of the VISUAL line"
+        );
+        let at_end = app.text_caret_overlay().expect("a caret").caret[0];
+        assert!(
+            (at_end[1] - home[1]).abs() < 1.0,
+            "the caret is drawn on line 1 ({} vs {})",
+            at_end[1],
+            home[1]
+        );
+        assert!(
+            at_end[0] > home[0] + 10.0,
+            "at the end of it ({} vs {})",
+            at_end[0],
+            home[0]
+        );
+
+        // Any other motion drops the affinity again: Left from there is an
+        // ordinary caret one character back.
+        app.text_key(0x25, false, false);
+        assert!(
+            !app.text_edit.as_ref().unwrap().affinity,
+            "a plain step clears the trailing bit"
+        );
+    }
+
+    /// P1. Home/End/Ctrl+A left the old column goal standing, so the next
+    /// Up/Down snapped the caret back to a column it had left two keys ago.
+    #[test]
+    fn home_clears_the_column_goal() {
+        let Some(mut app) = headless() else {
+            println!("[test] SKIP: no usable adapter");
+            return;
+        };
+        horizontal(&mut app);
+        app.start_new_text([300.0, 300.0], None);
+        type_lines(&mut app, "aaaaaaaa\nbb\ncccccccc");
+        app.text_key(0x24, false, false); // Home — on line 3
+        assert!(
+            app.text_edit.as_ref().unwrap().goal.is_none(),
+            "the goal went with it"
+        );
+        app.text_key(0x26, false, false); // Up: line 2, column 0
+        assert_eq!(
+            app.text_edit.as_ref().unwrap().caret,
+            9,
+            "up from the start of line 3 is the start of line 2"
+        );
+    }
+
+    /// P1. Up on the first line and Down on the last used to be dead keys.
+    #[test]
+    fn up_on_the_first_line_goes_to_the_start_and_down_on_the_last_to_the_end() {
+        let Some(mut app) = headless() else {
+            println!("[test] SKIP: no usable adapter");
+            return;
+        };
+        horizontal(&mut app);
+        app.start_new_text([300.0, 300.0], None);
+        type_lines(&mut app, "abc\ndef");
+        app.text_key(0x24, true, false); // Ctrl+Home
+        app.text_key(0x27, false, false); // Right, so the caret is at 1
+        assert_eq!(app.text_edit.as_ref().unwrap().caret, 1);
+        app.text_key(0x26, false, false); // Up on line 1
+        assert_eq!(app.text_edit.as_ref().unwrap().caret, 0, "to the very start");
+
+        app.text_key(0x23, true, false); // Ctrl+End
+        let len = app.edited_item().unwrap().utf16_len();
+        app.text_key(0x25, false, false); // Left: still on the last line
+        app.text_key(0x28, false, false); // Down on the last line
+        assert_eq!(
+            app.text_edit.as_ref().unwrap().caret,
+            len,
+            "to the very end"
+        );
+    }
+
+    /// P1. Ctrl+Shift+Z fell into the plain Ctrl+Z arm and UNDID; Ctrl+Y was
+    /// swallowed. Both redo now, and a fresh edit throws the redo away.
+    #[test]
+    fn ctrl_shift_z_and_ctrl_y_redo_inside_the_session() {
+        let Some(mut app) = headless() else {
+            println!("[test] SKIP: no usable adapter");
+            return;
+        };
+        app.start_new_text([300.0, 300.0], None);
+        type_str(&mut app, "ab cd");
+        assert!(app.text_key(0x5A, true, false)); // Ctrl+Z
+        assert_eq!(typed(&app), "ab ");
+
+        assert!(app.text_key(0x5A, true, true)); // Ctrl+Shift+Z
+        assert_eq!(typed(&app), "ab cd", "the redo put the word back");
+        assert!(app.text_editing(), "and it did NOT end the session");
+
+        assert!(app.text_key(0x5A, true, false));
+        assert!(app.text_key(0x5A, true, false));
+        assert_eq!(typed(&app), "ab");
+        assert!(app.text_key(0x59, true, false)); // Ctrl+Y
+        assert_eq!(typed(&app), "ab ", "Ctrl+Y is the same key by another name");
+        assert!(app.text_key(0x59, true, false));
+        assert_eq!(typed(&app), "ab cd");
+        assert!(
+            app.text_key(0x59, true, false),
+            "an empty redo is swallowed, not passed on"
+        );
+        assert_eq!(typed(&app), "ab cd");
+
+        // Undo, then type: the future is gone, and the redo key cannot bring
+        // back text that never followed this edit.
+        assert!(app.text_key(0x5A, true, false));
+        assert_eq!(typed(&app), "ab ");
+        type_str(&mut app, "x");
+        assert_eq!(typed(&app), "ab x");
+        assert!(app.text_key(0x5A, true, true));
+        assert_eq!(typed(&app), "ab x", "the old 'cd' is not coming back");
+    }
+
+    /// P1. Object tool: a double-click on a text box opens it for editing
+    /// (CSP). A single click still just selects it for dragging.
+    #[test]
+    fn object_tool_double_click_opens_the_text_for_editing() {
+        let Some(mut app) = headless() else {
+            println!("[test] SKIP: no usable adapter");
+            return;
+        };
+        horizontal(&mut app);
+        app.start_new_text([300.0, 300.0], None);
+        type_str(&mut app, "hello");
+        let (x, y) = point_at(&app, 2);
+        app.commit_text_edit();
+        app.tool = Tool::Object;
+
+        assert!(app.text_object_press(x, y, 1), "the box took the press");
+        assert!(!app.text_editing(), "one click selects, it does not edit");
+        assert!(app.text_obj_drag.is_some(), "and arms a drag");
+
+        assert!(app.text_object_press(x, y, 2));
+        assert!(app.text_editing(), "two clicks are the way in");
+        assert!(app.text_obj_drag.is_none(), "the drag stood down");
+        pump(&mut app);
+        assert_eq!(app.tool, Tool::Text, "and the Text tool came up with it");
+        assert_eq!(typed(&app), "hello", "editing the box that was clicked");
     }
 }

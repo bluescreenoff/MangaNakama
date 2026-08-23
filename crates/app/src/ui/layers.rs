@@ -730,6 +730,20 @@ const FOLDER_ROW_H: f32 = 34.0;
 /// the old right-edge badges).
 const FLAG_COL_W: f32 = 16.0;
 
+/// Header strip: the palette-colour chip and the numeric opacity field that
+/// sits beside the slider (CSP's `[colour ▾][Normal ▾][slider][100 ⌃⌄]`).
+const CHIP_W: f32 = 15.0;
+const SPIN_W: f32 = 44.0;
+
+/// The mask thumbnail beside the layer thumbnail — CSP's second image cell,
+/// present only on masked rows.
+const MASK_THUMB: f32 = 20.0;
+
+/// The row's right-edge menu column (the hover-visible ≡). Reserved on
+/// EVERY row even though the glyph only paints on hover: a column that
+/// appeared under the pointer would reflow the name mid-read.
+const ROW_MENU_W: f32 = 15.0;
+
 // The status marks (`ref_mark`/`draft_mark`), the active row's fill
 // (`sel_active`) and its 1px edge lines (`sel_edge`) used to be four private
 // consts here. They are Theme fields now, so a theme can move them together
@@ -772,16 +786,190 @@ pub(crate) fn row_glyph(l: &mn_core::Layer) -> Option<Icon> {
     None
 }
 
+/// One palette row's worth of layer state, snapshotted before the row loop
+/// so the painter can hold it while `app` is borrowed mutably.
+struct Row {
+    name: String,
+    visible: bool,
+    opacity: f32,
+    blend: Blend,
+    /// The palette colour the rail strip paints — the layer's OWN label,
+    /// or, for a folder without one, the colour it inherits (PC-002).
+    strip: Option<[u8; 3]>,
+    is_frame: bool,
+    /// The layer-type marker (`row_glyph`); `None` = plain raster.
+    glyph: Option<Icon>,
+    /// A toned row's screen frequency: the meta line reads "85.0 LPI"
+    /// where a plain row reads "100 % Normal" (CSP's tone rows).
+    tone_lpi: Option<f32>,
+    depth: u8,
+    folder: bool,
+    open: bool,
+    clip: bool,
+    /// The clip flag is set but resolves to NO base (`clip_bases`) — the
+    /// flag is being ignored and the row should say so, not lie red
+    /// (docs/CLIPPING-SCENARIOS.md 5a).
+    clip_dangling: bool,
+    lock: bool,
+    lock_alpha: bool,
+    reference: bool,
+    draft: bool,
+    /// `Some(enabled)` when the layer carries a mask (LM-001..009). The row
+    /// paints a second thumbnail for it — CSP's mask cell — and a cross
+    /// through it when the mask is kept but switched off.
+    mask: Option<bool>,
+}
+
+/// The row's ≡ menu: the per-row half of the layer commands, all of them
+/// indexed at THIS row rather than the active layer, so a menu opened on a
+/// row you have not selected still does what it says. The ones that only
+/// exist as active-layer commands (duplicate, merge, delete, the mask
+/// family) select the row first — commands run in queue order.
+fn row_menu(ui: &mut egui::Ui, app: &mut App, i: usize, row: &Row) {
+    let select_first = |app: &mut App| {
+        if app.doc.active != i {
+            app.push_cmd(AppCmd::SelectLayer(i));
+        }
+    };
+    if ui.button("Rename…").clicked() {
+        app.renaming = Some((i, row.name.clone()));
+        ui.close();
+    }
+    if ui.button("Duplicate layer").clicked() {
+        select_first(app);
+        app.push_cmd(AppCmd::DuplicateLayer);
+        ui.close();
+    }
+    if ui.button("Merge with layer below").clicked() {
+        select_first(app);
+        app.push_cmd(AppCmd::MergeDown);
+        ui.close();
+    }
+    ui.separator();
+    let mark = |on: bool, s: &str| if on { format!("✓ {s}") } else { s.to_owned() };
+    if ui.button(mark(row.clip, "Clip to layer below")).clicked() {
+        app.push_cmd(AppCmd::SetLayerClip(i, !row.clip));
+        ui.close();
+    }
+    if ui
+        .button(mark(row.lock_alpha, "Lock transparent pixels"))
+        .clicked()
+    {
+        app.push_cmd(AppCmd::SetLayerLockAlpha(i, !row.lock_alpha));
+        ui.close();
+    }
+    if ui.button(mark(row.lock, "Lock layer")).clicked() {
+        app.push_cmd(AppCmd::SetLayerLock(i, !row.lock));
+        ui.close();
+    }
+    ui.separator();
+    if ui.button(mark(row.reference, "Reference layer")).clicked() {
+        app.push_cmd(AppCmd::SetLayerReference(i, !row.reference));
+        ui.close();
+    }
+    if ui.button(mark(row.draft, "Draft layer")).clicked() {
+        app.push_cmd(AppCmd::SetLayerDraft(i, !row.draft));
+        ui.close();
+    }
+    if ui.button("Layer colour…").clicked() {
+        app.layer_colour_pick = Some(i);
+        ui.close();
+    }
+    ui.separator();
+    match row.mask {
+        None => {
+            if ui.button("Create mask (all visible)").clicked() {
+                select_first(app);
+                app.push_cmd(AppCmd::MaskSelection);
+                ui.close();
+            }
+        }
+        Some(enabled) => {
+            if ui.button("Edit mask").clicked() {
+                select_first(app);
+                if !app.mask_edit {
+                    app.push_cmd(AppCmd::MaskEdit);
+                }
+                ui.close();
+            }
+            if ui
+                .button(if enabled { "Mask off (keep)" } else { "Mask on" })
+                .clicked()
+            {
+                select_first(app);
+                app.push_cmd(AppCmd::MaskToggle);
+                ui.close();
+            }
+            if ui.button("Delete mask").clicked() {
+                select_first(app);
+                app.push_cmd(AppCmd::MaskDelete);
+                ui.close();
+            }
+        }
+    }
+    ui.separator();
+    if ui.button("Delete layer").clicked() {
+        select_first(app);
+        app.push_cmd(AppCmd::RemoveLayer);
+        ui.close();
+    }
+}
+
 pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
     // Top strip: the active layer's blend + opacity, exactly CSP's layout.
     let active = app.doc.active;
     if let Some(l) = app.doc.layers.get(active) {
         let (blend, opacity, through, is_folder) = (l.blend, l.opacity, l.through, l.folder);
+        let label = l.label;
         ui.horizontal(|ui| {
+            // CSP's header strip is [palette-colour ▾][Normal ▾][opacity
+            // slider][100 ⌃⌄]. The widths are budgeted from the space the
+            // palette actually has: docked at ~200 pt the blend combo gives
+            // ground so the numeric field keeps its digits.
+            let avail = ui.available_width();
+            let sp = ui.spacing().item_spacing.x;
+            let combo_w = if avail < 226.0 { 62.0 } else { 88.0 };
+            let bar_w = (avail - CHIP_W - combo_w - SPIN_W - sp * 3.0).max(26.0);
+
+            // The palette-colour chip: the active layer's label colour, or a
+            // hollow well when it has none. It opens the SAME one-click
+            // Layer-colour window as the Label button and a row's colour
+            // cell — no second command, no second list of swatches.
+            let (chip, chip_resp) =
+                ui.allocate_exact_size(egui::vec2(CHIP_W, 15.0), egui::Sense::click());
+            match label {
+                Some([r, g, b]) => {
+                    ui.painter()
+                        .rect_filled(chip, 2.0, egui::Color32::from_rgb(r, g, b));
+                }
+                None => {
+                    ui.painter().rect_filled(chip, 2.0, theme::c().field);
+                    ui.painter().line_segment(
+                        [chip.left_bottom(), chip.right_top()],
+                        egui::Stroke::new(1.0, theme::c().text_weak),
+                    );
+                }
+            }
+            ui.painter().rect_stroke(
+                chip,
+                2.0,
+                egui::Stroke::new(1.0, theme::c().border),
+                egui::StrokeKind::Inside,
+            );
+            if chip_resp
+                .on_hover_text("Palette colour — swatches + picker")
+                .clicked()
+            {
+                app.layer_colour_pick = match app.layer_colour_pick {
+                    Some(_) => None,
+                    None => Some(active),
+                };
+            }
+
             let mut pick = None;
             let mut flip_through: Option<bool> = None;
             egui::ComboBox::from_id_salt("mn.blend.active")
-                .width(88.0)
+                .width(combo_w)
                 .selected_text(if through {
                     "Through".to_owned()
                 } else {
@@ -813,13 +1001,23 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
             if flip_through == Some(true) {
                 app.push_cmd(AppCmd::SetFolderThrough(active, true));
             }
+            // Slider AND spinner over one value: CSP's header carries both,
+            // and the number is the half that lets you type 63 instead of
+            // hunting for it on a 40 px track.
             let mut pct = opacity * 100.0;
-            if ValueBar::new("", 0.0, 100.0)
+            let bar = ValueBar::new("", 0.0, 100.0)
                 .suffix("%")
-                .width(ui.available_width())
-                .show(ui, &mut pct)
-                .changed()
-            {
+                .width(bar_w)
+                .show(ui, &mut pct);
+            let spin = ui.add_sized(
+                [SPIN_W, 17.0],
+                egui::DragValue::new(&mut pct)
+                    .range(0.0..=100.0)
+                    .speed(0.5)
+                    .max_decimals(0)
+                    .suffix(" %"),
+            );
+            if bar.changed() || spin.changed() {
                 app.push_cmd(AppCmd::SetLayerOpacity(active, pct / 100.0));
             }
         });
@@ -994,8 +1192,17 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
                         ui.selectable_value(&mut app.layer_filter_kind, k, k.label());
                     }
                     ui.separator();
-                    ui.checkbox(&mut app.layer_filter_ref_only, "reference only");
-                    ui.checkbox(&mut app.layer_filter_no_draft, "hide drafts");
+                    // T5c: the two property narrowings wear the hues of the
+                    // marks they hunt for (the row status column, the header
+                    // toggles and these now agree).
+                    ui.checkbox(
+                        &mut app.layer_filter_ref_only,
+                        egui::RichText::new("reference only").color(theme::c().ref_mark),
+                    );
+                    ui.checkbox(
+                        &mut app.layer_filter_no_draft,
+                        egui::RichText::new("hide drafts").color(theme::c().draft_mark),
+                    );
                     ui.checkbox(&mut app.layer_filter_this_frame, "this frame folder")
                         .on_hover_text(
                             "only the koma folder holding the active layer — the one that earns its keep on a 200-layer page",
@@ -1038,36 +1245,10 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
     }
 
     refresh_layer_thumbs(ui.ctx(), app);
+    let mask_thumbs = refresh_mask_thumbs(ui.ctx(), app);
 
     // The stack, top-first: CSP rows — eye | label strip | pen | thumbnail |
     // "100 % Normal" over the name. Rows drag to reorder.
-    struct Row {
-        name: String,
-        visible: bool,
-        opacity: f32,
-        blend: Blend,
-        /// The palette colour the rail strip paints — the layer's OWN label,
-        /// or, for a folder without one, the colour it inherits (PC-002).
-        strip: Option<[u8; 3]>,
-        is_frame: bool,
-        /// The layer-type marker (`row_glyph`); `None` = plain raster.
-        glyph: Option<Icon>,
-        /// A toned row's screen frequency: the meta line reads "85.0 LPI"
-        /// where a plain row reads "100 % Normal" (CSP's tone rows).
-        tone_lpi: Option<f32>,
-        depth: u8,
-        folder: bool,
-        open: bool,
-        clip: bool,
-        /// The clip flag is set but resolves to NO base (`clip_bases`) — the
-        /// flag is being ignored and the row should say so, not lie red
-        /// (docs/CLIPPING-SCENARIOS.md 5a).
-        clip_dangling: bool,
-        lock: bool,
-        lock_alpha: bool,
-        reference: bool,
-        draft: bool,
-    }
     let clip_bases = app.doc.clip_bases();
     let rows: Vec<Row> = app
         .doc
@@ -1101,6 +1282,7 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
             lock_alpha: l.lock_alpha,
             reference: l.reference,
             draft: l.draft,
+            mask: l.mask.as_ref().map(|m| m.enabled),
         })
         .collect();
     // Rows inside a collapsed folder are hidden (top-first walk).
@@ -1238,6 +1420,19 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
         let colour_cell = ui
             .interact(pen_cell, resp.id.with("colour"), egui::Sense::click())
             .on_hover_text("layer colour…");
+        // The row's ≡ menu lives in a reserved right-edge column. The
+        // response is taken EVERY frame (not only while hovered) — the
+        // pointer leaves the row the moment it enters the open menu, and a
+        // response that stopped existing would take the menu with it.
+        let menu_rect = egui::Rect::from_min_max(
+            egui::pos2(rect.right() - ROW_MENU_W, rect.top()),
+            rect.max,
+        );
+        let menu_resp = ui.interact(menu_rect, resp.id.with("rowmenu"), egui::Sense::click());
+        let menu_open = egui::Popup::is_id_open(
+            ui.ctx(),
+            egui::Popup::default_response_id(&menu_resp),
+        );
         // Discoverability (r102 audit): the row's two power gestures had
         // no surface — hover carries them now.
         let resp = resp.on_hover_text(
@@ -1264,7 +1459,10 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
             );
         } else if multi {
             p.rect_filled(fill_rect, 0.0, theme::c().sel_row);
-        } else if resp.hovered() {
+        } else if resp.hovered() || menu_resp.hovered() {
+            // The ≡ column is its own widget, so it takes the hover off the
+            // row — without this the row un-highlights as the pointer
+            // reaches the menu it is about to open.
             p.rect_filled(fill_rect, 0.0, theme::c().hover);
         }
         // The rail cells paint over the row fill. With a palette colour the
@@ -1494,6 +1692,55 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
             );
         }
 
+        // CSP's SECOND image cell: the layer mask, beside the layer thumb.
+        // Grey-on-dark coverage (light = the layer shows through), an accent
+        // ring while strokes are landing on the mask instead of the pixels
+        // (LM-004), and a red cross when the mask is kept but switched OFF —
+        // the state that otherwise looks exactly like no mask at all. The
+        // cell only exists on masked rows, so an ordinary stack loses no
+        // name width to it.
+        let mut mask_rect = None;
+        if let Some(enabled) = row.mask {
+            let mr = egui::Rect::from_min_size(
+                egui::pos2(snap(tr.right() + 5.0), snap(cy - MASK_THUMB * 0.5)),
+                egui::Vec2::splat(MASK_THUMB),
+            );
+            match mask_thumbs.get(i).and_then(|t| t.as_ref()) {
+                Some(t) => {
+                    p.image(
+                        t.id(),
+                        mr,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        egui::Color32::WHITE,
+                    );
+                }
+                None => {
+                    p.rect_filled(mr, 2.0, theme::c().field);
+                }
+            }
+            let armed = selected && app.mask_edit;
+            p.rect_stroke(
+                mr,
+                2.0,
+                egui::Stroke::new(
+                    if armed { 2.0 } else { 1.0 },
+                    if armed {
+                        theme::c().accent
+                    } else {
+                        theme::c().border
+                    },
+                ),
+                egui::StrokeKind::Inside,
+            );
+            if !enabled {
+                let off = theme::c().ref_mark;
+                let s = egui::Stroke::new(1.6, off);
+                p.line_segment([mr.left_top(), mr.right_bottom()], s);
+                p.line_segment([mr.left_bottom(), mr.right_top()], s);
+            }
+            mask_rect = Some(mr);
+        }
+
         // Two text lines, CSP's layout: the meta ("100 % Normal" — or
         // "85.0 LPI" on a toned row) small on top, the NAME big underneath,
         // instead of a name and a far-away right-aligned meta sharing one
@@ -1504,11 +1751,30 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
         } else {
             (rect.top() + 12.0, rect.bottom() - 14.0)
         };
-        let text_x = tr.right() + 8.0;
+        let text_x = mask_rect.map_or(tr.right() + 8.0, |mr| mr.right() + 6.0);
+
+        // The ≡ itself: three hairlines, painted only while the row (or the
+        // menu it opened) is under the pointer, CSP's row menu.
+        if resp.hovered() || menu_resp.hovered() || menu_open {
+            let mc = menu_rect.center();
+            let col = if menu_open || menu_resp.hovered() {
+                theme::c().text_strong
+            } else {
+                theme::c().text_weak
+            };
+            for dy in [-3.5, 0.0, 3.5] {
+                p.hline(
+                    (mc.x - 4.5)..=(mc.x + 4.5),
+                    mc.y + dy,
+                    egui::Stroke::new(1.2, col),
+                );
+            }
+        }
 
         // Right-edge flag on the meta line: the locks only — reference and
-        // draft moved into the status column on the left.
-        let mut fx = rect.right() - 11.0;
+        // draft moved into the status column on the left. Everything on this
+        // edge stops short of the reserved ≡ column.
+        let mut fx = menu_rect.left() - 8.0;
         if row.lock || row.lock_alpha {
             let lr = egui::Rect::from_center_size(egui::pos2(fx, y_meta), egui::vec2(12.0, 12.0));
             paint_icon(
@@ -1586,13 +1852,13 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
         // still shows its number here). "?" = ambiguous layout; the dot
         // marker = manually pinned. Right-click for the pin actions.
         // It rides the name line's right edge; the name ellipsizes first.
-        let mut name_right = rect.right() - 8.0;
+        let mut name_right = menu_rect.left() - 5.0;
         if row.folder
             && row.is_frame
             && let Some((pos, amb, pinned)) = app.frame_pos(i)
         {
             let br = egui::Rect::from_center_size(
-                egui::pos2(rect.right() - 14.0, y_name),
+                egui::pos2(menu_rect.left() - 11.0, y_name),
                 egui::vec2(16.0, 13.0),
             );
             name_right = br.left() - 6.0;
@@ -1699,10 +1965,32 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
             ui.interact(dr, resp.id.with("fold"), egui::Sense::click())
                 .clicked()
         });
+        // LM-004 from the palette: the mask cell is the mask's SELECT — it
+        // arms mask editing on this row, and clicking the armed one hands
+        // the brush back to the pixels.
+        let mask_clicked = mask_rect.is_some_and(|mr| {
+            ui.interact(mr, resp.id.with("mask"), egui::Sense::click())
+                .on_hover_text("edit this mask (click again to go back to the layer)")
+                .clicked()
+        });
+        egui::Popup::menu(&menu_resp).show(|ui| row_menu(ui, app, i, row));
         if colour_cell.clicked() {
             app.layer_colour_pick = Some(i);
         }
-        if eye.clicked() {
+        if mask_clicked {
+            if selected && app.mask_edit {
+                app.push_cmd(AppCmd::MaskEdit);
+            } else {
+                if !selected {
+                    app.push_cmd(AppCmd::SelectLayer(i));
+                }
+                // Already armed on another row: selecting this one keeps the
+                // arm (it has a mask), so a second toggle would disarm it.
+                if !app.mask_edit {
+                    app.push_cmd(AppCmd::MaskEdit);
+                }
+            }
+        } else if eye.clicked() {
             if ui.input(|i| i.modifiers.alt) {
                 // RF-001's promise (the hover said so since r102; the
                 // behaviour arrives r113): Alt+click SOLOs the layer,
@@ -1949,6 +2237,67 @@ fn refresh_layer_thumbs(ctx: &egui::Context, app: &mut App) {
     }
 }
 
+/// Mask thumbnails, keyed by the mask's revision. Mask revisions come from
+/// the GLOBAL tile counter (`mn_core::next_revision`), so a key can never
+/// mean two different masks — which is why this cache lives in egui memory
+/// keyed by content instead of by row index like `layer_thumbs`, and why it
+/// survives a reorder without a single invalidation call.
+#[derive(Clone, Default)]
+struct MaskThumbs(std::collections::HashMap<u64, egui::TextureHandle>);
+
+/// The per-row mask thumbnail for every layer (index-aligned, `None` on the
+/// unmasked ones). Rebuilds only what changed; drops the entries whose masks
+/// are gone, so a session of mask edits does not pile up textures.
+fn refresh_mask_thumbs(ctx: &egui::Context, app: &App) -> Vec<Option<egui::TextureHandle>> {
+    let id = egui::Id::new("mn.layer.maskthumbs");
+    let old = ctx.data(|d| d.get_temp::<MaskThumbs>(id)).unwrap_or_default();
+    let mut fresh = MaskThumbs::default();
+    let out: Vec<Option<egui::TextureHandle>> = (0..app.doc.layers.len())
+        .map(|i| {
+            let rev = app.doc.layers[i].mask.as_ref()?.revision;
+            let tex = match old.0.get(&rev) {
+                Some(t) => t.clone(),
+                None => ctx.load_texture(
+                    format!("mn.layer.mask.{rev}"),
+                    mask_thumb_image(&app.doc, i),
+                    egui::TextureOptions::LINEAR,
+                ),
+            };
+            fresh.0.insert(rev, tex.clone());
+            Some(tex)
+        })
+        .collect();
+    ctx.data_mut(|d| d.insert_temp(id, fresh));
+    out
+}
+
+/// A mask as a small grey-on-dark image: the coverage IS the picture (light
+/// = the layer shows through). An absent tile is UNMASKED, i.e. fully
+/// visible — the same rule the compositors and the bake use, and the reason
+/// a fresh LM-001 mask reads as a plain light square.
+fn mask_thumb_image(doc: &mn_core::Document, li: usize) -> egui::ColorImage {
+    const T: usize = 20;
+    let (w, h) = doc.size;
+    let mask = doc.layers[li].mask.as_ref();
+    let mut px = Vec::with_capacity(T * T * 4);
+    for ty in 0..T {
+        for tx in 0..T {
+            let cx = ((tx as f32 + 0.5) / T as f32 * w as f32) as i32;
+            let cy = ((ty as f32 + 0.5) / T as f32 * h as f32) as i32;
+            let idx = mn_core::TileIdx::of_pixel(cx, cy);
+            let (ox, oy) = idx.origin();
+            let cov = mask
+                .and_then(|m| m.tiles.get(&idx))
+                .map(|t| t.pixel((cx - ox) as usize, (cy - oy) as usize)[3])
+                .unwrap_or(32768)
+                .min(32768) as u32;
+            let mix = |lo: u32, hi: u32| ((lo * (32768 - cov) + hi * cov) / 32768) as u8;
+            px.extend_from_slice(&[mix(0x14, 0xd6), mix(0x14, 0xd6), mix(0x18, 0xda), 255]);
+        }
+    }
+    egui::ColorImage::from_rgba_unmultiplied([T, T], &px)
+}
+
 fn layer_thumb_image(doc: &mn_core::Document, li: usize) -> egui::ColorImage {
     const TW: usize = 32;
     const TH: usize = 32;
@@ -2174,6 +2523,39 @@ mod tests {
         assert_eq!(row_glyph(&d.layers[hdr]), Some(Icon::Frame));
         let plain = d.add_folder_above(hdr, "Group");
         assert_eq!(row_glyph(&d.layers[plain]), Some(Icon::Folder));
+    }
+
+    /// The mask cell's picture IS the coverage, and the rule that decides
+    /// what an EMPTY mask looks like is the compositor's: an absent tile is
+    /// unmasked, i.e. fully visible. So a fresh LM-001 mask reads as a light
+    /// square (the layer shows through) and a zero-coverage tile reads dark.
+    /// Get this backwards and every masked row shows the mask inverted.
+    #[test]
+    fn mask_thumb_paints_coverage_light_on_dark() {
+        let mut d = Document::new(64, 64);
+        d.layers[0].mask = Some(mn_core::doc::LayerMask {
+            tiles: std::collections::HashMap::new(),
+            enabled: true,
+            revision: mn_core::next_revision(),
+        });
+        let img = mask_thumb_image(&d, 0);
+        assert_eq!(img.pixels.len(), 20 * 20);
+        assert!(
+            img.pixels.iter().all(|c| c.r() > 0xc0),
+            "no tiles = unmasked = light"
+        );
+
+        let m = d.layers[0].mask.as_mut().unwrap();
+        // A transparent tile is zero coverage — the mask hides that region.
+        m.tiles.insert(
+            mn_core::TileIdx { x: 0, y: 0 },
+            std::sync::Arc::new(mn_core::Tile::new_transparent()),
+        );
+        let img = mask_thumb_image(&d, 0);
+        assert!(
+            img.pixels.iter().all(|c| c.r() < 0x30),
+            "zero coverage = hidden = dark"
+        );
     }
 
     /// SL-003's manga row: the scope is the frame folder BLOCK — header

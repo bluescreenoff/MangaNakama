@@ -210,19 +210,70 @@ fn store_verdict_at(p: &std::path::Path, v: &DabVerdict) {
 /// The stored `(fingerprint, on)`, if any. A malformed file reads as absent
 /// (the next launch re-measures — a corrupt verdict must never decide).
 pub fn load_verdict() -> Option<(String, bool)> {
-    load_verdict_at(&verdict_path()?)
+    let v = read_verdict_at(&verdict_path()?)?;
+    Some((v.fingerprint, v.on))
 }
 
+/// The pre-`read_verdict_at` shape, kept because the round-trip tests pin
+/// the (fingerprint, on) contract through it.
+#[cfg_attr(not(test), allow(dead_code))]
 fn load_verdict_at(p: &std::path::Path) -> Option<(String, bool)> {
+    let v = read_verdict_at(p)?;
+    Some((v.fingerprint, v.on))
+}
+
+/// The whole stored record, summary line included (the summary is what the
+/// user-facing "about 9× faster" number is read back out of).
+fn read_verdict_at(p: &std::path::Path) -> Option<DabVerdict> {
     let text = std::fs::read_to_string(p).ok()?;
     let mut lines = text.lines();
-    let fp = lines.next()?.trim().to_string();
+    let fingerprint = lines.next()?.trim().to_string();
     let on = match lines.next()?.trim() {
         "on" => true,
         "off" => false,
         _ => return None,
     };
-    if fp.is_empty() { None } else { Some((fp, on)) }
+    let summary = lines.next().unwrap_or("").trim().to_string();
+    if fingerprint.is_empty() {
+        None
+    } else {
+        Some(DabVerdict {
+            fingerprint,
+            on,
+            summary,
+        })
+    }
+}
+
+/// Do two adapter fingerprints name the same GPU + driver?
+///
+/// Trimmed on BOTH sides, and that is the entire point: the stored copy is
+/// trimmed when the file is read, while the live one came straight out of
+/// `adapter_line()` — which on DX12 used to end in a trailing space. A raw
+/// `==` therefore said "different adapter" on every single launch, so the
+/// measured verdict never applied and a fresh measurement child was spawned
+/// forever. Both call sites go through here so they cannot drift apart.
+fn same_adapter(a: &str, b: &str) -> bool {
+    a.trim() == b.trim()
+}
+
+/// The everyday pen's speed multiplier, read back out of the record line
+/// (`"plain g-pen 0.11x, soft airbrush 0.06x, …"`). Stored ratios are
+/// gpu/cpu — LOWER is faster — so 0.11 means about 9× faster. `None` when
+/// the line is missing or unparsable: the number is decoration for the
+/// status sentence, and the on/off decision never depends on it.
+fn speedup_from_summary(summary: &str) -> Option<f64> {
+    let head = CLASSES.first()?.0;
+    let entry = summary
+        .split(',')
+        .map(str::trim)
+        .find(|s| s.starts_with(head))?;
+    let ratio: f64 = entry[head.len()..]
+        .trim()
+        .trim_end_matches(['x', '×'])
+        .parse()
+        .ok()?;
+    (ratio.is_finite() && ratio > 0.0).then(|| 1.0 / ratio)
 }
 
 /// The startup resolution, pure so it is testable. Returns
@@ -242,7 +293,7 @@ pub fn resolve_auto(
         return (on, false);
     }
     match verdict {
-        Some((fp, on)) if fp == fingerprint => (on, false),
+        Some((fp, on)) if same_adapter(&fp, fingerprint) => (on, false),
         _ => (false, true),
     }
 }
@@ -252,7 +303,7 @@ pub fn resolve_auto(
 /// what it is, and it is the same rule [`resolve_auto`] applies.
 pub fn measured_for(fingerprint: &str) -> Option<bool> {
     match load_verdict() {
-        Some((fp, on)) if fp == fingerprint => Some(on),
+        Some((fp, on)) if same_adapter(&fp, fingerprint) => Some(on),
         _ => None,
     }
 }
@@ -271,36 +322,67 @@ pub fn state_line(
     supported: bool,
     explicit: bool,
     measured: Option<bool>,
-) -> &'static str {
+    speedup: Option<f64>,
+) -> String {
     if !supported {
-        return "GPU inking: off — this GPU cannot run it, so inking always uses the CPU";
+        return "GPU inking: off — this GPU cannot run it, so inking always uses the CPU".into();
     }
     if explicit {
         return if on {
             "GPU inking: on (set by hand, in the View menu)"
         } else {
             "GPU inking: off (set by hand, in the View menu)"
-        };
+        }
+        .into();
     }
     match measured {
-        Some(true) if on => "GPU inking: on — measured faster on this GPU",
-        Some(false) if !on => "GPU inking: off — measured slower on this GPU, so the CPU does the inking here",
-        // The measurement landed DURING this session (the background test
-        // finished after startup): it decides from the next start, so say
-        // that rather than claiming a state this session does not have.
-        Some(true) => "GPU inking: off for now — just measured faster on this GPU, and switches on the next time you start",
-        Some(false) => "GPU inking: on for now — just measured slower on this GPU, and switches off the next time you start",
-        None => "GPU inking: off — not measured yet; a short test runs in the background and its result applies the next time you start",
+        Some(true) if on => format!("GPU inking: on{}", faster_phrase(speedup)),
+        Some(false) if !on => "GPU inking: off — measured slower on this GPU, so the CPU does the inking here".into(),
+        // The measurement landed DURING this session and could not be
+        // applied live (only reachable now if the switch is held elsewhere):
+        // say it takes effect at the next start rather than claiming a
+        // state this session does not have.
+        Some(true) => format!(
+            "GPU inking: off for now — just{}, and switches on the next time you start",
+            faster_phrase(speedup)
+        ),
+        Some(false) => "GPU inking: on for now — just measured slower on this GPU, and switches off the next time you start".into(),
+        None => "GPU inking: off — not measured yet; a short test is running in the background and switches inking over as soon as it finishes".into(),
+    }
+}
+
+/// " — measured about 9× faster on this GPU", or the plain sentence when
+/// there is no usable number. Only a clear win gets a figure: a measurement
+/// that landed at 1.1× reads as noise to a human, and printing "about 1×
+/// faster" would make the whole line look like a lie.
+fn faster_phrase(speedup: Option<f64>) -> String {
+    match speedup {
+        Some(s) if s >= 1.15 && s < 1000.0 => {
+            let n = if s >= 2.0 {
+                format!("{s:.0}")
+            } else {
+                format!("{s:.1}")
+            };
+            format!(" — measured about {n}× faster on this GPU")
+        }
+        _ => " — measured faster on this GPU".to_string(),
     }
 }
 
 /// [`state_line`] for the live app, reading each half from its own source.
-pub fn state_line_for(app: &App) -> &'static str {
+/// One read of the stored record, not two: Preferences rebuilds this every
+/// frame it is open.
+pub fn state_line_for(app: &App) -> String {
+    let fp = app.renderer.adapter_line();
+    let stored = verdict_path()
+        .and_then(|p| read_verdict_at(&p))
+        .filter(|v| same_adapter(&v.fingerprint, &fp));
     state_line(
         app.gpu_dabs,
         app.renderer.gpu_dabs_supported(),
         app.layout.gpu_dabs_explicit,
-        measured_for(&app.renderer.adapter_line()),
+        stored.as_ref().map(|v| v.on),
+        stored.as_ref().and_then(|v| speedup_from_summary(&v.summary)),
     )
 }
 
@@ -350,6 +432,59 @@ mod tests {
         assert_eq!(resolve_auto(None, None, fp), (false, true));
     }
 
+    /// REGRESSION — the bug that kept GPU inking off on the owner's machine
+    /// for its whole life. `adapter_line()` formatted `"… | driver {} {}"`,
+    /// and DX12 reports an EMPTY `driver_info`, so the live fingerprint
+    /// ended in a space; the stored copy is trimmed when read. The old
+    /// `fp == fingerprint` compare therefore returned false forever: the
+    /// measured verdict never applied and every launch spawned another
+    /// measurement child. This exact case asserts `(true, false)` — under
+    /// the old compare it would have been `(false, true)`, which is why the
+    /// sibling test above (whose fingerprint has no trailing space) passed
+    /// while production failed.
+    #[test]
+    fn a_trailing_space_in_the_live_fingerprint_still_matches() {
+        let live = "Intel(R) UHD Graphics 620 | backend Dx12 | type IntegratedGpu | driver 31.0.101.2141 ";
+        let stored = live.trim().to_string();
+        assert!(same_adapter(&stored, live), "trimmed both sides");
+        assert_eq!(
+            resolve_auto(None, Some((stored.clone(), true)), live),
+            (true, false),
+            "a measured ON verdict must apply despite the trailing space"
+        );
+        assert_eq!(
+            resolve_auto(None, Some((stored, false)), live),
+            (false, false),
+            "and must not re-measure"
+        );
+        // Trimming must not make everything match everything: a real driver
+        // update still re-measures.
+        assert!(!same_adapter("Intel(R) UHD Graphics 620 | driver 31.0", live));
+        assert_eq!(
+            resolve_auto(None, Some(("some other gpu".into(), true)), live),
+            (false, true)
+        );
+    }
+
+    /// The measured number the status sentence quotes: ratios are gpu/cpu,
+    /// so 0.11 must read as "about 9× faster", never "0.11× faster".
+    #[test]
+    fn the_state_line_quotes_how_much_faster() {
+        let summary = "plain g-pen 0.11x, soft airbrush 0.06x, textured pencil 0.41x, \
+                       marker wash 0.60x, blending knife (smudge) 0.20x";
+        let up = speedup_from_summary(summary).expect("the pen row parses");
+        assert!((up - 9.09).abs() < 0.1, "0.11x is ~9x faster, got {up}");
+        let l = state_line(true, true, false, Some(true), Some(up));
+        assert!(l.contains("9×"), "the number is missing from {l:?}");
+        assert!(l.contains("faster"));
+        // No usable number (old file, unparsable row, or a win too small to
+        // be worth quoting): the sentence still reads as a sentence.
+        assert!(state_line(true, true, false, Some(true), None).contains("measured faster"));
+        assert!(state_line(true, true, false, Some(true), Some(1.02)).contains("measured faster"));
+        assert_eq!(speedup_from_summary("nothing parsable here"), None);
+        assert_eq!(speedup_from_summary("plain g-pen 0.00x"), None);
+    }
+
     /// The user-facing state line: it must name the SAME authority
     /// `resolve_auto` actually obeyed, and must never claim a state this
     /// session does not have. Pinned because this line is the only thing
@@ -358,26 +493,26 @@ mod tests {
     #[test]
     fn the_state_line_names_the_authority_that_decided() {
         // Unsupported wins over everything — there is nothing to explain.
-        assert!(state_line(false, false, true, Some(true)).contains("cannot run it"));
+        assert!(state_line(false, false, true, Some(true), None).contains("cannot run it"));
         // A hand-set choice is reported as a choice, never as a measurement.
-        assert!(state_line(true, true, true, Some(false)).contains("set by hand"));
-        assert!(state_line(false, true, true, Some(true)).contains("set by hand"));
+        assert!(state_line(true, true, true, Some(false), None).contains("set by hand"));
+        assert!(state_line(false, true, true, Some(true), None).contains("set by hand"));
         // No choice: the measurement explains it, in the right direction.
-        assert!(state_line(true, true, false, Some(true)).contains("measured faster"));
-        assert!(state_line(false, true, false, Some(false)).contains("measured slower"));
+        assert!(state_line(true, true, false, Some(true), None).contains("measured faster"));
+        assert!(state_line(false, true, false, Some(false), None).contains("measured slower"));
         // Nothing measured yet: say the test is running, not "it's off".
-        assert!(state_line(false, true, false, None).contains("not measured yet"));
+        assert!(state_line(false, true, false, None, None).contains("not measured yet"));
         // A measurement that landed mid-session must not claim this
         // session's inking moved — it applies at the next start.
-        assert!(state_line(false, true, false, Some(true)).contains("next time you start"));
-        assert!(state_line(true, true, false, Some(false)).contains("next time you start"));
+        assert!(state_line(false, true, false, Some(true), None).contains("next time you start"));
+        assert!(state_line(true, true, false, Some(false), None).contains("next time you start"));
         // No user-facing line may leak the internal vocabulary.
         for l in [
-            state_line(false, false, false, None),
-            state_line(true, true, true, None),
-            state_line(true, true, false, Some(true)),
-            state_line(false, true, false, Some(false)),
-            state_line(false, true, false, None),
+            state_line(false, false, false, None, None),
+            state_line(true, true, true, None, None),
+            state_line(true, true, false, Some(true), Some(9.09)),
+            state_line(false, true, false, Some(false), None),
+            state_line(false, true, false, None, None),
         ] {
             let l = l.to_ascii_lowercase();
             for jargon in ["verdict", "fingerprint", "adapter", "dab", "rasteriz"] {
@@ -399,6 +534,9 @@ mod tests {
         };
         store_verdict_at(&p, &v);
         assert_eq!(load_verdict_at(&p), Some((v.fingerprint.clone(), true)));
+        // The summary line survives too — the status sentence's number is
+        // read back out of it.
+        assert_eq!(read_verdict_at(&p), Some(v.clone()));
         std::fs::write(&p, "Adapter X | Dx12 | driver 31.0\nmaybe\n").unwrap();
         assert_eq!(load_verdict_at(&p), None, "a corrupt flag never decides");
         std::fs::write(&p, "\non\n").unwrap();

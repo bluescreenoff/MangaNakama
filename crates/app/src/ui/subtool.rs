@@ -40,9 +40,12 @@ fn ensure_preview(
 /// Property values.
 pub(super) fn sub_tool_list(ui: &mut egui::Ui, app: &mut App) {
     match app.tool {
-        // The selection pen/eraser ride the BRUSH preset list — the stroke
-        // is the active brush; only the target differs (selection coverage).
-        Tool::Pen | Tool::Eraser | Tool::SelPen | Tool::SelEraser => brush_sub_tools(ui, app),
+        // Only the two INK tools list brush presets. The selection pen and
+        // eraser used to ride this list too, back when they were their own
+        // strip cells; they are Selection sub tools now (2026-08-23), so
+        // holding one shows the Selection list with that row lit — CSP's
+        // shape, and the Tool Property panel still hands them the brush.
+        Tool::Pen | Tool::Eraser => brush_sub_tools(ui, app),
         // Most mode lists are three or four rows, but Figure runs thirteen
         // over three captions and the tail was simply unreachable. The
         // brush list scrolls itself, so only this arm gets a ScrollArea —
@@ -105,6 +108,28 @@ fn mode_row(ui: &mut egui::Ui, selected: bool, icon: Icon, name: &str) -> egui::
     );
     resp
 }
+
+/// The Selection tool's PAINT sub tools, folded in from the tool strip
+/// (owner, 2026-08-23: "select pen duplicates the G-pen with the same
+/// icon"). CSP files 選択ペン / 選択消し as Selection sub tools with a fixed
+/// create-type; ours carry theirs as a `Tool`, which is what the canvas
+/// stroke paths already key off. A table so the growth path is one line: a
+/// soft selection pen would be a third row here and a third `SubTool`
+/// variant, nothing else.
+const SEL_PAINT: [(&str, &str, Icon, Tool); 2] = [
+    (
+        "Selection pen",
+        "paint with the active brush — the stroke ADDS to the selection",
+        Icon::SelPen,
+        Tool::SelPen,
+    ),
+    (
+        "Erase selection",
+        "the same stroke, subtracting from the selection",
+        Icon::SelEraser,
+        Tool::SelEraser,
+    ),
+];
 
 fn mode_sub_tools(ui: &mut egui::Ui, app: &mut App) {
     use crate::cmd::{FrameMode, PanMode};
@@ -226,30 +251,52 @@ fn mode_sub_tools(ui: &mut egui::Ui, app: &mut App) {
                 app.wand_opts.refer = mn_core::FillRefer::Reference;
             }
         }
-        Tool::Select => {
+        Tool::Select | Tool::SelPen | Tool::SelEraser => {
             group_caption(ui, "Selection");
+            // The four SHAPE sub tools only light while the shape tool is
+            // the one in hand: holding the selection pen must not also show
+            // "Rectangle" selected, or the list stops saying where you are.
             let m = app.select_mode;
-            if mode_row(ui, m == SelectMode::Rect, Icon::Select, "Rectangle").clicked() {
+            let shape = app.tool == Tool::Select;
+            if mode_row(ui, shape && m == SelectMode::Rect, Icon::Select, "Rectangle").clicked() {
                 app.push_cmd(AppCmd::SetSelectMode(SelectMode::Rect));
             }
-            if mode_row(ui, m == SelectMode::Lasso, Icon::Select, "Lasso").clicked() {
+            if mode_row(ui, shape && m == SelectMode::Lasso, Icon::Select, "Lasso").clicked() {
                 app.push_cmd(AppCmd::SetSelectMode(SelectMode::Lasso));
             }
-            if mode_row(ui, m == SelectMode::Magnetic, Icon::Select, "Magnetic lasso")
-                .on_hover_text(
-                    "trace roughly along the lineart and the outline snaps to it — Backspace undoes an anchor, Enter closes",
-                )
-                .clicked()
+            if mode_row(
+                ui,
+                shape && m == SelectMode::Magnetic,
+                Icon::Select,
+                "Magnetic lasso",
+            )
+            .on_hover_text(
+                "trace roughly along the lineart and the outline snaps to it — Backspace undoes an anchor, Enter closes",
+            )
+            .clicked()
             {
                 app.push_cmd(AppCmd::SetSelectMode(SelectMode::Magnetic));
             }
-            if mode_row(ui, m == SelectMode::Shrink, Icon::Wand, "Shrink (flats)")
-                .on_hover_text(
-                    "drag across the empty space — every closed area the path crosses is selected",
-                )
-                .clicked()
+            if mode_row(
+                ui,
+                shape && m == SelectMode::Shrink,
+                Icon::Wand,
+                "Shrink selection",
+            )
+            .on_hover_text(
+                "drag across the empty space — every closed area the path crosses is selected",
+            )
+            .clicked()
             {
                 app.push_cmd(AppCmd::SetSelectMode(SelectMode::Shrink));
+            }
+            for (name, hint, icon, tool) in SEL_PAINT {
+                if mode_row(ui, app.tool == tool, icon, name)
+                    .on_hover_text(hint)
+                    .clicked()
+                {
+                    app.push_cmd(AppCmd::SetTool(tool));
+                }
             }
         }
         Tool::Frame => {
@@ -353,36 +400,40 @@ fn mode_sub_tools(ui: &mut egui::Ui, app: &mut App) {
                     app.figure_poly = None;
                 }
             }
+            // The preset rows carry a WHOLE `FigureLineOpts` now, built in
+            // mm and degrees at the page's dpi (see the constructors): a
+            // row that only wrote count and width could not express the
+            // gap, bundling and split jitters the density round added,
+            // and a half-written preset is how the sets drifted.
+            let dpi = app.tone_dpi();
+            use crate::cmd::FigureLineOpts as FLO;
             group_caption(ui, "Stream line");
-            for (label, count, width) in [
-                ("Stream line", 60u32, 3.0f32),
-                ("Dense stream", 140, 2.0),
-                ("Sparse stream", 24, 4.5),
+            for (label, opts) in [
+                ("Stream line", FLO::stream_dpi(dpi)),
+                ("Dense stream", FLO::dense_stream_dpi(dpi)),
+                ("Sparse stream", FLO::sparse_stream_dpi(dpi)),
             ] {
-                let on = app.figure_mode == FigureMode::Stream
-                    && app.figure_stream.count == count
-                    && app.figure_stream.width == width;
+                let on =
+                    app.figure_mode == FigureMode::Stream && app.figure_stream.same_as(&opts);
                 if mode_row(ui, on, Icon::StreamLines, label)
                     .on_hover_text("drag along the motion — a fresh speed-line layer each drag")
                     .clicked()
                 {
                     app.figure_mode = FigureMode::Stream;
                     app.figure_poly = None;
-                    app.figure_stream.count = count;
-                    app.figure_stream.width = width;
+                    app.figure_stream = FLO {
+                        seed: app.figure_stream.seed,
+                        ..opts
+                    };
                 }
             }
             group_caption(ui, "Saturated line");
-            for (label, count, width, jitter, r_in) in [
-                ("Saturated line", 96u32, 4.0f32, 0.35f32, 0.4f32),
-                ("Dense saturated line", 180, 3.0, 0.3, 0.35),
-                ("Dark burst", 260, 7.0, 0.5, 0.22),
+            for (label, opts) in [
+                ("Saturated line", FLO::focus_dpi(dpi)),
+                ("Dense saturated line", FLO::dense_focus_dpi(dpi)),
+                ("Dark burst", FLO::dark_burst_dpi(dpi)),
             ] {
-                let on = app.figure_mode == FigureMode::Focus
-                    && app.figure_focus.count == count
-                    && app.figure_focus.width == width
-                    && app.figure_focus.jitter == jitter
-                    && app.figure_focus.r_in_frac == r_in;
+                let on = app.figure_mode == FigureMode::Focus && app.figure_focus.same_as(&opts);
                 if mode_row(ui, on, Icon::FocusLines, label)
                     .on_hover_text(
                         "drag from the convergence point outward — a fresh focus-line layer each drag",
@@ -391,10 +442,10 @@ fn mode_sub_tools(ui: &mut egui::Ui, app: &mut App) {
                 {
                     app.figure_mode = FigureMode::Focus;
                     app.figure_poly = None;
-                    app.figure_focus.count = count;
-                    app.figure_focus.width = width;
-                    app.figure_focus.jitter = jitter;
-                    app.figure_focus.r_in_frac = r_in;
+                    app.figure_focus = FLO {
+                        seed: app.figure_focus.seed,
+                        ..opts
+                    };
                 }
             }
             // ウニフラッシュ, the pro-page audit's #1 IMPOSSIBLE — same
@@ -402,22 +453,19 @@ fn mode_sub_tools(ui: &mut egui::Ui, app: &mut App) {
             // knobs, only the rays are filled spikes. `width` reads as the
             // spike base width in px here, so the rows carry values that
             // suit a flash rather than a hairline fan.
-            for (label, mode, count, width, jitter, r_in) in [
+            for (label, mode, opts) in [
                 (
                     "Sea urchin flash",
                     FigureMode::Urchin,
-                    64u32,
-                    20.0f32,
-                    0.25f32,
-                    0.3f32,
+                    FLO::flash_dpi(dpi, 64, 0.85, 0.3),
                 ),
-                ("Solid flash", FigureMode::SolidFlash, 64, 22.0, 0.25, 0.45),
+                (
+                    "Solid flash",
+                    FigureMode::SolidFlash,
+                    FLO::flash_dpi(dpi, 64, 0.95, 0.45),
+                ),
             ] {
-                let on = app.figure_mode == mode
-                    && app.figure_focus.count == count
-                    && app.figure_focus.width == width
-                    && app.figure_focus.jitter == jitter
-                    && app.figure_focus.r_in_frac == r_in;
+                let on = app.figure_mode == mode && app.figure_focus.same_as(&opts);
                 if mode_row(ui, on, Icon::UrchinFlash, label)
                     .on_hover_text(
                         "drag from the flash's centre outward — a fresh flash layer each drag",
@@ -426,10 +474,10 @@ fn mode_sub_tools(ui: &mut egui::Ui, app: &mut App) {
                 {
                     app.figure_mode = mode;
                     app.figure_poly = None;
-                    app.figure_focus.count = count;
-                    app.figure_focus.width = width;
-                    app.figure_focus.jitter = jitter;
-                    app.figure_focus.r_in_frac = r_in;
+                    app.figure_focus = FLO {
+                        seed: app.figure_focus.seed,
+                        ..opts
+                    };
                 }
             }
         }
@@ -506,7 +554,7 @@ fn mode_sub_tools(ui: &mut egui::Ui, app: &mut App) {
                 app.pan_mode = PanMode::Rotate;
             }
         }
-        Tool::Pen | Tool::Eraser | Tool::SelPen | Tool::SelEraser => {
+        Tool::Pen | Tool::Eraser => {
             unreachable!("brush list handles these")
         }
     }

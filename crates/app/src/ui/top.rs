@@ -133,6 +133,13 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 app.push_cmd(AppCmd::CompExportAll);
                 ui.close();
             }
+            ui.separator();
+            // CSP keeps Preferences under File; ours moved here from Edit
+            // with the T3 rework (owner order 2026-08-21).
+            if item(ui, "Preferences…", "") {
+                app.push_cmd(AppCmd::OpenPrefs(None));
+                ui.close();
+            }
         });
         bar_menu(ui, "Edit", |ui| {
             if item(ui, "Undo", "Ctrl+Z") {
@@ -218,11 +225,6 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 .clicked()
             {
                 app.push_cmd(AppCmd::RegisterBrushFromSelection);
-                ui.close();
-            }
-            ui.separator();
-            if item(ui, "Preferences…", "") {
-                app.push_cmd(AppCmd::OpenPrefs(None));
                 ui.close();
             }
         });
@@ -981,7 +983,7 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
             if ui
                 .add_enabled(
                     app.renderer.gpu_dabs_supported(),
-                    egui::Checkbox::new(&mut gd, "GPU dab strokes (experimental)"),
+                    egui::Checkbox::new(&mut gd, "GPU inking"),
                 )
                 .on_disabled_hover_text(
                     "this adapter has no rgba16uint storage — cpu dab path only",
@@ -1450,8 +1452,56 @@ pub(super) fn status_bar(ui: &mut egui::Ui, app: &mut App) {
             );
             ui.separator();
         };
-        seg(ui, format!("{:.0}%", app.viewport.zoom * 100.0));
-        seg(ui, format!("{:+.1}°", app.viewport.rotate_rad.to_degrees()));
+        // M12: the zoom and rotation cells are CONTROLS, not printout —
+        // CSP docks a whole strip of them under the canvas. Every action
+        // routes through the existing view commands; the bar computes
+        // nothing of its own.
+        ui.spacing_mut().item_spacing.x = 3.0;
+        if ui.small_button("−").on_hover_text("zoom out").clicked() {
+            let s = app.prefs.wheel_step.max(1.02);
+            app.push_cmd(AppCmd::ZoomStep(1.0 / s));
+        }
+        let mut zoom_pct = app.viewport.zoom * 100.0;
+        let zr = ui.add(
+            egui::DragValue::new(&mut zoom_pct)
+                .range(1.0..=6400.0)
+                .speed(1.0)
+                .fixed_decimals(0)
+                .suffix("%"),
+        );
+        if zr.changed() && app.viewport.zoom > 0.0 {
+            app.push_cmd(AppCmd::ZoomStep(
+                (zoom_pct / 100.0) / app.viewport.zoom,
+            ));
+        }
+        zr.on_hover_text("drag or type; double-click to type an exact zoom");
+        if ui.small_button("＋").on_hover_text("zoom in").clicked() {
+            app.push_cmd(AppCmd::ZoomStep(app.prefs.wheel_step.max(1.02)));
+        }
+        if ui.small_button("fit").on_hover_text("fit the page in the window").clicked() {
+            app.push_cmd(AppCmd::ZoomFit);
+        }
+        ui.separator();
+        let mut rot_deg = app.viewport.rotate_rad.to_degrees();
+        let rr = ui.add(
+            egui::DragValue::new(&mut rot_deg)
+                .range(-180.0..=180.0)
+                .speed(0.5)
+                .fixed_decimals(1)
+                .suffix("°"),
+        );
+        if rr.changed() {
+            app.push_cmd(AppCmd::RotateView(
+                (rot_deg - app.viewport.rotate_rad.to_degrees()).to_radians(),
+            ));
+        }
+        rr.on_hover_text("view rotation — the page, not the art");
+        if app.viewport.rotate_rad.abs() > 1e-4
+            && ui.small_button("0°").on_hover_text("reset rotation").clicked()
+        {
+            app.push_cmd(AppCmd::RotateReset);
+        }
+        ui.separator();
         if app.viewport.flip_h {
             seg(ui, "mirror".to_owned());
         }

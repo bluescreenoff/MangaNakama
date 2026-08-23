@@ -506,14 +506,333 @@ pub(crate) fn sec_obj_frame(ui: &mut egui::Ui, app: &mut App) {
             });
         }
     }
+    // CSP's "Keep gutters aligned" (audit P0-4): All = dragging a border
+    // brings the facing border of the panel across the gutter with it, so
+    // the gap keeps its width. None = the one edge moves and the gutter
+    // narrows.
+    ui.horizontal(|ui| {
+        ui.label("Keep gutters aligned");
+        egui::ComboBox::from_id_salt("mn.obj.frame.gutter_align")
+            .selected_text(if app.gutter_align_all { "All" } else { "None" })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut app.gutter_align_all, false, "None");
+                ui.selectable_value(&mut app.gutter_align_all, true, "All");
+            });
+    })
+    .response
+    .on_hover_text("moves the neighbouring panel's facing border too, keeping the gutter width");
     ui.weak(format!(
         "{} panel(s) — drag vertices/edges; the box scales",
         fs.frames.len()
     ));
 }
 
+// --- the SELECTED effect-line run (owner report 2026-08-23) -------------
+//
+// Tool Property edits the item you picked, and a generated 流線/集中線 set
+// was the one item it refused to. These two sections edit the LAYER'S OWN
+// `GenLinesSpec` — not the Figure tool's defaults, which is what the sub
+// tool rows do — and commit through `GenLinesApplyTo` on the release edge
+// of a drag. Never per frame: a regen re-rasterizes the whole layer, and
+// a page-sized burst at 600 dpi is not a per-mouse-move operation.
+
+/// The draft spec the widgets mutate, and the layer it belongs to.
+fn gen_draft(app: &App) -> Option<(usize, mn_core::genlines::GenLinesSpec)> {
+    let li = app.gen_sel?;
+    let stored = app.doc.layers.get(li)?.genlines?;
+    Some((li, app.gen_edit.unwrap_or(stored)))
+}
+
+/// Push the draft (drag release) or keep it (mid-drag). One helper so no
+/// row can forget which of the two it is doing.
+///
+/// A frame in which NOTHING changed must not re-arm the draft: the canvas
+/// handles write the same spec, and a stale draft left sitting here would
+/// shadow their result the next time the palette drew.
+fn gen_commit(
+    app: &mut App,
+    li: usize,
+    spec: mn_core::genlines::GenLinesSpec,
+    changed: bool,
+    done: bool,
+) {
+    if done {
+        app.gen_edit = None;
+        if Some(spec) != app.doc.layers.get(li).and_then(|l| l.genlines) {
+            app.push_cmd(AppCmd::GenLinesApplyTo { layer: li, spec });
+        }
+    } else if changed {
+        app.gen_edit = Some(spec);
+    }
+}
+
+/// A ValueBar row over one `f32` of the draft: returns (changed, done).
+fn gen_bar(
+    ui: &mut egui::Ui,
+    label: &str,
+    range: (f32, f32),
+    decimals: usize,
+    suffix: &str,
+    v: &mut f32,
+) -> (bool, bool) {
+    let resp = ValueBar::new(label, range.0, range.1)
+        .decimals(decimals)
+        .suffix(suffix)
+        .show(ui, v);
+    (
+        resp.changed(),
+        resp.drag_stopped() || (resp.changed() && !resp.dragged()),
+    )
+}
+
+/// Shape: what kind of set it is, how far it reaches, how it tapers.
+pub(crate) fn sec_obj_genlines(ui: &mut egui::Ui, app: &mut App) {
+    let Some((li, mut s)) = gen_draft(app) else {
+        return;
+    };
+    let (mut changed, mut done) = (false, false);
+
+    // Kind, but only inside the RADIAL family: 集中線, ウニフラッシュ and
+    // ベタフラッシュ read a, b, c, d identically (centre, r_in, r_out), so
+    // switching between them is a re-render. A 流線 spec means something
+    // else by the same four numbers, so it is not offered as a swap — that
+    // would silently reinterpret the geometry.
+    if s.radial() {
+        ui.horizontal(|ui| {
+            for (k, label) in [(0u8, "Saturated"), (1, "Urchin"), (2, "Solid")] {
+                if ui.selectable_label(s.kind == k, label).clicked() && s.kind != k {
+                    s.kind = k;
+                    s.focus = true;
+                    changed = true;
+                    done = true;
+                }
+            }
+        });
+    }
+
+    ui.horizontal(|ui| {
+        ui.weak("colour");
+        // White knockout lines over a black panel — the generator inked
+        // black only until this existed.
+        if ui.color_edit_button_srgb(&mut s.color).changed() {
+            changed = true;
+            done = true;
+        }
+        if s.color != [0, 0, 0] && ui.small_button("black").clicked() {
+            s.color = [0, 0, 0];
+            changed = true;
+            done = true;
+        }
+    });
+
+    let px_per_mm = app.mm_to_px(1.0).max(0.001);
+    let flash = s.kind == 1 || s.kind == 2;
+    let mut w_mm = s.width / px_per_mm;
+    let (c, d) = gen_bar(
+        ui,
+        if flash { "Spike width" } else { "Width" },
+        (0.02, if flash { 4.0 } else { 1.5 }),
+        2,
+        " mm",
+        &mut w_mm,
+    );
+    if c {
+        s.width = (w_mm * px_per_mm).max(0.5);
+    }
+    changed |= c;
+    done |= d;
+
+    if !flash {
+        let (c, d) = gen_bar(ui, "Taper", (0.0, 1.0), 2, "", &mut s.taper);
+        changed |= c;
+        done |= d;
+    }
+
+    if s.radial() {
+        // The hole, as a fraction of the reach — the same knob the sub
+        // tool row arms, so the two mean one thing.
+        let mut frac = if s.d > 0.0 { s.c / s.d } else { 0.0 };
+        let (c, d) = gen_bar(ui, "Hollow centre", (0.0, 0.95), 2, "", &mut frac);
+        if c {
+            s.c = s.d * frac.clamp(0.0, 0.95);
+        }
+        changed |= c;
+        done |= d;
+        let (c2, d2) = gen_bar(ui, "Reach", (8.0, 6000.0), 0, " px", &mut s.d);
+        if c2 {
+            s.c = s.c.min((s.d - 4.0).max(0.0));
+        }
+        changed |= c2;
+        done |= d2;
+    } else {
+        let (c, d) = gen_bar(ui, "Angle", (-180.0, 180.0), 1, "°", &mut s.a);
+        changed |= c;
+        done |= d;
+        let (c2, d2) = gen_bar(ui, "Shortest", (8.0, 6000.0), 0, " px", &mut s.b);
+        changed |= c2;
+        done |= d2;
+        let (c3, d3) = gen_bar(ui, "Longest", (8.0, 6000.0), 0, " px", &mut s.c);
+        changed |= c3;
+        done |= d3;
+        if s.b > s.c {
+            s.b = s.c;
+        }
+        // 流線 with a vanishing point: the subtle fan a perspective panel
+        // wants. Off = pure parallel.
+        let mut fan = s.converge.is_some();
+        if ui
+            .checkbox(&mut fan, "Fan toward a point")
+            .on_hover_text("aims every run at one canvas point instead of running parallel")
+            .changed()
+        {
+            s.converge = fan.then(|| {
+                let a = crate::app::canvas_input::gen_anchor(&s, app.doc.size);
+                [a[0], a[1] - app.doc.size.1 as f32 * 4.0]
+            });
+            changed = true;
+            done = true;
+        }
+        if let Some(v) = &mut s.converge {
+            ui.horizontal(|ui| {
+                ui.label("Point");
+                let a = ui.add(egui::DragValue::new(&mut v[0]).speed(4.0));
+                let b = ui.add(egui::DragValue::new(&mut v[1]).speed(4.0));
+                changed |= a.changed() || b.changed();
+                done |= a.drag_stopped() || b.drag_stopped();
+            });
+        }
+    }
+
+    if ui
+        .button("Reroll")
+        .on_hover_text("the same parameters, a different draw of the random wobble")
+        .clicked()
+    {
+        s.seed = s.seed.wrapping_add(1);
+        changed = true;
+        done = true;
+    }
+    gen_commit(app, li, s, changed, done);
+}
+
+/// Density: the gap between lines, the bundling, and the wobble.
+pub(crate) fn sec_obj_genlines_density(ui: &mut egui::Ui, app: &mut App) {
+    let Some((li, mut s)) = gen_draft(app) else {
+        return;
+    };
+    let (mut changed, mut done) = (false, false);
+    let px_per_mm = app.mm_to_px(1.0).max(0.001);
+
+    if s.radial() {
+        // GAP, not count: a manga tutorial sizes a 集中線 in degrees
+        // (≈3° dense, ≈10° sparse) and that number means the same thing
+        // whatever the page is. The count is still shown, because every
+        // set placed before this was made of one.
+        let mut by_gap = s.gap_deg > 0.0;
+        if ui
+            .checkbox(&mut by_gap, "Space by angle")
+            .on_hover_text("a gap in degrees instead of a total count — 3° dense, 10° sparse")
+            .changed()
+        {
+            s.gap_deg = if by_gap {
+                360.0 / s.count.max(1) as f32
+            } else {
+                0.0
+            };
+            if !by_gap {
+                s.count = s.ray_count();
+            }
+            changed = true;
+            done = true;
+        }
+        if by_gap {
+            let (c, d) = gen_bar(ui, "Gap", (0.5, 30.0), 2, "°", &mut s.gap_deg);
+            changed |= c;
+            done |= d;
+            ui.weak(format!("{} lines", s.ray_count()));
+        } else {
+            let mut n = s.count as f32;
+            let (c, d) = gen_bar(ui, "Lines", (1.0, 512.0), 0, "", &mut n);
+            if c {
+                s.count = (n.round() as u32).max(1);
+            }
+            changed |= c;
+            done |= d;
+        }
+    } else {
+        let mut by_gap = s.gap_px > 0.0;
+        if ui
+            .checkbox(&mut by_gap, "Space evenly")
+            .on_hover_text(
+                "walk the block at a fixed gap instead of scattering runs at random — \
+                 the random scatter clumps, which is what makes a generated set read as noise",
+            )
+            .changed()
+        {
+            s.gap_px = if by_gap { px_per_mm } else { 0.0 };
+            changed = true;
+            done = true;
+        }
+        if by_gap {
+            let mut gap_mm = s.gap_px / px_per_mm;
+            let (c, d) = gen_bar(ui, "Gap", (0.1, 10.0), 2, " mm", &mut gap_mm);
+            if c {
+                s.gap_px = (gap_mm * px_per_mm).max(0.25);
+            }
+            changed |= c;
+            done |= d;
+
+            // まとまり — bundles with a hole between them. CSP's own
+            // biggest quality lever for a speed block.
+            let mut n = s.group as f32;
+            let (c, d) = gen_bar(ui, "Bundle", (0.0, 16.0), 0, "", &mut n);
+            if c {
+                s.group = n.round() as u32;
+            }
+            changed |= c;
+            done |= d;
+            if s.group > 1 {
+                let (c, d) = gen_bar(ui, "Bundle gap", (1.0, 8.0), 1, " ×", &mut s.group_gap);
+                changed |= c;
+                done |= d;
+            } else {
+                ui.weak("0 or 1 = one even block, no bundles");
+            }
+        } else {
+            let mut n = s.count as f32;
+            let (c, d) = gen_bar(ui, "Lines", (1.0, 512.0), 0, "", &mut n);
+            if c {
+                s.count = (n.round() as u32).max(1);
+            }
+            changed |= c;
+            done |= d;
+        }
+    }
+
+    // The three wobbles. 0 means "use the single old Jitter", so the row
+    // shows that value rather than pretending the set has none.
+    let single = s.jitter;
+    for (label, v, hint) in [
+        ("Position", &mut s.jit_gap, "how far each line strays"),
+        ("Length", &mut s.jit_len, "how much the lengths vary"),
+        ("Width", &mut s.jit_width, "how much the weights vary"),
+    ] {
+        let mut shown = if *v > 0.0 { *v } else { single };
+        let resp = ValueBar::new(label, 0.0, 1.0)
+            .decimals(2)
+            .show(ui, &mut shown);
+        if resp.changed() {
+            *v = shown;
+            changed = true;
+        }
+        done |= resp.drag_stopped() || (resp.changed() && !resp.dragged());
+        resp.on_hover_text(hint);
+    }
+    gen_commit(app, li, s, changed, done);
+}
+
 pub(crate) fn sec_obj_guide(ui: &mut egui::Ui, _app: &mut App) {
-    ui.weak("click a text box, balloon or panel");
+    ui.weak("click a text box, balloon, panel or effect-line set");
     ui.weak("drag moves; handles reshape; the blue box scales/rotates");
     ui.weak("Del removes the selected one");
 }
@@ -526,15 +845,64 @@ pub(crate) fn sec_figure(ui: &mut egui::Ui, app: &mut App) {
             // giant counts/widths were a real UI hang — applies here too).
             let radial = m.radial();
             let flash = m.gen_kind() != 0;
+            let px_per_mm = app.mm_to_px(1.0).max(0.001);
             let o = if radial {
                 &mut app.figure_focus
             } else {
                 &mut app.figure_stream
             };
-            ui.horizontal(|ui| {
-                ui.label(if flash { "Spikes" } else { "Lines" });
-                ui.add(egui::DragValue::new(&mut o.count).range(1..=512));
-            });
+            // Density is stated as a GAP where the preset says so — a
+            // count field that the generator ignores is worse than no
+            // field, and the gap is the unit a tutorial uses anyway.
+            if !flash && radial && o.gap_deg > 0.0 {
+                ui.horizontal(|ui| {
+                    ui.label("Gap");
+                    ui.add(
+                        egui::DragValue::new(&mut o.gap_deg)
+                            .range(0.5..=30.0)
+                            .speed(0.1)
+                            .suffix("°"),
+                    )
+                    .on_hover_text("degrees between rays — 3° dense, 10° sparse");
+                });
+                ui.weak(format!("{} lines", (360.0 / o.gap_deg).ceil() as u32));
+            } else if !flash && !radial && o.gap_px > 0.0 {
+                let mut gap_mm = o.gap_px / px_per_mm;
+                ui.horizontal(|ui| {
+                    ui.label("Gap");
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut gap_mm)
+                                .range(0.1..=10.0)
+                                .speed(0.02)
+                                .suffix(" mm"),
+                        )
+                        .on_hover_text("spacing between runs — they walk the block evenly")
+                        .changed()
+                    {
+                        o.gap_px = (gap_mm * px_per_mm).max(0.25);
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Bundle");
+                    ui.add(egui::DragValue::new(&mut o.group).range(0..=16))
+                        .on_hover_text("まとまり — runs per bundle, with a hole between bundles");
+                    if o.group > 1 {
+                        ui.add(
+                            egui::DragValue::new(&mut o.group_gap)
+                                .range(1.0..=8.0)
+                                .speed(0.1)
+                                .suffix(" ×"),
+                        )
+                        .on_hover_text("how wide the hole is, in gaps");
+                    }
+                });
+            } else {
+                ui.horizontal(|ui| {
+                    ui.label(if flash { "Spikes" } else { "Lines" });
+                    ui.add(egui::DragValue::new(&mut o.count).range(1..=512));
+                });
+            }
             ui.horizontal(|ui| {
                 ui.label(if flash { "Spike width" } else { "Width" });
                 // A flash's width is the spike BASE, so it needs a range
@@ -569,16 +937,27 @@ pub(crate) fn sec_figure(ui: &mut egui::Ui, app: &mut App) {
                     });
                 });
             }
+            // ONE wobble knob, writing all four fields. The presets set
+            // the three split jitters to different values (a printed set
+            // wants a lot of length wobble and little angular wobble),
+            // and a split jitter overrides the single one — so a Jitter
+            // row that wrote only `jitter` would look live and do
+            // nothing. Turning this evens them out, deliberately.
+            ui.horizontal(|ui| {
+                ui.label("Jitter");
+                let mut j = o.jit_gap.max(o.jitter);
+                if ui
+                    .add(egui::DragValue::new(&mut j).range(0.0..=1.0).speed(0.01))
+                    .on_hover_text("angle, width and length wobble — 0 is a drafting tool's fan")
+                    .changed()
+                {
+                    o.jitter = j;
+                    o.jit_gap = j;
+                    o.jit_len = j;
+                    o.jit_width = j;
+                }
+            });
             if radial {
-                ui.horizontal(|ui| {
-                    ui.label("Jitter");
-                    ui.add(
-                        egui::DragValue::new(&mut o.jitter)
-                            .range(0.0..=1.0)
-                            .speed(0.01),
-                    )
-                    .on_hover_text("angle, width and length wobble — 0 is a drafting tool's fan");
-                });
                 ui.horizontal(|ui| {
                     ui.label("Hollow centre");
                     ui.add(

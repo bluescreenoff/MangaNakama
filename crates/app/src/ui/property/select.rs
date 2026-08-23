@@ -1,9 +1,11 @@
 use super::*;
 
-pub(crate) fn sec_select(ui: &mut egui::Ui, app: &mut App) {
-    ui.weak("drag inside a selection to move it");
-    // SE-022: the persistent 4-way combine mode. Held modifiers override
-    // it per gesture (Shift / Alt / Shift+Alt).
+/// SE-022's persistent 4-way combine mode, shared by every tool that MAKES a
+/// selection. Held modifiers override it per gesture (Shift / Alt /
+/// Shift+Alt). The wand went without it until 2026-08-23 — its selections
+/// obeyed `sel_op` all along, but the only place to set it was a panel the
+/// wand never shows.
+pub(crate) fn sel_op_row(ui: &mut egui::Ui, app: &mut App) {
     egui::ComboBox::from_id_salt("mn.select.op")
         .selected_text(sel_op_label(app.sel_op))
         .show_ui(ui, |ui| {
@@ -17,6 +19,11 @@ pub(crate) fn sec_select(ui: &mut egui::Ui, app: &mut App) {
             }
         });
     ui.weak("Shift adds · Alt subtracts · Shift+Alt intersects");
+}
+
+pub(crate) fn sec_select(ui: &mut egui::Ui, app: &mut App) {
+    ui.weak("drag inside a selection to move it");
+    sel_op_row(ui, app);
     ui.horizontal(|ui| {
         if ui.button("Deselect (Ctrl+D)").clicked() {
             app.push_cmd(AppCmd::Deselect);
@@ -81,6 +88,11 @@ pub(crate) fn sel_op_label(op: mn_core::SelectionOp) -> &'static str {
 }
 
 pub(crate) fn sec_wand(ui: &mut egui::Ui, app: &mut App) {
+    // The wand floods with the SAME `mn_core::fill` machinery the Fill tool
+    // uses, off the same `FillOpts` — so every knob that machinery honours
+    // belongs here too. Until 2026-08-23 the panel showed three of them and
+    // the other four were set (or not) behind the artist's back.
+    sel_op_row(ui, app);
     let mut o = app.wand_opts;
     let mut tol = o.tolerance * 100.0;
     let mut changed = ValueBar::new("Tolerance", 0.0, 50.0)
@@ -88,25 +100,101 @@ pub(crate) fn sec_wand(ui: &mut egui::Ui, app: &mut App) {
         .show(ui, &mut tol)
         .changed();
     o.tolerance = tol / 100.0;
-    let mut gap = o.gap_close_px as f32;
-    changed |= ValueBar::new("Close gap", 0.0, 8.0)
-        .step(1.0)
-        .suffix(" px")
-        .show(ui, &mut gap)
-        .changed();
-    o.gap_close_px = gap as u32;
-    changed |= area_scaling_row(ui, &mut o);
+    changed |= auto_gap_block(ui, "mn.wand.expand", &mut o, None);
+    changed |= refer_block(ui, "mn.wand.refer", &mut o);
     if changed {
         app.push_cmd(AppCmd::SetWandOpts(o));
     }
 }
 
-/// FI-016's row, shared by the Fill and wand Tool Properties: CSP's SIGNED
-/// area scaling. Positive tucks the region under the lineart, negative
-/// pulls it back off the line.
-pub(crate) fn area_scaling_row(ui: &mut egui::Ui, o: &mut mn_core::FillOpts) -> bool {
+/// The "Auto gap & fringe" switch and the two rows it drives: dialled by hand
+/// when off, measured from the lineart when on. `measured` is the last
+/// measurement to read back, where the tool keeps one.
+fn auto_gap_block(
+    ui: &mut egui::Ui,
+    salt: &str,
+    o: &mut mn_core::FillOpts,
+    measured: Option<mn_core::AutoFill>,
+) -> bool {
+    let mut changed = ui
+        .checkbox(&mut o.auto, "Auto gap & fringe")
+        .on_hover_text(
+            "measure the lineart's own thickness at each click instead of dialling \
+             gap closing and area scaling by hand",
+        )
+        .changed();
+    if o.auto {
+        match measured {
+            Some(a) => {
+                ui.weak(format!("Close gap: {} px — measured", a.gap_close_px));
+                ui.weak(format!("Area scaling: {:+} px — measured", a.expand_px));
+                ui.weak(format!("lines read ~{:.0} px thick", a.line_px));
+            }
+            None => {
+                ui.weak("Close gap and area scaling: measured at the next click");
+            }
+        }
+    } else {
+        let mut gap = o.gap_close_px as f32;
+        changed |= ValueBar::new("Close gap", 0.0, 8.0)
+            .step(1.0)
+            .suffix(" px")
+            .show(ui, &mut gap)
+            .changed();
+        o.gap_close_px = gap as u32;
+        changed |= area_scaling_row(ui, salt, o);
+    }
+    changed
+}
+
+/// CSP's 参照 block: what the flood samples, whether draft layers count, and
+/// whether the page rim walls it in. Shared by Fill and Auto select — one
+/// `FillOpts`, one set of rows.
+fn refer_block(ui: &mut egui::Ui, salt: &str, o: &mut mn_core::FillOpts) -> bool {
+    let label = |v: mn_core::FillRefer| match v {
+        mn_core::FillRefer::All => "Refer: all layers",
+        mn_core::FillRefer::Active => "Refer: editing layer",
+        mn_core::FillRefer::Reference => "Refer: reference layer",
+    };
+    let mut pick: Option<mn_core::FillRefer> = None;
+    egui::ComboBox::from_id_salt(salt)
+        .width(ui.available_width() - 8.0)
+        .selected_text(label(o.refer))
+        .show_ui(ui, |ui| {
+            for v in [
+                mn_core::FillRefer::All,
+                mn_core::FillRefer::Active,
+                mn_core::FillRefer::Reference,
+            ] {
+                if ui.selectable_label(o.refer == v, label(v)).clicked() {
+                    pick = Some(v);
+                }
+            }
+        });
+    let mut changed = false;
+    if let Some(v) = pick {
+        o.refer = v;
+        changed = true;
+    }
+    changed |= ui
+        .checkbox(&mut o.refer_drafts, "Refer draft layers")
+        .changed();
+    // FI-022: the page's own perimeter joins the lineart as a wall.
+    changed |= ui
+        .checkbox(&mut o.refer_border, "Refer to image border")
+        .on_hover_text("the page's outer edge counts as a drawn line, so a fill cannot get out")
+        .changed();
+    changed
+}
+
+/// FI-016's row, shared by the Fill, wand and Tone Tool Properties: CSP's
+/// SIGNED area scaling, plus P0-4's 拡縮方法 — the SHAPE it scales in.
+/// Positive tucks the region under the lineart, negative pulls it back off
+/// the line. `salt` keeps the three panels' combos from sharing an egui id.
+pub(crate) fn area_scaling_row(ui: &mut egui::Ui, salt: &str, o: &mut mn_core::FillOpts) -> bool {
+    use mn_core::fill::ExpandMode;
     let mut exp = o.expand_px as f32;
-    let changed = ValueBar::new("Area scaling", -4.0, 4.0)
+    let mut changed = ValueBar::new("Area scaling", -4.0, 4.0)
         .step(1.0)
         .suffix(" px")
         .show(ui, &mut exp)
@@ -115,6 +203,31 @@ pub(crate) fn area_scaling_row(ui: &mut egui::Ui, o: &mut mn_core::FillOpts) -> 
     // `as i32` truncates toward zero; the slider steps whole pixels, so
     // round first or -1 arrives as 0 on the way past.
     o.expand_px = exp.round() as i32;
+    let label = |m: ExpandMode| match m {
+        ExpandMode::Rect => "Square",
+        ExpandMode::Round => "Round",
+        ExpandMode::ToDarkest => "To darkest pixel",
+    };
+    let mut pick: Option<ExpandMode> = None;
+    egui::ComboBox::from_id_salt(salt)
+        .width(ui.available_width() - 8.0)
+        .selected_text(label(o.expand_mode))
+        .show_ui(ui, |ui| {
+            for m in [ExpandMode::Rect, ExpandMode::Round, ExpandMode::ToDarkest] {
+                if ui.selectable_label(o.expand_mode == m, label(m)).clicked() {
+                    pick = Some(m);
+                }
+            }
+        });
+    ui.weak(match o.expand_mode {
+        ExpandMode::Rect => "grows the same distance in every direction, corners included",
+        ExpandMode::Round => "rounds the corners off — a disc, not a square",
+        ExpandMode::ToDarkest => "grows to the darkest pixel of the line and stops there",
+    });
+    if let Some(m) = pick {
+        o.expand_mode = m;
+        changed = true;
+    }
     changed
 }
 
@@ -143,67 +256,8 @@ pub(crate) fn sec_fill(ui: &mut egui::Ui, app: &mut App) {
     // ROADMAP: the fill that measures gap and fringe itself. Opt-in — the
     // two rows it drives go read-only underneath, showing what the last
     // fill actually measured, so the numbers stay learnable.
-    changed |= ui
-        .checkbox(&mut o.auto, "Auto gap & fringe")
-        .on_hover_text(
-            "measure the lineart's own thickness at each click instead of dialling \
-             gap closing and area scaling by hand",
-        )
-        .changed();
-    if o.auto {
-        match app.fill_auto {
-            Some(a) => {
-                ui.weak(format!("Close gap: {} px — measured", a.gap_close_px));
-                ui.weak(format!("Area scaling: {:+} px — measured", a.expand_px));
-                ui.weak(format!("lines read ~{:.0} px thick", a.line_px));
-            }
-            None => {
-                ui.weak("Close gap and area scaling: measured at the next fill");
-            }
-        }
-    } else {
-        let mut gap = o.gap_close_px as f32;
-        changed |= ValueBar::new("Close gap", 0.0, 8.0)
-            .step(1.0)
-            .suffix(" px")
-            .show(ui, &mut gap)
-            .changed();
-        o.gap_close_px = gap as u32;
-        changed |= area_scaling_row(ui, &mut o);
-    }
-    // CSP's fill 参照 block: what the flood samples, and whether draft
-    // layers count.
-    let mut pick: Option<mn_core::FillRefer> = None;
-    egui::ComboBox::from_id_salt("mn.fill.refer")
-        .width(ui.available_width() - 8.0)
-        .selected_text(match o.refer {
-            mn_core::FillRefer::All => "Refer: all layers",
-            mn_core::FillRefer::Active => "Refer: editing layer",
-            mn_core::FillRefer::Reference => "Refer: reference layer",
-        })
-        .show_ui(ui, |ui| {
-            for (v, label) in [
-                (mn_core::FillRefer::All, "Refer: all layers"),
-                (mn_core::FillRefer::Active, "Refer: editing layer"),
-                (mn_core::FillRefer::Reference, "Refer: reference layer"),
-            ] {
-                if ui.selectable_label(o.refer == v, label).clicked() {
-                    pick = Some(v);
-                }
-            }
-        });
-    if let Some(v) = pick {
-        o.refer = v;
-        changed = true;
-    }
-    changed |= ui
-        .checkbox(&mut o.refer_drafts, "Refer draft layers")
-        .changed();
-    // FI-022: the page's own perimeter joins the lineart as a wall.
-    changed |= ui
-        .checkbox(&mut o.refer_border, "Refer to image border")
-        .on_hover_text("the page's outer edge counts as a drawn line, so a fill cannot get out")
-        .changed();
+    changed |= auto_gap_block(ui, "mn.fill.expand", &mut o, app.fill_auto);
+    changed |= refer_block(ui, "mn.fill.refer", &mut o);
     // NL-006's switch (TRIAGE 137): fill a LIVE layer instead of painting.
     // Enclose-and-fill paints pockets, not a window — the live model has no
     // shape for it, so the switch stays with the click sub tool.

@@ -143,14 +143,41 @@ pub(super) fn ellipsis(
     ui.fonts_mut(|f| f.layout_job(job))
 }
 
-/// Small uppercase caption with a rule to the right — a list section label,
+/// Title-case a section caption: "Frame border" → "Frame Border". CSP titles
+/// its property sections; we used to SHOUT them, which is the loudest
+/// typography in a palette of quiet grey rows (nit N1).
+///
+/// Normalising HERE and not at the ~30 call sites keeps the source strings
+/// readable and covers the two dynamic callers (the property section table
+/// and sub tool preset GROUP FOLDER NAMES, which the artist types).
+///
+/// Anything with a non-ASCII character is returned untouched: a Japanese
+/// group name has no case, and `to_uppercase` on one is at best a no-op.
+/// Apostrophes do not start a word, so "Artist's" stays "Artist's".
+fn title_case(s: &str) -> String {
+    if !s.is_ascii() {
+        return s.to_owned();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut at_word_start = true;
+    for ch in s.chars() {
+        out.push(if at_word_start {
+            ch.to_ascii_uppercase()
+        } else {
+            ch.to_ascii_lowercase()
+        });
+        at_word_start = !(ch.is_ascii_alphanumeric() || ch == '\'');
+    }
+    out
+}
+
+/// Small title-case caption with a rule to the right — a list section label,
 /// not a widget.
 pub(super) fn group_caption(ui: &mut egui::Ui, label: &str) {
     let (rect, _) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 15.0), egui::Sense::hover());
     let font = egui::FontId::proportional(9.5);
-    let galley =
-        ui.fonts_mut(|f| f.layout_no_wrap(label.to_uppercase(), font, theme::c().text_weak));
+    let galley = ui.fonts_mut(|f| f.layout_no_wrap(title_case(label), font, theme::c().text_weak));
     let p = ui.painter();
     p.galley(
         egui::pos2(rect.left() + 2.0, rect.center().y - galley.size().y * 0.5),
@@ -183,7 +210,28 @@ pub(super) fn px_mm_text(mm: f32, dpi: u32) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::px_mm_text;
+    use super::{px_mm_text, title_case};
+
+    /// The captions the palettes actually pass, plus the two shapes that
+    /// would be damaged by a naive `split_whitespace`.
+    #[test]
+    fn captions_are_title_case_and_leave_japanese_alone() {
+        assert_eq!(title_case("Frame border"), "Frame Border");
+        assert_eq!(title_case("LAYER SETTINGS"), "Layer Settings");
+        assert_eq!(title_case("Scale / Rotation"), "Scale / Rotation");
+        // A slash or a hyphen starts a word; an apostrophe does not.
+        assert_eq!(title_case("gutter l/r"), "Gutter L/R");
+        assert_eq!(title_case("artist's own"), "Artist's Own");
+        // Nothing to case: separators and numbers come back as they went in.
+        assert_eq!(title_case("---"), "---");
+        assert_eq!(title_case("2 up"), "2 Up");
+        // Non-ASCII is never touched, so a Japanese preset group folder keeps
+        // its name and its ASCII neighbours in the same string keep theirs.
+        assert_eq!(title_case("ペン入れ"), "ペン入れ");
+        assert_eq!(title_case("my ペン group"), "my ペン group");
+        assert_eq!(title_case(""), "");
+    }
+
 
     /// The owner's own numbers: CSP's "15" and our "0.64 mm" are the same
     /// border at 600 dpi, and the label says both.

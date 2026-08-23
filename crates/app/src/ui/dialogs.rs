@@ -357,6 +357,40 @@ pub(super) fn work_settings_window(ctx: &egui::Context, app: &mut App) {
                     ui.text_edit_singleline(&mut d.story);
                     ui.end_row();
 
+                    // M2: the publisher/printer target. Picking one
+                    // RESTATES the draft's paper/trim/binding from the
+                    // profile — through this dialog's own Apply, so the
+                    // geometry consequences stay in the one door. None
+                    // keeps everything hand-set.
+                    ui.label("Publisher profile");
+                    egui::ComboBox::from_id_salt("mn.worksettings.profile")
+                        .width(240.0)
+                        .selected_text(
+                            d.profile
+                                .as_ref()
+                                .map_or("None".to_owned(), |p| p.name.clone()),
+                        )
+                        .show_ui(ui, |ui| {
+                            if ui.selectable_label(d.profile.is_none(), "None").clicked() {
+                                d.profile = None;
+                            }
+                            for p in mn_core::profile::PublisherProfile::builtins() {
+                                let on = d.profile.as_ref().is_some_and(|q| q.name == p.name);
+                                if ui.selectable_label(on, &p.name).clicked() && !on {
+                                    d.setup = p.setup.clone();
+                                    d.binding_right = p.binding_right;
+                                    d.profile = Some(p);
+                                }
+                            }
+                        })
+                        .response
+                        .on_hover_text(
+                            "a submission target: sets the paper geometry now, and \
+                             gives preflight its norms (page-count multiple, screen \
+                             ruling) and Export All a one-press output setup",
+                        );
+                    ui.end_row();
+
                     ui.label("Preset");
                     egui::ComboBox::from_id_salt("mn.worksettings.preset")
                         .width(240.0)
@@ -631,411 +665,6 @@ pub(super) fn canvas_size_window(ctx: &egui::Context, app: &mut App) {
         app.canvas_size_open = false;
     } else {
         app.canvas_size_open = open && !cancel;
-    }
-}
-
-// --- preferences --------------------------------------------------------
-
-/// A group header inside the Preferences window. Five of these instead of
-/// tabs: ten rows fit in one column, and a tab bar over ten rows is a
-/// filing system for a drawer with three things in it.
-fn pref_head(ui: &mut egui::Ui, text: &str, focus: Option<&str>) {
-    ui.add_space(7.0);
-    // The window has no tabs, so "open Preferences on Performance" — what
-    // the command palette's Preferences rows ask for — can only mean: open
-    // it with that header lit. Accent rather than a scroll, because every
-    // header is already on screen; the only thing missing is where to look.
-    let lit = focus == Some(text);
-    ui.label(egui::RichText::new(text).strong().color(if lit {
-        super::theme::c().accent
-    } else {
-        super::theme::c().text_strong
-    }));
-    ui.add_space(2.0);
-}
-
-/// The Autosave dropdown's labels — CSP's own range, plus Off.
-fn autosave_label(min: u32) -> String {
-    if min == 0 {
-        "Off".to_owned()
-    } else {
-        format!("{min} min")
-    }
-}
-
-/// Edit ▸ Preferences…. **One window, five headers, no tabs, no tree, no
-/// search box** — the ten values that are genuinely user preferences rather
-/// than architecture constants (docs/design/PREFERENCES-SPEC.md §5 is the
-/// list of what deliberately stays hardcoded, and it is the load-bearing
-/// half). Revisit the shape if this ever passes ~20 rows, and treat that as
-/// a warning rather than a milestone.
-///
-/// Every default is today's constant, so a user who never opens this window
-/// sees no change at all.
-pub(super) fn prefs_window(ctx: &egui::Context, app: &mut App) {
-    if !app.prefs_open {
-        return;
-    }
-    let mut open = app.prefs_open;
-    let focus = app.prefs_focus;
-    let mut changed = false;
-    let mut reset = false;
-    let mut preset_pick: Option<String> = None;
-    let mut theme_pick: Option<&'static str> = None;
-    let autosave_before = app.prefs.autosave_min;
-    let preset_now = app.prefs.new_preset_setup().name;
-    // Read before the window borrows `app.prefs`. Live rather than cached:
-    // the background measurement can land mid-session and the View-menu
-    // toggle can move under us, and a stale explanation is worse than none.
-    let gpu_line = crate::bench::state_line_for(app);
-
-    egui::Window::new("Preferences")
-        .open(&mut open)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, -30.0))
-        .show(ctx, |ui| {
-            ui.set_max_width(430.0);
-            let p = &mut app.prefs;
-
-            pref_head(ui, "Saving", focus);
-            egui::Grid::new("mn.prefs.saving")
-                .num_columns(2)
-                .spacing([10.0, 5.0])
-                .show(ui, |ui| {
-                    ui.label("Autosave");
-                    egui::ComboBox::from_id_salt("mn.prefs.autosave")
-                        .width(110.0)
-                        .selected_text(autosave_label(p.autosave_min))
-                        .show_ui(ui, |ui| {
-                            for m in [0u32, 5, 10, 15, 30, 60] {
-                                if ui
-                                    .selectable_label(p.autosave_min == m, autosave_label(m))
-                                    .clicked()
-                                    && p.autosave_min != m
-                                {
-                                    p.autosave_min = m;
-                                    changed = true;
-                                }
-                            }
-                        });
-                    ui.end_row();
-
-                    // PR-041. A second row rather than an "Every operation"
-                    // entry in the dropdown above: the two are not
-                    // alternatives — with both on you get whichever comes
-                    // first — and a dropdown cannot say that.
-                    //
-                    // It greys out when Autosave is Off, because Off has to
-                    // mean off. A user who turns autosave off (a stalling
-                    // network drive, a huge page) and then finds MORE writes
-                    // happening has been lied to by the control he reached
-                    // for, and the setting doing nothing invisibly would be
-                    // the same lie one layer down.
-                    let timer_on = p.autosave_min != 0;
-                    ui.label("Also after every operation");
-                    changed |= ui
-                        .add_enabled(
-                            timer_on,
-                            egui::Checkbox::new(&mut p.autosave_every_op, ""),
-                        )
-                        .on_hover_text(
-                            "Writes the recovery copy as soon as an operation finishes, \
-                             instead of waiting for the timer. Costs a save per operation \
-                             on a print-resolution page.",
-                        )
-                        .changed();
-                    ui.end_row();
-
-                    // The unexported-pages reminder (owner ask
-                    // 2026-08-22). It lives under Saving rather than in a
-                    // section of its own: exporting is the other half of
-                    // "did my work make it out of the app", and one more
-                    // row here beats a sixth header for one checkbox.
-                    ui.label("Remind about unexported pages");
-                    changed |= ui
-                        .add(egui::Checkbox::new(&mut p.export_reminder, ""))
-                        .on_hover_text(
-                            "Shows a quiet count in the status bar when pages changed \
-                             since the last export wrote them; click it to open Export \
-                             All Pages. Silent until a work has been exported once. \
-                             Export reminder, unexported, stale pages, forgot to export.",
-                        )
-                        .changed();
-                    ui.end_row();
-                });
-            ui.weak(
-                "Work folders save in place on this timer; everything else gets a \
-                 separate recovery copy. Off stops the timer entirely — including \
-                 the per-operation save, which is the same write on a different \
-                 trigger.",
-            );
-
-            pref_head(ui, "Drawing", focus);
-            egui::Grid::new("mn.prefs.drawing")
-                .num_columns(2)
-                .spacing([10.0, 5.0])
-                .show(ui, |ui| {
-                    ui.label("Mouse smoothing floor");
-                    changed |= ui
-                        .add(
-                            egui::DragValue::new(&mut p.mouse_smooth_px)
-                                .range(0.0..=mn_core::stabilize::MAX_STRING_PX)
-                                .speed(0.25)
-                                .suffix(" px"),
-                        )
-                        .changed();
-                    ui.end_row();
-                });
-            ui.weak(
-                "Mouse strokes only — the pen always uses the sub tool's own \
-                 stabilizer. 0 turns the floor off.",
-            );
-
-            pref_head(ui, "Canvas & view", focus);
-            egui::Grid::new("mn.prefs.canvas")
-                .num_columns(2)
-                .spacing([10.0, 5.0])
-                .show(ui, |ui| {
-                    ui.label("New canvas");
-                    ui.horizontal(|ui| {
-                        changed |= ui
-                            .add(
-                                egui::DragValue::new(&mut p.new_canvas.0)
-                                    .range(1..=65535)
-                                    .suffix(" px"),
-                            )
-                            .changed();
-                        changed |= ui
-                            .add(
-                                egui::DragValue::new(&mut p.new_canvas.1)
-                                    .range(1..=65535)
-                                    .suffix(" px"),
-                            )
-                            .changed();
-                    });
-                    ui.end_row();
-
-                    ui.label("New Comic preset");
-                    egui::ComboBox::from_id_salt("mn.prefs.preset")
-                        .width(240.0)
-                        .selected_text(preset_now.clone())
-                        .show_ui(ui, |ui| {
-                            for s in PageSetup::presets() {
-                                if ui.selectable_label(preset_now == s.name, &s.name).clicked()
-                                    && preset_now != s.name
-                                {
-                                    preset_pick = Some(s.name.clone());
-                                }
-                            }
-                        });
-                    ui.end_row();
-
-                    ui.label("Fit margin");
-                    let mut pct = p.fit_margin * 100.0;
-                    if ui
-                        .add(
-                            egui::DragValue::new(&mut pct)
-                                .range(80.0..=100.0)
-                                .speed(0.25)
-                                .fixed_decimals(0)
-                                .suffix(" %"),
-                        )
-                        .changed()
-                    {
-                        p.fit_margin = pct / 100.0;
-                        changed = true;
-                    }
-                    ui.end_row();
-
-                    ui.label("Wheel zoom step");
-                    changed |= ui
-                        .add(
-                            egui::DragValue::new(&mut p.wheel_step)
-                                .range(1.02..=1.50)
-                                .speed(0.005)
-                                .fixed_decimals(2)
-                                .prefix("×"),
-                        )
-                        .changed();
-                    ui.end_row();
-
-                    ui.label("View rotation step");
-                    changed |= ui
-                        .add(
-                            egui::DragValue::new(&mut p.rotate_step_deg)
-                                .range(1.0..=90.0)
-                                .speed(0.5)
-                                .fixed_decimals(0)
-                                .suffix(" °"),
-                        )
-                        .changed();
-                    ui.end_row();
-
-                    ui.label("Layers palette icons");
-                    changed |= ui
-                        .add(
-                            egui::DragValue::new(&mut p.palette_icon_px)
-                                .range(14.0..=32.0)
-                                .speed(0.25)
-                                .fixed_decimals(0)
-                                .suffix(" px"),
-                        )
-                        .on_hover_text(
-                            "size of the Layers palette's command buttons; \
-                             the toggle strip scales with it",
-                        )
-                        .changed();
-                    ui.end_row();
-                });
-            ui.weak("New canvas and preset apply to the next document you create.");
-
-            // The theme picker is deliberately three words in a row rather
-            // than a dropdown: with three built-ins, a combo box hides two
-            // of them behind a click, and the whole point of a theme is that
-            // you try them. The full editor (custom themes, per-token
-            // colour pickers) waits for the Preferences rework.
-            pref_head(ui, "Interface", focus);
-            egui::Grid::new("mn.prefs.interface")
-                .num_columns(2)
-                .spacing([10.0, 5.0])
-                .show(ui, |ui| {
-                    ui.label("Theme");
-                    let now = theme::resolved_name(&p.theme);
-                    ui.horizontal(|ui| {
-                        for (name, _) in theme::BUILT_INS {
-                            if ui.selectable_label(now == *name, *name).clicked() && now != *name {
-                                theme_pick = Some(*name);
-                            }
-                        }
-                    });
-                    ui.end_row();
-
-                    ui.label("Coloured icons");
-                    changed |= ui
-                        .checkbox(&mut p.icon_colours, "")
-                        .on_hover_text(
-                            "Tints each icon by what it does — a green plus on the \
-                             new-layer buttons, a red bin, one hue for the selection \
-                             family — in low-saturation shades taken from the current \
-                             theme. Off draws every glyph in plain chrome grey. \
-                             (colour, colors, icons, monochrome, tint, hue, greyscale)",
-                        )
-                        .changed();
-                    ui.end_row();
-                });
-            ui.weak("Applies immediately. Only dark themes ship for now.");
-
-            pref_head(ui, "Text", focus);
-            egui::Grid::new("mn.prefs.text")
-                .num_columns(2)
-                .spacing([10.0, 5.0])
-                .show(ui, |ui| {
-                    ui.label("New text size");
-                    changed |= ui
-                        .add(
-                            egui::DragValue::new(&mut p.text_size_pt)
-                                .range(4.0..=72.0)
-                                .speed(0.25)
-                                .fixed_decimals(1)
-                                .suffix(" pt"),
-                        )
-                        .changed();
-                    ui.end_row();
-
-                    ui.label("Recent files kept");
-                    changed |= ui
-                        .add(egui::DragValue::new(&mut p.recent_depth).range(1..=32))
-                        .changed();
-                    ui.end_row();
-                });
-
-            pref_head(ui, "History", focus);
-            egui::Grid::new("mn.prefs.history")
-                .num_columns(2)
-                .spacing([10.0, 5.0])
-                .show(ui, |ui| {
-                    ui.label("Undo depth");
-                    changed |= ui
-                        .add(
-                            egui::DragValue::new(&mut p.undo_depth)
-                                .range(50..=5000)
-                                .speed(5.0)
-                                .suffix(" steps"),
-                        )
-                        .changed();
-                    ui.end_row();
-                });
-            ui.weak("Deeper history uses more memory. Lowering it drops the oldest steps now.");
-
-            // Read-only on purpose — the switch itself is the View menu's,
-            // and duplicating a control here would create a second place
-            // for it to disagree. What was missing was never a control: it
-            // was any way to SEE which authority decided, so an owner whose
-            // machine measured CPU-faster could tell "working as designed"
-            // from "broken and silent". Same sentence as the startup log.
-            pref_head(ui, "Performance", focus);
-            ui.label(gpu_line);
-            ui.weak(
-                "Inking moves to the GPU only where a measurement on this machine says \
-                 it is faster; on many laptops the CPU wins and it stays off. Set it \
-                 by hand in the View menu, under GPU dab strokes.",
-            );
-
-            ui.add_space(4.0);
-            ui.separator();
-            if ui.button("Reset to defaults").clicked() {
-                reset = true;
-            }
-            ui.add_space(2.0);
-            ui.weak(
-                egui::RichText::new(format!(
-                    "Settings live in {} — deleting that file resets everything here.",
-                    crate::app::prefs::path_hint()
-                ))
-                .size(10.0),
-            );
-        });
-
-    if reset {
-        app.prefs.reset();
-        app.new_doc_draft.setup = app.prefs.new_preset_setup();
-        theme_pick = Some(theme::resolved_name(&app.prefs.theme));
-    }
-    // Unconditional, and after `reset`: the checkbox writes the preference
-    // and this pushes it into the painters' global. One atomic store per
-    // frame the window is open costs nothing, and it means Reset cannot
-    // leave the switch and the setting disagreeing.
-    super::icons::set_accents(app.prefs.icon_colours);
-    if let Some(name) = theme_pick {
-        app.prefs.theme = name.to_owned();
-        // Live, this frame: swap the tokens, then push them through egui's
-        // own widget visuals. Immediate mode redraws everything anyway, so
-        // there is nothing else to invalidate — and the dock derives its
-        // style from `Style::from_egui` every frame, so it follows too.
-        theme::set_by_name(name);
-        theme::apply(ctx);
-        changed = true;
-    }
-    if let Some(name) = preset_pick {
-        app.prefs.new_preset = name;
-        // Take effect NOW, not just on the next launch — the draft the New
-        // Comic dialog reuses is built once, at startup.
-        app.new_doc_draft.setup = app.prefs.new_preset_setup();
-        changed = true;
-    }
-    if changed {
-        app.prefs.mark_dirty();
-    }
-    // The autosave timer lives in the message loop; `pump_commands` re-arms
-    // it from here (0 = kill it).
-    if app.prefs.autosave_min != autosave_before {
-        app.autosave_rearm = Some(app.prefs.autosave_ms());
-    }
-    app.prefs_open = open;
-    if !open {
-        // The lit header belongs to the trip that asked for it, not to the
-        // next time the window is opened from the menu.
-        app.prefs_focus = None;
     }
 }
 
@@ -1757,6 +1386,14 @@ fn colour_label(e: mn_core::LayerExpression) -> &'static str {
     }
 }
 
+fn crop_label(c: mn_core::export::ExportCrop) -> &'static str {
+    match c {
+        mn_core::export::ExportCrop::Paper => "Whole paper",
+        mn_core::export::ExportCrop::TrimBleed => "Trim + bleed (print)",
+        mn_core::export::ExportCrop::Trim => "Trim only (web)",
+    }
+}
+
 /// PM-050/051/053/054/055: the Export All Pages options — file prefix,
 /// page range, split spreads, and CSP's "write text to file" toggle. The
 /// name preview is the point of the dialog: the owner can SEE that the
@@ -1815,6 +1452,28 @@ pub(super) fn export_all_window(ctx: &egui::Context, app: &mut App) {
                              reads once you edit a control below",
                         );
                     ui.end_row();
+
+                    // M2: one press fills every knob below from the work's
+                    // publisher profile — dpi, colour, split, crop, exact
+                    // height. Only shown when a profile is picked.
+                    if let Some(p) = app.profile.clone() {
+                        ui.label("Profile");
+                        if ui
+                            .button(format!("Use \"{}\"", p.name))
+                            .on_hover_text(
+                                "fills the output settings from the profile picked \
+                                 in Work Settings; every field stays editable after",
+                            )
+                            .clicked()
+                        {
+                            app.export_all_dpi = p.export.dpi;
+                            app.export_all_colour = p.export.colour;
+                            app.export_all_split = p.export.split_spreads;
+                            app.export_all_crop = p.export.crop;
+                            app.export_all_px_height = p.export.px_height;
+                        }
+                        ui.end_row();
+                    }
 
                     ui.label("File prefix");
                     ui.add(
@@ -1890,6 +1549,49 @@ pub(super) fn export_all_window(ctx: &egui::Context, app: &mut App) {
                             "the finish is applied AFTER the resample, so a 1-bit \
                              export is 1-bit at the size it ships",
                         );
+                    ui.end_row();
+
+                    // M2: what rectangle leaves the building. Needs a page
+                    // setup — a pixel canvas has no trim to cut to.
+                    let has_setup = app.page.is_some();
+                    ui.label("Crop");
+                    ui.add_enabled_ui(has_setup, |ui| {
+                        egui::ComboBox::from_id_salt("mn.exportall.crop")
+                            .width(160.0)
+                            .selected_text(crop_label(app.export_all_crop))
+                            .show_ui(ui, |ui| {
+                                for c in [
+                                    mn_core::export::ExportCrop::Paper,
+                                    mn_core::export::ExportCrop::TrimBleed,
+                                    mn_core::export::ExportCrop::Trim,
+                                ] {
+                                    ui.selectable_value(
+                                        &mut app.export_all_crop,
+                                        c,
+                                        crop_label(c),
+                                    );
+                                }
+                            })
+                            .response
+                            .on_hover_text(
+                                "whole paper (as always), trim + bleed (what a \
+                                 printer wants on the plate), or trim only (what \
+                                 a reader sees — the web crop)",
+                            );
+                    });
+                    ui.end_row();
+
+                    ui.label("Exact height");
+                    ui.add(
+                        egui::DragValue::new(&mut app.export_all_px_height)
+                            .range(0..=20000)
+                            .speed(8)
+                            .suffix(" px"),
+                    )
+                    .on_hover_text(
+                        "0 = off. Wins over dpi when set — a web target speced \
+                         in pixels means those pixels. Never upsamples.",
+                    );
                     ui.end_row();
                 });
             ui.add_space(4.0);

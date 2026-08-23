@@ -1694,7 +1694,7 @@ fn material_bank_pastes_and_tiles() {
     // drive — assert the starter set exists in the repo layout.
     let mat_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/materials");
     assert!(
-        mat_dir.join("tones/tone-dot-60lpi-10.png").is_file(),
+        mat_dir.join("tones/tone-dot-60lpi-gradient.png").is_file(),
         "the starter materials must ship in assets/materials"
     );
     if app.materials.is_empty() {
@@ -1703,7 +1703,9 @@ fn material_bank_pastes_and_tiles() {
         app.materials_scan();
     }
     assert!(
-        app.materials.iter().any(|m| m.name == "tone-dot-60lpi-10"),
+        app.materials
+            .iter()
+            .any(|m| m.name == "tone-dot-60lpi-gradient"),
         "the scan must find the starter tones: {:?}",
         app.materials
             .iter()
@@ -1711,10 +1713,14 @@ fn material_bank_pastes_and_tiles() {
             .collect::<Vec<_>>()
     );
 
+    // The GRADED sheet, deliberately: every FLAT starter tone now ships a
+    // `.tone.json` and places as a live tone layer (it fills the page, it
+    // does not float), so the bitmap-float path has to be exercised
+    // against the one sheet a flat tone cannot reproduce.
     let dots = app
         .materials
         .iter()
-        .find(|m| m.name == "tone-dot-60lpi-10")
+        .find(|m| m.name == "tone-dot-60lpi-gradient")
         .unwrap()
         .path
         .clone();
@@ -1852,10 +1858,13 @@ fn material_paste_size_modes_and_layer_order() {
         app.material_folders[0] = mat_dir.clone();
         app.materials_scan();
     }
+    // The graded sheet is the shipped BITMAP material — the flat tones
+    // place live now (see `material_tone_tests`), so they have no paste
+    // geometry to measure.
     let dots = app
         .materials
         .iter()
-        .find(|m| m.name == "tone-dot-60lpi-10")
+        .find(|m| m.name == "tone-dot-60lpi-gradient")
         .unwrap()
         .path
         .clone();
@@ -6044,11 +6053,14 @@ fn transform_fields_flip_pivot_and_midpoint() {
     crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::TransformCancel);
 
     // TR-004: the right-edge midpoint drag scales ONE axis — down at
-    // (128,64), up at (192,64) → sx = 2, sy untouched. Identity view
-    // first: the fitted zoom shrinks the hit-test tolerance slack and
-    // the corner test (tol·1.4) would swallow the midpoint at low zoom.
+    // (128,64), up at (192,64). Identity view first: the fitted zoom
+    // shrinks the hit-test tolerance slack and the corner test (tol·1.4)
+    // would swallow the midpoint at low zoom.
     app.viewport.zoom = 1.0;
     app.viewport.pan = [0.0, 0.0];
+    // Keep-aspect ships ON (CSP 縦横比固定); this case is about the
+    // ONE-axis behaviour, so turn the setting off the way the checkbox does.
+    app.transform_keep_aspect = false;
     crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::TransformStart);
     let (x0, y0) = app.viewport.to_screen(128.0, 64.0);
     let (x1, y1) = app.viewport.to_screen(192.0, 64.0);
@@ -6057,19 +6069,29 @@ fn transform_fields_flip_pivot_and_midpoint() {
     {
         // (canvas_up clears the gesture; the params are the proof — a
         // corner grab would scale BOTH axes, Move/Rotate neither.)
+        //
+        // sx is 1.5, not 2.0: the ANCHOR changed (2026-08-23, owner bug).
+        // A side handle used to scale about the reference point — the
+        // centre, 64px away, so 128→192 read as ×2 and the LEFT edge ran
+        // away by the same amount. CSP anchors on the opposite edge, 128px
+        // away, so the same pull is ×1.5 and the left edge holds still.
         let d = app.transform_drag.as_ref().unwrap();
-        assert!((d.sx - 2.0).abs() < 0.05, "sx doubled: {}", d.sx);
+        assert!((d.sx - 1.5).abs() < 0.05, "sx off the left edge: {}", d.sx);
         assert!((d.sy - 1.0).abs() < 1e-5, "sy untouched: {}", d.sy);
     }
-    // Commit the one-axis scale: x' = 64 + 2(x−64) → the square's
-    // x-extent 20..108 becomes −24..152 (canvas-clipped to 0..152),
-    // y unchanged 20..108.
+    // Commit the one-axis scale: the left edge (x=0) is pinned, so
+    // x' = 1.5x → the square's x-extent 20..108 becomes 30..162, y
+    // unchanged 20..108.
     crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::TransformCommit);
     assert!(
         ink_at(&app.doc, 140, 64),
         "ink extended past the old right edge"
     );
-    assert!(ink_at(&app.doc, 8, 64), "ink pulled past the old left edge");
+    assert!(ink_at(&app.doc, 40, 64), "and the body came with it");
+    assert!(
+        !ink_at(&app.doc, 8, 64),
+        "the anchored left edge did NOT run away"
+    );
     assert!(
         !ink_at(&app.doc, 80, 16),
         "vertical extent unchanged (above)"
@@ -8010,4 +8032,219 @@ fn ruler_handles_name_themselves_in_the_status_line() {
         app.status
     );
     app.canvas_up(mx, my, &empty);
+}
+
+// --- CSP "Keep gutters aligned" (audit P0-4) ---------------------------
+
+/// Two panels with a real gutter between them, one frame folder. Dragging
+/// the facing border of A used to move that edge ALONE — the 40 px gutter
+/// narrowed to nothing. With "Keep gutters aligned = All" B's facing
+/// border travels the same distance and the gutter keeps its width.
+#[test]
+fn edge_drag_keeps_the_gutter_within_one_folder() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    app.viewport = mn_gpu::Viewport::default();
+    use mn_core::frame::{Frame, FrameSet};
+    let l = app.doc.add_frame_layer(
+        "panels",
+        FrameSet {
+            frames: vec![
+                Frame::rect(0.0, 0.0, 100.0, 200.0),
+                Frame::rect(140.0, 0.0, 240.0, 200.0),
+            ],
+            border_px: 4.0,
+            slot: None,
+            reading_pin: None,
+            border_ruler: false,
+        },
+    );
+    // A's right edge (points 1..2, x = 100) drags right by 60.
+    let orig = app.doc.layers[l].frames().unwrap().frames[0].clone();
+    app.object_drag = Some(crate::app::canvas_input::ObjectDrag {
+        layer: l,
+        frame: 0,
+        mode: crate::app::canvas_input::ObjectDragMode::Edge(1),
+        start: (100.0, 100.0),
+        cur: (100.0, 100.0),
+        orig,
+    });
+    app.canvas_up(160.0, 100.0, &[]);
+    while let Some(c) = app.cmds.pop_front() {
+        crate::cmd::dispatch(&mut app, c);
+    }
+    let fr = &app.doc.layers[l].frames().unwrap().frames;
+    assert!((fr[0].bbox()[2] - 160.0).abs() < 0.01, "{:?}", fr[0].points);
+    assert!(
+        (fr[1].bbox()[0] - 200.0).abs() < 0.01,
+        "B's facing border came along: {:?}",
+        fr[1].points
+    );
+    assert!(
+        (fr[1].bbox()[2] - 240.0).abs() < 0.01,
+        "B's FAR border stayed put: {:?}",
+        fr[1].points
+    );
+    assert!(
+        (fr[1].bbox()[0] - fr[0].bbox()[2] - 40.0).abs() < 0.01,
+        "the gutter kept its width"
+    );
+}
+
+/// The same gesture across TWO frame folders — the divide-folder layout,
+/// where every panel is its own folder, is our common case. Each touched
+/// folder gets its own FrameCommit.
+#[test]
+fn edge_drag_keeps_the_gutter_across_folders() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    app.viewport = mn_gpu::Viewport::default();
+    let a = app.doc.add_frame_folder(
+        "Frame 1",
+        mn_core::FrameSet::single_rect([0.0, 0.0, 100.0, 200.0], 4.0),
+    );
+    let b = app.doc.add_frame_folder(
+        "Frame 2",
+        mn_core::FrameSet::single_rect([140.0, 0.0, 240.0, 200.0], 4.0),
+    );
+    let orig = app.doc.layers[a].frames().unwrap().frames[0].clone();
+    app.object_drag = Some(crate::app::canvas_input::ObjectDrag {
+        layer: a,
+        frame: 0,
+        mode: crate::app::canvas_input::ObjectDragMode::Edge(1),
+        start: (100.0, 100.0),
+        cur: (100.0, 100.0),
+        orig,
+    });
+    app.canvas_up(160.0, 100.0, &[]);
+    while let Some(c) = app.cmds.pop_front() {
+        crate::cmd::dispatch(&mut app, c);
+    }
+    let fa = app.doc.layers[a].frames().unwrap().frames[0].bbox();
+    let fb = app.doc.layers[b].frames().unwrap().frames[0].bbox();
+    assert!((fa[2] - 160.0).abs() < 0.01, "{fa:?}");
+    assert!(
+        (fb[0] - 200.0).abs() < 0.01,
+        "the sibling folder moved: {fb:?}"
+    );
+    assert!((fb[2] - 240.0).abs() < 0.01, "its far border did not: {fb:?}");
+}
+
+/// "Keep gutters aligned = None" is the pre-fix behaviour on purpose: the
+/// dragged edge moves alone and the gutter narrows. Panels that SHARE a
+/// border still carry — that carry is not the gutter feature.
+#[test]
+fn gutter_align_none_resizes_the_edge_alone() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    app.viewport = mn_gpu::Viewport::default();
+    app.gutter_align_all = false;
+    let a = app.doc.add_frame_folder(
+        "Frame 1",
+        mn_core::FrameSet::single_rect([0.0, 0.0, 100.0, 200.0], 4.0),
+    );
+    let b = app.doc.add_frame_folder(
+        "Frame 2",
+        mn_core::FrameSet::single_rect([140.0, 0.0, 240.0, 200.0], 4.0),
+    );
+    let orig = app.doc.layers[a].frames().unwrap().frames[0].clone();
+    app.object_drag = Some(crate::app::canvas_input::ObjectDrag {
+        layer: a,
+        frame: 0,
+        mode: crate::app::canvas_input::ObjectDragMode::Edge(1),
+        start: (100.0, 100.0),
+        cur: (100.0, 100.0),
+        orig,
+    });
+    app.canvas_up(130.0, 100.0, &[]);
+    while let Some(c) = app.cmds.pop_front() {
+        crate::cmd::dispatch(&mut app, c);
+    }
+    let fa = app.doc.layers[a].frames().unwrap().frames[0].bbox();
+    let fb = app.doc.layers[b].frames().unwrap().frames[0].bbox();
+    assert!((fa[2] - 130.0).abs() < 0.01, "{fa:?}");
+    assert!((fb[0] - 140.0).abs() < 0.01, "None left B alone: {fb:?}");
+}
+
+/// An edge with nothing across from it — the page margin — is a plain
+/// resize, gutter mode or not.
+#[test]
+fn edge_drag_against_the_page_edge_is_a_plain_resize() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    app.viewport = mn_gpu::Viewport::default();
+    let a = app.doc.add_frame_folder(
+        "Frame 1",
+        mn_core::FrameSet::single_rect([0.0, 0.0, 100.0, 200.0], 4.0),
+    );
+    let orig = app.doc.layers[a].frames().unwrap().frames[0].clone();
+    app.object_drag = Some(crate::app::canvas_input::ObjectDrag {
+        layer: a,
+        frame: 0,
+        mode: crate::app::canvas_input::ObjectDragMode::Edge(1),
+        start: (100.0, 100.0),
+        cur: (100.0, 100.0),
+        orig,
+    });
+    app.canvas_up(160.0, 100.0, &[]);
+    while let Some(c) = app.cmds.pop_front() {
+        crate::cmd::dispatch(&mut app, c);
+    }
+    let fa = app.doc.layers[a].frames().unwrap().frames[0].bbox();
+    assert!((fa[2] - 160.0).abs() < 0.01, "resized: {fa:?}");
+    assert!(!app.status.contains("neighbour"), "{}", app.status);
+}
+
+/// The all-or-nothing revert covers the gutter carry too: push A's border
+/// far enough and B — moved by the SAME delta — collapses. The whole
+/// gesture drops, both panels untouched. (The zero-gutter twin of this
+/// lives in `gutter_carry_reverts_when_a_neighbour_would_break`.)
+#[test]
+fn gutter_carry_reverts_when_the_facing_panel_would_collapse() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    app.viewport = mn_gpu::Viewport::default();
+    let a = app.doc.add_frame_folder(
+        "Frame 1",
+        mn_core::FrameSet::single_rect([0.0, 0.0, 100.0, 200.0], 4.0),
+    );
+    let b = app.doc.add_frame_folder(
+        "Frame 2",
+        mn_core::FrameSet::single_rect([140.0, 0.0, 240.0, 200.0], 4.0),
+    );
+    let orig = app.doc.layers[a].frames().unwrap().frames[0].clone();
+    app.object_drag = Some(crate::app::canvas_input::ObjectDrag {
+        layer: a,
+        frame: 0,
+        mode: crate::app::canvas_input::ObjectDragMode::Edge(1),
+        start: (100.0, 100.0),
+        cur: (100.0, 100.0),
+        orig,
+    });
+    // +100 carries B's left border onto its right at 240: the panel
+    // collapses to zero area, so the whole gesture drops.
+    app.canvas_up(200.0, 100.0, &[]);
+    assert!(
+        app.status.contains("neighbour"),
+        "the refusal says so: {}",
+        app.status
+    );
+    assert!(app.cmds.is_empty(), "nothing was queued");
+    let fa = app.doc.layers[a].frames().unwrap().frames[0].bbox();
+    let fb = app.doc.layers[b].frames().unwrap().frames[0].bbox();
+    assert!(
+        (fa[2] - 100.0).abs() < 0.01,
+        "the dragged panel reverted: {fa:?}"
+    );
+    assert!((fb[0] - 140.0).abs() < 0.01, "the neighbour reverted: {fb:?}");
 }

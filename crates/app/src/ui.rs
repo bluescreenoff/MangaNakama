@@ -28,6 +28,7 @@ mod overlay;
 mod pages;
 mod batch;
 mod pattern;
+mod prefs_dialog;
 mod property;
 mod reader;
 mod subtool;
@@ -42,9 +43,10 @@ pub use quick::open_command_palette;
 use color::picker_sync;
 use dialogs::{
     adjust_window, canvas_size_window, detail_window, export_all_window, feedback_window,
-    filter_window, gen_lines_window, goto_page_window, hud, new_doc_window, prefs_window,
+    filter_window, gen_lines_window, goto_page_window, hud, new_doc_window,
     property_detail_window, spread_window, story_window, text_styles_window, work_settings_window, workspace_window,
 };
+use prefs_dialog::prefs_window;
 use overlay::canvas_overlay;
 use top::{status_bar, top_bar};
 use widgets::chrome_frame;

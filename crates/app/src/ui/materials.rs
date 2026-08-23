@@ -158,6 +158,24 @@ fn paste_options(ui: &mut egui::Ui, app: &mut App) {
     ui.checkbox(&mut app.material_tone, "Tone").on_hover_text(
         "paste as the document's screentone (60 LPI 45° dots) — makes any image printable on a mono page",
     );
+    // A TONE material has no paste geometry to choose: it fills the page
+    // (or the selection) as a live tone layer, and its screen is
+    // canvas-absolute — scaling a tone would scale the dots, which is the
+    // bug the live path exists to kill. Grey the two combos out rather
+    // than leaving controls armed that cannot do anything.
+    let tone_material = app
+        .material_selected
+        .and_then(|i| app.materials.get(i))
+        .is_some_and(|m| m.tone_spec().is_some());
+    let row = ui.add_enabled_ui(!tone_material, |ui| paste_geometry(ui, app));
+    if tone_material {
+        row.response
+            .on_hover_text("a tone fills the page or the selection");
+    }
+}
+
+/// The two paste-geometry combos — size and layer order.
+fn paste_geometry(ui: &mut egui::Ui, app: &mut App) {
     // MT-032: CSP's paste-size vocabulary — five meanings of "paste
     // this at the right size", named after the job.
     let size_label = match app.material_size {

@@ -101,6 +101,16 @@ const REPAINT_TIMER: usize = 1;
 /// (`prefs.txt`) — 15 minutes shipped, which is the owner's original
 /// request; 0 means the timer is never armed at all.
 const AUTOSAVE_TIMER: usize = 2;
+/// Repeating poll, armed ONLY while the background GPU-inking measurement
+/// child is running, killed the moment its verdict lands (or after
+/// [`MEASURE_GIVE_UP`] ticks, so a child that dies without writing does not
+/// leave a timer ticking for the session). Without this the verdict sat in a
+/// file nobody re-read until the next launch.
+const MEASURE_TIMER: usize = 3;
+const MEASURE_POLL_MS: u32 = 3_000;
+/// ~3 minutes. The measurement is a 3-rep bench; if it has not written by
+/// then it never will.
+const MEASURE_GIVE_UP: u32 = 60;
 
 struct Cli {
     warp: bool,
@@ -201,10 +211,32 @@ fn parse_cli() -> Cli {
                 }
             }
             "--help" | "-h" => {
+                // Every flag `parse_cli` accepts, in the order it matches
+                // them. A flag that exists but is undocumented is a flag
+                // nobody uses: --gpu-dabs and the two bench modes were the
+                // whole GPU-inking story and none of them were listed.
                 println!(
-                    "MangaNakama\n  --warp             force the software (fallback/WARP) adapter\n  \
-                     --novsync          present with AutoNoVsync instead of AutoVsync\n  \
-                     --screenshot PATH  render one offscreen frame (canvas + UI) to PNG and exit"
+                    "MangaNakama\n\
+                     \n  adapter\n  \
+                       --warp             force the software (fallback/WARP) adapter\n  \
+                       --novsync          present with AutoNoVsync instead of AutoVsync\n  \
+                       --gpu-dabs         force inking onto the GPU (overrides the measured default)\n\
+                     \n  screenshots\n  \
+                       --screenshot PATH  render one offscreen frame (canvas + UI) to PNG and exit\n  \
+                       --shot-size WxH    size for --screenshot (default 1280x860)\n  \
+                       --shot-transform   --screenshot extra: an active transform box\n  \
+                       --shot-selection   --screenshot extra: an active selection\n  \
+                       --shot-framefocus  --screenshot extra: a focused frame folder\n  \
+                       --shot-tone        --screenshot extra: a tone layer\n  \
+                       --shot-dock        --screenshot extra: Layers torn off as a floating dock\n  \
+                       --shot-hero        --screenshot extra: README-grade shot, no diagnostics\n\
+                     \n  measurement + end-to-end runs (no window; print and exit)\n  \
+                       --bench-dabs       time CPU vs GPU inking, write manganakama-bench.txt\n  \
+                       --bench-verdict    the short measurement run, writes gpu-verdict.txt\n  \
+                       --e2e-workfolder   drive the work-folder storage path\n  \
+                       --e2e-dockdrag     drive the dock drag interactions\n  \
+                       --e2e-paneresize   drive the dock-column resize edges\n\
+                     \n  --help, -h         this list"
                 );
                 std::process::exit(0);
             }
@@ -481,6 +513,13 @@ fn main() {
     println!("[app] dpi scale: {ppp:.2}x");
     let app = Box::new(App::new(renderer, (cw, ch), ppp));
     let mut app = app;
+    // The UI-size preference multiplies the window DPI from the first
+    // frame (prefs load inside App::new, so the scale is only known now;
+    // dpi_changed is a no-op at 1.0).
+    if (app.prefs.ui_scale - 1.0).abs() > 1e-4 {
+        let s = app.prefs.ui_scale;
+        app.dpi_changed(ppp * s);
+    }
     // The reader's F11 fullscreen needs the window handle (tests run
     // headless with hwnd == 0 — state-only).
     app.hwnd = hwnd as isize;
@@ -519,11 +558,16 @@ fn main() {
         // dies the verdict file stays absent and the next launch retries.
         bench_note = Some(match std::env::current_exe() {
             Ok(exe) => match std::process::Command::new(exe).arg("--bench-verdict").spawn() {
-                Ok(child) => format!(
-                    "[app] gpu-inking: measuring this GPU in the background (pid {}); \
-                     the result applies at the next start",
-                    child.id()
-                ),
+                Ok(child) => {
+                    // Watch for the verdict THIS session. Armed only here,
+                    // killed by the first tick that finds it.
+                    unsafe { SetTimer(hwnd, MEASURE_TIMER, MEASURE_POLL_MS, None) };
+                    format!(
+                        "[app] gpu-inking: measuring this GPU in the background (pid {}); \
+                         the result applies as soon as it finishes",
+                        child.id()
+                    )
+                }
                 Err(e) => format!("[app] gpu-inking: could not start the measurement: {e}"),
             },
             Err(e) => format!("[app] gpu-inking: could not locate this exe to measure: {e}"),
@@ -897,6 +941,34 @@ fn flush_redraw(hwnd: HWND, app: &mut App) {
     }
 }
 
+/// One tick of the background measurement watch. Returns `true` when the
+/// poll is finished and its timer should be killed.
+///
+/// The measurement child writes `gpu-verdict.txt` and exits; nothing used to
+/// re-read it, so a machine measured at 9× faster kept inking on the CPU
+/// until the user happened to restart. `gpu_dabs` is read per stroke, so
+/// flipping it here is safe mid-session — the change takes effect from the
+/// next stroke and never mid-stroke. The switch is NOT marked explicit: this
+/// is still the measured auto-default, and the View menu must keep saying so.
+fn measurement_poll(app: &mut App) -> bool {
+    static TICKS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = TICKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let Some(on) = bench::measured_for(&app.renderer.adapter_line()) else {
+        return n >= MEASURE_GIVE_UP;
+    };
+    let want = on && app.renderer.gpu_dabs_supported();
+    if want != app.gpu_dabs {
+        app.gpu_dabs = want;
+        app.set_status(if want {
+            "inking now runs on the GPU: measured faster on this machine (View menu to change)"
+        } else {
+            "inking stays on the CPU: measured faster there on this machine (View menu to change)"
+        });
+    }
+    println!("[app] {}", bench::state_line_for(app));
+    true
+}
+
 /// Drain queued commands. File dialogs are resolved here, between borrows.
 fn pump_commands(hwnd: HWND) {
     loop {
@@ -921,6 +993,15 @@ fn pump_commands(hwnd: HWND) {
                 SetTimer(hwnd, AUTOSAVE_TIMER, ms, None);
             }
         }
+    }
+
+    // The Preferences panel moved the UI-size slider: the effective
+    // pixels-per-point is window DPI × scale, applied through the same
+    // door a monitor DPI change uses (viewport zoom compensates, so the
+    // artwork's on-screen size does not move — only the chrome does).
+    if let Some(scale) = with_app(hwnd, |a| a.ui_scale_apply.take()).flatten() {
+        let base = window_ppp(hwnd);
+        with_app(hwnd, |a| a.dpi_changed(base * scale));
     }
 
     // PR-041: "save recovery data for every operation" — the same
@@ -1734,6 +1815,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             } else if wparam == AUTOSAVE_TIMER {
                 // Repeating: never killed. Executed by pump_commands.
                 app.push_cmd(AppCmd::Autosave);
+            } else if wparam == MEASURE_TIMER && measurement_poll(app) {
+                unsafe { KillTimer(hwnd, MEASURE_TIMER) };
             }
             0
         }
@@ -1839,7 +1922,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 };
             }
             // hiword(wparam) is the new dpi; ask the window to be safe.
-            app.dpi_changed(window_ppp(hwnd));
+            // × ui_scale: the UI-size preference rides the same effective
+            // pixels-per-point everywhere (see pump_commands).
+            app.dpi_changed(window_ppp(hwnd) * app.prefs.ui_scale);
             flush_redraw(hwnd, app);
             0
         }
@@ -1961,7 +2046,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         let mut taps = TAPS.lock().unwrap_or_else(|e| e.into_inner());
                         match msg {
                             WM_POINTERDOWN => {
-                                let ppp = window_ppp(hwnd);
+                                // The shell's ppp IS the effective one
+                                // (window DPI × UI scale) — the navigator
+                                // rect and tap slop must use the same
+                                // space egui laid out in.
+                                let ppp = app.shell.ppp;
                                 taps.configure(
                                     app.layout.touch_gestures,
                                     ppp,

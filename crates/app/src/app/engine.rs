@@ -31,11 +31,13 @@ pub enum EngineKind {
 ///
 /// `cmd.rs`'s `SelectBrush` reads the same key to build the LIVE engine — the
 /// two must stay in step, or a preset draws as one brush and previews as
-/// another.
+/// another. The reading half is [`mn_brush::preset_engine_key`]; this is the
+/// only place that turns the name into an engine.
+///
+/// An UNKNOWN name is `None`, not an error: a preset from a newer build falls
+/// back to the MyPaint path rather than leaving the sub tool with no engine.
 pub fn preset_engine(path: &Path) -> Option<EngineKind> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let j: serde_json::Value = serde_json::from_str(&text).ok()?;
-    match j.get("mn-engine")?.as_str()? {
+    match mn_brush::preset_engine_key(path)?.as_str() {
         "grid" => Some(EngineKind::Grid(GridDab::default())),
         "hairy" => Some(EngineKind::Hairy(HairyDab::default())),
         "curve" => Some(EngineKind::Curve(CurveDab::default())),
@@ -886,5 +888,84 @@ impl StrokeSink for Engine {
         for t in &mut self.twins {
             t.kind.end(doc);
         }
+    }
+}
+
+#[cfg(test)]
+mod preset_engine_tests {
+    use super::*;
+
+    /// Which arm of [`EngineKind`] a preset landed on, as a name a table can
+    /// compare — the enum carries engines, which are not `PartialEq`.
+    fn arm(k: &EngineKind) -> &'static str {
+        match k {
+            EngineKind::My(_) => "my",
+            EngineKind::Dab(_) => "dab",
+            EngineKind::Grid(_) => "grid",
+            EngineKind::Hairy(_) => "hairy",
+            EngineKind::Curve(_) => "curve",
+            EngineKind::Dyna(_) => "dyna",
+        }
+    }
+
+    /// The whole `mn-engine` contract as one table. Three readers build an
+    /// engine from this key (the live tool, the Sub Tool swatch, the property
+    /// panel's test strip) and they only agree because they all come through
+    /// here.
+    #[test]
+    fn the_mn_engine_key_selects_its_engine() {
+        let dir = std::env::temp_dir().join("mn-preset-engine-table");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let cases: [(&str, Option<&str>); 8] = [
+            (r#"{"version":3,"mn-engine":"grid"}"#, Some("grid")),
+            (r#"{"version":3,"mn-engine":"hairy"}"#, Some("hairy")),
+            (r#"{"version":3,"mn-engine":"curve"}"#, Some("curve")),
+            (r#"{"version":3,"mn-engine":"dyna"}"#, Some("dyna")),
+            // A name this build does not know falls back to MyPaint rather
+            // than leaving the sub tool with no engine at all.
+            (r#"{"version":3,"mn-engine":"sparkle"}"#, None),
+            // The key is optional: an ordinary preset is a MyPaint preset.
+            (r#"{"version":3,"settings":{}}"#, None),
+            // Wrong type, and not JSON at all — neither may panic.
+            (r#"{"mn-engine":7}"#, None),
+            ("not json", None),
+        ];
+        for (i, (json, want)) in cases.iter().enumerate() {
+            let p = dir.join(format!("case{i}.myb"));
+            std::fs::write(&p, json).expect("write preset");
+            assert_eq!(
+                preset_engine(&p).as_ref().map(arm),
+                *want,
+                "case {i}: {json}"
+            );
+        }
+        // A path that does not exist is `None`, not a panic.
+        assert!(preset_engine(&dir.join("absent.myb")).is_none());
+    }
+
+    /// And the SHIPPED presets really carry those keys — the table above would
+    /// happily pass while every asset had a typo in it.
+    #[test]
+    fn the_shipped_procedural_presets_select_their_engines() {
+        for (name, want) in [
+            ("grid-dots", "grid"),
+            ("hairy-bristles", "hairy"),
+            ("curve-brush", "curve"),
+            ("dyna-spring", "dyna"),
+        ] {
+            let p = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("../../assets/brushes/krita/{name}.myb"));
+            assert_eq!(
+                preset_engine(&p).as_ref().map(arm),
+                Some(want),
+                "{name} lost its mn-engine key"
+            );
+        }
+        let pen = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/brushes/classic/pen.myb");
+        assert!(
+            preset_engine(&pen).is_none(),
+            "an ordinary preset must stay on the MyPaint path"
+        );
     }
 }

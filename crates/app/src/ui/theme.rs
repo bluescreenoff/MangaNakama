@@ -370,15 +370,22 @@ impl<'a> ValueBar<'a> {
         if hot {
             p.rect_filled(rect, CornerRadius::same(R_CTRL), th.hover);
         }
-        // The track: a hairline strip along the bottom edge, empty part
-        // inset-dark, filled part accent. Full width, so the drag mapping
-        // (pointer x → t) is exactly the one the row already had.
+        // The track: a hairline strip along the bottom edge. Full width, so
+        // the drag mapping (pointer x → t) is exactly the one the row
+        // already had.
         let track = egui::Rect::from_min_max(
             egui::pos2(rect.left(), rect.bottom() - TRACK_H),
             rect.right_bottom(),
         );
         let cr = CornerRadius::same(1);
-        p.rect_filled(track, cr, th.field);
+        // The GROOVE is painted first and always, across the whole width —
+        // CSP never hides it, and a zeroed parameter ("Stabilize 0%", "In
+        // 0 px") has no fill at all, so the groove is the only thing saying
+        // the row is draggable (parity M1). It is `outline`, not the `field`
+        // trough grey: three pixels of 0x1c on a 0x2a panel is a black
+        // hairline flush with the row below it, which reads as a seam, not a
+        // control — an empty bar looked like static text.
+        p.rect_filled(track, cr, th.outline);
         let t = self.to_t(*v);
         let fill_w = t * track.width();
         if fill_w > 0.5 {
@@ -576,6 +583,14 @@ mod tests {
             assert!(
                 lum(t.window) < lum(t.panel),
                 "{name}: chrome is not the darkest surface"
+            );
+            // [`ValueBar`] paints its groove in `outline` on a `panel` body,
+            // and an empty bar is groove ONLY. If a future palette lets the
+            // two converge, every zeroed slider in Tool Property goes back to
+            // looking like a line of static text (parity M1).
+            assert!(
+                lum(t.outline) >= lum(t.panel) + 24,
+                "{name}: the ValueBar groove does not read against the panel"
             );
         }
         assert_ne!(SEPIA, DARK);

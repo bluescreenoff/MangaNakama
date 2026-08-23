@@ -18,19 +18,11 @@ use super::theme;
 use crate::app::App;
 use crate::cmd::{AppCmd, SubTool, Tool};
 
-/// The Preferences window's section headers, in the order it draws them —
-/// the palette's "Preferences ▸ …" rows open the window with one of these
-/// lit (`ui::dialogs::pref_head`). Renaming a header here without renaming
-/// it there only costs the highlight, never the row.
-const PREF_SECTIONS: [&str; 7] = [
-    "Saving",
-    "Drawing",
-    "Canvas & view",
-    "Interface",
-    "Text",
-    "History",
-    "Performance",
-];
+/// The Preferences window's tabs, straight from the window's own array —
+/// the palette's "Preferences ▸ …" rows open the window on one of these,
+/// and the per-setting rows below them come from the same registry the
+/// window renders, so neither can drift.
+const PREF_SECTIONS: [&str; 7] = super::prefs_dialog::TABS;
 
 /// One searchable entry: what it is called, where it lives (the parenthetical
 /// UI-052 shows), and what it runs. Curated — payload commands are named,
@@ -397,6 +389,14 @@ pub fn palette_entries(input: &PaletteInput) -> Vec<Entry> {
             PREF_SECTIONS
                 .iter()
                 .map(|&s| cmd_row(s, "Preferences", AppCmd::OpenPrefs(Some(s)))),
+        )
+        // Every individual setting, from the window's own registry — the
+        // palette can NAVIGATE to a row ("undo depth" jumps there, lit);
+        // inline editing here is explicitly out of scope.
+        .chain(
+            super::prefs_dialog::PREF_INDEX
+                .iter()
+                .map(|m| cmd_row(m.label, "Setting", AppCmd::OpenPrefs(Some(m.id)))),
         )
         .chain(super::dock::ALL.iter().map(|&p| {
             cmd_row(
@@ -942,6 +942,37 @@ mod tests {
         assert_eq!(magnetic, vec!["Magnetic lasso".to_owned()]);
     }
 
+    /// The selection pen and eraser lost their strip cells on 2026-08-23 and
+    /// became Selection sub tools. The palette is the door that has to stay
+    /// open, or removing the cells would simply have removed the tools —
+    /// they were unreachable by search before the fold-in, so this row of
+    /// the fix is the whole reason the `SubTool` variants exist.
+    #[test]
+    fn palette_entries_reach_the_selection_paint_tools() {
+        let entries = all_entries();
+        for (label, tool) in [
+            ("Selection pen", Tool::SelPen),
+            ("Erase selection", Tool::SelEraser),
+        ] {
+            let row = entries
+                .iter()
+                .find(|e| e.label == label)
+                .unwrap_or_else(|| panic!("{label} must be searchable"));
+            assert_eq!(row.path, "Sub Tool ▸ Selection", "it files under Selection");
+            match row.cmd {
+                AppCmd::SetSubTool(s) => assert_eq!(s.tool(), tool, "{label} carries its tool"),
+                ref other => panic!("{label} must push SetSubTool, not {other:?}"),
+            }
+        }
+        // Searching the group name lists the whole family — the four shapes
+        // plus the two paint rows.
+        let family = labels(&entries, &palette_filter(&entries, "selection", &[], 40));
+        assert!(
+            family.iter().any(|l| l == "Selection pen"),
+            "the group search finds it too {family:?}"
+        );
+    }
+
     /// The user's own auto actions are runnable from the palette, on the
     /// SAME command the Auto Actions palette's ▶ pushes — index-keyed, so
     /// the rows are built from today's list, not remembered.
@@ -984,6 +1015,18 @@ mod tests {
             match row.cmd {
                 AppCmd::OpenPrefs(Some(s)) => assert_eq!(s, sec, "opens on its own section"),
                 ref other => panic!("{sec} must open Preferences, not {other:?}"),
+            }
+        }
+        // And each individual setting row jumps to its own registry id —
+        // "undo depth" in the palette lands on that row, lit.
+        for m in super::super::prefs_dialog::PREF_INDEX {
+            let row = entries
+                .iter()
+                .find(|e| e.label == m.label && e.path == "Setting")
+                .unwrap_or_else(|| panic!("Setting ▸ {} has no row", m.label));
+            match row.cmd {
+                AppCmd::OpenPrefs(Some(s)) => assert_eq!(s, m.id, "jumps to its own row"),
+                ref other => panic!("{} must open Preferences, not {other:?}", m.label),
             }
         }
         // Typing the window's name lists its sections (the path is searched;

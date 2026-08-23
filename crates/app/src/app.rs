@@ -49,7 +49,9 @@ pub use prefs::Prefs;
 pub use crate::cmd::RulerKind;
 pub use pages::{CanvasSizeDraft, NewComicDraft, PageEntry, SpreadOp, WorkSettingsDraft};
 pub use session::{DocSession, unsaved_autosave_path_for};
-pub use transform::{TransformDrag, TransformGesture, TransformGrab, transform_preview};
+pub use transform::{
+    ROTATE_STALK_SCREEN, TransformDrag, TransformGesture, TransformGrab, transform_preview,
+};
 
 use canvas_input::{BalloonObjDrag, ObjectDrag};
 use std::collections::{HashMap, VecDeque};
@@ -204,10 +206,19 @@ pub struct App {
     pub canvas_size_open: bool,
     /// Preferences window (Edit ▸ Preferences…).
     pub prefs_open: bool,
-    /// The section header the window opened ON, lit so the eye lands there.
-    /// The window is one column of headers rather than tabs, so this is what
-    /// "jump to Preferences ▸ Performance" can mean; cleared when it closes.
+    /// What the window opened ON: a tab name ("Performance") or a row id
+    /// from `ui::prefs_dialog::PREF_INDEX` ("undo_depth") — the window
+    /// resolves either to a tab and lights the row. Cleared when it closes.
     pub prefs_focus: Option<&'static str>,
+    /// The Preferences window's active tab (index into
+    /// `ui::prefs_dialog::TABS`). Session state, not persisted.
+    pub prefs_tab: usize,
+    /// The Preferences window's live search text.
+    pub prefs_search: String,
+    /// The UI-size slider moved: `main::pump_commands` re-derives the
+    /// effective pixels-per-point (window DPI × this) through the
+    /// `dpi_changed` door. Same shape as `autosave_rearm`, same reason.
+    pub ui_scale_apply: Option<f32>,
     /// TC-004/005/006/011: the open tonal-correction dialog's live
     /// parameters; `None` = no correction dialog open.
     pub adjust_draft: Option<mn_core::Adjust>,
@@ -244,6 +255,12 @@ pub struct App {
     /// reduced to. `Colour` = untouched, which is what the run did before
     /// finishing presets existed.
     pub export_all_colour: mn_core::LayerExpression,
+    /// What rectangle leaves the building (M2): whole paper, trim+bleed
+    /// (print plate), or trim only (web). Paper = the pre-profile export,
+    /// byte-identical.
+    pub export_all_crop: mn_core::export::ExportCrop,
+    /// Exact output height in px, 0 = off. Wins over dpi; never upsamples.
+    pub export_all_px_height: u32,
     /// TRIAGE 144: the Story Editor window + its per-page decoded docs
     /// (None = the active page, which edits the live document).
     pub story_open: bool,
@@ -367,6 +384,11 @@ pub struct App {
     /// live driver drag (blue reference / shape handles).
     pub gen_sel: Option<usize>,
     pub gen_drag: Option<crate::app::canvas_input::GenLinesDrag>,
+    /// Tool Property's draft of the SELECTED run's spec while a bar is
+    /// being dragged — the same buffering idiom as `border_edit`, and for
+    /// a sharper reason: committing per frame would re-rasterize a
+    /// page-sized effect-line layer on every mouse move.
+    pub gen_edit: Option<mn_core::genlines::GenLinesSpec>,
     /// Quick Access (UI-050/052): the search field + pinned commands.
     pub quick_query: String,
     pub quick_pins: Vec<String>,
@@ -397,6 +419,13 @@ pub struct App {
     pub spine_mm: f32,
     /// Cover page designation — page index in reading order. Preflight input.
     pub cover: Option<usize>,
+    /// Template page (tekno B2) — reading-order index whose bytes seed new
+    /// pages instead of a blank. Set from the Pages palette's right-click;
+    /// index-bound like `cover`.
+    pub template_page: Option<usize>,
+    /// Publisher/printer target (ROADMAP M2): preflight norms + export
+    /// finish preselect. Picked in Work Settings; rides the work file.
+    pub profile: Option<mn_core::profile::PublisherProfile>,
     /// Preflight palette (TRIAGE 132): cached findings + the staleness key
     /// (active doc revision + page index + a manual flag for work-metadata
     /// edits, which do not bump the doc revision).
@@ -507,8 +536,12 @@ pub struct App {
     pub ruler_lock: mn_core::SnapLock,
     /// Part 2: the in-progress curve ruler polyline (click vertices).
     pub curve_pending: Option<Vec<[f32; 2]>>,
-    /// Double-click detection for curve-ruler finishing (client px + time).
-    pub last_click: Option<(f32, f32, std::time::Instant)>,
+    /// Click-run detection (client px + time + how many presses deep the run
+    /// is): curve-ruler finishing, double-click word select, triple-click line
+    /// select, double-click-to-edit on the Object tool. Maintained by
+    /// `App::click_run` — the window class carries no CS_DBLCLKS, so the run
+    /// is timed by hand.
+    pub last_click: Option<(f32, f32, std::time::Instant, u8)>,
     /// The surface size the last sticky-fit check saw (change = resize).
     pub nav_last_surface: (u32, u32),
     /// Navigator thumbnail cache: the texture + the doc revision it was
@@ -704,6 +737,11 @@ pub struct App {
     /// at 600 dpi).
     pub gutter_folder_mm: (f32, f32),
     pub gutter_border_mm: (f32, f32),
+    /// Object tool, CSP "Keep gutters aligned": with it on (All), dragging a
+    /// panel border moves the FACING border of the panel across the gutter
+    /// too, so the gap keeps its width. Off (None) resizes the one edge and
+    /// lets the gutter narrow. Session state — CSP does not persist it either.
+    pub gutter_align_all: bool,
     /// Create-frame options (CSP Rectangle-frame Tool Property).
     pub frame_border_mm: f32,
     pub frame_draw_border: bool,
@@ -836,6 +874,10 @@ pub struct App {
     pub text_bar_drag: Option<TextBarDrag>,
     /// Transform modal: live transform drag (Enter commits, Esc cancels).
     pub transform_drag: Option<TransformDrag>,
+    /// Transform Tool Property "Keep aspect ratio" (CSP 縦横比固定, on by
+    /// default): corner and side handles scale both axes by one ratio.
+    /// Shift does the same for a single drag.
+    pub transform_keep_aspect: bool,
     /// New-text defaults (Tool Property). Font resolves to 源暎アンチック v5
     /// when installed; size in pt at the document dpi; manga default vertical.
     pub text_font: String,
@@ -1201,6 +1243,9 @@ impl App {
             canvas_size_open: false,
             prefs_open: false,
             prefs_focus: None,
+            prefs_tab: 0,
+            prefs_search: String::new(),
+            ui_scale_apply: None,
             adjust_draft: None,
             adjust_preview: None,
             goto_page_open: false,
@@ -1217,6 +1262,8 @@ impl App {
             export_all_text: false,
             export_all_dpi: 0,
             export_all_colour: mn_core::LayerExpression::Colour,
+            export_all_crop: mn_core::export::ExportCrop::Paper,
+            export_all_px_height: 0,
             mask_show_area: false,
             tone_show_area: false,
             mask_edit: false,
@@ -1264,6 +1311,7 @@ impl App {
             gen_jitter: 0.4,
             gen_seed: 1,
             gen_sel: None,
+            gen_edit: None,
             object_pick: None,
             eye_solo_backup: None,
             size_drag: None,
@@ -1297,6 +1345,8 @@ impl App {
             expression: mn_core::Expression::Mono,
             spine_mm: 0.0,
             cover: None,
+            template_page: None,
+            profile: None,
             preflight_findings: None,
             preflight_rev: 0,
             preflight_page: 0,
@@ -1406,6 +1456,7 @@ impl App {
             // 70/230 px, divide-border 40/54 px (research/csp-tools.json).
             gutter_folder_mm: (2.96, 9.74),
             gutter_border_mm: (1.69, 2.29),
+            gutter_align_all: true,
             // His Rectangle-frame border is 15 px at 600 dpi.
             frame_border_mm: 0.64,
             frame_draw_border: true,
@@ -1462,6 +1513,7 @@ impl App {
             text_obj_drag: None,
             text_bar_drag: None,
             transform_drag: None,
+            transform_keep_aspect: true,
             text_font: String::new(),
             text_size_pt: prefs.text_size_pt,
             text_vertical: true,
@@ -2248,11 +2300,63 @@ impl App {
             } else {
                 egui::CursorIcon::Grab
             }
+        } else if let Some(c) = self.transform_cursor() {
+            c
         } else if self.tool == Tool::Text {
             egui::CursorIcon::Text
         } else {
             egui::CursorIcon::Crosshair
         }
+    }
+
+    /// While a Transform float is up, the cursor says what the handle under
+    /// the pointer WILL do — the same answer `transform_down` will give,
+    /// through the same `hit_test`, so the two can never disagree.
+    fn transform_cursor(&self) -> Option<egui::CursorIcon> {
+        let drag = self.transform_drag.as_ref()?;
+        let grab = match drag.gesture {
+            Some(g) => g.grab,
+            None => {
+                let (px, py) = self.last_pointer;
+                let (cx, cy) = self.viewport.to_canvas(px as f32, py as f32);
+                // Alt never changes the ICON (Alt-inside is Pivot, which is
+                // Move's cursor; Alt on a handle keeps the handle), so the
+                // hover probe does not need the live modifier state.
+                drag.hit_test([cx, cy], self.viewport.zoom, false)
+            }
+        };
+        let dragging = drag.gesture.is_some();
+        // Screen-space direction of a canvas vector: the box rotates, and so
+        // does the VIEW, so the arrow must be picked after both.
+        let sector = |a: [f32; 2], b: [f32; 2], n: f32| -> i32 {
+            let (ax, ay) = self.viewport.to_screen(a[0], a[1]);
+            let (bx, by) = self.viewport.to_screen(b[0], b[1]);
+            let step = std::f32::consts::TAU / n;
+            (((by - ay).atan2(bx - ax) / step).round() as i32).rem_euclid(n as i32)
+        };
+        Some(match grab {
+            TransformGrab::Corner(i) => {
+                // Along the diagonal out of the opposite corner.
+                if matches!(sector(drag.bbox[(i + 2) % 4], drag.bbox[i], 8.0), 0 | 1 | 4 | 5) {
+                    egui::CursorIcon::ResizeNwSe
+                } else {
+                    egui::CursorIcon::ResizeNeSw
+                }
+            }
+            TransformGrab::Edge(i) => {
+                let mid = |a: [f32; 2], b: [f32; 2]| [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5];
+                let from = mid(drag.bbox[(i + 2) % 4], drag.bbox[(i + 3) % 4]);
+                let to = mid(drag.bbox[i], drag.bbox[(i + 1) % 4]);
+                if sector(from, to, 4.0) % 2 == 0 {
+                    egui::CursorIcon::ResizeHorizontal
+                } else {
+                    egui::CursorIcon::ResizeVertical
+                }
+            }
+            TransformGrab::Rotate if dragging => egui::CursorIcon::Grabbing,
+            TransformGrab::Rotate => egui::CursorIcon::Grab,
+            TransformGrab::Move | TransformGrab::Pivot => egui::CursorIcon::Move,
+        })
     }
 
     /// Build the egui frame, then draw canvas + UI into one swapchain frame.
@@ -3333,7 +3437,7 @@ impl App {
         let cycle =
             |cur: usize, n: usize| -> usize { ((cur as i32 + dir).rem_euclid(n as i32)) as usize };
         match self.tool {
-            Tool::Pen | Tool::Eraser | Tool::SelPen | Tool::SelEraser => {
+            Tool::Pen | Tool::Eraser => {
                 if self.presets.is_empty() {
                     return;
                 }
@@ -3342,13 +3446,35 @@ impl App {
                 let p = self.presets[next].1.clone();
                 self.push_cmd(AppCmd::SelectBrush(p));
             }
-            Tool::Select => {
-                self.select_mode = match self.select_mode {
-                    SelectMode::Rect => SelectMode::Lasso,
-                    SelectMode::Lasso => SelectMode::Magnetic,
-                    SelectMode::Magnetic => SelectMode::Shrink,
-                    SelectMode::Shrink => SelectMode::Rect,
+            // ONE cycle over the whole Selection list: the four shapes, then
+            // the two paint sub tools folded in from the strip (2026-08-23).
+            // Stepping onto or off a paint row switches the tool, so `,`/`.`
+            // walks exactly the rows `ui/subtool.rs` draws.
+            Tool::Select | Tool::SelPen | Tool::SelEraser => {
+                const SHAPES: [SelectMode; 4] = [
+                    SelectMode::Rect,
+                    SelectMode::Lasso,
+                    SelectMode::Magnetic,
+                    SelectMode::Shrink,
+                ];
+                let cur = match self.tool {
+                    Tool::SelPen => SHAPES.len(),
+                    Tool::SelEraser => SHAPES.len() + 1,
+                    _ => SHAPES
+                        .iter()
+                        .position(|m| *m == self.select_mode)
+                        .unwrap_or(0),
                 };
+                match cycle(cur, SHAPES.len() + 2) {
+                    4 => self.push_cmd(AppCmd::SetTool(Tool::SelPen)),
+                    5 => self.push_cmd(AppCmd::SetTool(Tool::SelEraser)),
+                    i => {
+                        if self.tool != Tool::Select {
+                            self.push_cmd(AppCmd::SetTool(Tool::Select));
+                        }
+                        self.select_mode = SHAPES[i];
+                    }
+                }
                 self.magnetic = None;
             }
             Tool::Object => {
@@ -3382,11 +3508,19 @@ impl App {
                 self.set_status(self.tone_opts.tone.pattern.label());
             }
             Tool::Wand => {
-                // The `,`/`.` sub-tool stepper flips the refer mode pair.
-                self.wand_opts.refer = match self.wand_opts.refer {
-                    mn_core::FillRefer::All => mn_core::FillRefer::Active,
-                    _ => mn_core::FillRefer::All,
-                };
+                // The wand's sub tools are its three 参照 rows — all three,
+                // since the Sub Tool list lists all three (the old pair flip
+                // could never reach "refer reference layer" from the key).
+                const M: [mn_core::FillRefer; 3] = [
+                    mn_core::FillRefer::All,
+                    mn_core::FillRefer::Active,
+                    mn_core::FillRefer::Reference,
+                ];
+                let cur = M
+                    .iter()
+                    .position(|r| *r == self.wand_opts.refer)
+                    .unwrap_or(0);
+                self.wand_opts.refer = M[cycle(cur, M.len())];
             }
             Tool::Balloon => {
                 const M: [BalloonMode; 4] = [
@@ -3924,3 +4058,14 @@ mod page_size_tests;
 /// frame-published sync) or lost (a page switch).
 #[cfg(test)]
 mod ruler_undo_tests;
+
+/// Owner report 2026-08-23: a tone material must place a LIVE tone layer
+/// filling the page (or the selection), never a resizable raster float
+/// whose scale would resize the dots.
+#[cfg(test)]
+mod material_tone_tests;
+
+/// Owner report 2026-08-23: an effect-line run you cannot re-select, and
+/// driver handles that were off the page when you could.
+#[cfg(test)]
+mod gen_lines_object_tests;

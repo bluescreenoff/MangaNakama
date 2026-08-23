@@ -162,6 +162,10 @@ pub struct WorkSettingsDraft {
     pub expression: mn_core::Expression,
     pub spine_mm: f32,
     pub cover: Option<usize>,
+    /// Publisher/printer target. Picking one in the dialog restates
+    /// `setup` + `binding_right` from it — through the draft, so the
+    /// dialog's own Apply/geometry flow stays the only door.
+    pub profile: Option<mn_core::profile::PublisherProfile>,
 }
 
 impl Default for WorkSettingsDraft {
@@ -174,6 +178,7 @@ impl Default for WorkSettingsDraft {
             expression: mn_core::Expression::Mono,
             spine_mm: 0.0,
             cover: None,
+            profile: None,
         }
     }
 }
@@ -377,6 +382,8 @@ impl App {
             expression: self.expression,
             spine_mm: self.spine_mm,
             cover: self.cover,
+            template_page: self.template_page,
+            profile: self.profile.clone(),
             next_id: self.folder_next_id,
             pages: self
                 .pages
@@ -518,7 +525,7 @@ impl App {
     /// the cache key is the active doc's revision + page). Findings carry
     /// page context in their messages already.
     pub fn run_preflight(&mut self) -> Vec<mn_core::PreflightFinding> {
-        let meta = mn_core::ProjectMeta::for_checks(
+        let mut meta = mn_core::ProjectMeta::for_checks(
             self.story.clone(),
             self.binding_right,
             self.page.clone(),
@@ -526,6 +533,9 @@ impl App {
             self.spine_mm,
             self.cover,
         );
+        // The profile IS a preflight input (page-count multiple, screen
+        // ruling); set after construction so for_checks stays six params.
+        meta.profile = self.profile.clone();
         let mut out = mn_core::preflight::run_work(&meta, self.pages.len());
         if let Some(setup) = &self.page {
             let mut check = |i: usize, doc: &Document| {
@@ -654,21 +664,24 @@ impl App {
     }
 
     /// Install a document decoded for the page (or pages) THIS TAB is
-    /// already editing, keeping the rulers.
+    /// already editing.
     ///
-    /// Rulers live on the `Document` so the document's one undo history can
-    /// own them, but they are session-only — `doc_to_bytes` does not write
-    /// them and `bytes_to_doc` hands back a default set. Every in-session
-    /// re-decode (page switch, spread combine/split, page replace) would
-    /// therefore silently wipe a perspective set the user built, where
-    /// before rulers lived on the App and survived. Carrying them here
-    /// keeps the old behaviour: rulers follow the TAB, not the page.
-    /// (Opening a file or making a new document does NOT come through
-    /// here — a different document gets its own empty set.)
+    /// Rulers persist per page now (`mnc/rulers.json`), so a page that
+    /// carries its OWN set wins — that is the perspective grid the user
+    /// built on that page. A page with no saved set still inherits the
+    /// tab's working set (the old carry behaviour): rulers keep following
+    /// the artist onto fresh pages, and a saved grid is never clobbered
+    /// by the page you happened to switch away from. (Opening a file or
+    /// making a new document does NOT come through here — a different
+    /// document gets its own set as loaded.)
     pub fn adopt_page_doc(&mut self, doc: Document) {
-        let rulers = std::mem::take(&mut self.doc.rulers);
+        let carried = std::mem::take(&mut self.doc.rulers);
         self.doc = doc;
-        self.doc.rulers = rulers;
+        if !self.doc.rulers.has_geometry() {
+            // Whole set including the on/special switches: a page without
+            // geometry has nothing to say about them either.
+            self.doc.rulers = carried;
+        }
     }
 
     /// Switch the editor to another page (decode-on-switch).

@@ -100,6 +100,12 @@ pub struct Prefs {
     /// left alone — same rule as `new_preset`, and the reason a theme from a
     /// newer build survives a downgrade instead of being rewritten to `dark`.
     pub theme: String,
+    /// Whole-UI size multiplier, 0.75..=1.75, 1.0 = the window DPI alone
+    /// (owner 2026-08-21: "his UI reads too small"). Applied by scaling the
+    /// shell's effective pixels-per-point, so fonts, spacing, icons, input
+    /// mapping and the canvas hole all move together — never a font-size
+    /// sweep.
+    pub ui_scale: f32,
     /// Tint icons by what they do (`ui::icons::IconRole`), ON by default —
     /// the owner asked for coloured icons everywhere and an off switch, in
     /// that order. Off paints every glyph in plain chrome grey, which is
@@ -128,6 +134,7 @@ impl Default for Prefs {
             export_reminder: true,
             palette_icon_px: PALETTE_ICON_PX,
             theme: THEME.to_owned(),
+            ui_scale: 1.0,
             icon_colours: true,
             unknown: Vec::new(),
             dirty: false,
@@ -196,7 +203,7 @@ impl Prefs {
     /// wrote that this one does not understand, verbatim.
     fn to_body(&self) -> String {
         let mut body = format!(
-            "autosave_min={}\nautosave_every_op={}\nundo_depth={}\nmouse_smooth_px={}\nnew_canvas_w={}\nnew_canvas_h={}\nfit_margin={}\nwheel_step={}\nrotate_step_deg={}\nrecent_depth={}\ntext_size_pt={}\nnew_preset={}\nexport_reminder={}\npalette_icon_px={}\ntheme={}\nicon_colours={}\n",
+            "autosave_min={}\nautosave_every_op={}\nundo_depth={}\nmouse_smooth_px={}\nnew_canvas_w={}\nnew_canvas_h={}\nfit_margin={}\nwheel_step={}\nrotate_step_deg={}\nrecent_depth={}\ntext_size_pt={}\nnew_preset={}\nexport_reminder={}\npalette_icon_px={}\ntheme={}\nicon_colours={}\nui_scale={}\n",
             self.autosave_min,
             u8::from(self.autosave_every_op),
             self.undo_depth,
@@ -213,6 +220,7 @@ impl Prefs {
             self.palette_icon_px,
             self.theme.replace('\n', ""),
             u8::from(self.icon_colours),
+            self.ui_scale,
         );
         for line in &self.unknown {
             body.push_str(line);
@@ -279,6 +287,7 @@ impl Prefs {
                     _ => self.icon_colours,
                 }
             }
+            "ui_scale" => self.ui_scale = v.parse().unwrap_or(self.ui_scale),
             // A key we do not know is a key from a NEWER build. Keep the
             // line so the next save writes it back out instead of eating it.
             _ if !k.is_empty() => self.unknown.push(line.to_owned()),
@@ -309,6 +318,7 @@ impl Prefs {
         self.rotate_step_deg = finite(self.rotate_step_deg, ROTATE_STEP_DEG, 1.0, 90.0);
         self.recent_depth = self.recent_depth.clamp(1, 32);
         self.text_size_pt = finite(self.text_size_pt, TEXT_SIZE_PT, 4.0, 72.0);
+        self.ui_scale = finite(self.ui_scale, 1.0, 0.75, 1.75);
         // A blank name would be written back out as a blank `theme=` line —
         // the only "clamp" a theme name gets. An UNKNOWN name is left alone
         // (see `apply_kv`); it simply paints `dark`.
@@ -453,8 +463,10 @@ mod tests {
         me.text_size_pt = 20.0;
         me.new_preset = "Doujinshi B5 600dpi (同人誌)".to_owned();
         me.export_reminder = false;
+        me.ui_scale = 1.25;
 
         let back = from_body(&me.to_body());
+        assert_eq!(back.ui_scale, 1.25, "UI size persists");
         assert!(!back.export_reminder, "turning the reminder off persists");
         assert_eq!(back.autosave_min, 30);
         assert!(back.autosave_every_op);

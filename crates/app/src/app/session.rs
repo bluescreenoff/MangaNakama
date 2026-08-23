@@ -190,6 +190,8 @@ impl App {
         self.object_sel = None;
         self.balloon_sel = None;
         self.gen_sel = None;
+        // …and Tool Property's uncommitted draft of that run's spec.
+        self.gen_edit = None;
         // Rulers are per-document too (they ride `doc`, which parks with
         // the session), so a live move's index would aim at the OTHER
         // document's ruler set.

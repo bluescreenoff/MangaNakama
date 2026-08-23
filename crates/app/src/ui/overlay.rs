@@ -74,7 +74,24 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
     // and its driver handles — CSP's two-line model: the reference says
     // WHERE the set sits (moves/reshapes the run), the handles on it
     // drive the shape. Live during a drag via the shared spec math.
-    if let Some(li) = app.gen_sel
+    //
+    // Drawn for the SELECTED run and, under the Operation tool, for the
+    // ACTIVE layer's run — nothing was drawn until a run was already
+    // selected, so there was nothing on screen to aim the click at, and a
+    // freshly placed set looked like it had no controls at all.
+    let gen_li = app
+        .gen_sel
+        .filter(|li| {
+            app.doc
+                .layers
+                .get(*li)
+                .is_some_and(|l| l.genlines.is_some())
+        })
+        .or_else(|| {
+            (app.tool == Tool::Object && app.doc.active_layer().genlines.is_some())
+                .then_some(app.doc.active)
+        });
+    if let Some(li) = gen_li
         && let Some(spec) = app.doc.layers.get(li).and_then(|l| l.genlines)
     {
         let live = app
@@ -87,13 +104,19 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
         let pts = crate::app::canvas_input::gen_handle_points(&live, app.doc.size);
         if live.focus {
             // The reference: cross at the centre + the two radius circles.
+            // `c` came through `to_pt`, so it is already a SCREEN POINT —
+            // dividing the arm by the zoom on top of that shrank the cross
+            // to a speck the further you zoomed in, which is exactly when
+            // you want to see it. Screen sizes are literals here; only
+            // canvas LENGTHS get scaled (and by `zoom / ppp`, the
+            // px→point convention the brush ring uses).
             let c = to_pt(live.a, live.b);
-            let arm = 10.0 / app.viewport.zoom.max(0.01);
+            let arm = 10.0;
             for d in [egui::vec2(1.0, 0.0), egui::vec2(0.0, 1.0)] {
                 painter.line_segment([c - d * arm, c + d * arm], egui::Stroke::new(1.5, blue));
             }
             for (r, dash) in [(live.c, true), (live.d, true)] {
-                let rr = r * app.viewport.zoom.max(0.01);
+                let rr = r * app.viewport.zoom.max(0.01) / ppp;
                 // Dashed circle = 48 short arcs.
                 const SEG: usize = 48;
                 let step = std::f32::consts::TAU / SEG as f32;
@@ -106,8 +129,11 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
                 let _ = dash;
             }
         } else {
-            // The reference: the direction line through the canvas centre.
-            let a = [app.doc.size.0 as f32 * 0.5, app.doc.size.1 as f32 * 0.5];
+            // The reference: the direction line through the run's own
+            // anchor (the placing drag's midpoint), not the page centre —
+            // a line drawn somewhere the gesture never went is not a
+            // reference to anything.
+            let a = crate::app::canvas_input::gen_anchor(&live, app.doc.size);
             let (sn, co) = live.a.to_radians().sin_cos();
             let dir = [co, sn];
             let p0 = to_pt(a[0] - dir[0] * live.c, a[1] - dir[1] * live.c);
@@ -116,7 +142,8 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
         }
         for (mode, p) in pts {
             let c = to_pt(p[0], p[1]);
-            let r = 4.5 / app.viewport.zoom.max(0.01);
+            // A handle is a fixed size ON SCREEN (see the cross above).
+            let r = 4.5;
             let rect = egui::Rect::from_center_size(c, egui::vec2(r * 2.0, r * 2.0));
             painter.rect_filled(rect, 1.0, egui::Color32::WHITE);
             let hot = app
@@ -866,7 +893,7 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
                 handle(egui::pos2(brect.left(), brect.center().y));
                 // Rotation lollipop: stem up from the top-centre.
                 let stem0 = egui::pos2(brect.center().x, brect.top());
-                let stem1 = egui::pos2(stem0.x, stem0.y - 26.0);
+                let stem1 = egui::pos2(stem0.x, stem0.y - crate::app::ROTATE_STALK_SCREEN);
                 painter.line_segment([stem0, stem1], egui::Stroke::new(1.2, theme::c().accent));
                 painter.circle_stroke(stem1, 4.5, egui::Stroke::new(1.5, theme::c().accent));
                 // Shared-gutter markers (yellow, along the shared edge).
@@ -996,7 +1023,8 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
                     );
                 }
                 // Rotation lollipop above the box's top edge.
-                let lolly = egui::pos2(boxr.center().x, boxr.top() - 26.0);
+                let lolly =
+                    egui::pos2(boxr.center().x, boxr.top() - crate::app::ROTATE_STALK_SCREEN);
                 painter.line_segment(
                     [egui::pos2(boxr.center().x, boxr.top()), lolly],
                     egui::Stroke::new(1.2, theme::c().accent),
@@ -1114,7 +1142,7 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
             col,
         );
     }
-    let rot_off = crate::text_edit::ROTATE_OFFSET_SCREEN / app.viewport.zoom.max(0.01);
+    let rot_off = crate::app::ROTATE_STALK_SCREEN / app.viewport.zoom.max(0.01);
     let text_shown: Option<(mn_core::TextItem, bool)> = if let Some(d) = &app.text_obj_drag {
         Some((d.preview(), true))
     } else if app.tool == Tool::Object {
@@ -1489,6 +1517,26 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
                 egui::StrokeKind::Inside,
             );
         }
+        // The rotate stalk, same lollipop as frames/balloons/text: rotation
+        // is THIS handle (plus dragging outside the box), never a corner.
+        // Its point comes from the hit test's own helper.
+        let stalk = drag.stalk_point(app.viewport.zoom);
+        let stalk = to_pt(stalk[0], stalk[1]);
+        let top = egui::pos2(
+            (drag.bbox[0][0] + drag.bbox[1][0]) * 0.5,
+            (drag.bbox[0][1] + drag.bbox[1][1]) * 0.5,
+        );
+        let grabbed_stalk = matches!(
+            drag.gesture.as_ref().map(|g| g.grab),
+            Some(crate::app::TransformGrab::Rotate)
+        );
+        painter.line_segment(
+            [to_pt(top.x, top.y), stalk],
+            egui::Stroke::new(1.2, theme::c().accent),
+        );
+        let r = if grabbed_stalk { 5.5 } else { 4.5 };
+        painter.circle_filled(stalk, r, theme::c().panel);
+        painter.circle_stroke(stalk, r, egui::Stroke::new(1.4, theme::c().accent));
         // TR-003: the reference point — a cross with a centre dot.
         let pv = drag.pivot();
         let pv = to_pt(pv[0], pv[1]);

@@ -15,6 +15,12 @@ pub enum Icon {
     Eraser,
     Fill,
     Select,
+    /// Selection ▸ Selection pen (CSP 選択ペン): the marquee's corner Ls with
+    /// a pen nib inside — the stroke paints selection, not ink.
+    SelPen,
+    /// Selection ▸ Erase selection (CSP 選択消し): the same marquee corners
+    /// with an eraser slab inside.
+    SelEraser,
     /// Object tool: transform-handle box (CSP Operation ▸ Object).
     Object,
     /// Frame (koma) divide tool: a panelled page.
@@ -213,6 +219,8 @@ impl Icon {
             | Self::UrchinFlash => Ink,
             // The selection family, launcher included.
             Self::Select
+            | Self::SelPen
+            | Self::SelEraser
             | Self::Wand
             | Self::Object
             | Self::SelDeselect
@@ -378,6 +386,44 @@ pub fn paint_role(p: &Painter, r: Rect, icon: Icon, base: Color32, accent: Optio
             );
             // A marquee IS its dashes — the whole thin outline takes the hue.
             p.extend(Shape::dashed_line(&pts, a_thin, w * 0.16, w * 0.13));
+        }
+        Icon::SelPen | Icon::SelEraser => {
+            // Shared base, so the pair reads as one family: the marquee's
+            // four corner Ls (the same shorthand `SelDeselect` uses), hue on
+            // the marquee because the marquee is the selection. The TOOL
+            // sitting inside stays base-coloured — it is the create-type,
+            // not the subject.
+            let q = rect(r, 0.05, 0.05, 0.95, 0.95);
+            let (s, e) = (q.min, q.max);
+            let (kx, ky) = (q.width() * 0.30, q.height() * 0.30);
+            for (from, to) in [
+                (s, Pos2::new(s.x + kx, s.y)),
+                (s, Pos2::new(s.x, s.y + ky)),
+                (Pos2::new(e.x - kx, s.y), Pos2::new(e.x, s.y)),
+                (Pos2::new(e.x, s.y), Pos2::new(e.x, s.y + ky)),
+                (Pos2::new(e.x, e.y - ky), e),
+                (Pos2::new(e.x - kx, e.y), e),
+                (Pos2::new(s.x, e.y - ky), Pos2::new(s.x, e.y)),
+                (Pos2::new(s.x, e.y), Pos2::new(s.x + kx, e.y)),
+            ] {
+                p.line_segment([from, to], a_thin);
+            }
+            if icon == Icon::SelPen {
+                // `Icon::Pen`'s nib + barrel, shrunk to sit inside the box.
+                p.add(Shape::convex_polygon(
+                    poly(r, &[(0.22, 0.78), (0.44, 0.68), (0.34, 0.52)]),
+                    color,
+                    Stroke::NONE,
+                ));
+                p.line(poly(r, &[(0.38, 0.61), (0.76, 0.24)]), line);
+            } else {
+                // `Icon::Eraser`'s slab at ~60%, so the two sit at one weight.
+                p.add(Shape::convex_polygon(
+                    poly(r, &[(0.24, 0.62), (0.46, 0.33), (0.72, 0.50), (0.50, 0.79)]),
+                    color,
+                    Stroke::NONE,
+                ));
+            }
         }
         Icon::Object => {
             p.rect_stroke(
@@ -1335,6 +1381,12 @@ mod tests {
             Icon::SelShrink,
             Icon::SelTransform,
             Icon::SelDrawOutside,
+            // The two paint sub tools: their marquee takes the hue, the nib
+            // and the slab inside stay grey. (The bare `Eraser` is roleless
+            // precisely because it has no sub-shape to accent; this one
+            // does — the box around it.)
+            Icon::SelPen,
+            Icon::SelEraser,
         ] {
             assert_eq!(icon.accent_role(), Some(IconRole::Select), "{icon:?}");
         }

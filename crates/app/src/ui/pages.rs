@@ -298,10 +298,40 @@ fn pages_body(ui: &mut egui::Ui, app: &mut App) {
                     if resp.clicked() && !selected {
                         app.push_cmd(AppCmd::SelectPage(i));
                     }
+                    // The template page wears a quiet corner mark so "why
+                    // did my new page come out pre-panelled" has a visible
+                    // answer.
+                    if app.template_page == Some(i) {
+                        ui.painter().text(
+                            cell_rect.left_top() + egui::vec2(3.0, 2.0),
+                            egui::Align2::LEFT_TOP,
+                            "T",
+                            egui::FontId::proportional(9.0),
+                            theme::c().accent,
+                        );
+                    }
                     // Docking 2 phase 2: a page beside the canvas.
                     resp.context_menu(|ui| {
                         if ui.button("Open in a pane").clicked() {
                             app.push_cmd(AppCmd::OpenPageInPane(i));
+                            ui.close();
+                        }
+                        // Template page (tekno B2): new pages clone this
+                        // page's bytes instead of starting blank.
+                        if app.template_page == Some(i) {
+                            if ui.button("Stop using as template").clicked() {
+                                app.template_page = None;
+                                app.mark_dirty();
+                                app.set_status("new pages start blank again");
+                                ui.close();
+                            }
+                        } else if ui.button("Use as template for new pages").clicked() {
+                            app.template_page = Some(i);
+                            app.mark_dirty();
+                            app.set_status(format!(
+                                "page {} is the template — every new page starts as a copy of it",
+                                i + 1
+                            ));
                             ui.close();
                         }
                     });
