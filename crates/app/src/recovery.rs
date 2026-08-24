@@ -95,6 +95,8 @@ fn modified(p: &Path) -> Option<SystemTime> {
 /// instead of the real `%TEMP%`). Candidates:
 ///
 /// * `temp/MangaNakama-autosave.mnc` — shadows nothing, always eligible.
+/// * `temp/MangaNakama-autosave[-N]/work.mnc` — same, as an incremental
+///   work folder (05 item 1); ranked by the index's own mtime.
 /// * for each recent document, its sibling `.autosave.mnc` — eligible only
 ///   while it is NEWER than the document itself.
 ///
@@ -112,14 +114,26 @@ pub fn newest_autosave(recents: &[PathBuf], temp: &Path) -> Option<PathBuf> {
     // (`MangaNakama-autosave.mnc`, `-1.mnc`, `-2.mnc`, …). They were a single
     // shared file until 2026-08-20, which meant one unsaved tab could
     // overwrite another's.
+    //
+    // Since 2026-08-24 (05 item 1) a pathless work autosaves as a work
+    // FOLDER (`MangaNakama-autosave[-N]\work.mnc`) — offered by the index's
+    // own mtime. The monolithic spelling is still matched: a pre-fix
+    // session may have left one behind.
     if let Ok(entries) = std::fs::read_dir(temp) {
         for e in entries.flatten() {
             let p = e.path();
-            let is_stash = p
-                .file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with("MangaNakama-autosave") && n.ends_with(".mnc"));
-            if is_stash && let Some(t) = modified(&p) {
+            let name = p.file_name().and_then(|n| n.to_str());
+            if !name.is_some_and(|n| n.starts_with("MangaNakama-autosave")) {
+                continue;
+            }
+            if p.is_dir() {
+                let inner = p.join(mn_core::project::WORKFOLDER_INDEX);
+                if let Some(t) = modified(&inner) {
+                    consider(inner, t);
+                }
+            } else if name.is_some_and(|n| n.ends_with(".mnc"))
+                && let Some(t) = modified(&p)
+            {
                 consider(p, t);
             }
         }
@@ -160,7 +174,13 @@ pub fn clear_sibling_autosave(doc: &Path) {
 /// months-old scratch document after an unrelated crash, under a dialog that
 /// claims it is newer than the file it belongs to.
 pub fn clear_unsaved_stash(slot: usize) {
+    // Both spellings (05 item 1): the pre-2026-08-24 monolithic file and
+    // the incremental work folder that replaced it.
     let _ = std::fs::remove_file(crate::app::unsaved_autosave_path_for(slot));
+    let index = crate::app::unsaved_autosave_folder_for(slot);
+    if let Some(dir) = index.parent() {
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
 
 #[cfg(test)]
@@ -281,5 +301,53 @@ build 1.0
         assert!(!side.exists(), "the shadow is gone");
         assert!(doc.exists(), "the document is NOT");
         std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// 05 item 1: a pathless work's stash is a work FOLDER now — offered
+    /// by its index, ranked by the index's own mtime against the
+    /// pre-fix monolithic spelling (which a pre-fix session may still
+    /// have left behind).
+    #[test]
+    fn the_unsaved_folder_stash_is_offered_by_its_index() {
+        let d = scratch("folder-stash");
+        let mono = d.join("MangaNakama-autosave-5.mnc");
+        let dir = d.join("MangaNakama-autosave-5");
+        std::fs::create_dir_all(&dir).unwrap();
+        let wf = dir.join(mn_core::project::WORKFOLDER_INDEX);
+        touch(&mono, "old format, older");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        touch(&wf, "new format, newer");
+        assert_eq!(newest_autosave(&[], &d), Some(wf.clone()));
+
+        // ...and the reverse ordering: a newer monolithic file wins —
+        // ranking is by freshness, not by format.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        touch(&mono, "newer now");
+        assert_eq!(newest_autosave(&[], &d), Some(mono.clone()));
+
+        // A stash-named folder WITHOUT an index is not a stash.
+        std::fs::create_dir_all(d.join("MangaNakama-autosave-6")).unwrap();
+        assert_eq!(newest_autosave(&[], &d), Some(mono));
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// `clear_unsaved_stash` must kill BOTH spellings. It resolves the
+    /// real `%TEMP%`, so it runs on a slot no real session fills (30
+    /// tabs) and cleans up after itself.
+    #[test]
+    fn clearing_the_unsaved_stash_removes_folder_and_file() {
+        let file = crate::app::unsaved_autosave_path_for(30);
+        let index = crate::app::unsaved_autosave_folder_for(30);
+        let dir = index.parent().unwrap().to_path_buf();
+        let _ = std::fs::remove_file(&file);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        std::fs::create_dir_all(&dir).unwrap();
+        touch(&file, "pre-fix monolithic");
+        touch(&index, "incremental folder");
+
+        clear_unsaved_stash(30);
+        assert!(!file.exists(), "the monolithic stash is gone");
+        assert!(!dir.exists(), "the stash FOLDER is gone whole");
     }
 }

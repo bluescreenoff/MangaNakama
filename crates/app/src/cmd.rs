@@ -3687,6 +3687,10 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                                         id: fp.id,
                                         rev: fp.rev,
                                         saved_rev: fp.saved_rev,
+                                        // The temp-autosave watermark is
+                                        // per-TEMP-folder; a fresh open has
+                                        // written nothing there.
+                                        autosaved_rev: 0,
                                         exported_rev: fp.exported_rev,
                                         doc_rev: if i == 0 { app.doc.revision } else { 0 },
                                         spread: false,
@@ -5609,36 +5613,47 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                         Ok(msg) => app.set_status(format!("autosave: {msg}")),
                         Err(e) => app.set_error(format!("autosave failed: {e}")),
                     }
-                } else if let Err(e) = app.stash_current_page() {
-                    app.set_error(format!("autosave stash failed: {e}"));
+                } else if let Some(doc) = app.doc_path.clone() {
+                    // A saved single-file work keeps its shadow BESIDE ITSELF
+                    // — recovery ranks that shadow against the file it
+                    // shadows, which a `%TEMP%` copy could not do.
+                    if let Err(e) = app.stash_current_page() {
+                        app.set_error(format!("autosave stash failed: {e}"));
+                    } else {
+                        let mut proj = mn_core::Project::new(
+                            app.story.clone(),
+                            app.page.clone(),
+                            app.binding_right,
+                        );
+                        proj.meta.expression = app.expression;
+                        proj.meta.spine_mm = app.spine_mm;
+                        proj.meta.cover = app.cover;
+                        proj.meta.template_page = app.template_page;
+                        proj.meta.profile = app.profile.clone();
+                        proj.pages = app
+                            .pages
+                            .iter()
+                            .map(|e| e.bytes.clone().unwrap_or_default())
+                            .collect();
+                        app.pages[app.page_index].bytes = None;
+                        // Both spellings come from `recovery`, which is also
+                        // what READS them back after a crash (PR-040) — a
+                        // literal here and a literal there is how a recovery
+                        // feature ends up hunting for a file nothing writes.
+                        let path = crate::recovery::sibling_autosave(&doc);
+                        match mn_core::project::save(&proj, &path) {
+                            Ok(()) => app.set_status(format!("autosaved -> {}", path.display())),
+                            Err(e) => app.set_error(format!("autosave failed: {e}")),
+                        }
+                    }
                 } else {
-                    let mut proj = mn_core::Project::new(
-                        app.story.clone(),
-                        app.page.clone(),
-                        app.binding_right,
-                    );
-                    proj.meta.expression = app.expression;
-                    proj.meta.spine_mm = app.spine_mm;
-                    proj.meta.cover = app.cover;
-                    proj.meta.template_page = app.template_page;
-                    proj.meta.profile = app.profile.clone();
-                    proj.pages = app
-                        .pages
-                        .iter()
-                        .map(|e| e.bytes.clone().unwrap_or_default())
-                        .collect();
-                    app.pages[app.page_index].bytes = None;
-                    // Both spellings come from `recovery`, which is also what
-                    // READS them back after a crash (PR-040) — a literal here
-                    // and a literal there is how a recovery feature ends up
-                    // hunting for a file nothing writes.
-                    let path = app
-                        .doc_path
-                        .as_ref()
-                        .map(|p| crate::recovery::sibling_autosave(p))
-                        .unwrap_or_else(|| crate::app::unsaved_autosave_path_for(app.active_doc));
-                    match mn_core::project::save(&proj, &path) {
-                        Ok(()) => app.set_status(format!("autosaved -> {}", path.display())),
+                    // 05 item 1: a pathless work autosaves into an
+                    // incremental TEMP work folder — only dirty pages
+                    // re-encode, instead of one monolithic zip built from
+                    // every page on the UI thread every tick.
+                    let index = crate::app::unsaved_autosave_folder_for(app.active_doc);
+                    match app.autosave_work_folder(&index) {
+                        Ok(msg) => app.set_status(format!("autosave: {msg}")),
                         Err(e) => app.set_error(format!("autosave failed: {e}")),
                     }
                 }

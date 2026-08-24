@@ -129,6 +129,24 @@ pub fn unsaved_autosave_path_for(i: usize) -> PathBuf {
     }
 }
 
+/// The TEMP work-FOLDER index for a never-saved document in slot `i` —
+/// the incremental autosave target (05 item 1). The folder holding the
+/// index is what `recovery::clear_unsaved_stash` deletes; the index file
+/// itself is what `recovery::newest_autosave` offers back after a crash.
+/// Slot 0 keeps the historical stem (no suffix), matching
+/// [`unsaved_autosave_path_for`]; the old monolithic `.mnc` spelling and
+/// this folder differ by extension, so both can sit in `%TEMP%`.
+pub fn unsaved_autosave_folder_for(i: usize) -> PathBuf {
+    let stem = if i == 0 {
+        "MangaNakama-autosave".to_owned()
+    } else {
+        format!("MangaNakama-autosave-{i}")
+    };
+    std::env::temp_dir()
+        .join(stem)
+        .join(mn_core::project::WORKFOLDER_INDEX)
+}
+
 fn sibling_autosave(doc: &std::path::Path) -> PathBuf {
     crate::recovery::sibling_autosave(doc)
 }

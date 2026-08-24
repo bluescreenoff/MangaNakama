@@ -27,6 +27,11 @@ pub struct PageEntry {
     pub rev: u64,
     /// Revision already on disk in the work folder (skip-write hint).
     pub saved_rev: u64,
+    /// Revision already written by the TEMP autosave folder (05 item 1).
+    /// A temp write must NEVER advance `saved_rev` — that watermark means
+    /// "safe in the work's real home", and advancing it here would make
+    /// the next real Save As skip pages it believes are saved.
+    pub autosaved_rev: u64,
     /// Revision the last export of this page WROTE (0 = this page has
     /// never been exported). `rev > exported_rev` is the whole of the
     /// unexported-pages reminder — see [`unexported_pages`]. Persisted
@@ -81,6 +86,7 @@ impl PageEntry {
             id: 0,
             rev: 0,
             saved_rev: 0,
+            autosaved_rev: 0,
             exported_rev: 0,
             doc_rev: 0,
             spread: false,
@@ -256,6 +262,7 @@ impl App {
             id: 0,
             rev,
             saved_rev: 0,
+            autosaved_rev: 0,
             exported_rev: 0,
             doc_rev: 0,
             spread: false,
@@ -417,6 +424,63 @@ impl App {
             dir.display(),
             self.pages.len()
         ))
+    }
+
+    /// Autosave the whole work into a TEMP work folder — `index` is
+    /// [`crate::app::unsaved_autosave_folder_for`]'s
+    /// `%TEMP%\MangaNakama-autosave[-N]\work.mnc` (05 item 1: the
+    /// pathless-work crash net). Same per-dirty-page incremental format
+    /// as [`Self::save_work_folder`], with two deliberate differences:
+    ///
+    /// * the skip key is each page's `autosaved_rev` watermark, and ONLY
+    ///   that advances — `saved_rev` still means "safe in the work's real
+    ///   home", so a later Save As rewrites every page it should.
+    /// * no stale-file cleanup and no foreign-file refusal: the folder is
+    ///   ours by construction (slot-keyed under `%TEMP%`) and dies whole
+    ///   in `recovery::clear_unsaved_stash`.
+    pub fn autosave_work_folder(&mut self, index: &std::path::Path) -> Result<String, String> {
+        let dir = index
+            .parent()
+            .ok_or_else(|| "autosave folder path has no parent".to_owned())?
+            .to_path_buf();
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        self.stash_current_page()?;
+        let wf = mn_core::project::WorkFolder {
+            story: self.story.clone(),
+            binding_right: self.binding_right,
+            setup: self.page.clone(),
+            expression: self.expression,
+            spine_mm: self.spine_mm,
+            cover: self.cover,
+            template_page: self.template_page,
+            profile: self.profile.clone(),
+            next_id: self.folder_next_id,
+            pages: self
+                .pages
+                .iter()
+                .map(|e| mn_core::project::FolderPage {
+                    id: e.id,
+                    rev: e.rev,
+                    // THE TRAP THIS WHOLE METHOD EXISTS FOR: the temp
+                    // watermark is the skip key, and it is the only one
+                    // this write advances.
+                    saved_rev: e.autosaved_rev,
+                    exported_rev: e.exported_rev,
+                    bytes: e.bytes.clone().unwrap_or_default(),
+                })
+                .collect(),
+        };
+        let (ids, written) =
+            mn_core::project::save_folder(&wf, &dir, &[]).map_err(|e| e.to_string())?;
+        for (e, &id) in self.pages.iter_mut().zip(&ids) {
+            e.id = id;
+            e.autosaved_rev = e.rev.max(1);
+        }
+        // The active page keeps living in `doc`, not in bytes.
+        self.pages[self.page_index].bytes = None;
+        let max_id = self.pages.iter().map(|e| e.id).max().unwrap_or(0);
+        self.folder_next_id = self.folder_next_id.max(max_id + 1);
+        Ok(format!("{} page(s) -> {}", written, dir.display()))
     }
 
     /// Render a Pages-panel thumbnail of the current document. Each call

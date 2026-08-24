@@ -48,7 +48,7 @@ pub use prefs::Prefs;
 
 pub use crate::cmd::RulerKind;
 pub use pages::{CanvasSizeDraft, NewComicDraft, PageEntry, SpreadOp, WorkSettingsDraft};
-pub use session::{DocSession, unsaved_autosave_path_for};
+pub use session::{DocSession, unsaved_autosave_folder_for, unsaved_autosave_path_for};
 pub use transform::{
     ROTATE_STALK_SCREEN, TransformDrag, TransformGesture, TransformGrab, transform_preview,
 };
@@ -4013,6 +4013,11 @@ mod open_in_tab_tests;
 
 #[cfg(test)]
 mod unsaved_across_tabs_tests;
+
+/// 05 item 1 — the pathless-work autosave is an incremental TEMP work
+/// folder. Same frugality rule as `new_document_tests`.
+#[cfg(test)]
+mod autosave_folder_tests;
 
 /// r125's data-loss fixes, pinned. Same frugality rule as
 /// `new_document_tests`: 72 dpi drafts, one App at a time.
