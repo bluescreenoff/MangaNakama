@@ -159,7 +159,7 @@ for humans. The adapter line is the identity, so a driver update or a new
 GPU re-measures by itself; a damaged file counts as no file rather than
 deciding anything.</div>
 <div class="quirk"><b>The View menu always wins, and sticks.</b>
-<b>View ▸ GPU dab strokes</b> is an explicit choice: it is remembered in
+<b>View ▸ GPU inking</b> is an explicit choice: it is remembered in
 <code>ui.txt</code>, it is never overruled by a measurement, and once you
 have set it the app stops measuring. It takes effect from the next stroke,
 so flipping it mid-page is safe. On an adapter that cannot run the path at
@@ -170,6 +170,21 @@ smudge, erasing, textured tips — everything behaves the same either way,
 and the two paths are held to the same pixels by tests. If a drawing
 behaves differently with the switch flipped, that is a bug worth
 reporting, not a setting.</div>
+<div class="quirk"><b>A brush that washes AND smudges at once always inks
+on the CPU, even with GPU inking on.</b> That combination picks its
+colour from the canvas <em>under the stroke while the stroke is still
+wet</em> — every dab has to see the paint the dab before it just laid
+down, so the engine must work dab, look, dab, look. The GPU is only fast
+because it draws many dabs in one batch, and dabs in a batch cannot see
+each other's paint; for a brush whose whole character is that
+self-feedback, the colours drift visibly off — about 19% in our
+measurements, not a rounding error. Wash alone and smudge alone do not
+feed on themselves this way, and they do run on the GPU. <span
+class="why">Making the GPU stop and wait after every single dab would
+leave it slower than the CPU it was meant to replace, so the honest
+routing is: this one brush family stays where it is correct AND fastest.
+It is automatic — there is nothing to set, and no wet stroke ever comes
+out the wrong colour to buy a speed number.</span></div>
 
 <h2>Reporting a problem</h2>
 <div class="quirk"><b>Attach <code>manganakama.log</code> — one file,
