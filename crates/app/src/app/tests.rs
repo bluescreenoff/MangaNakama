@@ -8495,6 +8495,33 @@ fn the_object_tool_drags_a_tone_layers_lattice() {
     assert_eq!(tone.offset, [30.0, 0.0], "the lattice slid with the drag");
 }
 
+/// Row 89: the wizard's Apply sets the GLOBAL curve (every tool's input
+/// bends in `push_batch` before any per-tool curve) and persists it in
+/// prefs; an empty Apply returns the pen to raw tablet pressure.
+#[test]
+fn the_pen_wizard_applies_a_global_curve() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (400, 300), 1.0);
+    assert!(
+        app.global_pressure.is_empty(),
+        "a fresh install has no correction"
+    );
+    let stronger = mn_core::stroke::gamma_pressure_curve(0.5);
+    crate::cmd::dispatch(&mut app, AppCmd::PenPressureCurveSet(stronger.clone()));
+    assert_eq!(app.global_pressure, stronger);
+    assert!(
+        app.prefs.pressure_curve.contains(':'),
+        "persisted for prefs.txt"
+    );
+    assert!(!app.pen_wizard_open, "Apply closes the wizard");
+    // And back off: raw pressure again.
+    crate::cmd::dispatch(&mut app, AppCmd::PenPressureCurveSet(Vec::new()));
+    assert!(app.global_pressure.is_empty());
+    assert!(app.prefs.pressure_curve.is_empty());
+}
+
 /// Owner repro 2026-08-22: Figure ▸ Saturated line on a PANELED page put a
 /// "Focus lines" row in the palette and NOTHING on the canvas. TWO faults,
 /// each sufficient on its own, which is why this asserts the COMPOSITE and

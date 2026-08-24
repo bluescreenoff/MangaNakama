@@ -2023,6 +2023,12 @@ pub enum AppCmd {
     /// section header to point at — the window has no tabs, so "open on the
     /// Performance page" is "open it with that header lit".
     OpenPrefs(Option<&'static str>),
+    /// Row 89 (BR-014–016): open the global pen-pressure wizard.
+    PenPressureWizardOpen,
+    /// The wizard's Apply: replace the global correction curve (empty =
+    /// back to the identity) and persist it in prefs — it then bends
+    /// every tool's input before any per-tool curve.
+    PenPressureCurveSet(Vec<[f32; 2]>),
     /// PM-053: write every text item in the chapter to a `.txt` in
     /// reading order (the translator/letterer handoff).
     ExportText,
@@ -3865,6 +3871,27 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             app.prefs_open = true;
             app.prefs_focus = section;
             app.mark_dirty();
+        }
+        AppCmd::PenPressureWizardOpen => {
+            app.pen_wizard_open = true;
+            app.pen_wizard_gamma = 1.0;
+            app.pen_wizard_samples.clear();
+            app.set_status("draw a few strokes, then Stronger/Weaker until the line feels right");
+        }
+        AppCmd::PenPressureCurveSet(pts) => {
+            app.global_pressure = pts.clone();
+            app.prefs.pressure_curve = if pts.is_empty() {
+                String::new()
+            } else {
+                crate::app::prefs::pressure_curve_string(&pts)
+            };
+            app.prefs.mark_dirty();
+            app.pen_wizard_open = false;
+            app.set_status(if pts.is_empty() {
+                "pen pressure correction off — raw tablet pressure"
+            } else {
+                "pen pressure correction applied to every tool"
+            });
         }
         AppCmd::ExportText => {}
         AppCmd::ExportTextPath(p) => {

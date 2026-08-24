@@ -668,6 +668,100 @@ pub(super) fn canvas_size_window(ctx: &egui::Context, app: &mut App) {
     }
 }
 
+/// Row 89 (BR-014–016): the global pen-pressure wizard. It listens to
+/// the RAW pressures of strokes drawn while it is open (`push_batch`
+/// copies them), graphs them grey, overlays the Stronger/Weaker
+/// correction in accent, and Apply writes the curve to prefs — it then
+/// bends EVERY tool's input, before any per-tool curve.
+pub(super) fn pen_wizard_window(ctx: &egui::Context, app: &mut App) {
+    if !app.pen_wizard_open {
+        return;
+    }
+    let mut open = true;
+    egui::Window::new("Pen pressure")
+        .open(&mut open)
+        .resizable(false)
+        .show(ctx, |ui| {
+            ui.label("Draw a few strokes on the canvas — the grey line is the pen's raw pressure.");
+            ui.add_space(4.0);
+            let h = 96.0;
+            let (rect, _) =
+                ui.allocate_exact_size(egui::vec2(ui.available_width(), h), egui::Sense::hover());
+            let crv = mn_core::stroke::gamma_pressure_curve(app.pen_wizard_gamma);
+            let yat = |p: f32| rect.bottom() - 4.0 - p.clamp(0.0, 1.0) * (rect.height() - 8.0);
+            let paint = ui.painter_at(rect);
+            for f in [0.0f32, 0.5, 1.0] {
+                let y = yat(f);
+                paint.line_segment(
+                    [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
+                    egui::Stroke::new(0.5, theme::c().border),
+                );
+            }
+            let n = app.pen_wizard_samples.len();
+            if n >= 2 {
+                let xat = |i: usize| rect.left() + i as f32 / (n - 1) as f32 * rect.width();
+                let raw: Vec<egui::Pos2> = app
+                    .pen_wizard_samples
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| egui::pos2(xat(i), yat(*p)))
+                    .collect();
+                paint.add(egui::Shape::line(
+                    raw,
+                    egui::Stroke::new(1.0, theme::c().text_weak),
+                ));
+                let corr: Vec<egui::Pos2> = app
+                    .pen_wizard_samples
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| {
+                        egui::pos2(xat(i), yat(mn_core::stroke::eval_pressure_curve(&crv, *p)))
+                    })
+                    .collect();
+                paint.add(egui::Shape::line(
+                    corr,
+                    egui::Stroke::new(2.0, theme::c().accent),
+                ));
+            } else {
+                paint.text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "draw with the pen…",
+                    egui::FontId::proportional(12.0),
+                    theme::c().text_weak,
+                );
+            }
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if ui.button("Stronger").clicked() {
+                    app.pen_wizard_gamma = (app.pen_wizard_gamma / 1.25).max(0.25);
+                }
+                if ui.button("Weaker").clicked() {
+                    app.pen_wizard_gamma = (app.pen_wizard_gamma * 1.25).min(4.0);
+                }
+                if ui.button("Reset").clicked() {
+                    app.pen_wizard_gamma = 1.0;
+                }
+                ui.weak(format!("×{:.2}", app.pen_wizard_gamma));
+            });
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if ui.button("Apply to every tool").clicked() {
+                    let pts = if (app.pen_wizard_gamma - 1.0).abs() < 1e-3 {
+                        Vec::new()
+                    } else {
+                        crv.clone()
+                    };
+                    app.push_cmd(AppCmd::PenPressureCurveSet(pts));
+                }
+                if ui.button("Cancel").clicked() {
+                    app.pen_wizard_open = false;
+                }
+            });
+        });
+    app.pen_wizard_open &= open;
+}
+
 // --- tonal correction ---------------------------------------------------
 
 /// A CSP-style −100..100 slider over a parameter stored as −1..1.

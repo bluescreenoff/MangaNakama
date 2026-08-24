@@ -390,6 +390,15 @@ pub struct App {
     pub gen_drag: Option<crate::app::canvas_input::GenLinesDrag>,
     /// Live drag of a tone layer's lattice (CSP "Move tone pattern").
     pub fill_lattice_drag: Option<crate::app::canvas_input::FillLatticeDrag>,
+    /// Row 89: the GLOBAL pen-pressure correction, empty = identity.
+    /// Applied to every sample in `push_batch`, before per-tool curves.
+    pub global_pressure: Vec<[f32; 2]>,
+    /// The pen-pressure wizard (BR-014–016): open flag, the
+    /// Stronger/Weaker bend, and the raw pressures of strokes drawn
+    /// while it listens.
+    pub pen_wizard_open: bool,
+    pub pen_wizard_gamma: f32,
+    pub pen_wizard_samples: Vec<f32>,
     /// Tool Property's draft of the SELECTED run's spec while a bar is
     /// being dragged — the same buffering idiom as `border_edit`, and for
     /// a sharper reason: committing per frame would re-rasterize a
@@ -1325,6 +1334,11 @@ impl App {
             temp_object: false,
             gen_drag: None,
             fill_lattice_drag: None,
+            global_pressure: crate::app::prefs::parse_pressure_curve(&prefs.pressure_curve)
+                .unwrap_or_default(),
+            pen_wizard_open: false,
+            pen_wizard_gamma: 1.0,
+            pen_wizard_samples: Vec::new(),
             quick_query: String::new(),
             quick_pins: layout
                 .quick_pins
@@ -2737,6 +2751,31 @@ impl App {
         if self.stroke.is_none() || batch.is_empty() {
             return;
         }
+        // Row 89 (BR-014–016): the wizard listens to the RAW tablet
+        // pressures; the global correction curve then bends every sample
+        // BEFORE any per-tool curve sees it — global first, for every
+        // tool at once. Identity (empty curve) costs one length check.
+        if self.pen_wizard_open {
+            self.pen_wizard_samples
+                .extend(batch.iter().map(|s| s.pressure));
+            let keep = self.pen_wizard_samples.len().saturating_sub(4096);
+            self.pen_wizard_samples.drain(0..keep);
+        }
+        let corrected: Vec<PenSample>;
+        let batch: &[PenSample] = if self.global_pressure.is_empty() {
+            batch
+        } else {
+            corrected = batch
+                .iter()
+                .map(|s| {
+                    let mut s = *s;
+                    s.pressure =
+                        mn_core::stroke::eval_pressure_curve(&self.global_pressure, s.pressure);
+                    s
+                })
+                .collect();
+            &corrected
+        };
         // View-compensated speed/direction inputs (vendor patch #12) — per
         // batch, so wheel-zoom/rotation mid-stroke stays correct. Rotation
         // goes in RAW RADIANS: the C applies DEGREES() itself, and our

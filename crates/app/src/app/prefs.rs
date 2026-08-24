@@ -120,6 +120,11 @@ pub struct Prefs {
     /// NOT serialized — it is typing state, not a preference; to_body
     /// names its keys explicitly so this never leaks into prefs.txt.
     pub theme_save_name: String,
+    /// Row 89 / BR-014–016: the GLOBAL pen-pressure correction curve as
+    /// `"x:y,x:y,…"` with x,y in 0..=1 — the wizard's Stronger/Weaker
+    /// output. Empty = identity (no correction; byte-stable with every
+    /// older file). A value is stored only when it parses.
+    pub pressure_curve: String,
     /// `k=v` lines this build does not recognise, kept so saving here does
     /// not delete a newer build's settings.
     unknown: Vec<String>,
@@ -147,6 +152,7 @@ impl Default for Prefs {
             icon_colours: true,
             show_pose3d_materials: false,
             theme_save_name: String::new(),
+            pressure_curve: String::new(),
             unknown: Vec::new(),
             dirty: false,
         }
@@ -167,6 +173,40 @@ fn finite(v: f32, fallback: f32, lo: f32, hi: f32) -> f32 {
     } else {
         fallback
     }
+}
+
+/// Parse the global pressure curve's `"x:y,x:y"` form into sorted,
+/// clamped points. `Some(vec![])` for an empty string (identity, made
+/// explicit); `None` when any pair is malformed — callers keep the old
+/// value rather than guessing.
+pub fn parse_pressure_curve(s: &str) -> Option<Vec<[f32; 2]>> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Some(Vec::new());
+    }
+    let mut pts = Vec::new();
+    for pair in s.split(',') {
+        let (x, y) = pair.split_once(':')?;
+        let (x, y): (f32, f32) = (x.trim().parse().ok()?, y.trim().parse().ok()?);
+        if !(0.0..=1.0).contains(&x) || !(0.0..=1.0).contains(&y) {
+            return None;
+        }
+        pts.push([x, y]);
+    }
+    if pts.is_empty() {
+        return None;
+    }
+    pts.sort_by(|a, b| a[0].total_cmp(&b[0]));
+    Some(pts)
+}
+
+/// Canonical serialization for the same form — what `to_body` writes and
+/// what the wizard hands the preference on Apply.
+pub fn pressure_curve_string(pts: &[[f32; 2]]) -> String {
+    pts.iter()
+        .map(|p| format!("{:.4}:{:.4}", p[0], p[1]))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 impl Prefs {
@@ -218,7 +258,7 @@ impl Prefs {
     /// wrote that this one does not understand, verbatim.
     fn to_body(&self) -> String {
         let mut body = format!(
-            "autosave_min={}\nautosave_every_op={}\nundo_depth={}\nmouse_smooth_px={}\nnew_canvas_w={}\nnew_canvas_h={}\nfit_margin={}\nwheel_step={}\nrotate_step_deg={}\nrecent_depth={}\ntext_size_pt={}\nnew_preset={}\nexport_reminder={}\npalette_icon_px={}\ntheme={}\nicon_colours={}\nui_scale={}\nshow_pose3d_materials={}\n",
+            "autosave_min={}\nautosave_every_op={}\nundo_depth={}\nmouse_smooth_px={}\nnew_canvas_w={}\nnew_canvas_h={}\nfit_margin={}\nwheel_step={}\nrotate_step_deg={}\nrecent_depth={}\ntext_size_pt={}\nnew_preset={}\nexport_reminder={}\npalette_icon_px={}\ntheme={}\nicon_colours={}\nui_scale={}\nshow_pose3d_materials={}\npressure_curve={}\n",
             self.autosave_min,
             u8::from(self.autosave_every_op),
             self.undo_depth,
@@ -237,6 +277,7 @@ impl Prefs {
             u8::from(self.icon_colours),
             self.ui_scale,
             u8::from(self.show_pose3d_materials),
+            self.pressure_curve.replace('\n', ""),
         );
         for line in &self.unknown {
             body.push_str(line);
@@ -291,6 +332,13 @@ impl Prefs {
             "theme" => {
                 if !v.is_empty() {
                     self.theme = v.to_owned();
+                }
+            }
+            // Row 89: stored only when it PARSES — a mangled line keeps
+            // the identity rather than disabling the pen silently.
+            "pressure_curve" => {
+                if parse_pressure_curve(v).is_some() {
+                    self.pressure_curve = v.trim().to_owned();
                 }
             }
             // Both spellings, and gibberish keeps the value — the same rule
@@ -676,5 +724,36 @@ mod tests {
         let on = from_body("icon_colours=1\n");
         assert!(on.icon_colours);
         assert!(on.to_body().contains("icon_colours=1\n"));
+    }
+
+    /// Row 89: the pressure curve round-trips through prefs.txt, empty
+    /// stays empty (identity, the pre-wizard file unchanged), and a
+    /// mangled value is refused rather than half-applied.
+    #[test]
+    fn pressure_curve_round_trips_and_refuses_garbage() {
+        assert_eq!(
+            parse_pressure_curve(""),
+            Some(Vec::new()),
+            "empty = identity, explicit"
+        );
+        assert!(parse_pressure_curve("0:0,0.5:x").is_none());
+        assert!(parse_pressure_curve("0:2").is_none(), "out of range");
+        let pts = parse_pressure_curve("0:0, 0.5:0.35 ,1:1").expect("parses");
+        assert_eq!(pts, vec![[0.0, 0.0], [0.5, 0.35], [1.0, 1.0]]);
+        let s = pressure_curve_string(&pts);
+        assert_eq!(
+            parse_pressure_curve(&s).as_deref(),
+            Some(&pts[..]),
+            "canonical form re-parses to the same points"
+        );
+
+        let on = from_body("pressure_curve=0:0,0.5:0.35,1:1\n");
+        assert!(on.to_body().contains("pressure_curve=0:0,0.5:0.35,1:1"));
+        // Garbage keeps the default (off) instead of corrupting the pen.
+        let mangled = from_body("pressure_curve=oops\n");
+        assert!(mangled.pressure_curve.is_empty());
+        assert!(mangled.to_body().contains("pressure_curve=\n"));
+        // The default file gains the key with an empty value — identity.
+        assert!(Prefs::default().to_body().contains("pressure_curve=\n"));
     }
 }

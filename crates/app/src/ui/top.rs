@@ -142,6 +142,10 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 app.push_cmd(AppCmd::OpenPrefs(None));
                 ui.close();
             }
+            if item(ui, "Pen pressure…", "") {
+                app.push_cmd(AppCmd::PenPressureWizardOpen);
+                ui.close();
+            }
         });
         bar_menu(ui, "Edit", |ui| {
             if item(ui, "Undo", "Ctrl+Z") {
