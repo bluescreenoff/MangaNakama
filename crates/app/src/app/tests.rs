@@ -8786,3 +8786,54 @@ fn an_oversize_ink_grab_selects_instead_of_lifting() {
     app.object_hit(50.0, 50.0);
     assert!(app.transform_drag.is_some(), "a small mark still grabs");
 }
+
+/// The frame EXPAND arrows (owner ask 2026-08-26, CSP's yellow
+/// triangles): the target finder picks the NEAREST neighbour edge or
+/// template line beyond each bbox edge, and a tap on the arrow grows the
+/// edge to it in ONE undo step — the gutter between dies.
+#[test]
+fn frame_expand_arrows_grow_to_the_nearest_border() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    app.viewport.zoom = 1.0;
+    app.viewport.pan = [0.0, 0.0];
+    // Two panels with a 40 px gutter; page 600×400, no guides (template
+    // lines empty, so the sibling is the only candidate).
+    app.doc.add_frame_folder(
+        "Frame 1",
+        mn_core::FrameSet::single_rect([40.0, 40.0, 280.0, 360.0], 2.0),
+    );
+    let li = app.doc.layers.iter().rposition(|l| l.is_frame()).unwrap();
+    let mut fs = app.doc.layers[li].frames().unwrap().clone();
+    fs.frames
+        .push(mn_core::Frame::rect(320.0, 40.0, 560.0, 360.0));
+    app.doc.set_frames(li, fs);
+
+    // Select the RIGHT panel; its LEFT arrow targets the left panel's
+    // right edge (280), its RIGHT arrow the canvas… no candidate (no
+    // template) → None.
+    app.object_sel = Some((li, 1));
+    let t = crate::app::canvas_input::frame_expand_targets(&app.doc, app.page.as_ref(), li, 1);
+    assert_eq!(t[0], Some(280.0), "left: the neighbour's right edge");
+    assert_eq!(t[1], None, "right: nothing beyond");
+    assert_eq!(t[2], None, "top: nothing beyond");
+    assert_eq!(t[3], None, "bottom: nothing beyond");
+
+    // The arrow sits outside the left edge midpoint; tapping it expands.
+    let arrows = app.frame_expand_arrow_pts();
+    assert_eq!(arrows.len(), 1, "one arrow drawn: {arrows:?}");
+    assert_eq!(arrows[0].0, 0, "it is the left arrow");
+    let (ax, ay) = app.viewport.to_canvas(arrows[0].1.x, arrows[0].1.y);
+    app.tool = Tool::Object;
+    app.object_hit(ax, ay);
+    let grew = app.doc.layers[li].frames().unwrap().frames[1].bbox();
+    assert_eq!(grew[0], 280.0, "the left edge moved onto the neighbour");
+    assert_eq!(grew[2], 560.0, "the rest of the panel stayed");
+    assert!(app.object_sel.is_some(), "still selected — arrows stay up");
+    // One undo takes it back.
+    assert!(app.doc.undo());
+    let back = app.doc.layers[li].frames().unwrap().frames[1].bbox();
+    assert_eq!(back[0], 320.0, "one undo = the gutter is back");
+}

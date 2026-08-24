@@ -947,6 +947,24 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
                         arrow(-1.0);
                     }
                 }
+                // EXPAND arrows (owner ask 2026-08-26, CSP's yellow
+                // triangles): one OUTWARD-pointing triangle just outside
+                // each bbox edge that has a neighbour border or template
+                // line to grow to — tap = the gutter dies there. Distinct
+                // from the shared-edge double arrows above: those mark an
+                // EXISTING alignment; these offer the next one.
+                for (dir, tip) in app.frame_expand_arrow_pts() {
+                    let (dx, dy) = match dir {
+                        0 => (-1.0, 0.0),
+                        1 => (1.0, 0.0),
+                        2 => (0.0, -1.0),
+                        _ => (0.0, 1.0),
+                    };
+                    let back = egui::pos2(tip.x - dx * 10.0 - dy * 5.0, tip.y - dy * 10.0 + dx * 5.0);
+                    let back2 = egui::pos2(tip.x - dx * 10.0 + dy * 5.0, tip.y - dy * 10.0 - dx * 5.0);
+                    painter.line_segment([back, tip], egui::Stroke::new(2.2, yellow));
+                    painter.line_segment([back2, tip], egui::Stroke::new(2.2, yellow));
+                }
             }
         }
         if let Some((li, bi)) = app.balloon_sel {

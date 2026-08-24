@@ -1661,6 +1661,19 @@ impl App {
             self.balloon_obj_drag = Some(d);
             self.object_sel = None;
             self.gen_sel = None;
+        } else if {
+            // Expand arrows (owner 2026-08-26): only the SELECTED frame has
+            // them, so they are checked before the ordinary frame hit —
+            // an arrow sits just OUTSIDE the bbox and would otherwise fall
+            // through to the ink grab. One tap, one undo step; the frame
+            // stays selected so the arrows stay up for the next direction.
+            let (sx, sy) = self.viewport.to_screen(cx, cy);
+            self.frame_expand_arrow_pts()
+                .into_iter()
+                .find(|&(_, tip)| (sx - tip.x).abs() <= 12.0 && (sy - tip.y).abs() <= 12.0)
+                .is_some_and(|(dir, _)| self.frame_expand_press(dir))
+        } {
+            self.object_pick = Some((cx, cy));
         } else if let Some(d) = frame_hit {
             self.object_sel = Some((d.layer, d.frame));
             self.object_pick = Some((cx, cy));
@@ -3113,5 +3126,195 @@ mod gen_drag_tests {
             size,
         );
         assert!(s.c >= s.b, "max stays >= min");
+    }
+}
+
+// --- frame expand arrows (owner ask 2026-08-26: CSP's yellow triangles) ---
+
+/// The nearest EXPANSION target beyond each bbox edge of frame `fi` in
+/// `layer`: [left, right, top, bottom] as canvas coordinates. Candidates
+/// are sibling frames' bbox edges (any visible frame folder — a divide
+/// makes each panel its own folder) and the page's template lines
+/// (trim/bleed/inner/safety); the nearest beyond the edge wins. `None` =
+/// nothing to expand to in that direction. Axis-aligned bbox math: a
+/// slanted panel's OTHER vertices keep their shape (only vertices on the
+/// moved edge follow).
+pub(crate) fn frame_expand_targets(
+    doc: &mn_core::Document,
+    page: Option<&mn_core::PageSetup>,
+    layer: usize,
+    fi: usize,
+) -> [Option<f32>; 4] {
+    let Some(frames) = doc.layers.get(layer).and_then(|l| l.frames()) else {
+        return [None; 4];
+    };
+    let Some(f) = frames.frames.get(fi) else {
+        return [None; 4];
+    };
+    let b = f.bbox();
+    const EPS: f32 = 1.5;
+    // Vertical template lines for left/right, horizontal for top/bottom.
+    let mut vlines: Vec<f32> = Vec::new();
+    let mut hlines: Vec<f32> = Vec::new();
+    if let Some(p) = page.filter(|p| p.has_guides()) {
+        let push = |r: [f32; 4], v: &mut Vec<f32>, h: &mut Vec<f32>| {
+            v.push(r[0]);
+            v.push(r[2]);
+            h.push(r[1]);
+            h.push(r[3]);
+        };
+        push(p.trim_rect_px(), &mut vlines, &mut hlines);
+        push(p.bleed_rect_px(), &mut vlines, &mut hlines);
+        push(p.inner_rect_px_on(true), &mut vlines, &mut hlines);
+        push(p.inner_rect_px_on(false), &mut vlines, &mut hlines);
+    }
+    // Every sibling bbox edge is a candidate line on BOTH axes (a
+    // neighbour's LEFT edge can also be the thing we expand onto, when it
+    // sits inside our span) — no lefts/rights split.
+    for (li, l) in doc.layers.iter().enumerate() {
+        if !l.visible || l.frames().is_none() {
+            continue;
+        }
+        let Some(fs) = l.frames() else { continue };
+        for (si, sib) in fs.frames.iter().enumerate() {
+            if li == layer && si == fi {
+                continue;
+            }
+            let sb = sib.bbox();
+            vlines.push(sb[0]);
+            vlines.push(sb[2]);
+            hlines.push(sb[1]);
+            hlines.push(sb[3]);
+        }
+    }
+    // Left: the nearest edge strictly LEFT of our left edge (a neighbour's
+    // right edge to expand INTO, or a template line). Max of candidates
+    // below b[0]; likewise mirrored for the other three.
+    let nearest_below = |x: f32, cands: &mut Vec<f32>| -> Option<f32> {
+        let best = cands
+            .iter()
+            .filter(|&&c| c < x - EPS)
+            .cloned()
+            .fold(f32::MIN, f32::max);
+        (best > f32::MIN / 2.0).then_some(best)
+    };
+    let nearest_above = |x: f32, cands: &mut Vec<f32>| -> Option<f32> {
+        let best = cands
+            .iter()
+            .filter(|&&c| c > x + EPS)
+            .cloned()
+            .fold(f32::MAX, f32::min);
+        (best < f32::MAX / 2.0).then_some(best)
+    };
+    [
+        nearest_below(b[0], &mut vlines),
+        nearest_above(b[2], &mut vlines),
+        nearest_below(b[1], &mut hlines),
+        nearest_above(b[3], &mut hlines),
+    ]
+}
+
+impl App {
+    /// Where each of the SELECTED frame's expand arrows sits (screen px),
+    /// for the direction it expands in — `[dir, tip_pos]`, dirs 0..3 =
+    /// left, right, top, bottom. Arrows live just OUTSIDE the bbox edge
+    /// midpoint (CSP's triangles); the top arrow dodges the rotation
+    /// lollipop by sitting beside it.
+    pub(crate) fn frame_expand_arrow_pts(&self) -> Vec<(usize, egui::Pos2)> {
+        let Some((li, fi)) = self.object_sel else {
+            return Vec::new();
+        };
+        let Some(f) = self
+            .doc
+            .layers
+            .get(li)
+            .and_then(|l| l.frames())
+            .and_then(|fs| fs.frames.get(fi))
+        else {
+            return Vec::new();
+        };
+        let targets = frame_expand_targets(&self.doc, self.page.as_ref(), li, fi);
+        let b = f.bbox();
+        let to_screen = |p: [f32; 2]| {
+            let (x, y) = self.viewport.to_screen(p[0], p[1]);
+            egui::pos2(x, y)
+        };
+        let (tl, br) = (to_screen([b[0], b[1]]), to_screen([b[2], b[3]]));
+        let cx = (tl.x + br.x) * 0.5;
+        let cy = (tl.y + br.y) * 0.5;
+        const OFF: f32 = 16.0;
+        let mut out = Vec::new();
+        if targets[0].is_some() {
+            out.push((0usize, egui::pos2(tl.x - OFF, cy)));
+        }
+        if targets[1].is_some() {
+            out.push((1usize, egui::pos2(br.x + OFF, cy)));
+        }
+        if targets[2].is_some() {
+            // Beside the lollipop, not under it.
+            out.push((2usize, egui::pos2(cx + 18.0, tl.y - OFF)));
+        }
+        if targets[3].is_some() {
+            out.push((3usize, egui::pos2(cx, br.y + OFF)));
+        }
+        out
+    }
+
+    /// One tap on an expand arrow: grow the SELECTED frame's matching bbox
+    /// edge to its target (the neighbour's edge or the template line —
+    /// the gutter between them dies, CSP's bleed panel in one press).
+    /// Only vertices ON the moved edge follow; a slanted panel keeps its
+    /// shape elsewhere. Records ONE undo step via `set_frames`.
+    pub(crate) fn frame_expand_press(&mut self, dir: usize) -> bool {
+        let Some((li, fi)) = self.object_sel else {
+            return false;
+        };
+        let targets = frame_expand_targets(&self.doc, self.page.as_ref(), li, fi);
+        let Some(target) = targets[dir] else {
+            return false;
+        };
+        let Some(fs) = self.doc.layers.get(li).and_then(|l| l.frames()) else {
+            return false;
+        };
+        let Some(f) = fs.frames.get(fi) else {
+            return false;
+        };
+        let b = f.bbox();
+        const EPS: f32 = 1.5;
+        let mut nf = f.clone();
+        let mut moved = false;
+        for p in nf.points.iter_mut() {
+            let on_edge = match dir {
+                0 => (p[0] - b[0]).abs() < EPS,
+                1 => (p[0] - b[2]).abs() < EPS,
+                2 => (p[1] - b[1]).abs() < EPS,
+                _ => (p[1] - b[3]).abs() < EPS,
+            };
+            if on_edge {
+                match dir {
+                    0 | 1 => p[0] = target,
+                    _ => p[1] = target,
+                }
+                moved = true;
+            }
+        }
+        if !moved {
+            return false;
+        }
+        let valid = nf.area() >= mn_core::frame::MIN_FRAME_AREA && (nf.is_convex() || nf.is_simple());
+        if !valid {
+            self.set_status("expand refused — the panel would collapse");
+            return true;
+        }
+        let mut set = fs.clone();
+        set.frames[fi] = nf;
+        if self.doc.set_frames(li, set) {
+            self.renumber_frames();
+            self.renderer.invalidate();
+            self.set_status("panel expanded to the next border");
+            self.mark_dirty();
+            return true;
+        }
+        false
     }
 }
