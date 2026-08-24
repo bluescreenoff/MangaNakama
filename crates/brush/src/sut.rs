@@ -167,8 +167,7 @@ pub(crate) fn variant_params_effectors(
 
 /// Parse a `.sut` file from disk.
 pub fn parse_sut_file(path: &Path) -> Result<SutBrush, String> {
-    let bytes =
-        std::fs::read(path).map_err(|e| format!("sut: {}: {e}", path.display()))?;
+    let bytes = std::fs::read(path).map_err(|e| format!("sut: {}: {e}", path.display()))?;
     let stem = path
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
@@ -301,10 +300,7 @@ mod tests {
     /// effector, and a usable name.
     #[test]
     fn real_sut_files_parse_end_to_end() {
-        for (file, expect_name) in [
-            ("sut_sample.sut", "Hard"),
-            ("sut_sample2.sut", "Soft"),
-        ] {
+        for (file, expect_name) in [("sut_sample.sut", "Hard"), ("sut_sample2.sut", "Soft")] {
             let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/data")
                 .join(file);

@@ -2107,7 +2107,7 @@ pub extern "C" fn mnc_brush_texture_advance() {
             TEXTURE_PTR.with(|c| c.set(p as usize));
             TEXTURE_SIZE.with(|c| c.set(s));
         }
-    }    // Angle jitter, base-angle mode only (see TIP_JITTER_OK's doc).
+    } // Angle jitter, base-angle mode only (see TIP_JITTER_OK's doc).
     if TIP_JITTER_OK.with(|c| c.get()) != 0 {
         let v = f32::from_bits(VARIATION.with(|c| c.get()));
         if v > 0.0 {
@@ -2646,11 +2646,13 @@ mod wash_smudge_tests {
     #[test]
     fn tip_sets_swap_the_active_mask_per_dab() {
         use std::sync::Arc;
-        let mk = |v: u8| Arc::new(TextureMask {
-            name: format!("t{v}"),
-            size: 4,
-            data: Arc::new(vec![v; 16]),
-        });
+        let mk = |v: u8| {
+            Arc::new(TextureMask {
+                name: format!("t{v}"),
+                size: 4,
+                data: Arc::new(vec![v; 16]),
+            })
+        };
         let a = mk(10);
         let b = mk(200);
         let variants: Box<[(*const u8, i32)]> =

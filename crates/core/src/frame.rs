@@ -451,7 +451,10 @@ impl Frame {
         // agree at the limit.
         let (a, _) = self.halves_by_path(&offset_path(path, -g, reach))?;
         let (_, b) = self.halves_by_path(&offset_path(path, g, reach))?;
-        if a.area() < MIN_FRAME_AREA || b.area() < MIN_FRAME_AREA || !a.is_simple() || !b.is_simple()
+        if a.area() < MIN_FRAME_AREA
+            || b.area() < MIN_FRAME_AREA
+            || !a.is_simple()
+            || !b.is_simple()
         {
             return None;
         }
@@ -854,13 +857,7 @@ impl FrameSet {
     /// another frame of this set. `None` when nothing faces it. Only frames
     /// whose projection onto the edge's own direction OVERLAPS the edge count
     /// — a panel off to the side is not "the next panel over".
-    fn facing_distance(
-        &self,
-        skip: usize,
-        a: [f32; 2],
-        b: [f32; 2],
-        nrm: [f32; 2],
-    ) -> Option<f32> {
+    fn facing_distance(&self, skip: usize, a: [f32; 2], b: [f32; 2], nrm: [f32; 2]) -> Option<f32> {
         let mut best: Option<f32> = None;
         for (i, o) in self.frames.iter().enumerate() {
             if i == skip {
@@ -1177,12 +1174,7 @@ mod tests {
         // A skewed neighbour reports its NEAREST corner, and only that one
         // is the facing vertex.
         let skew = Frame {
-            points: vec![
-                [140.0, 0.0],
-                [240.0, 0.0],
-                [240.0, 100.0],
-                [180.0, 100.0],
-            ],
+            points: vec![[140.0, 0.0], [240.0, 0.0], [240.0, 100.0], [180.0, 100.0]],
         };
         let (d, idx) = facing_vertices(&skew, a, b, nrm).unwrap();
         assert!((d - 40.0).abs() < 1e-4);
@@ -1462,7 +1454,10 @@ mod tests {
         let lost = f.area() - a.area() - b.area();
         assert!(lost > 0.0, "the gutter costs area");
         // The gutter is ~8 px over a ~120 px long cut, plus the elbow.
-        assert!(lost < 8.0 * 260.0, "and not much more than the gutter: {lost}");
+        assert!(
+            lost < 8.0 * 260.0,
+            "and not much more than the gutter: {lost}"
+        );
         // Each half keeps two of the panel's own corners.
         assert!(a.area() > 4000.0 && b.area() > 4000.0);
     }
@@ -1509,7 +1504,10 @@ mod tests {
         assert_eq!(cells.len(), 6);
         // 3 columns of 100 px lose 10 px of gutter each except at the page
         // edges: the outer two are 95 wide, the middle one 90.
-        let mut widths: Vec<f32> = cells[..3].iter().map(|c| c.bbox()[2] - c.bbox()[0]).collect();
+        let mut widths: Vec<f32> = cells[..3]
+            .iter()
+            .map(|c| c.bbox()[2] - c.bbox()[0])
+            .collect();
         widths.sort_by(f32::total_cmp);
         assert!((widths[0] - 90.0).abs() < 0.01, "middle column: {widths:?}");
         assert!((widths[2] - 95.0).abs() < 0.01, "outer column: {widths:?}");
@@ -1578,8 +1576,14 @@ mod tests {
         // Edge 0 is the top (y=60) — it runs up past y=0 by the bleed.
         assert!(fs.extend_to_edge(0, 0, (400.0, 300.0), 6.0));
         let bb = fs.frames[0].bbox();
-        assert!((bb[1] + 6.0).abs() < 0.01, "top is 6 px past the page: {bb:?}");
-        assert!((bb[0] - 50.0).abs() < 0.01 && (bb[2] - 250.0).abs() < 0.01, "sides unmoved");
+        assert!(
+            (bb[1] + 6.0).abs() < 0.01,
+            "top is 6 px past the page: {bb:?}"
+        );
+        assert!(
+            (bb[0] - 50.0).abs() < 0.01 && (bb[2] - 250.0).abs() < 0.01,
+            "sides unmoved"
+        );
         assert!((bb[3] - 160.0).abs() < 0.01, "bottom unmoved");
     }
 
@@ -1588,8 +1592,7 @@ mod tests {
     #[test]
     fn extend_to_edge_closes_the_gutter_against_a_neighbour() {
         let mut fs = FrameSet::single_rect([20.0, 20.0, 180.0, 100.0], 4.0);
-        fs.frames
-            .push(Frame::rect(20.0, 120.0, 180.0, 260.0));
+        fs.frames.push(Frame::rect(20.0, 120.0, 180.0, 260.0));
         // Bottom edge of the top panel (y=100) toward the panel at y=120.
         assert!(fs.extend_to_edge(0, 2, (400.0, 300.0), 6.0));
         assert!(
@@ -1608,7 +1611,10 @@ mod tests {
     #[test]
     fn border_as_ruler_drops_the_ink_and_keeps_the_width() {
         let mut fs = FrameSet::single_rect([16.0, 16.0, 112.0, 112.0], 6.0);
-        assert!(!fs.rasterize_border((128, 128)).is_empty(), "ink by default");
+        assert!(
+            !fs.rasterize_border((128, 128)).is_empty(),
+            "ink by default"
+        );
         assert!(fs.ruler_curves().is_empty(), "and no ruler while it inks");
 
         fs.border_ruler = true;

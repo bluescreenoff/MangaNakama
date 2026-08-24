@@ -24,9 +24,9 @@ mod gbr;
 mod kpp;
 mod mybrush;
 pub mod sqlite_ro;
+mod surface;
 pub mod sut;
 pub mod todb;
-mod surface;
 
 /// Brush setting/input ids, generated from `brushsettings.json` at build time.
 pub mod settings;
@@ -1177,7 +1177,10 @@ mod tests {
             b.set_hard_dab(true);
             b.set_texture(Some(half_ink()));
             b.set_texture_anchor_dab(true);
-            b.set_base_value(settings::setting_id("radius_logarithmic").unwrap(), 16f32.ln());
+            b.set_base_value(
+                settings::setting_id("radius_logarithmic").unwrap(),
+                16f32.ln(),
+            );
             b.set_texture_angle_deg(angle);
             straight_stroke(&mut b, &mut doc, 256.0, 1.0);
             doc
@@ -1191,10 +1194,8 @@ mod tests {
                     let idx = TileIdx::of_pixel(x, y);
                     if let Some(t) = doc.active_layer().tile(idx) {
                         sum += u64::from(
-                            t.pixel(
-                                (x - idx.origin().0) as usize,
-                                (y - idx.origin().1) as usize,
-                            )[3],
+                            t.pixel((x - idx.origin().0) as usize, (y - idx.origin().1) as usize)
+                                [3],
                         );
                     }
                 }

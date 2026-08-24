@@ -338,11 +338,34 @@ pub fn token_set(t: &mut Theme, k: &str, v: Color32) -> bool {
 /// order.
 pub fn token_names() -> [&'static str; 28] {
     [
-        "window", "panel", "header", "field", "hover", "active", "button",
-        "accent", "accent_fill", "sel_row", "sel_active", "sel_edge",
-        "border", "outline", "text", "text_weak", "text_strong", "warn",
-        "ref_mark", "draft_mark", "rec", "hue_create", "hue_destroy",
-        "hue_media", "hue_ink", "hue_select", "hue_layer", "hue_nav",
+        "window",
+        "panel",
+        "header",
+        "field",
+        "hover",
+        "active",
+        "button",
+        "accent",
+        "accent_fill",
+        "sel_row",
+        "sel_active",
+        "sel_edge",
+        "border",
+        "outline",
+        "text",
+        "text_weak",
+        "text_strong",
+        "warn",
+        "ref_mark",
+        "draft_mark",
+        "rec",
+        "hue_create",
+        "hue_destroy",
+        "hue_media",
+        "hue_ink",
+        "hue_select",
+        "hue_layer",
+        "hue_nav",
     ]
 }
 
@@ -374,11 +397,11 @@ pub fn from_body(base: Theme, text: &str) -> (Theme, Vec<String>) {
         let hex = v.trim().trim_start_matches('#');
         if hex.len() == 6
             && let Ok(b) = u32::from_str_radix(hex, 16)
-            && token_set(&mut t, k.trim(), Color32::from_rgb(
-                (b >> 16) as u8,
-                ((b >> 8) & 0xff) as u8,
-                (b & 0xff) as u8,
-            ))
+            && token_set(
+                &mut t,
+                k.trim(),
+                Color32::from_rgb((b >> 16) as u8, ((b >> 8) & 0xff) as u8, (b & 0xff) as u8),
+            )
         {
             continue;
         }
@@ -826,11 +849,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let mut t = SEPIA;
-        assert!(token_set(&mut t, "accent", egui::Color32::from_rgb(1, 2, 3)));
+        assert!(token_set(
+            &mut t,
+            "accent",
+            egui::Color32::from_rgb(1, 2, 3)
+        ));
         assert!(save_custom(&dir, "mine", &t));
         assert_eq!(custom_names_in(&dir), vec!["mine".to_owned()]);
         let got = load_custom(&dir, "mine").expect("the file loads");
-        assert_eq!(token_get(&got, "accent"), Some(egui::Color32::from_rgb(1, 2, 3)));
+        assert_eq!(
+            token_get(&got, "accent"),
+            Some(egui::Color32::from_rgb(1, 2, 3))
+        );
         assert_eq!(
             token_get(&got, "panel"),
             Some(SEPIA.panel),
@@ -840,8 +870,15 @@ mod tests {
         // the DARK base.
         std::fs::write(dir.join("partial.txt"), "accent=010203\n").unwrap();
         let part = load_custom(&dir, "partial").expect("partial loads");
-        assert_eq!(token_get(&part, "accent"), Some(egui::Color32::from_rgb(1, 2, 3)));
-        assert_eq!(token_get(&part, "panel"), Some(DARK.panel), "the base fills the gaps");
+        assert_eq!(
+            token_get(&part, "accent"),
+            Some(egui::Color32::from_rgb(1, 2, 3))
+        );
+        assert_eq!(
+            token_get(&part, "panel"),
+            Some(DARK.panel),
+            "the base fills the gaps"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

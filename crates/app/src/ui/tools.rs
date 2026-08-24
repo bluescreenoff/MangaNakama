@@ -111,10 +111,8 @@ pub(super) fn tool_palette_body(ui: &mut egui::Ui, app: &mut App) {
 /// The rule between two tool families: a hairline the width of the grid,
 /// with air either side.
 fn group_rule(ui: &mut egui::Ui, grid_w: f32) {
-    let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), 7.0),
-        egui::Sense::hover(),
-    );
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 7.0), egui::Sense::hover());
     let left = rect.left();
     ui.painter().hline(
         egui::Rangef::new(left, left + grid_w),

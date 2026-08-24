@@ -581,10 +581,7 @@ impl Layer {
         // Rounded up on the UNSIGNED size: `div_ceil` is stable for u32 and
         // still unstable for i32 (`int_roundings`).
         let tsu = TILE_SIZE as u32;
-        let (cw, chh) = (
-            size.0.div_ceil(tsu) as i32,
-            size.1.div_ceil(tsu) as i32,
-        );
+        let (cw, chh) = (size.0.div_ceil(tsu) as i32, size.1.div_ceil(tsu) as i32);
         let mut out: HashMap<TileIdx, Arc<Tile>> = HashMap::new();
         {
             let base = self.base_tiles();
@@ -806,43 +803,42 @@ impl Layer {
     /// region's pixels would un-hide it.
     pub(crate) fn remap_planes_x(&mut self, keep: (i64, i64), dx: i64, w: u32, h: u32) {
         let ts = TILE_SIZE as i64;
-        let remap = |map: &HashMap<TileIdx, Arc<Tile>>,
-                     keep_zero: bool|
-         -> HashMap<TileIdx, Arc<Tile>> {
-            let mut out: HashMap<TileIdx, Arc<Tile>> = HashMap::new();
-            for (ti, t) in map {
-                let (ox, oy) = ti.origin();
-                for py in 0..TILE_SIZE {
-                    for px in 0..TILE_SIZE {
-                        let p = t.pixel(px, py);
-                        if p[3] == 0 && !keep_zero {
-                            continue;
+        let remap =
+            |map: &HashMap<TileIdx, Arc<Tile>>, keep_zero: bool| -> HashMap<TileIdx, Arc<Tile>> {
+                let mut out: HashMap<TileIdx, Arc<Tile>> = HashMap::new();
+                for (ti, t) in map {
+                    let (ox, oy) = ti.origin();
+                    for py in 0..TILE_SIZE {
+                        for px in 0..TILE_SIZE {
+                            let p = t.pixel(px, py);
+                            if p[3] == 0 && !keep_zero {
+                                continue;
+                            }
+                            let (x, y) = (ox as i64 + px as i64, oy as i64 + py as i64);
+                            if x < keep.0 || x >= keep.1 || y < 0 || y >= h as i64 {
+                                continue;
+                            }
+                            let nx = x + dx;
+                            if nx < 0 || nx >= w as i64 {
+                                continue;
+                            }
+                            let ni = TileIdx::of_pixel(nx as i32, y as i32);
+                            let tile = out
+                                .entry(ni)
+                                .or_insert_with(|| Arc::new(Tile::new_transparent()));
+                            Arc::make_mut(tile).set_pixel(
+                                (nx - ni.x as i64 * ts) as usize,
+                                (y - ni.y as i64 * ts) as usize,
+                                p,
+                            );
                         }
-                        let (x, y) = (ox as i64 + px as i64, oy as i64 + py as i64);
-                        if x < keep.0 || x >= keep.1 || y < 0 || y >= h as i64 {
-                            continue;
-                        }
-                        let nx = x + dx;
-                        if nx < 0 || nx >= w as i64 {
-                            continue;
-                        }
-                        let ni = TileIdx::of_pixel(nx as i32, y as i32);
-                        let tile = out
-                            .entry(ni)
-                            .or_insert_with(|| Arc::new(Tile::new_transparent()));
-                        Arc::make_mut(tile).set_pixel(
-                            (nx - ni.x as i64 * ts) as usize,
-                            (y - ni.y as i64 * ts) as usize,
-                            p,
-                        );
                     }
                 }
-            }
-            for t in out.values_mut() {
-                Arc::make_mut(t).touch();
-            }
-            out
-        };
+                for t in out.values_mut() {
+                    Arc::make_mut(t).touch();
+                }
+                out
+            };
         self.tiles = remap(&self.tiles, false);
         if let Some(m) = &mut self.mask {
             m.tiles = remap(&m.tiles, true);
@@ -1879,12 +1875,16 @@ impl Document {
     /// tile cache around that swap (restored tiles keep their old, lower
     /// revisions; the cache uploads only on newer).
     pub fn next_undo_is_structure(&self) -> bool {
-        self.history.peek_undo().is_some_and(Self::group_is_structural)
+        self.history
+            .peek_undo()
+            .is_some_and(Self::group_is_structural)
     }
 
     /// Same door, redo side.
     pub fn next_redo_is_structure(&self) -> bool {
-        self.history.peek_redo().is_some_and(Self::group_is_structural)
+        self.history
+            .peek_redo()
+            .is_some_and(Self::group_is_structural)
     }
 
     /// Vector inking (docs/VECTOR-INKING.md): close the open op as ONE
@@ -1921,11 +1921,7 @@ impl Document {
     /// Vector inking phase 3: close the open op as ONE set-restructuring
     /// group (trim eraser, stroke delete) — the re-derived tiles' pre-images
     /// plus the whole set as it was BEFORE.
-    pub fn end_op_vector_set(
-        &mut self,
-        before: crate::stroke_set::StrokeSet,
-        label: &str,
-    ) -> bool {
+    pub fn end_op_vector_set(&mut self, before: crate::stroke_set::StrokeSet, label: &str) -> bool {
         let Some((li, _label, tiles)) = self.take_op() else {
             return false;
         };
@@ -2075,11 +2071,7 @@ impl Document {
                     tiles: inverse,
                 })
             }
-            UndoGroup::GenLines {
-                layer,
-                spec,
-                tiles,
-            } => {
+            UndoGroup::GenLines { layer, spec, tiles } => {
                 let l = self.layers.get_mut(layer)?;
                 // Parameters and pixels swap together — see the group's
                 // doc comment. Same tile door as `Tiles`, so restored tiles
@@ -3701,12 +3693,13 @@ impl Document {
         }
         if index == self.active {
             // Deselect the target: someone else must take the pen.
-            let Some(pos) = self
-                .layer_multi
-                .iter()
-                .rposition(|&m| m < index)
-                .or(if self.layer_multi.is_empty() { None } else { Some(0) })
-            else {
+            let Some(pos) = self.layer_multi.iter().rposition(|&m| m < index).or(
+                if self.layer_multi.is_empty() {
+                    None
+                } else {
+                    Some(0)
+                },
+            ) else {
                 return false; // the only selected row stays selected
             };
             self.active = self.layer_multi.remove(pos);
@@ -4373,7 +4366,10 @@ impl Document {
                 // BEFORE `tile_mut` allocates it and stashes an undo
                 // pre-image for a tile it was never going to touch.
                 let proj = |px: f32, py: f32| ((px - a[0]) * ab[0] + (py - a[1]) * ab[1]) / ab2;
-                let (tx1, ty1) = ((ox + TILE_SIZE as i32) as f32, (oy + TILE_SIZE as i32) as f32);
+                let (tx1, ty1) = (
+                    (ox + TILE_SIZE as i32) as f32,
+                    (oy + TILE_SIZE as i32) as f32,
+                );
                 let us = [
                     proj(ox as f32, oy as f32),
                     proj(tx1, oy as f32),
@@ -5653,7 +5649,10 @@ mod tests {
         let one_frame = FrameSet::single_rect([64.0, 64.0, 192.0, 192.0], 4.0);
         let li = doc.add_frame_layer("Frame 1", one_frame.clone());
         assert!(doc.layers[li].is_frame());
-        assert!(doc.can_undo(), "adding the layer records one structural step");
+        assert!(
+            doc.can_undo(),
+            "adding the layer records one structural step"
+        );
         let raster_before = doc.layers[li].tile_count();
         assert!(raster_before > 0);
 
@@ -5899,7 +5898,11 @@ mod tests {
         assert!(doc.set_layer_clip(above, true));
         let bases = doc.clip_bases();
         assert_eq!(bases[top], Some(hi), "folder header is the base");
-        assert_eq!(bases[above], Some(hi), "the run resolves through the member");
+        assert_eq!(
+            bases[above],
+            Some(hi),
+            "the run resolves through the member"
+        );
         assert!(doc.set_folder_through(hi, true));
         let bases = doc.clip_bases();
         assert_eq!(bases[top], None, "a through folder breaks the chain");
@@ -6087,7 +6090,11 @@ mod tests {
         doc.set_layer_label(above, Some(GREEN));
         doc.set_layer_label(0, Some(GREEN));
         assert_eq!(doc.palette_colour(above), Some(GREEN), "its own label");
-        assert_eq!(doc.palette_colour(outer), Some(BLUE), "no leak from outside");
+        assert_eq!(
+            doc.palette_colour(outer),
+            Some(BLUE),
+            "no leak from outside"
+        );
 
         // Nesting: an inner folder with no colour of its own is transparent to
         // the flat scan — the outer folder still finds the label further in,

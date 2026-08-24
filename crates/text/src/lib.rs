@@ -199,7 +199,10 @@ fn layout_utf16(item: &TextItem) -> Vec<u16> {
     let mut at = 0u32;
     for c in item.text.chars() {
         let n = c.len_utf16() as u32;
-        if tcy.iter().any(|t| at >= t.start && at + n <= t.start + t.len) {
+        if tcy
+            .iter()
+            .any(|t| at >= t.start && at + n <= t.start + t.len)
+        {
             for u in &mut out[at as usize..(at + n) as usize] {
                 *u = 0x3000; // U+3000 IDEOGRAPHIC SPACE
             }
@@ -533,8 +536,12 @@ impl TextEngine {
 
             let u16s: Vec<u16> = r.text.encode_utf16().collect();
             let rl = unsafe {
-                self.dwrite
-                    .CreateTextLayout(&u16s, &format, MAX_SPRITE as f32, MAX_SPRITE as f32)?
+                self.dwrite.CreateTextLayout(
+                    &u16s,
+                    &format,
+                    MAX_SPRITE as f32,
+                    MAX_SPRITE as f32,
+                )?
             };
             if item.vertical {
                 unsafe {
@@ -572,10 +579,7 @@ impl TextEngine {
                     base.top + slack(base.height, h) + nudge,
                 ]
             } else {
-                [
-                    base.left + slack(base.width, w) + nudge,
-                    base.top - h - gap,
-                ]
+                [base.left + slack(base.width, w) + nudge, base.top - h - gap]
             };
             out.push(InlineDraw {
                 layout: rl,
@@ -666,8 +670,12 @@ impl TextEngine {
                 };
                 let u16s: Vec<u16> = text.encode_utf16().collect();
                 let tl = unsafe {
-                    self.dwrite
-                        .CreateTextLayout(&u16s, &format, MAX_SPRITE as f32, MAX_SPRITE as f32)?
+                    self.dwrite.CreateTextLayout(
+                        &u16s,
+                        &format,
+                        MAX_SPRITE as f32,
+                        MAX_SPRITE as f32,
+                    )?
                 };
                 let mut m = DWRITE_TEXT_METRICS::default();
                 unsafe { tl.GetMetrics(&mut m)? };
@@ -1159,7 +1167,11 @@ mod tests {
         assert_eq!(e.layout_builds.get(), before + 2);
         let _ = e.line_bounds(&it, 600, 2);
         let _ = e.caret(&it, 600, 1, false).ok();
-        assert_eq!(e.layout_builds.get(), before + 2, "caret rides the same key");
+        assert_eq!(
+            e.layout_builds.get(),
+            before + 2,
+            "caret rides the same key"
+        );
         // Text changed → new key → rebuild.
         let mut it2 = it.clone();
         it2.insert(0, "x");
@@ -1413,7 +1425,10 @@ mod tests {
         let mut v = item("あいうえおかきくけこさしすせそ", true);
         v.size = [400.0, 120.0];
         let (_, vend) = e.line_bounds(&v, 96, 0).unwrap();
-        assert!(vend > 0 && vend < v.utf16_len(), "the column wrapped: {vend}");
+        assert!(
+            vend > 0 && vend < v.utf16_len(),
+            "the column wrapped: {vend}"
+        );
         let vhome = e.caret(&v, 96, 0, false).unwrap();
         let vtail = e.caret(&v, 96, vend, true).unwrap();
         assert!(
@@ -1711,7 +1726,10 @@ mod tcy_render_tests {
 
         let (sw, sh) = ink_box(&stacked);
         let (uw, uh) = ink_box(&upright);
-        assert!(sh > sw, "rotated and stacked, 22 inks a tall box ({sw}x{sh})");
+        assert!(
+            sh > sw,
+            "rotated and stacked, 22 inks a tall box ({sw}x{sh})"
+        );
         assert!(uw > uh, "upright, 22 inks a wide box ({uw}x{uh})");
 
         // Nothing else is on this line, so the column is as narrow as the
@@ -1808,7 +1826,10 @@ mod tcy_render_tests {
         // two half-cells the run was replaced by.
         let full = e.caret(&t, 96, 4, false).unwrap();
         let inside = e.caret(&t, 96, 2, false).unwrap();
-        assert!((full.cell[3] - em).abs() < 1.0, "position 4 is 時: {full:?}");
+        assert!(
+            (full.cell[3] - em).abs() < 1.0,
+            "position 4 is 時: {full:?}"
+        );
         assert!(
             (inside.cell[3] - em / 2.0).abs() < 1.0,
             "position 2 is half the hole the two digits left: {inside:?}"
@@ -1910,7 +1931,10 @@ mod ruby_style_tests {
         let m = e.render(&moved, 96).unwrap().unwrap();
         assert_eq!((a.size, a.rgba.len()), (z.size, z.rgba.len()));
         assert_eq!(a.rgba, z.rgba, "a zero adjust changed the render");
-        assert!(m.rgba != a.rgba || m.size != a.size, "the adjust did nothing");
+        assert!(
+            m.rgba != a.rgba || m.size != a.size,
+            "the adjust did nothing"
+        );
     }
 
     /// The defaults are the typographic ones, and an item that never touches
@@ -1962,7 +1986,10 @@ mod auto_tcy_render_tests {
             a.size != b.size || a.rgba != b.rgba,
             "Auto 縦中横 changed nothing — the derived run never reached the layout"
         );
-        assert_eq!(b.size, c.size, "auto and hand-marked disagree on the sprite");
+        assert_eq!(
+            b.size, c.size,
+            "auto and hand-marked disagree on the sprite"
+        );
         assert_eq!(
             b.rgba, c.rgba,
             "auto put the upright cell somewhere the hand-marked run does not"

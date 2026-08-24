@@ -365,9 +365,8 @@ fn tent_h(src: &Raster, dst: &mut Raster) {
             );
             let mut out = [0u16; TILE_CHANNELS];
             for c in 0..TILE_CHANNELS {
-                out[c] =
-                    ((l[c] as u32 + 2 * m[c] as u32 + r[c] as u32 + 2) / 4).min(u16::MAX as u32)
-                        as u16;
+                out[c] = ((l[c] as u32 + 2 * m[c] as u32 + r[c] as u32 + 2) / 4)
+                    .min(u16::MAX as u32) as u16;
             }
             dst.set_pixel(x, y, out);
         }
@@ -385,9 +384,8 @@ fn tent_v(src: &Raster, dst: &mut Raster) {
             );
             let mut out = [0u16; TILE_CHANNELS];
             for c in 0..TILE_CHANNELS {
-                out[c] =
-                    ((u[c] as u32 + 2 * m[c] as u32 + d[c] as u32 + 2) / 4).min(u16::MAX as u32)
-                        as u16;
+                out[c] = ((u[c] as u32 + 2 * m[c] as u32 + d[c] as u32 + 2) / 4)
+                    .min(u16::MAX as u32) as u16;
             }
             dst.set_pixel(x, y, out);
         }
@@ -872,7 +870,10 @@ mod tests {
         }
         // Vertically it did NOT spread: row 99 is above the block.
         assert_eq!(alpha_at(&doc, 64, 98), 0, "no vertical smear at angle 0");
-        assert!(alpha_at(&doc, 80, 104) > 0, "smeared along +x past the block");
+        assert!(
+            alpha_at(&doc, 80, 104) > 0,
+            "smeared along +x past the block"
+        );
         assert!(alpha_at(&doc, 48, 104) > 0, "and along -x");
     }
 
@@ -936,7 +937,10 @@ mod tests {
         let depth = doc.undo_len();
         assert!(doc.apply_filter(Filter::BlurStrong));
         assert_eq!(doc.undo_len(), depth + 1, "one step, not one per tile");
-        assert_eq!(doc.undo_labels().last().map(String::as_str), Some("Blur (strong)"));
+        assert_eq!(
+            doc.undo_labels().last().map(String::as_str),
+            Some("Blur (strong)")
+        );
         assert!(doc.undo());
         for x in 0..256 {
             assert_eq!(px_at(&doc, x, 80), before[x as usize], "undo missed x={x}");

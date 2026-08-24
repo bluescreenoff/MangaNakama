@@ -118,7 +118,11 @@ pub(super) fn navigator_palette(ui: &mut egui::Ui, app: &mut App) {
         // LIT while flipped (CV-031: "the flip icons stay highlighted so
         // you never forget you are mirrored"), one button per axis — both
         // lit means the page is simply upside down.
-        let btn = egui::Button::new(if app.viewport.flip_h { "⇄ ●" } else { "⇄" });
+        let btn = egui::Button::new(if app.viewport.flip_h {
+            "⇄ ●"
+        } else {
+            "⇄"
+        });
         if ui
             .add(btn)
             .on_hover_text("flip view horizontally (Ctrl+9)")
@@ -126,7 +130,11 @@ pub(super) fn navigator_palette(ui: &mut egui::Ui, app: &mut App) {
         {
             app.push_cmd(AppCmd::FlipView);
         }
-        let btn = egui::Button::new(if app.viewport.flip_v { "⇅ ●" } else { "⇅" });
+        let btn = egui::Button::new(if app.viewport.flip_v {
+            "⇅ ●"
+        } else {
+            "⇅"
+        });
         if ui
             .add(btn)
             .on_hover_text("flip view vertically (Ctrl+Shift+9)")

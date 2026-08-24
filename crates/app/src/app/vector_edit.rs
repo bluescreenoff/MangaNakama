@@ -240,9 +240,7 @@ impl App {
         }
         self.doc.set_active(saved_active);
         if missing {
-            self.set_status(
-                "some strokes' presets are missing — their ink was not re-derived",
-            );
+            self.set_status("some strokes' presets are missing — their ink was not re-derived");
         }
     }
 

@@ -73,10 +73,8 @@ pub(super) fn color_slots(ui: &mut egui::Ui, app: &mut App) {
         }
 
         ui.add_space(4.0);
-        let (tr, tr_resp) = ui.allocate_exact_size(
-            egui::vec2(CHIP_SMALL, CHIP_SMALL),
-            egui::Sense::click(),
-        );
+        let (tr, tr_resp) =
+            ui.allocate_exact_size(egui::vec2(CHIP_SMALL, CHIP_SMALL), egui::Sense::click());
         let p = ui.painter();
         icons::checkerboard(p, tr, 4.0);
         chip_stroke(p, tr, app.slot == Slot::Transparent, tr_resp.hovered());
@@ -425,7 +423,9 @@ fn hsv_fields(ui: &mut egui::Ui, app: &mut App, w: f32) {
         let max = if i == 0 { 359.0 } else { 100.0 };
         let r = ui.add_sized(
             [dw, 16.0],
-            egui::DragValue::new(&mut vals[i]).range(0.0..=max).speed(1.0),
+            egui::DragValue::new(&mut vals[i])
+                .range(0.0..=max)
+                .speed(1.0),
         );
         edited |= r.changed() || r.drag_stopped();
         live |= r.dragged();
@@ -779,8 +779,7 @@ enum SetAct {
 fn foot_btn(ui: &mut egui::Ui, label: &str, enabled: bool, tip: &str) -> egui::Response {
     ui.add_enabled(
         enabled,
-        egui::Button::new(egui::RichText::new(label).size(10.5))
-            .min_size(egui::vec2(0.0, 17.0)),
+        egui::Button::new(egui::RichText::new(label).size(10.5)).min_size(egui::vec2(0.0, 17.0)),
     )
     .on_hover_text(tip)
 }
@@ -932,11 +931,27 @@ pub(super) fn swatch_grid(ui: &mut egui::Ui, app: &mut App) {
         {
             replace = true;
         }
-        if foot_btn(ui, "Delete", sel != usize::MAX, "Delete the selected swatch").clicked() {
+        if foot_btn(
+            ui,
+            "Delete",
+            sel != usize::MAX,
+            "Delete the selected swatch",
+        )
+        .clicked()
+        {
             del = Some(sel);
         }
         // Import a GIMP/Krita .gpl palette (appended to this set, persisted).
-        if icon_btn(ui, Icon::Folder, 17.0, false, true, "Import palette (.gpl)…").clicked() {
+        if icon_btn(
+            ui,
+            Icon::Folder,
+            17.0,
+            false,
+            true,
+            "Import palette (.gpl)…",
+        )
+        .clicked()
+        {
             app.push_cmd(AppCmd::ImportPalette);
         }
     });
@@ -1098,7 +1113,11 @@ mod tests {
 
         store.remove_current(&mut live);
         assert_eq!(store.names(), ["Standard"]);
-        assert_eq!(live, vec![sw("#ff0000")], "the survivor's colours come back");
+        assert_eq!(
+            live,
+            vec![sw("#ff0000")],
+            "the survivor's colours come back"
+        );
 
         store.remove_current(&mut live);
         assert_eq!(store.names(), ["Standard"], "the last set stays");

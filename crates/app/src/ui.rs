@@ -17,6 +17,7 @@ pub mod quick;
 pub mod refs;
 pub mod theme;
 
+mod batch;
 mod color;
 mod dialogs;
 pub mod dock;
@@ -26,7 +27,6 @@ mod materials;
 mod navigator;
 mod overlay;
 mod pages;
-mod batch;
 mod pattern;
 mod prefs_dialog;
 mod property;
@@ -43,11 +43,11 @@ pub use quick::open_command_palette;
 use color::picker_sync;
 use dialogs::{
     adjust_window, canvas_size_window, detail_window, export_all_window, feedback_window,
-    filter_window, gen_lines_window, goto_page_window, hud, new_doc_window,
-    property_detail_window, spread_window, story_window, text_styles_window, work_settings_window, workspace_window,
+    filter_window, gen_lines_window, goto_page_window, hud, new_doc_window, property_detail_window,
+    spread_window, story_window, text_styles_window, work_settings_window, workspace_window,
 };
-use prefs_dialog::prefs_window;
 use overlay::canvas_overlay;
+use prefs_dialog::prefs_window;
 use top::{status_bar, top_bar};
 use widgets::chrome_frame;
 
@@ -110,14 +110,8 @@ pub fn build(ui: &mut egui::Ui, app: &mut App) {
         if hole.is_positive() {
             let p = ui.painter();
             for r in [
-                egui::Rect::from_min_max(
-                    screen.min,
-                    egui::pos2(screen.max.x, hole.top()),
-                ),
-                egui::Rect::from_min_max(
-                    egui::pos2(screen.min.x, hole.bottom()),
-                    screen.max,
-                ),
+                egui::Rect::from_min_max(screen.min, egui::pos2(screen.max.x, hole.top())),
+                egui::Rect::from_min_max(egui::pos2(screen.min.x, hole.bottom()), screen.max),
                 egui::Rect::from_min_max(
                     egui::pos2(screen.min.x, hole.top()),
                     egui::pos2(hole.left(), hole.bottom()),
@@ -163,4 +157,3 @@ pub fn build(ui: &mut egui::Ui, app: &mut App) {
     app.layout.save_if_dirty();
     app.prefs.save_if_dirty();
 }
-

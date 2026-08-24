@@ -654,7 +654,9 @@ mod tests {
         assert_eq!(back.template_page, Some(0), "tekno B2 rides the index");
         assert_eq!(
             back.profile.as_ref().map(|p| p.name.clone()),
-            crate::profile::PublisherProfile::builtins().pop().map(|p| p.name),
+            crate::profile::PublisherProfile::builtins()
+                .pop()
+                .map(|p| p.name),
             "M2: the publisher profile rides the index too"
         );
         let _ = ids;
@@ -685,7 +687,10 @@ mod tests {
         wf.pages[0].exported_rev = 7;
         save_folder(&wf, &dir, &[]).unwrap();
         let back = load_folder(&dir).unwrap();
-        assert_eq!(back.pages[0].exported_rev, 7, "the export revision persists");
+        assert_eq!(
+            back.pages[0].exported_rev, 7,
+            "the export revision persists"
+        );
         assert_eq!(back.pages[1].exported_rev, 0, "an unexported page stays 0");
         let _ = std::fs::remove_dir_all(&dir);
 

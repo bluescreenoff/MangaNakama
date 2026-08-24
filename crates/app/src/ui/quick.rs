@@ -148,9 +148,17 @@ pub fn command_index() -> Vec<(&'static str, &'static str, AppCmd)> {
         ("Flip view vertically", "View (Ctrl+Shift+9)", FlipViewV),
         ("Reset rotation", "View", RotateReset),
         ("Reset rotation and flip", "View", RotateFlipReset),
-        ("Reset view (upright, unmirrored, fitted)", "View", ViewReset),
+        (
+            "Reset view (upright, unmirrored, fitted)",
+            "View",
+            ViewReset,
+        ),
         ("Hide crop marks and margins", "View", SetGuidesHidden(true)),
-        ("Show crop marks and margins", "View", SetGuidesHidden(false)),
+        (
+            "Show crop marks and margins",
+            "View",
+            SetGuidesHidden(false),
+        ),
         ("Reset transformation", "Transform", TransformReset),
         ("Lock tool settings", "Tool Property", SetToolLock(true)),
         ("Unlock tool settings", "Tool Property", SetToolLock(false)),
@@ -366,9 +374,10 @@ pub fn palette_entries(input: &PaletteInput) -> Vec<Entry> {
         .into_iter()
         .map(|(label, path, cmd)| cmd_row(label, path, cmd))
         .chain(
-            input.presets.iter().map(|(name, p)| {
-                cmd_row(name, "Sub Tool ▸ Brush", AppCmd::SelectBrush(p.clone()))
-            }),
+            input
+                .presets
+                .iter()
+                .map(|(name, p)| cmd_row(name, "Sub Tool ▸ Brush", AppCmd::SelectBrush(p.clone()))),
         )
         // Every non-brush sub tool, switching the TOOL as well as the mode —
         // picking "Lasso" from the palette must leave you holding the
@@ -405,13 +414,12 @@ pub fn palette_entries(input: &PaletteInput) -> Vec<Entry> {
                 AppCmd::PaletteOpen(p),
             )
         }))
-        .chain(input.workspaces.iter().map(|n| {
-            cmd_row(
-                n,
-                "Workspace ▸ Saved",
-                AppCmd::WorkspaceApply(n.clone()),
-            )
-        }))
+        .chain(
+            input
+                .workspaces
+                .iter()
+                .map(|n| cmd_row(n, "Workspace ▸ Saved", AppCmd::WorkspaceApply(n.clone()))),
+        )
         // The material bank, on the Materials palette's own click command —
         // including its Tile checkbox, so the two paths paste the same way.
         .chain(input.materials.iter().map(|(name, folder, path, tile)| {
@@ -449,9 +457,12 @@ pub fn palette_entries(input: &PaletteInput) -> Vec<Entry> {
                 AppCmd::OpenOraPath(p.clone()),
             )
         }))
-        .chain(input.styles.iter().map(|n| {
-            cmd_row(n, "Text style", AppCmd::TextStylePick(n.clone()))
-        }))
+        .chain(
+            input
+                .styles
+                .iter()
+                .map(|n| cmd_row(n, "Text style", AppCmd::TextStylePick(n.clone()))),
+        )
         .chain(MANUAL_TOPICS.iter().map(|&(title, file)| {
             Entry::new(
                 title,
@@ -554,9 +565,8 @@ pub fn palette_filter(
     let trimmed = query.trim();
     let (kind, rest) = split_sigil(trimmed);
     let q = rest.trim().to_lowercase();
-    let numeric_page = kind == Some(Kind::Page)
-        && !q.is_empty()
-        && q.chars().all(|c| c.is_ascii_digit());
+    let numeric_page =
+        kind == Some(Kind::Page) && !q.is_empty() && q.chars().all(|c| c.is_ascii_digit());
     let mut hits: Vec<(u32, usize, usize)> = entries
         .iter()
         .enumerate()
@@ -878,11 +888,7 @@ mod tests {
         let presets = fake_presets();
         let actions = fake_actions();
         let materials = fake_materials();
-        let layers = [
-            "Rough".to_owned(),
-            "Ink".to_owned(),
-            "Tone 60L".to_owned(),
-        ];
+        let layers = ["Rough".to_owned(), "Ink".to_owned(), "Tone 60L".to_owned()];
         let recent = [PathBuf::from(r"C:\work\ch03.mnc")];
         let styles = ["Dialogue".to_owned(), "Thought".to_owned()];
         let workspaces = ["Inking".to_owned()];
@@ -916,7 +922,10 @@ mod tests {
         match lasso.cmd {
             AppCmd::SetSubTool(s) => {
                 assert_eq!(s.tool(), Tool::Select, "the pick carries its tool");
-                assert_eq!(s, crate::cmd::SubTool::Select(crate::cmd::SelectMode::Lasso));
+                assert_eq!(
+                    s,
+                    crate::cmd::SubTool::Select(crate::cmd::SelectMode::Lasso)
+                );
             }
             ref other => panic!("a sub tool row must push SetSubTool, not {other:?}"),
         }
@@ -937,7 +946,10 @@ mod tests {
             assert!(entries.iter().any(|e| e.path == path), "{path} has rows");
         }
         let family = labels(&entries, &palette_filter(&entries, "balloon", &[], 20));
-        assert!(family.len() >= 4, "the balloon family is findable {family:?}");
+        assert!(
+            family.len() >= 4,
+            "the balloon family is findable {family:?}"
+        );
         let magnetic = labels(&entries, &palette_filter(&entries, "magnetic", &[], 5));
         assert_eq!(magnetic, vec!["Magnetic lasso".to_owned()]);
     }
@@ -990,7 +1002,11 @@ mod tests {
             .iter()
             .find(|e| e.label == "Panel setup")
             .expect("the second action");
-        assert!(matches!(second.cmd, AppCmd::ActionRun(1)), "{:?}", second.cmd);
+        assert!(
+            matches!(second.cmd, AppCmd::ActionRun(1)),
+            "{:?}",
+            second.cmd
+        );
         // No actions recorded: no rows, and nothing else changes.
         let presets = fake_presets();
         let bare = palette_entries(&PaletteInput {
@@ -1046,7 +1062,10 @@ mod tests {
                 ref other => panic!("{want} must push PaletteOpen, not {other:?}"),
             }
         }
-        let hist = labels(&entries, &palette_filter(&entries, "history palette", &[], 5));
+        let hist = labels(
+            &entries,
+            &palette_filter(&entries, "history palette", &[], 5),
+        );
         assert_eq!(hist, vec!["History palette".to_owned()]);
     }
 
@@ -1239,16 +1258,25 @@ mod tests {
     #[test]
     fn palette_filter_matches_labels_and_menu_paths() {
         let entries = all_entries();
-        let hits = labels(&entries, &palette_filter(&entries, "eras", &[], PALETTE_ROWS));
+        let hits = labels(
+            &entries,
+            &palette_filter(&entries, "eras", &[], PALETTE_ROWS),
+        );
         assert!(hits.contains(&"Eraser".to_owned()), "{hits:?}");
         let rulers = labels(&entries, &palette_filter(&entries, "ruler", &[], 20));
-        assert!(rulers.len() >= 5, "the ruler family is reachable {rulers:?}");
+        assert!(
+            rulers.len() >= 5,
+            "the ruler family is reachable {rulers:?}"
+        );
         // A menu path is searchable too — "Ruler" as a *path* fragment.
         let by_path = labels(&entries, &palette_filter(&entries, "layer ▸", &[], 20));
         assert!(!by_path.is_empty(), "menu paths are part of the haystack");
         // Ladder: "pen" is a prefix of "Pen" and only a fuzzy/word hit
         // elsewhere, so the tool wins the top row.
-        let pen = labels(&entries, &palette_filter(&entries, "pen", &[], PALETTE_ROWS));
+        let pen = labels(
+            &entries,
+            &palette_filter(&entries, "pen", &[], PALETTE_ROWS),
+        );
         assert_eq!(pen.first().map(String::as_str), Some("Pen"), "{pen:?}");
         assert!(
             palette_filter(&entries, "zzzznotathing", &[], PALETTE_ROWS).is_empty(),
@@ -1263,7 +1291,10 @@ mod tests {
     fn palette_filter_leads_with_recents_on_an_empty_query() {
         let entries = all_entries();
         let recents = vec!["Redo".to_owned(), "Kabura pen".to_owned()];
-        let hits = labels(&entries, &palette_filter(&entries, "", &recents, PALETTE_ROWS));
+        let hits = labels(
+            &entries,
+            &palette_filter(&entries, "", &recents, PALETTE_ROWS),
+        );
         assert_eq!(hits.len(), PALETTE_ROWS, "the empty query still fills rows");
         assert_eq!(&hits[..2], &recents[..], "most recent first, in order");
         assert_eq!(

@@ -504,7 +504,12 @@ fn layer_png(app: &App, li: usize) -> image::RgbaImage {
                 img.put_pixel(
                     x as u32,
                     y as u32,
-                    image::Rgba([un(p[0]), un(p[1]), un(p[2]), ((a * 255 + 16384) / 32768) as u8]),
+                    image::Rgba([
+                        un(p[0]),
+                        un(p[1]),
+                        un(p[2]),
+                        ((a * 255 + 16384) / 32768) as u8,
+                    ]),
                 );
             }
         }
@@ -538,7 +543,9 @@ mod tests {
         let Some(mut app) = app() else { return };
         app.batch.scope = BatchScope::AllLayers;
         let names = |app: &App, idxs: &[usize]| -> Vec<String> {
-            idxs.iter().map(|&i| app.doc.layers[i].name.clone()).collect()
+            idxs.iter()
+                .map(|&i| app.doc.layers[i].name.clone())
+                .collect()
         };
         let m = app.batch_matches();
         assert_eq!(
@@ -548,14 +555,12 @@ mod tests {
         );
         app.batch.scope = BatchScope::Prefix;
         app.batch.prefix = "Panel".into();
-        assert_eq!(names(&app, &app.batch_matches()), vec!["Panel a", "Panel b"]);
+        assert_eq!(
+            names(&app, &app.batch_matches()),
+            vec!["Panel a", "Panel b"]
+        );
         // Folder children: select the folder header first.
-        let f = app
-            .doc
-            .layers
-            .iter()
-            .position(|l| l.folder)
-            .unwrap();
+        let f = app.doc.layers.iter().position(|l| l.folder).unwrap();
         app.doc.set_active(f);
         app.batch.scope = BatchScope::FolderChildren;
         assert_eq!(names(&app, &app.batch_matches()), vec!["inner"]);
@@ -568,7 +573,9 @@ mod tests {
     fn selected_scope_follows_the_palette() {
         let Some(mut app) = app() else { return };
         let names = |app: &App, idxs: &[usize]| -> Vec<String> {
-            idxs.iter().map(|&i| app.doc.layers[i].name.clone()).collect()
+            idxs.iter()
+                .map(|&i| app.doc.layers[i].name.clone())
+                .collect()
         };
         let idx = |app: &App, n: &str| app.doc.layers.iter().position(|l| l.name == n).unwrap();
         app.batch.scope = BatchScope::Selected;
@@ -577,12 +584,18 @@ mod tests {
         let (a, b) = (idx(&app, "Panel a"), idx(&app, "Panel b"));
         app.doc.set_active(a);
         assert!(app.doc.toggle_multi(b));
-        assert_eq!(names(&app, &app.batch_matches()), vec!["Panel a", "Panel b"]);
+        assert_eq!(
+            names(&app, &app.batch_matches()),
+            vec!["Panel a", "Panel b"]
+        );
 
         // A folder header in the selection is not a match.
         let f = idx(&app, "F");
         assert!(app.doc.toggle_multi(f));
-        assert!(app.doc.multi_targets().contains(&f), "header really is selected");
+        assert!(
+            app.doc.multi_targets().contains(&f),
+            "header really is selected"
+        );
         assert_eq!(
             names(&app, &app.batch_matches()),
             vec!["Panel a", "Panel b"],
@@ -831,7 +844,11 @@ mod tests {
         let s = app.batch_export_pngs(&dir);
         assert!(s.contains("2 layer PNGs"), "{s}");
         let img = image::open(dir.join("01-Panel_b.png")).unwrap().to_rgba8();
-        assert_eq!(img.dimensions(), app.doc.size, "full canvas, whatever it is");
+        assert_eq!(
+            img.dimensions(),
+            app.doc.size,
+            "full canvas, whatever it is"
+        );
         assert!(img.get_pixel(3, 4)[3] > 0);
         std::fs::remove_dir_all(&dir).ok();
     }

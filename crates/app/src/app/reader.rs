@@ -238,7 +238,8 @@ impl App {
     pub fn reader_close(&mut self) {
         self.reader.open = false;
         // Reader v2: remember where he stopped (ui.txt via UiLayout).
-        self.layout.note_reader_page(self.reader_screen_first_page());
+        self.layout
+            .note_reader_page(self.reader_screen_first_page());
         // v2.1: the work folder's sidecar carries flags + last page.
         self.reader_save_state();
         if self.reader.fs_used {

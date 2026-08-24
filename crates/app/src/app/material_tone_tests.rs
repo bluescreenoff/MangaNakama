@@ -116,7 +116,8 @@ fn a_dropped_tone_fills_the_whole_page_as_a_live_layer() {
         "the screen must reach both corners: {tl} / {br} inked px"
     );
     assert_eq!(
-        app.material_uses.get(&material(&app, "tone-dot-60lpi-30").display().to_string()),
+        app.material_uses
+            .get(&material(&app, "tone-dot-60lpi-30").display().to_string()),
         Some(&1),
         "the drop must still count a use"
     );
@@ -160,7 +161,11 @@ fn a_dropped_tone_fills_the_selection_when_there_is_one() {
         .count();
     assert!(inked > 200, "a 50% screen inside the window: {inked} px");
     for (x, y) in [(4, 4), (200, 200), (10, 200), (200, 10), (100, 20)] {
-        assert_eq!(px(x, y), [255, 255, 255], "inked outside the selection at {x},{y}");
+        assert_eq!(
+            px(x, y),
+            [255, 255, 255],
+            "inked outside the selection at {x},{y}"
+        );
     }
 }
 

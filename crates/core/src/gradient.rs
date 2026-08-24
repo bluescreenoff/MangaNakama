@@ -392,7 +392,10 @@ impl Ramp {
             }
             MixMode::Linear => {
                 let f = |x: f32, y: f32| {
-                    let (x, y) = (srgb_to_linear(x.clamp(0.0, 1.0)), srgb_to_linear(y.clamp(0.0, 1.0)));
+                    let (x, y) = (
+                        srgb_to_linear(x.clamp(0.0, 1.0)),
+                        srgb_to_linear(y.clamp(0.0, 1.0)),
+                    );
                     linear_to_srgb(x + (y - x) * s)
                 };
                 [
@@ -626,7 +629,11 @@ pub fn import_ggr(text: &str) -> Result<NamedRamp, String> {
     // 13 numbers is the documented minimum row; later GIMP writes 15.
     let rows: Vec<Vec<f32>> = lines
         .take(count)
-        .map(|l| l.split_whitespace().filter_map(|f| f.parse().ok()).collect())
+        .map(|l| {
+            l.split_whitespace()
+                .filter_map(|f| f.parse().ok())
+                .collect()
+        })
         .filter(|v: &Vec<f32>| v.len() >= 13)
         .collect();
     let (first, last) = match (rows.first(), rows.last()) {
@@ -769,10 +776,13 @@ mod tests {
         // Capacity is real, and remove/resort keep the invariant.
         let mut full = MidStops::default();
         for i in 0..MAX_MID {
-            assert!(full.insert(GradStop {
-                pos: i as f32 / MAX_MID as f32,
-                ..Default::default()
-            }).is_some());
+            assert!(
+                full.insert(GradStop {
+                    pos: i as f32 / MAX_MID as f32,
+                    ..Default::default()
+                })
+                .is_some()
+            );
         }
         assert!(full.is_full());
         assert_eq!(full.insert(GradStop::default()), None, "no seventh stop");
@@ -969,8 +979,14 @@ mod tests {
         assert!((s.pos - 0.5).abs() < 1e-6);
         assert_eq!(s.color, [0.0, 1.0, 0.0, 1.0], "coloured by the boundary");
 
-        assert!(import_ggr("PNG\u{0}\r\n").is_err(), "a non-gradient is refused");
-        assert!(import_ggr("GIMP Gradient\nName: x\n0\n").is_err(), "and an empty one");
+        assert!(
+            import_ggr("PNG\u{0}\r\n").is_err(),
+            "a non-gradient is refused"
+        );
+        assert!(
+            import_ggr("GIMP Gradient\nName: x\n0\n").is_err(),
+            "and an empty one"
+        );
 
         let mut many = String::from("GIMP Gradient\nName: Long\n20\n");
         for i in 0..20 {

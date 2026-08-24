@@ -3034,10 +3034,7 @@ mod tests {
         let pad = EM * FIT_PAD_EM;
         // Padded half-extents from the (fixed, coincident) centre.
         let (hx, hy) = (20.0 + pad, 10.0 + pad);
-        let want = [
-            hx * std::f32::consts::SQRT_2,
-            hy * std::f32::consts::SQRT_2,
-        ];
+        let want = [hx * std::f32::consts::SQRT_2, hy * std::f32::consts::SQRT_2];
 
         // GROW: a bubble far too small for the lettering.
         let mut small = ellipse(100.0, 100.0, 12.0, 12.0);
@@ -3213,7 +3210,11 @@ mod tests {
         let BalloonShape::Ellipse { center, .. } = &b.shape else {
             panic!("ellipse")
         };
-        assert_eq!(*center, [100.0, 100.0], "the bubble stayed where it was put");
+        assert_eq!(
+            *center,
+            [100.0, 100.0],
+            "the bubble stayed where it was put"
+        );
         assert!(holds(&b, &t), "and it reached out to hold the lettering");
     }
 

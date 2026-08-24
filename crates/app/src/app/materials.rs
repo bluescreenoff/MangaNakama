@@ -184,8 +184,15 @@ pub fn infer_material_type(
         return MaterialType::Tone;
     }
     if has(&[
-        "speed-line", "speedline", "focus-line", "effect-line", "effect",
-        "stream", "集中線", "流線", "スピード線",
+        "speed-line",
+        "speedline",
+        "focus-line",
+        "effect-line",
+        "effect",
+        "stream",
+        "集中線",
+        "流線",
+        "スピード線",
     ]) {
         return MaterialType::EffectLines;
     }
@@ -1218,7 +1225,9 @@ impl App {
     /// selected) — the info pane's paste block binds to this.
     pub fn material_paste_selected(&self) -> Option<MaterialPaste> {
         let i = self.material_selected?;
-        self.materials.get(i).map(|m| MaterialPaste::from_tags(&m.tags))
+        self.materials
+            .get(i)
+            .map(|m| MaterialPaste::from_tags(&m.tags))
     }
 
     /// Write the selected material's paste tags (persisted beside its
@@ -1753,7 +1762,11 @@ mod tests {
                 (String::new(), "root".to_owned()),
                 ("sfx".to_owned(), "whoosh".to_owned()),
                 (
-                    Path::new("sfx/impact").components().collect::<PathBuf>().display().to_string(),
+                    Path::new("sfx/impact")
+                        .components()
+                        .collect::<PathBuf>()
+                        .display()
+                        .to_string(),
                     "boom".to_owned()
                 ),
             ],
@@ -1857,14 +1870,10 @@ mod tests {
             .find(|n| matches!(&n.filter, MaterialFilter::Prefix(_, _, t) if t == "boom"))
             .unwrap();
         assert_eq!(
-            boom.depth,
-            3,
+            boom.depth, 3,
             "All(0) → type Other(1) → bank, the flat root(2) → groups(3)"
         );
-        assert_eq!(
-            items.iter().filter(|i| boom.filter.accepts(i)).count(),
-            12
-        );
+        assert_eq!(items.iter().filter(|i| boom.filter.accepts(i)).count(), 12);
 
         // One material short of the threshold: no groups at all.
         items.pop();
@@ -1889,9 +1898,16 @@ mod tests {
         uniq.sort();
         uniq.dedup();
         assert_eq!(uniq.len(), ids.len(), "colliding tree ids: {ids:?}");
-        assert_eq!(name_prefix_token("_boom_ horizontal").as_deref(), Some("boom"));
+        assert_eq!(
+            name_prefix_token("_boom_ horizontal").as_deref(),
+            Some("boom")
+        );
         assert_eq!(name_prefix_token(" Painter 11").as_deref(), Some("painter"));
-        assert_eq!(name_prefix_token("a-1").as_deref(), None, "one letter names nothing");
+        assert_eq!(
+            name_prefix_token("a-1").as_deref(),
+            None,
+            "one letter names nothing"
+        );
         assert_eq!(name_prefix_token("___").as_deref(), None);
     }
 
@@ -1936,7 +1952,11 @@ mod tests {
             "tags key on the sidecar's name; the scan persisted the kind's type"
         );
         assert_eq!(items[1].kind, MaterialKind::Image);
-        assert_eq!(items[1].thumb_path(), items[1].path, "a bitmap is its own thumb");
+        assert_eq!(
+            items[1].thumb_path(),
+            items[1].path,
+            "a bitmap is its own thumb"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2010,10 +2030,11 @@ mod tests {
         ];
         let hidden = materials_tree(&items, &["bank".into()], false);
         assert_eq!(hidden[0].count, 2, "the pose did not count");
-        assert!(!hidden.iter().any(|n| matches!(
-            n.filter,
-            MaterialFilter::Type(MaterialType::Pose3d)
-        )));
+        assert!(
+            !hidden
+                .iter()
+                .any(|n| matches!(n.filter, MaterialFilter::Type(MaterialType::Pose3d)))
+        );
         assert_eq!(
             hidden.iter().filter(|n| n.depth == 1).count(),
             2,
@@ -2022,10 +2043,11 @@ mod tests {
 
         let shown = materials_tree(&items, &["bank".into()], true);
         assert_eq!(shown[0].count, 3);
-        assert!(shown.iter().any(|n| matches!(
-            n.filter,
-            MaterialFilter::Type(MaterialType::Pose3d)
-        )));
+        assert!(
+            shown
+                .iter()
+                .any(|n| matches!(n.filter, MaterialFilter::Type(MaterialType::Pose3d)))
+        );
     }
 
     /// The tag chip filter: exact user-tag match, case-insensitive, and
@@ -2077,10 +2099,7 @@ mod tests {
             "@notone, @size=expand, @order=bottom, @type=tone, dots"
         );
         // All-None strips every paste tag, keeps @type + user tags.
-        assert_eq!(
-            MaterialPaste::default().onto(line),
-            "@type=tone, dots"
-        );
+        assert_eq!(MaterialPaste::default().onto(line), "@type=tone, dots");
         // Unknown size words are ignored, not guessed.
         assert_eq!(MaterialPaste::from_tags("@size=huge").size, None);
         assert!(!MaterialPaste::from_tags("dots, @type=tone").any());
@@ -2093,7 +2112,10 @@ mod tests {
     #[test]
     fn type_tags_round_trip_and_split_off_user_tags() {
         assert_eq!(normalize_tags("  @type=tone , dots "), "@type=tone, dots");
-        assert_eq!(MaterialType::from_tags("@type=tone, dots"), Some(MaterialType::Tone));
+        assert_eq!(
+            MaterialType::from_tags("@type=tone, dots"),
+            Some(MaterialType::Tone)
+        );
         assert_eq!(MaterialType::from_tags("dots"), None);
         assert_eq!(MaterialType::from_tags("@type=nonsense"), None);
         assert_eq!(
@@ -2123,7 +2145,11 @@ mod tests {
         assert_eq!(t("speech-bubble", "", ""), MaterialType::Balloon);
         assert_eq!(t("フキダシ丸", "", ""), MaterialType::Balloon);
         assert_eq!(t("pose", "3D/standing", ""), MaterialType::Pose3d);
-        assert_eq!(t("boy", "3D", ""), MaterialType::Pose3d, "the folder says it");
+        assert_eq!(
+            t("boy", "3D", ""),
+            MaterialType::Pose3d,
+            "the folder says it"
+        );
         assert_eq!(t("city-pattern", "", ""), MaterialType::PatternImage);
         assert_eq!(t("cat", "", ""), MaterialType::Other);
         // Explicit beats everything.
@@ -2158,7 +2184,11 @@ mod tests {
         let items = materials_scan_folder(&dir, 0);
         let by = |n: &str| items.iter().find(|m| m.name == n).unwrap();
         assert_eq!(by("speed-line-a").material_type, MaterialType::EffectLines);
-        assert_eq!(by("cat").material_type, MaterialType::Balloon, "explicit wins");
+        assert_eq!(
+            by("cat").material_type,
+            MaterialType::Balloon,
+            "explicit wins"
+        );
         assert_eq!(by("misc").material_type, MaterialType::Other);
 
         let body = std::fs::read_to_string(dir.join("tags.txt")).unwrap();
@@ -2180,7 +2210,10 @@ mod tests {
         let body2 = std::fs::read_to_string(dir.join("tags.txt")).unwrap();
         assert_eq!(body, body2, "a rescan writes nothing new");
         for (a, b) in items.iter().zip(again.iter()) {
-            assert_eq!((a.name.as_str(), a.material_type), (b.name.as_str(), b.material_type));
+            assert_eq!(
+                (a.name.as_str(), a.material_type),
+                (b.name.as_str(), b.material_type)
+            );
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

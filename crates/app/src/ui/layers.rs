@@ -232,8 +232,8 @@ pub(super) fn layer_property(ui: &mut egui::Ui, app: &mut App) {
                     .selected_text(p.density.label())
                     .show_ui(ui, |ui| {
                         for d in DENSITIES {
-                            let picked = std::mem::discriminant(&p.density)
-                                == std::mem::discriminant(&d);
+                            let picked =
+                                std::mem::discriminant(&p.density) == std::mem::discriminant(&d);
                             if ui.selectable_label(picked, d.label()).clicked() && !picked {
                                 p.density = d;
                                 discrete = true;
@@ -415,7 +415,11 @@ pub(super) fn layer_property(ui: &mut egui::Ui, app: &mut App) {
                 )
                 .changed()
             {
-                let c = if on { sub.or(Some(LAYER_TINTS[3])) } else { None };
+                let c = if on {
+                    sub.or(Some(LAYER_TINTS[3]))
+                } else {
+                    None
+                };
                 app.push_cmd(AppCmd::SetLayerSubColour(i, c));
             }
             if on && let Some(c) = tint_chips(ui, &LAYER_TINTS, sub) {
@@ -457,11 +461,7 @@ pub(super) fn layer_property(ui: &mut egui::Ui, app: &mut App) {
                     "an outline grown round this layer's own alpha — nothing is painted",
                 )
             };
-            if ui
-                .checkbox(&mut on, label)
-                .on_hover_text(tip)
-                .changed()
-            {
+            if ui.checkbox(&mut on, label).on_hover_text(tip).changed() {
                 app.edge_edit = None;
                 app.push_cmd(AppCmd::SetEdge(i, on.then(|| edge.unwrap_or_default())));
             }
@@ -517,10 +517,7 @@ pub(super) fn layer_property(ui: &mut egui::Ui, app: &mut App) {
                     mn_core::LayerExpression::Grey,
                     mn_core::LayerExpression::Mono,
                 ] {
-                    if ui
-                        .selectable_label(expr == e, expression_name(e))
-                        .clicked()
-                    {
+                    if ui.selectable_label(expr == e, expression_name(e)).clicked() {
                         expr_pick = Some(e);
                     }
                 }
@@ -893,7 +890,11 @@ fn row_menu(ui: &mut egui::Ui, app: &mut App, i: usize, row: &Row) {
                 ui.close();
             }
             if ui
-                .button(if enabled { "Mask off (keep)" } else { "Mask on" })
+                .button(if enabled {
+                    "Mask off (keep)"
+                } else {
+                    "Mask on"
+                })
                 .clicked()
             {
                 select_first(app);
@@ -1266,13 +1267,10 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
             strip: app.doc.palette_colour(i),
             is_frame: l.is_frame(),
             glyph: row_glyph(l),
-            tone_lpi: l
-                .tone
-                .map(|t| t.lpi)
-                .or(match &l.kind {
-                    LayerKind::Fill(FillKind::Tone { tone, .. }) => Some(tone.lpi),
-                    _ => None,
-                }),
+            tone_lpi: l.tone.map(|t| t.lpi).or(match &l.kind {
+                LayerKind::Fill(FillKind::Tone { tone, .. }) => Some(tone.lpi),
+                _ => None,
+            }),
             depth: l.depth,
             folder: l.folder,
             open: l.open,
@@ -1353,7 +1351,11 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
         let multi = selected || app.doc.layer_multi.contains(&i);
 
         // Folder rows run thinner than layer rows (CSP; owner 2026-08-21).
-        let row_h = if row.folder { FOLDER_ROW_H } else { LAYER_ROW_H };
+        let row_h = if row.folder {
+            FOLDER_ROW_H
+        } else {
+            LAYER_ROW_H
+        };
 
         // Inline rename keeps the row's full height and puts the field on
         // the name line — the old branch let the TextEdit allocate its own
@@ -1424,15 +1426,11 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
         // response is taken EVERY frame (not only while hovered) — the
         // pointer leaves the row the moment it enters the open menu, and a
         // response that stopped existing would take the menu with it.
-        let menu_rect = egui::Rect::from_min_max(
-            egui::pos2(rect.right() - ROW_MENU_W, rect.top()),
-            rect.max,
-        );
+        let menu_rect =
+            egui::Rect::from_min_max(egui::pos2(rect.right() - ROW_MENU_W, rect.top()), rect.max);
         let menu_resp = ui.interact(menu_rect, resp.id.with("rowmenu"), egui::Sense::click());
-        let menu_open = egui::Popup::is_id_open(
-            ui.ctx(),
-            egui::Popup::default_response_id(&menu_resp),
-        );
+        let menu_open =
+            egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&menu_resp));
         // Discoverability (r102 audit): the row's two power gestures had
         // no surface — hover carries them now.
         let resp = resp.on_hover_text(
@@ -1918,9 +1916,7 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
                 // TRIAGE 127 (FB-053/054): the per-frame Draw-border switch,
                 // on the folder's own row where CSP puts it.
                 ui.separator();
-                let ruler = app.doc.layers[i]
-                    .frames()
-                    .is_some_and(|fs| fs.border_ruler);
+                let ruler = app.doc.layers[i].frames().is_some_and(|fs| fs.border_ruler);
                 let label = if ruler {
                     "Draw border (ink it again)"
                 } else {
@@ -2192,10 +2188,7 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
                         &mut c32,
                         egui::color_picker::Alpha::Opaque,
                     ) {
-                        app.push_cmd(AppCmd::SetLayerLabel(
-                            ci,
-                            Some([c32.r(), c32.g(), c32.b()]),
-                        ));
+                        app.push_cmd(AppCmd::SetLayerLabel(ci, Some([c32.r(), c32.g(), c32.b()])));
                     }
                 });
             if !open {
@@ -2250,7 +2243,9 @@ struct MaskThumbs(std::collections::HashMap<u64, egui::TextureHandle>);
 /// are gone, so a session of mask edits does not pile up textures.
 fn refresh_mask_thumbs(ctx: &egui::Context, app: &App) -> Vec<Option<egui::TextureHandle>> {
     let id = egui::Id::new("mn.layer.maskthumbs");
-    let old = ctx.data(|d| d.get_temp::<MaskThumbs>(id)).unwrap_or_default();
+    let old = ctx
+        .data(|d| d.get_temp::<MaskThumbs>(id))
+        .unwrap_or_default();
     let mut fresh = MaskThumbs::default();
     let out: Vec<Option<egui::TextureHandle>> = (0..app.doc.layers.len())
         .map(|i| {
@@ -2564,7 +2559,10 @@ mod tests {
     #[test]
     fn frame_folder_scope_covers_the_block() {
         let mut d = Document::new(200, 200);
-        let hdr = d.add_frame_folder("Frame 1", FrameSet::single_rect([10.0, 10.0, 90.0, 90.0], 2.0));
+        let hdr = d.add_frame_folder(
+            "Frame 1",
+            FrameSet::single_rect([10.0, 10.0, 90.0, 90.0], 2.0),
+        );
         // add_frame_folder leaves the folder's own draw layer active.
         let inside = d.active;
         assert!(inside < hdr, "the draw layer is a child of the header");

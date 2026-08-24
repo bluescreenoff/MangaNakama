@@ -754,7 +754,10 @@ mod tests {
         assert!(near(up.map([0.0; 3])[0], 0.0), "black end");
         assert!(near(up.map([1.0; 3])[0], 1.0), "white end");
         assert!(near(up.map([0.5; 3])[0], 0.75), "the point itself");
-        assert!(up.map([0.25; 3])[0] > 0.25, "and it lifts its neighbourhood");
+        assert!(
+            up.map([0.25; 3])[0] > 0.25,
+            "and it lifts its neighbourhood"
+        );
         assert!(!up.is_identity());
         // Points that all sit ON the diagonal really are a no-op, extra
         // handles or not.
@@ -788,7 +791,10 @@ mod tests {
         // reduced to luma would flatten colour.
         let c = curve(&[[0.0, 0.0], [0.5, 0.75], [1.0, 1.0]]);
         let out = c.map([0.5, 0.0, 1.0]);
-        assert!(near(out[0], 0.75) && near(out[1], 0.0) && near(out[2], 1.0), "{out:?}");
+        assert!(
+            near(out[0], 0.75) && near(out[1], 0.0) && near(out[2], 1.0),
+            "{out:?}"
+        );
     }
 
     // --- the document applier --------------------------------------------
@@ -852,10 +858,16 @@ mod tests {
         put(&mut doc, 0, 6, 5, [0.4, 0.4, 0.4, 0.5]);
         assert!(doc.apply_adjust(&Adjust::Binarize { threshold: 0.5 }));
         let p = get(&doc, 0, 5, 5);
-        assert!(near(p[0], 1.0) && near(p[1], 1.0) && near(p[2], 1.0), "{p:?}");
+        assert!(
+            near(p[0], 1.0) && near(p[1], 1.0) && near(p[2], 1.0),
+            "{p:?}"
+        );
         assert!(near(p[3], 0.5), "alpha must survive a correction: {p:?}");
         let d = get(&doc, 0, 6, 5);
-        assert!(near(d[0], 0.0) && near(d[1], 0.0) && near(d[2], 0.0), "{d:?}");
+        assert!(
+            near(d[0], 0.0) && near(d[1], 0.0) && near(d[2], 0.0),
+            "{d:?}"
+        );
         assert!(near(d[3], 0.5), "alpha must survive a correction: {d:?}");
     }
 

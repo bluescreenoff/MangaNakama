@@ -2149,8 +2149,7 @@ impl Renderer {
         // Tiles waiting on a staging buffer, flushed every `UPLOAD_BATCH` and
         // once more when the walk ends. Holds texture handles (cheap clones)
         // and either a borrowed tile slice or a masked copy of one.
-        let mut batch: Vec<(wgpu::Texture, Cow<[u16]>)> =
-            Vec::with_capacity(UPLOAD_BATCH);
+        let mut batch: Vec<(wgpu::Texture, Cow<[u16]>)> = Vec::with_capacity(UPLOAD_BATCH);
 
         for (li, layer) in doc.layers.iter().enumerate() {
             let pixel_tiles = layer
@@ -3739,7 +3738,10 @@ mod viewport_tests {
         vp.flip_v_around(centre);
         assert!(!vp.flip_v);
         assert!(close(vp.rotate_rad, 0.3));
-        assert!(close2(vp.to_screen(anchor.0, anchor.1), (centre[0], centre[1])));
+        assert!(close2(
+            vp.to_screen(anchor.0, anchor.1),
+            (centre[0], centre[1])
+        ));
     }
 
     /// H+V composed is a 180° POINT reflection, not a mirror: both axes

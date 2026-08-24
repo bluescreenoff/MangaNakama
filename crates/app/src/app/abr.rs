@@ -233,7 +233,11 @@ fn write_computed(
             "authored at {authored:.0} px (default capped at {MAX_DEFAULT_PX:.0})"
         ));
     }
-    set_base(&mut settings, "hardness", (hardness_pct / 100.0).clamp(0.05, 1.0));
+    set_base(
+        &mut settings,
+        "hardness",
+        (hardness_pct / 100.0).clamp(0.05, 1.0),
+    );
     // Roundness R% = the dab squashed to R% of its diameter → engine ratio.
     let ratio = (100.0 / info.roundness_pct).clamp(1.0, 10.0);
     if ratio > 1.0 {
@@ -246,9 +250,14 @@ fn write_computed(
             (-info.angle_deg).rem_euclid(180.0),
         );
     }
-    let name = info.name.clone().unwrap_or_else(|| format!("{set}-round-{n}"));
+    let name = info
+        .name
+        .clone()
+        .unwrap_or_else(|| format!("{set}-round-{n}"));
     let desc = "Round brush imported from a Photoshop brush set".to_string();
-    let ok = write_brush(root, "imported", set, n, &name, None, settings, extras, desc, &notes);
+    let ok = write_brush(
+        root, "imported", set, n, &name, None, settings, extras, desc, &notes,
+    );
     sum.imported += ok as usize;
     if ok {
         sum.translated += 1;
@@ -389,7 +398,9 @@ fn translate(info: &AbrPresetInfo, diameter_px: f64) -> Translated {
     // -- spacing --
     match info.spacing_pct {
         Some(pct) => spacing_settings(&mut s, pct),
-        None => notes.push("spacing off in Photoshop (per-event stamping); default gap used".into()),
+        None => {
+            notes.push("spacing off in Photoshop (per-event stamping); default gap used".into())
+        }
     }
 
     // -- size dynamics --
@@ -423,10 +434,7 @@ fn translate(info: &AbrPresetInfo, diameter_px: f64) -> Translated {
     if info.angle_dyn.control == Control::Direction {
         extras.insert("mn-texture-rotate".into(), json!("direction"));
         if info.angle_dyn.jitter_pct > 0.0 {
-            notes.push(format!(
-                "angle jitter {}%",
-                info.angle_dyn.jitter_pct
-            ));
+            notes.push(format!("angle jitter {}%", info.angle_dyn.jitter_pct));
         }
     } else if info.angle_dyn.is_active() {
         notes.push(format!("per-dab angle ({})", dyn_label(&info.angle_dyn)));
@@ -459,11 +467,7 @@ fn translate(info: &AbrPresetInfo, diameter_px: f64) -> Translated {
             .get("dabs_per_actual_radius")
             .and_then(|v| v["base_value"].as_f64())
         {
-            set_base(
-                &mut s,
-                "dabs_per_actual_radius",
-                (d * info.count).min(50.0),
-            );
+            set_base(&mut s, "dabs_per_actual_radius", (d * info.count).min(50.0));
         }
         notes.push(format!(
             "scatter count {} approximated as dab density",
@@ -475,8 +479,8 @@ fn translate(info: &AbrPresetInfo, diameter_px: f64) -> Translated {
     }
 
     // -- transfer (opacity + flow) --
-    let pressure_opacity = info.flow.control == Control::Pressure
-        || info.opacity.control == Control::Pressure;
+    let pressure_opacity =
+        info.flow.control == Control::Pressure || info.opacity.control == Control::Pressure;
     if pressure_opacity {
         s.insert(
             "opaque_multiply".into(),
@@ -748,7 +752,7 @@ impl App {
             // preset each, grouped by CSP group. Tips ride .sut exports.
             "todb" => match mn_brush::todb::parse_todb_file(path) {
                 Ok(tools) if tools.is_empty() => {
-                    return self.set_error("that database holds no importable sub tools")
+                    return self.set_error("that database holds no importable sub tools");
                 }
                 Ok(tools) => {
                     let dpi = self.page.as_ref().map(|p| p.dpi).unwrap_or(0);
@@ -757,9 +761,7 @@ impl App {
                 Err(e) => return self.set_error(format!("brush import failed: {e}")),
             },
             "kpp" => match mn_brush::parse_kpp_file(path) {
-                Ok(preset) => {
-                    super::kpp_import::write_kpp_import(&root, &preset, &set_slug(&stem))
-                }
+                Ok(preset) => super::kpp_import::write_kpp_import(&root, &preset, &set_slug(&stem)),
                 Err(e) => return self.set_error(format!("brush import failed: {e}")),
             },
             "gbr" | "gih" => match mn_brush::parse_gimp_brush_file(path) {
@@ -995,8 +997,7 @@ mod tests {
         assert_eq!(myb["name"], "Scatter Ink");
         // Size: from Dmtr 64 → ln(32); pressure sweeps from 40 %.
         assert!(
-            (s["radius_logarithmic"]["base_value"].as_f64().unwrap() - (32.0f64).ln()).abs()
-                < 1e-6
+            (s["radius_logarithmic"]["base_value"].as_f64().unwrap() - (32.0f64).ln()).abs() < 1e-6
         );
         let pr = &s["radius_logarithmic"]["inputs"]["pressure"];
         assert!((pr[0][1].as_f64().unwrap() - (0.4f64).ln()).abs() < 1e-6);
@@ -1004,9 +1005,7 @@ mod tests {
         let rr = &s["radius_logarithmic"]["inputs"]["random"];
         assert!((rr[0][1].as_f64().unwrap() - (0.8f64).ln()).abs() < 1e-6);
         // Spacing 25 % → 2 dabs per radius, doubled by count 2 → 4.
-        assert!(
-            (s["dabs_per_actual_radius"]["base_value"].as_f64().unwrap() - 4.0).abs() < 1e-6
-        );
+        assert!((s["dabs_per_actual_radius"]["base_value"].as_f64().unwrap() - 4.0).abs() < 1e-6);
         assert_eq!(s["dabs_per_basic_radius"]["base_value"], 0.0);
         // Scatter 120 % of diameter → 2.4 radii.
         assert!((myb["mn-scatter"].as_f64().unwrap() - 2.4).abs() < 1e-6);
@@ -1016,9 +1015,7 @@ mod tests {
             json!([1.0, 1.0])
         );
         // Opacity jitter 15 % → opaque random dip to −0.15.
-        assert!(
-            (s["opaque"]["inputs"]["random"][0][1].as_f64().unwrap() + 0.15).abs() < 1e-6
-        );
+        assert!((s["opaque"]["inputs"]["random"][0][1].as_f64().unwrap() + 0.15).abs() < 1e-6);
         // Photoshop stamps per dab: sampled imports anchor to the dab, and
         // the Direction-controlled angle translates into the live stamp
         // rotation instead of a note (#10 amendment 2).
@@ -1037,7 +1034,12 @@ mod tests {
         assert!(notes.iter().any(|n| n.contains("count 2")));
         assert!(notes.iter().any(|n| n.contains("wet edges")));
         assert!(notes.iter().any(|n| n.contains("dual brush")));
-        assert!(myb["description"].as_str().unwrap().contains("Not translated:"));
+        assert!(
+            myb["description"]
+                .as_str()
+                .unwrap()
+                .contains("Not translated:")
+        );
         std::fs::remove_dir_all(root.parent().unwrap()).ok();
     }
 
@@ -1082,7 +1084,11 @@ mod tests {
         };
         let set = mn_brush::parse_abr_set(&bytes, "sample").unwrap();
         assert_eq!(set.tips.len(), 31);
-        assert!(set.presets.len() >= 30, "desc parsed: {}", set.presets.len());
+        assert!(
+            set.presets.len() >= 30,
+            "desc parsed: {}",
+            set.presets.len()
+        );
         let root = tmp_root("real");
         let sum = write_import(&root, &set, "sample");
         // Every preset with a live tip imports; the blank tip's presets and
@@ -1110,9 +1116,7 @@ mod tests {
             std::fs::read_to_string(p)
                 .ok()
                 .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-                .is_some_and(|v| {
-                    v["settings"]["dabs_per_basic_radius"]["base_value"] == json!(0.0)
-                })
+                .is_some_and(|v| v["settings"]["dabs_per_basic_radius"]["base_value"] == json!(0.0))
         });
         assert!(translated, "no preset shows translated spacing");
         std::fs::remove_dir_all(root.parent().unwrap()).ok();

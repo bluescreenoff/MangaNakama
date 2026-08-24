@@ -117,12 +117,18 @@ fn one_click_tones_a_region_as_one_undoable_live_layer() {
         }
         ref k => panic!("not a live tone layer: {k:?}"),
     }
-    assert!(app.doc.layers[li].mask.is_some(), "the region is the window");
+    assert!(
+        app.doc.layers[li].mask.is_some(),
+        "the region is the window"
+    );
     assert!(
         app.doc.layers[li].tiles().next().is_none(),
         "a tone gesture bakes no pixels"
     );
-    assert!(mask_at(&app, li, 120, 120) > 0, "inside the box is windowed");
+    assert!(
+        mask_at(&app, li, 120, 120) > 0,
+        "inside the box is windowed"
+    );
     assert_eq!(mask_at(&app, li, 10, 10), 0, "outside it is not");
 
     // The status narrates the area and the screen.
@@ -179,9 +185,15 @@ fn a_second_click_tones_another_region_independently() {
     };
     let (a, b) = (read(&app, tones[0]), read(&app, tones[1]));
     assert_eq!(a.0, TonePattern::Dots);
-    assert!((a.1 - 60.0).abs() < 1e-6 && (a.2 - 1.0).abs() < 1e-6, "{a:?}");
+    assert!(
+        (a.1 - 60.0).abs() < 1e-6 && (a.2 - 1.0).abs() < 1e-6,
+        "{a:?}"
+    );
     assert_eq!(b.0, TonePattern::Star);
-    assert!((b.1 - 25.0).abs() < 1e-6 && (b.2 - 0.2).abs() < 1e-6, "{b:?}");
+    assert!(
+        (b.1 - 25.0).abs() < 1e-6 && (b.2 - 0.2).abs() < 1e-6,
+        "{b:?}"
+    );
 
     // And each window holds only its own pocket.
     assert!(mask_at(&app, tones[0], 60, 60) > 0);

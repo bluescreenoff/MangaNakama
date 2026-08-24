@@ -38,14 +38,16 @@ pub struct VectorStroke {
 
 impl VectorStroke {
     pub fn samples(&self) -> impl Iterator<Item = PenSample> + '_ {
-        self.points.iter().map(|&(x, y, pressure, tilt_x, tilt_y, t_ms)| PenSample {
-            x,
-            y,
-            pressure,
-            tilt_x,
-            tilt_y,
-            t_ms,
-        })
+        self.points
+            .iter()
+            .map(|&(x, y, pressure, tilt_x, tilt_y, t_ms)| PenSample {
+                x,
+                y,
+                pressure,
+                tilt_x,
+                tilt_y,
+                t_ms,
+            })
     }
 
     pub fn from_samples(
@@ -150,10 +152,7 @@ impl StrokeSet {
                     let lo = cuts.iter().rev().find(|&&c| c < i).map_or(0, |&c| c + 1);
                     // Nearest crossing at/after the run end: samples up to
                     // and including the crossing segment's start die.
-                    let hi = cuts
-                        .iter()
-                        .find(|&&c| c >= run_end)
-                        .map_or(n - 1, |&c| c);
+                    let hi = cuts.iter().find(|&&c| c >= run_end).map_or(n - 1, |&c| c);
                     for e in erase.iter_mut().take(hi + 1).skip(lo) {
                         *e = true;
                     }
@@ -268,7 +267,11 @@ mod tests {
         };
         // Touch the horizontal at x≈150 only.
         assert!(set.trim(&[(150.0, 50.0)], 6.0));
-        assert_eq!(set.strokes.len(), 4, "middle span died, two pieces + verticals");
+        assert_eq!(
+            set.strokes.len(),
+            4,
+            "middle span died, two pieces + verticals"
+        );
         // Piece 1 ends at the first crossing (x≈100), piece 2 begins at the
         // second (x≈200) — sample-grain tolerance.
         let xs: Vec<(f32, f32)> = set.strokes[..2]
@@ -326,7 +329,10 @@ mod tests {
             false,
         );
         assert!(doc.end_op_vector_stroke(stroke.clone()));
-        assert_eq!(doc.active_layer().strokes.as_ref().unwrap().strokes.len(), 1);
+        assert_eq!(
+            doc.active_layer().strokes.as_ref().unwrap().strokes.len(),
+            1
+        );
         let inked = |d: &crate::Document| {
             d.active_layer()
                 .tile(crate::TileIdx::new(0, 0))
@@ -368,21 +374,20 @@ mod tests {
         doc.add_layer("plain");
         doc.add_layer("vector");
         let li = doc.layers.len() - 1;
-        let stroke =
-            VectorStroke::from_samples(
-                &[PenSample {
-                    x: 1.0,
-                    y: 2.0,
-                    pressure: 0.5,
-                    tilt_x: 0.0,
-                    tilt_y: 0.0,
-                    t_ms: 8.0,
-                }],
-                "csp/real-g-pen",
-                14.0,
-                [1, 2, 3],
-                false,
-            );
+        let stroke = VectorStroke::from_samples(
+            &[PenSample {
+                x: 1.0,
+                y: 2.0,
+                pressure: 0.5,
+                tilt_x: 0.0,
+                tilt_y: 0.0,
+                t_ms: 8.0,
+            }],
+            "csp/real-g-pen",
+            14.0,
+            [1, 2, 3],
+            false,
+        );
         doc.layers[li].strokes = Some(StrokeSet {
             strokes: vec![stroke.clone()],
         });

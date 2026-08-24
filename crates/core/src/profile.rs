@@ -156,7 +156,10 @@ mod tests {
     /// HERE, not fall back silently in a release.
     #[test]
     fn builtins_reference_real_presets() {
-        let names: Vec<String> = PageSetup::presets().iter().map(|p| p.name.clone()).collect();
+        let names: Vec<String> = PageSetup::presets()
+            .iter()
+            .map(|p| p.name.clone())
+            .collect();
         for b in PublisherProfile::builtins() {
             assert!(
                 names.contains(&b.setup.name),

@@ -49,7 +49,9 @@ impl App {
             return self.set_error(refusal("duplicate", &path));
         };
         self.rescan_keeping_selection();
-        self.set_status(format!("duplicated as \"{name}\" — tune it in Tool Property"));
+        self.set_status(format!(
+            "duplicated as \"{name}\" — tune it in Tool Property"
+        ));
     }
 
     /// Sub Tool ▸ right-click ▸ Delete. No confirm dialog, so the status
@@ -287,7 +289,11 @@ mod tests {
             .expect("a mine/ preset duplicates");
         assert_eq!(first, root.join("mine/mine-2.myb"));
         assert_eq!(name, "Canvas brush 1 copy");
-        assert_eq!(name_of(&path), "Canvas brush 1", "the original is untouched");
+        assert_eq!(
+            name_of(&path),
+            "Canvas brush 1",
+            "the original is untouched"
+        );
         // The shared tip mask rides along — textures are not owned by one
         // preset.
         let json: serde_json::Value =

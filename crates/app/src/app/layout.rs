@@ -636,7 +636,9 @@ mod tests {
         );
         for k in OLD {
             assert!(
-                !me.to_body().lines().any(|l| l.starts_with(&format!("{k}="))),
+                !me.to_body()
+                    .lines()
+                    .any(|l| l.starts_with(&format!("{k}="))),
                 "ui.txt must not persist a brush size under `{k}`"
             );
         }
@@ -649,7 +651,10 @@ mod tests {
     #[test]
     fn sub_tool_sizes_roundtrip_through_the_body() {
         let mut me = UiLayout::default();
-        assert!(me.sub_tool_size_px.is_empty(), "nothing until the user acts");
+        assert!(
+            me.sub_tool_size_px.is_empty(),
+            "nothing until the user acts"
+        );
         me.note_sub_tool_size("csp/g-pen.myb", Some(37.5));
         assert!(me.dirty);
         // An untouched sub tool is an ABSENT entry, not a written default.
@@ -713,7 +718,9 @@ mod tests {
 
         let body = me.to_body();
         assert_eq!(
-            body.lines().filter(|l| l.starts_with("references=")).count(),
+            body.lines()
+                .filter(|l| l.starts_with("references="))
+                .count(),
             1,
             "one line, whatever the paths contain: {body}"
         );
@@ -907,7 +914,10 @@ mod tests {
         for line in body.lines() {
             back.apply_kv(line);
         }
-        assert!(!back.gpu_dabs_explicit, "a round trip must not forge a choice");
+        assert!(
+            !back.gpu_dabs_explicit,
+            "a round trip must not forge a choice"
+        );
 
         // Using the View-menu toggle IS the choice — even when it picks the
         // value the layout already held (turning it off while it is off is
@@ -1066,7 +1076,11 @@ mod tests {
         assert!(!back.dirty, "an unchanged fold must not re-dirty ui.txt");
 
         let mut junk = UiLayout::default();
-        for line in ["test_stroke_hidden=0", "test_stroke_hidden=no", "left_w=200"] {
+        for line in [
+            "test_stroke_hidden=0",
+            "test_stroke_hidden=no",
+            "left_w=200",
+        ] {
             junk.apply_kv(line);
             assert!(!junk.test_stroke_hidden, "{line} must not fold the strip");
         }

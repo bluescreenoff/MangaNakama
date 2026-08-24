@@ -380,7 +380,10 @@ impl Lasso {
 
     /// The anchor the live wire currently grows from.
     pub fn last_anchor(&self) -> (i32, i32) {
-        *self.anchors.last().expect("a lasso always has its first anchor")
+        *self
+            .anchors
+            .last()
+            .expect("a lasso always has its first anchor")
     }
 
     /// Straight-line distance from the last anchor — the auto-anchor trigger
@@ -541,10 +544,7 @@ mod tests {
         let path = wire(&mut f, &doc, (40, 94), (140, 94), 40);
         assert_eq!(path.first().copied(), Some((40, 94)));
         assert_eq!(path.last().copied(), Some((140, 94)));
-        let on_edge = path
-            .iter()
-            .filter(|(_, y)| (98..=101).contains(y))
-            .count();
+        let on_edge = path.iter().filter(|(_, y)| (98..=101).contains(y)).count();
         assert!(
             on_edge * 2 > path.len(),
             "most of the path snapped onto the boundary ({on_edge} of {})",
@@ -571,10 +571,7 @@ mod tests {
         let mut f = EdgeField::new(&doc);
         let path = wire(&mut f, &doc, (40, 100), (180, 100), 40);
         let on_ink = path.iter().filter(|(_, y)| (78..=84).contains(y)).count();
-        let on_tone = path
-            .iter()
-            .filter(|(_, y)| (114..=121).contains(y))
-            .count();
+        let on_tone = path.iter().filter(|(_, y)| (114..=121).contains(y)).count();
         assert!(
             on_ink * 2 > path.len(),
             "most of the wire rode the ink ({on_ink} of {})",

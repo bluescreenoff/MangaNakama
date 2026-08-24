@@ -1798,7 +1798,10 @@ mod ruby_tests {
         it.set_ruby(0, 2, "かんじ");
         it.delete_range(1, 3);
         assert_eq!((it.ruby[0].start, it.ruby[0].len), (0, 1));
-        assert_eq!(it.ruby[0].text, "かんじ", "the reading itself is the user's");
+        assert_eq!(
+            it.ruby[0].text, "かんじ",
+            "the reading itself is the user's"
+        );
     }
 
     /// A reading with nothing left to read is not kept alive out of
@@ -2169,7 +2172,10 @@ mod auto_tcy_tests {
     }
 
     fn spans(it: &TextItem) -> Vec<(u32, u32)> {
-        it.effective_tcy().iter().map(|t| (t.start, t.len)).collect()
+        it.effective_tcy()
+            .iter()
+            .map(|t| (t.start, t.len))
+            .collect()
     }
 
     /// The heart of TX-062: maximal alphanumeric runs no longer than the
@@ -2219,7 +2225,10 @@ mod auto_tcy_tests {
         it.delete_range(0, 1);
         assert_eq!(it.text, "23時");
         assert_eq!(spans(&it), vec![(0, 2)], "back to a pair, back upright");
-        assert!(it.tcy.is_empty(), "and nothing was ever written to the model");
+        assert!(
+            it.tcy.is_empty(),
+            "and nothing was ever written to the model"
+        );
     }
 
     /// A hand-marked run wins over an auto candidate that touches it, so the

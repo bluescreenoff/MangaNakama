@@ -188,9 +188,14 @@ fn mode_sub_tools(ui: &mut egui::Ui, app: &mut App) {
             {
                 app.push_cmd(AppCmd::SetFillMode(FillMode::Enclose));
             }
-            if mode_row(ui, app.fill_mode == FillMode::Lasso, Icon::Select, "Lasso fill")
-                .on_hover_text("drag a shape and it is painted as drawn — lines are ignored")
-                .clicked()
+            if mode_row(
+                ui,
+                app.fill_mode == FillMode::Lasso,
+                Icon::Select,
+                "Lasso fill",
+            )
+            .on_hover_text("drag a shape and it is painted as drawn — lines are ignored")
+            .clicked()
             {
                 app.push_cmd(AppCmd::SetFillMode(FillMode::Lasso));
             }
@@ -258,7 +263,14 @@ fn mode_sub_tools(ui: &mut egui::Ui, app: &mut App) {
             // "Rectangle" selected, or the list stops saying where you are.
             let m = app.select_mode;
             let shape = app.tool == Tool::Select;
-            if mode_row(ui, shape && m == SelectMode::Rect, Icon::Select, "Rectangle").clicked() {
+            if mode_row(
+                ui,
+                shape && m == SelectMode::Rect,
+                Icon::Select,
+                "Rectangle",
+            )
+            .clicked()
+            {
                 app.push_cmd(AppCmd::SetSelectMode(SelectMode::Rect));
             }
             if mode_row(ui, shape && m == SelectMode::Lasso, Icon::Select, "Lasso").clicked() {
@@ -373,9 +385,14 @@ fn mode_sub_tools(ui: &mut egui::Ui, app: &mut App) {
             }
             // S-001: the pick is an OPERATION sub tool in CSP, not a layer
             // palette button — you are pointing at the page, not at a list.
-            if mode_row(ui, om == ObjectMode::PickLayer, Icon::Eyedrop, "Select layer")
-                .on_hover_text("click a pixel and the Layer palette jumps to whichever layer drew it")
-                .clicked()
+            if mode_row(
+                ui,
+                om == ObjectMode::PickLayer,
+                Icon::Eyedrop,
+                "Select layer",
+            )
+            .on_hover_text("click a pixel and the Layer palette jumps to whichever layer drew it")
+            .clicked()
             {
                 app.object_mode = ObjectMode::PickLayer;
             }
@@ -413,8 +430,7 @@ fn mode_sub_tools(ui: &mut egui::Ui, app: &mut App) {
                 ("Dense stream", FLO::dense_stream_dpi(dpi)),
                 ("Sparse stream", FLO::sparse_stream_dpi(dpi)),
             ] {
-                let on =
-                    app.figure_mode == FigureMode::Stream && app.figure_stream.same_as(&opts);
+                let on = app.figure_mode == FigureMode::Stream && app.figure_stream.same_as(&opts);
                 if mode_row(ui, on, Icon::StreamLines, label)
                     .on_hover_text("drag along the motion — a fresh speed-line layer each drag")
                     .clicked()

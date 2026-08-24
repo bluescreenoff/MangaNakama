@@ -186,7 +186,12 @@ pub fn quick_verdict(cfg: GpuConfig, reps: usize) -> Result<DabVerdict, String> 
 /// `gpu-verdict.txt` beside the exe: line 1 `fingerprint`, line 2 `on`/`off`,
 /// line 3 the summary (a record for humans; never parsed).
 pub fn verdict_path() -> Option<std::path::PathBuf> {
-    Some(std::env::current_exe().ok()?.parent()?.join("gpu-verdict.txt"))
+    Some(
+        std::env::current_exe()
+            .ok()?
+            .parent()?
+            .join("gpu-verdict.txt"),
+    )
 }
 
 pub fn store_verdict(v: &DabVerdict) {
@@ -382,7 +387,9 @@ pub fn state_line_for(app: &App) -> String {
         app.renderer.gpu_dabs_supported(),
         app.layout.gpu_dabs_explicit,
         stored.as_ref().map(|v| v.on),
-        stored.as_ref().and_then(|v| speedup_from_summary(&v.summary)),
+        stored
+            .as_ref()
+            .and_then(|v| speedup_from_summary(&v.summary)),
     )
 }
 
@@ -393,8 +400,7 @@ mod tests {
     /// The criterion, pinned: the airbrush must clearly win, nothing may
     /// badly lose, and malformed input never flips ON.
     #[test]
-    fn the_flip_criterion_is_conservative()
-    {
+    fn the_flip_criterion_is_conservative() {
         let n = CLASSES.len();
         let mut wins = vec![0.8; n];
         assert!(decide(&wins), "a clean sweep flips on");
@@ -415,7 +421,10 @@ mod tests {
         let fp = "Some GPU | Vulkan | driver 1.2";
         let stored = Some((fp.to_string(), true));
         // Explicit user choice wins, never re-measures.
-        assert_eq!(resolve_auto(Some(false), stored.clone(), fp), (false, false));
+        assert_eq!(
+            resolve_auto(Some(false), stored.clone(), fp),
+            (false, false)
+        );
         assert_eq!(resolve_auto(Some(true), None, fp), (true, false));
         // No explicit choice: this adapter's verdict applies.
         assert_eq!(resolve_auto(None, stored, fp), (true, false));
@@ -444,7 +453,8 @@ mod tests {
     /// while production failed.
     #[test]
     fn a_trailing_space_in_the_live_fingerprint_still_matches() {
-        let live = "Intel(R) UHD Graphics 620 | backend Dx12 | type IntegratedGpu | driver 31.0.101.2141 ";
+        let live =
+            "Intel(R) UHD Graphics 620 | backend Dx12 | type IntegratedGpu | driver 31.0.101.2141 ";
         let stored = live.trim().to_string();
         assert!(same_adapter(&stored, live), "trimmed both sides");
         assert_eq!(
@@ -459,7 +469,10 @@ mod tests {
         );
         // Trimming must not make everything match everything: a real driver
         // update still re-measures.
-        assert!(!same_adapter("Intel(R) UHD Graphics 620 | driver 31.0", live));
+        assert!(!same_adapter(
+            "Intel(R) UHD Graphics 620 | driver 31.0",
+            live
+        ));
         assert_eq!(
             resolve_auto(None, Some(("some other gpu".into(), true)), live),
             (false, true)
@@ -540,7 +553,11 @@ mod tests {
         std::fs::write(&p, "Adapter X | Dx12 | driver 31.0\nmaybe\n").unwrap();
         assert_eq!(load_verdict_at(&p), None, "a corrupt flag never decides");
         std::fs::write(&p, "\non\n").unwrap();
-        assert_eq!(load_verdict_at(&p), None, "an empty fingerprint never decides");
+        assert_eq!(
+            load_verdict_at(&p),
+            None,
+            "an empty fingerprint never decides"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

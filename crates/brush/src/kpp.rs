@@ -161,8 +161,8 @@ fn text_string(b: &[u8]) -> String {
 fn parse_preset_xml(xml: &str) -> Result<KppPreset, String> {
     let (attrs, body, self_closed) = find_element(xml, 0, "Preset")
         .ok_or_else(|| "kpp: no <Preset> element in the preset XML".to_string())?;
-    let name = attr(attrs, "name")
-        .ok_or_else(|| "kpp: <Preset> has no name attribute".to_string())?;
+    let name =
+        attr(attrs, "name").ok_or_else(|| "kpp: <Preset> has no name attribute".to_string())?;
     let paintop_id = attr(attrs, "paintopid")
         .ok_or_else(|| "kpp: <Preset> has no paintopid attribute".to_string())?;
 

@@ -861,7 +861,8 @@ impl App {
             self.set_status("the set ran and changed nothing");
             return;
         }
-        self.doc.wrap_recent("Run set", ran.min(self.doc.undo_len()));
+        self.doc
+            .wrap_recent("Run set", ran.min(self.doc.undo_len()));
         self.set_status(format!(
             "{ran} action{} ran — one undo takes it all back",
             if ran == 1 { "" } else { "s" }
@@ -1296,8 +1297,9 @@ mod tests {
           {"name":"Also good","steps":[{"step":"SelectAbove","on":true}]}
         "#;
         let flat = format!("[{inner}]");
-        let setted =
-            format!("{{\"sets\":[{{\"name\":\"Inking\",\"actions\":[{inner}]}}],\"current\":\"Inking\"}}");
+        let setted = format!(
+            "{{\"sets\":[{{\"name\":\"Inking\",\"actions\":[{inner}]}}],\"current\":\"Inking\"}}"
+        );
         // The shape of the bug, pinned: the OLD one-shot parse still fails
         // on this exact text, so this test fails against the old code.
         assert!(
@@ -1465,7 +1467,10 @@ mod tests {
         f.current = "gone".into();
         assert_eq!(f.current_index(), 0);
         f.set_current_actions(vec![action(vec![], "B")]);
-        assert_eq!(f.current, "Inking 2", "the write named the set it landed in");
+        assert_eq!(
+            f.current, "Inking 2",
+            "the write named the set it landed in"
+        );
     }
 
     /// Sets a user is not looking at are not in memory. A write folds the

@@ -122,10 +122,7 @@ impl RefBank {
 
     /// The persisted form: absolute paths, newest last.
     pub fn to_lines(&self) -> Vec<String> {
-        self.paths
-            .iter()
-            .map(|p| p.display().to_string())
-            .collect()
+        self.paths.iter().map(|p| p.display().to_string()).collect()
     }
 }
 
@@ -248,7 +245,9 @@ fn ref_row(ui: &mut egui::Ui, app: &mut App, i: usize) -> bool {
             img,
             egui::TextureOptions::LINEAR,
         );
-        app.refs.thumbs.insert(path.clone(), ThumbTex { tex, missing });
+        app.refs
+            .thumbs
+            .insert(path.clone(), ThumbTex { tex, missing });
     }
     resp.clicked()
 }
@@ -374,12 +373,9 @@ fn viewer_body(ui: &mut egui::Ui, app: &mut App, v: &mut RefView) {
     let size = egui::vec2(iw * fit * v.zoom, ih * fit * v.zoom);
     let img_rect = egui::Rect::from_center_size(rect.center() + v.pan, size);
     let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-    ui.painter().with_clip_rect(rect).image(
-        tex.id(),
-        img_rect,
-        uv,
-        egui::Color32::WHITE,
-    );
+    ui.painter()
+        .with_clip_rect(rect)
+        .image(tex.id(), img_rect, uv, egui::Color32::WHITE);
 
     let alt = ui.input(|i| i.modifiers.alt);
     if (v.pick || alt) && resp.clicked() {
@@ -398,7 +394,10 @@ fn viewer_body(ui: &mut egui::Ui, app: &mut App, v: &mut RefView) {
                 // dispatches this), so a reference pick joins the Recent
                 // strip and honours the auto-swatch switch exactly like one.
                 app.push_cmd(AppCmd::SetSlotColor(rgb));
-                app.set_status(format!("picked #{r:02x}{g:02x}{b:02x} from {}", file_label(&v.path)));
+                app.set_status(format!(
+                    "picked #{r:02x}{g:02x}{b:02x} from {}",
+                    file_label(&v.path)
+                ));
             }
         }
     } else if v.pick || alt {
@@ -530,7 +529,10 @@ mod tests {
         let _ = std::fs::remove_file(&gone);
         let (img, missing) = thumb_image(&gone, THUMB_CAP);
         assert!(missing, "a gone file must report missing");
-        assert!(img.size[0] >= 16 && img.size[1] >= 16, "drawable placeholder");
+        assert!(
+            img.size[0] >= 16 && img.size[1] >= 16,
+            "drawable placeholder"
+        );
         assert_eq!(img.pixels.len(), img.size[0] * img.size[1]);
         assert!(
             img.pixels.iter().any(|p| *p == theme::c().warn),
@@ -602,7 +604,11 @@ mod tests {
             loaded_per_frame.iter().all(|&n| n <= 1),
             "one image per frame, never a burst: {loaded_per_frame:?}"
         );
-        assert_eq!(app.refs.thumbs.len(), 3, "every visible row got a thumbnail");
+        assert_eq!(
+            app.refs.thumbs.len(),
+            3,
+            "every visible row got a thumbnail"
+        );
         assert!(
             app.refs.thumbs[&gone].missing,
             "the renamed file is a placeholder row, not a hole"
@@ -634,7 +640,10 @@ mod tests {
     fn adding_the_same_reference_twice_is_one_row() {
         let mut bank = RefBank::default();
         let a = PathBuf::from(r"D:\refs\hand.png");
-        assert_eq!(bank.add(vec![a.clone(), PathBuf::from(r"D:\refs\eye.png")]), 2);
+        assert_eq!(
+            bank.add(vec![a.clone(), PathBuf::from(r"D:\refs\eye.png")]),
+            2
+        );
         assert_eq!(bank.add(vec![a]), 0);
         assert_eq!(bank.paths.len(), 2);
         assert_eq!(bank.to_lines()[0], r"D:\refs\hand.png");

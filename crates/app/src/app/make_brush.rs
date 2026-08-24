@@ -40,9 +40,7 @@ impl App {
                     "brush \"{name}\" registered (group Mine) — your marks stamp along the stroke; tune size and spacing in Tool Property"
                 ));
             }
-            None => self.set_error(
-                "make brush: lasso some ink on the active raster layer first",
-            ),
+            None => self.set_error("make brush: lasso some ink on the active raster layer first"),
         }
     }
 
@@ -133,9 +131,8 @@ impl App {
                 "captured at {natural:.0} px (default capped at {MAX_DEFAULT_PX:.0})"
             ));
         }
-        let desc =
-            "Brush tip captured from canvas marks (Edit ▸ Register selection as brush tip)"
-                .to_string();
+        let desc = "Brush tip captured from canvas marks (Edit ▸ Register selection as brush tip)"
+            .to_string();
         let ok = write_brush(
             &root,
             "mine",
@@ -198,7 +195,10 @@ fn connected_islands(gray: &[u8], w: u32, h: u32) -> Vec<(u32, u32, u32, u32)> {
             x1 = x1.max(x);
             y1 = y1.max(y);
             for (dx, dy) in [(!0, 0), (1, 0), (0, !0), (0, 1)] {
-                let (nx, ny) = match (x.checked_add_signed(dx as isize), y.checked_add_signed(dy as isize)) {
+                let (nx, ny) = match (
+                    x.checked_add_signed(dx as isize),
+                    y.checked_add_signed(dy as isize),
+                ) {
                     (Some(a), Some(b)) if a < w && b < h => (a, b),
                     _ => continue,
                 };
@@ -273,16 +273,7 @@ fn register_variant_brush_into(
     let name = format!("Canvas brush {n} ({} tips)", islands.len());
     let desc = "Brush tips captured from canvas marks (multi-tip variation)".to_string();
     let ok = write_brush(
-        root,
-        "mine",
-        "mine",
-        n,
-        &name,
-        None,
-        settings,
-        extras,
-        desc,
-        &notes,
+        root, "mine", "mine", n, &name, None, settings, extras, desc, &notes,
     );
     ok.then(|| (root.join("mine").join(format!("{slug}.myb")), name))
 }
@@ -325,7 +316,11 @@ mod tests {
         let mut app = App::new(renderer, (600, 400), 1.0);
         let root = tmp_root("marks");
         // A 3-px diagonal of ink well inside a larger selection.
-        ink(&mut app, &[(100, 100), (101, 101), (102, 102)], [W, 0, 0, W]);
+        ink(
+            &mut app,
+            &[(100, 100), (101, 101), (102, 102)],
+            [W, 0, 0, W],
+        );
         app.doc.selection = Some(mn_core::Selection::from_rect(
             &app.doc, 90.0, 90.0, 130.0, 130.0,
         ));
@@ -396,7 +391,8 @@ mod tests {
         let mut app = App::new(renderer, (600, 400), 1.0);
         let root = tmp_root("refuse");
         assert!(
-            app.register_brush_from_selection_into(root.clone()).is_none(),
+            app.register_brush_from_selection_into(root.clone())
+                .is_none(),
             "no selection"
         );
         app.doc.selection = Some(mn_core::Selection::from_rect(

@@ -92,7 +92,11 @@ pub fn parse_todb(bytes: &[u8]) -> Result<Vec<TobdTool>, String> {
     let root = tables
         .get("Manager")
         .and_then(|t| t.records().into_iter().next())
-        .and_then(|r| r.get("RootUuid").and_then(Value::as_blob).map(|b| b.to_vec()))
+        .and_then(|r| {
+            r.get("RootUuid")
+                .and_then(Value::as_blob)
+                .map(|b| b.to_vec())
+        })
         .and_then(|b| hex16(&b))
         .ok_or("todb: Manager has no RootUuid")?;
 
@@ -177,8 +181,7 @@ pub fn parse_todb_file(path: &Path) -> Result<Vec<TobdTool>, String> {
             ));
         }
     }
-    let bytes =
-        std::fs::read(path).map_err(|e| format!("todb: {}: {e}", path.display()))?;
+    let bytes = std::fs::read(path).map_err(|e| format!("todb: {}: {e}", path.display()))?;
     parse_todb(&bytes)
 }
 
@@ -192,7 +195,8 @@ mod tests {
     use super::*;
 
     fn fixture() -> Option<Vec<u8>> {
-        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/todb_sample.todb");
+        let p =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/todb_sample.todb");
         std::fs::read(p).ok().or_else(|| {
             eprintln!("[fixture] todb_sample.todb missing, skipping");
             None
@@ -213,11 +217,7 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            vec![
-                ("Mapping pen", 1),
-                ("G-pen", 1),
-                ("Hard Airbrush", 1),
-            ],
+            vec![("Mapping pen", 1), ("G-pen", 1), ("Hard Airbrush", 1),],
             "three sub tools under Pen and Airbrush; the empty group and \
              the variantless leaf are not tools"
         );
@@ -234,7 +234,10 @@ mod tests {
         let hard = &tools[2];
         assert_eq!(hard.group_path, vec!["Airbrush".to_owned()]);
         assert_eq!(hard.brush.params.get("BrushFlow"), Some(&50.0));
-        assert!(hard.brush.tip_pngs.is_empty(), "tips ride .sut exports (v1)");
+        assert!(
+            hard.brush.tip_pngs.is_empty(),
+            "tips ride .sut exports (v1)"
+        );
     }
 
     /// The WAL guard: a journal beside the database means a live Clip
@@ -246,16 +249,16 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let db = dir.join("EditImageTool.todb");
         std::fs::write(&db, b"SQLite format 3\0").unwrap();
-        assert!(parse_todb_file(&db).is_err(), "a non-database errors anyway");
+        assert!(
+            parse_todb_file(&db).is_err(),
+            "a non-database errors anyway"
+        );
         std::fs::write(dir.join("EditImageTool.todb-wal"), b"journal").unwrap();
         let err = match parse_todb_file(&db) {
             Err(e) => e,
             Ok(_) => panic!("the journal must be refused"),
         };
-        assert!(
-            err.contains("-wal"),
-            "the refusal names the journal: {err}"
-        );
+        assert!(err.contains("-wal"), "the refusal names the journal: {err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -264,8 +267,7 @@ mod tests {
     #[test]
     fn only_the_wanted_tables_decode() {
         let Some(b) = fixture() else { return };
-        let tables =
-            sqlite_ro::parse_sqlite_tables(&b, &["Node"]).expect("filtered parse");
+        let tables = sqlite_ro::parse_sqlite_tables(&b, &["Node"]).expect("filtered parse");
         assert!(tables.contains_key("Node"));
         assert!(
             !tables.contains_key("Variant"),

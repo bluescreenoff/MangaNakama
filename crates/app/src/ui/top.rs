@@ -23,7 +23,9 @@ fn bar_menu(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
     let mut sibs: Vec<egui::Id> = ctx.data(|d| d.get_temp(sibs_id).unwrap_or_default());
     if resp.hovered()
         && !egui::Popup::is_id_open(&ctx, id)
-        && sibs.iter().any(|&s| s != id && egui::Popup::is_id_open(&ctx, s))
+        && sibs
+            .iter()
+            .any(|&s| s != id && egui::Popup::is_id_open(&ctx, s))
     {
         // open_popup is exclusive: opening this one closes the sibling.
         egui::Popup::open_id(&ctx, id);
@@ -1470,15 +1472,17 @@ pub(super) fn status_bar(ui: &mut egui::Ui, app: &mut App) {
                 .suffix("%"),
         );
         if zr.changed() && app.viewport.zoom > 0.0 {
-            app.push_cmd(AppCmd::ZoomStep(
-                (zoom_pct / 100.0) / app.viewport.zoom,
-            ));
+            app.push_cmd(AppCmd::ZoomStep((zoom_pct / 100.0) / app.viewport.zoom));
         }
         zr.on_hover_text("drag or type; double-click to type an exact zoom");
         if ui.small_button("＋").on_hover_text("zoom in").clicked() {
             app.push_cmd(AppCmd::ZoomStep(app.prefs.wheel_step.max(1.02)));
         }
-        if ui.small_button("fit").on_hover_text("fit the page in the window").clicked() {
+        if ui
+            .small_button("fit")
+            .on_hover_text("fit the page in the window")
+            .clicked()
+        {
             app.push_cmd(AppCmd::ZoomFit);
         }
         ui.separator();
@@ -1497,7 +1501,10 @@ pub(super) fn status_bar(ui: &mut egui::Ui, app: &mut App) {
         }
         rr.on_hover_text("view rotation — the page, not the art");
         if app.viewport.rotate_rad.abs() > 1e-4
-            && ui.small_button("0°").on_hover_text("reset rotation").clicked()
+            && ui
+                .small_button("0°")
+                .on_hover_text("reset rotation")
+                .clicked()
         {
             app.push_cmd(AppCmd::RotateReset);
         }

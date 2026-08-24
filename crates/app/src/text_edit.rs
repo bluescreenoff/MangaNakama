@@ -100,8 +100,14 @@ pub enum TextGesture {
     /// double, 3+ = triple), and `base` what that press selected — a
     /// double-click drag extends by whole words, a triple-click drag by whole
     /// lines, and neither collapses when the mouse twitches.
-    Select { clicks: u8, base: (u32, u32) },
-    Box { start: (f32, f32), cur: (f32, f32) },
+    Select {
+        clicks: u8,
+        base: (u32, u32),
+    },
+    Box {
+        start: (f32, f32),
+        cur: (f32, f32),
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -851,9 +857,8 @@ impl App {
         // A single character with a selection to replace, or whitespace, is
         // a boundary — everything else typed run-on coalesces into one undo
         // step. (Pasting is never "typing", however short the paste.)
-        let typing = !ed.has_selection()
-            && s.chars().count() == 1
-            && !s.chars().any(|c| c.is_whitespace());
+        let typing =
+            !ed.has_selection() && s.chars().count() == 1 && !s.chars().any(|c| c.is_whitespace());
         self.snapshot_edit(typing);
         let Some(ed) = self.text_edit.as_ref() else {
             return;
@@ -1032,7 +1037,9 @@ impl App {
     /// (TX-062). An empty field clears whatever reading they carry.
     pub fn text_ruby_button(&mut self) {
         let Some(ed) = self.text_edit.as_ref() else {
-            self.set_status("double-click the text first — furigana applies to selected characters");
+            self.set_status(
+                "double-click the text first — furigana applies to selected characters",
+            );
             return;
         };
         let (a, b) = ed.selection();
@@ -1354,7 +1361,9 @@ impl App {
         if !self.text_object_hit(cx, cy) {
             return false;
         }
-        if clicks >= 2 && let Some((li, ti)) = self.text_sel {
+        if clicks >= 2
+            && let Some((li, ti)) = self.text_sel
+        {
             // The press had already armed a move-drag; editing takes it back.
             self.text_obj_drag = None;
             self.object_pick = None;
@@ -1685,7 +1694,9 @@ mod in_editor_undo_tests {
     }
 
     fn typed(app: &App) -> String {
-        app.edited_item().map(|i| i.text.clone()).unwrap_or_default()
+        app.edited_item()
+            .map(|i| i.text.clone())
+            .unwrap_or_default()
     }
 
     fn type_str(app: &mut App, s: &str) {
@@ -1811,7 +1822,10 @@ mod in_editor_undo_tests {
             (it.pos[0] - 4.0, it.pos[1] + it.size[1] * 0.5)
         };
         app.text_tool_down(x, y, false, 1);
-        assert!(app.text_edit.is_some(), "the session survives the near-miss");
+        assert!(
+            app.text_edit.is_some(),
+            "the session survives the near-miss"
+        );
         assert_eq!(
             app.text_edit.as_ref().unwrap().caret,
             0,
@@ -1893,7 +1907,11 @@ mod in_editor_undo_tests {
             steps,
             "nothing was popped off the document stack"
         );
-        assert_eq!(committed_text(&app), "hi", "and the box still reads what it did");
+        assert_eq!(
+            committed_text(&app),
+            "hi",
+            "and the box still reads what it did"
+        );
     }
 
     /// DEFECT 2 (discrete controls). A Tool Property change during a session
@@ -1914,7 +1932,11 @@ mod in_editor_undo_tests {
         assert_eq!(app.edited_item().unwrap().size_pt, 33.0, "the size applied");
 
         assert!(app.text_key(0x5A, true, false));
-        assert_eq!(typed(&app), "abc", "the press took back the size, not the text");
+        assert_eq!(
+            typed(&app),
+            "abc",
+            "the press took back the size, not the text"
+        );
         assert_eq!(app.edited_item().unwrap().size_pt, before_pt);
 
         assert!(app.text_key(0x5A, true, false));
@@ -1933,7 +1955,11 @@ mod in_editor_undo_tests {
         };
         app.start_new_text([300.0, 300.0], None);
         type_str(&mut app, "abc");
-        let before_pct = app.edited_item().expect("the edited item").ruby_style.size_pct;
+        let before_pct = app
+            .edited_item()
+            .expect("the edited item")
+            .ruby_style
+            .size_pct;
         let steps = app.doc.undo_len();
 
         for k in 0..10u16 {
@@ -1954,7 +1980,11 @@ mod in_editor_undo_tests {
         );
 
         assert!(app.text_key(0x5A, true, false));
-        assert_eq!(typed(&app), "abc", "one press took back the whole drag, not the text");
+        assert_eq!(
+            typed(&app),
+            "abc",
+            "one press took back the whole drag, not the text"
+        );
         assert_eq!(app.edited_item().unwrap().ruby_style.size_pct, before_pct);
 
         assert!(app.text_key(0x5A, true, false));
@@ -2014,15 +2044,9 @@ mod in_editor_undo_tests {
         // Halfway between this caret and the next one is the middle of the
         // glyph, along whichever axis the text reads on.
         let l = if item.vertical {
-            [
-                a.cell[0] + a.cell[2] * 0.5,
-                (a.point[1] + b.point[1]) * 0.5,
-            ]
+            [a.cell[0] + a.cell[2] * 0.5, (a.point[1] + b.point[1]) * 0.5]
         } else {
-            [
-                (a.point[0] + b.point[0]) * 0.5,
-                a.cell[1] + a.cell[3] * 0.5,
-            ]
+            [(a.point[0] + b.point[0]) * 0.5, a.cell[1] + a.cell[3] * 0.5]
         };
         let p = item.to_canvas(l);
         (p[0], p[1])
@@ -2230,7 +2254,11 @@ mod in_editor_undo_tests {
         app.text_key(0x27, false, false); // Right, so the caret is at 1
         assert_eq!(app.text_edit.as_ref().unwrap().caret, 1);
         app.text_key(0x26, false, false); // Up on line 1
-        assert_eq!(app.text_edit.as_ref().unwrap().caret, 0, "to the very start");
+        assert_eq!(
+            app.text_edit.as_ref().unwrap().caret,
+            0,
+            "to the very start"
+        );
 
         app.text_key(0x23, true, false); // Ctrl+End
         let len = app.edited_item().unwrap().utf16_len();

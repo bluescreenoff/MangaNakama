@@ -50,7 +50,8 @@ impl App {
         };
         let before = self.doc.layers.clone();
         let active = self.doc.active;
-        self.doc.record_structure("Apply layer comp", before, active);
+        self.doc
+            .record_structure("Apply layer comp", before, active);
         self.comp_last_state = Some(mn_core::doc::LayerComp::capture("", &self.doc.layers));
         c.apply_to(&mut self.doc.layers, Some(self.comp_added_visible));
         self.comp_selected = Some(i);

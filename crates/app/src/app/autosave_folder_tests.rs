@@ -106,16 +106,12 @@ fn a_saved_single_file_work_still_autosaves_beside_itself() {
     // Give it a real path by saving single-file (the inline build the
     // Autosave sibling arm itself uses; App has no `as_project` — that is
     // the parked-session encoder).
-    let dir = std::env::temp_dir().join(format!(
-        "mn-autosave-folder-{}-saved",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("mn-autosave-folder-{}-saved", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let doc = dir.join("shadowed.mnc");
     app.stash_current_page().unwrap();
-    let mut proj =
-        mn_core::Project::new(app.story.clone(), app.page.clone(), app.binding_right);
+    let mut proj = mn_core::Project::new(app.story.clone(), app.page.clone(), app.binding_right);
     proj.pages = app
         .pages
         .iter()

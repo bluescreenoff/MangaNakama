@@ -164,8 +164,16 @@ mod tests {
     #[test]
     fn hex_rejects_what_it_cannot_read_exactly() {
         for s in [
-            "", "#", "#ff00", "#ff00000", "#gggggg", "#ff0000ff", // alpha we'd have to drop
-            "#ff 00 00", "rgb(1,2,3)", "#+f0000", "0x00ff00",
+            "",
+            "#",
+            "#ff00",
+            "#ff00000",
+            "#gggggg",
+            "#ff0000ff", // alpha we'd have to drop
+            "#ff 00 00",
+            "rgb(1,2,3)",
+            "#+f0000",
+            "0x00ff00",
         ] {
             assert_eq!(parse_hex(s), None, "{s} must not parse");
         }

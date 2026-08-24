@@ -52,7 +52,10 @@ fn layer_alpha(app: &App, li: usize) -> u64 {
 fn a_stroke_records_and_undoes_as_one_step() {
     let Some(mut app) = vector_app() else { return };
     let li = app.doc.active;
-    assert!(app.doc.layers[li].strokes.is_some(), "AddVectorLayer arms it");
+    assert!(
+        app.doc.layers[li].strokes.is_some(),
+        "AddVectorLayer arms it"
+    );
 
     drag(&mut app, 200.0);
     assert!(layer_alpha(&app, li) > 0, "the stroke inked normally");
@@ -170,7 +173,10 @@ fn translating_a_stroke_moves_ink_and_geometry_as_one_step() {
     // Grab the stroke mid-body (a sample point sits at x=120,y=200) and
     // drag 40 px right through the real press/move/release path.
     app.tool = Tool::Object;
-    assert!(app.vector_hit(120.0, 200.0, false), "the stroke takes the press");
+    assert!(
+        app.vector_hit(120.0, 200.0, false),
+        "the stroke takes the press"
+    );
     assert!(app.vector_drag_move(160.0, 200.0));
     assert!(app.vector_drag_release());
 
@@ -201,9 +207,13 @@ fn translating_a_stroke_moves_ink_and_geometry_as_one_step() {
         .tiles()
         .map(|(idx, t)| (idx, t.data().to_vec()))
         .collect();
-    assert_eq!(tiles_after_undo, tiles_before, "undo restores the ink exactly");
     assert_eq!(
-        app.doc.layers[li].strokes.as_ref().unwrap().strokes[0], geom_before,
+        tiles_after_undo, tiles_before,
+        "undo restores the ink exactly"
+    );
+    assert_eq!(
+        app.doc.layers[li].strokes.as_ref().unwrap().strokes[0],
+        geom_before,
         "…and the geometry, same step"
     );
     crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::Redo);
@@ -226,11 +236,17 @@ fn a_point_drag_deforms_locally() {
     app.tool = Tool::Object;
     // Grab exactly the first sample (x=60) and pull it up 30 px.
     assert!(app.vector_hit(60.0, 200.0, false));
-    assert!(app.vector_drag.as_ref().unwrap().point.is_some(), "point grab");
+    assert!(
+        app.vector_drag.as_ref().unwrap().point.is_some(),
+        "point grab"
+    );
     assert!(app.vector_drag_move(60.0, 170.0));
     assert!(app.vector_drag_release());
     let s = &app.doc.layers[li].strokes.as_ref().unwrap().strokes[0];
-    assert!((s.points[0].1 - 170.0).abs() < 1.0, "the grabbed point followed");
+    assert!(
+        (s.points[0].1 - 170.0).abs() < 1.0,
+        "the grabbed point followed"
+    );
     let far = s.points.last().unwrap();
     assert!(
         (far.1 - 200.0).abs() < 1e-3,
@@ -265,7 +281,10 @@ fn the_eraser_trims_to_the_crossings_and_undoes_as_one() {
     };
     vert(&mut app, 100.0);
     vert(&mut app, 190.0);
-    assert_eq!(app.doc.layers[li].strokes.as_ref().unwrap().strokes.len(), 3);
+    assert_eq!(
+        app.doc.layers[li].strokes.as_ref().unwrap().strokes.len(),
+        3
+    );
     let tiles_before: std::collections::BTreeMap<TileIdx, Vec<u16>> = app.doc.layers[li]
         .tiles()
         .map(|(idx, t)| (idx, t.data().to_vec()))
@@ -291,8 +310,16 @@ fn the_eraser_trims_to_the_crossings_and_undoes_as_one() {
     app.end_stroke();
 
     let set = app.doc.layers[li].strokes.as_ref().unwrap();
-    assert_eq!(set.strokes.len(), 4, "split into two pieces + two verticals");
-    assert_eq!(app.doc.undo_len(), steps_before + 1, "one step for the trim");
+    assert_eq!(
+        set.strokes.len(),
+        4,
+        "split into two pieces + two verticals"
+    );
+    assert_eq!(
+        app.doc.undo_len(),
+        steps_before + 1,
+        "one step for the trim"
+    );
     let alpha_at = |app: &App, x: i32, y: i32| -> u16 {
         let idx = TileIdx::of_pixel(x, y);
         app.doc.layers[li]
@@ -300,7 +327,11 @@ fn the_eraser_trims_to_the_crossings_and_undoes_as_one() {
             .map(|t| t.pixel((x - idx.origin().0) as usize, (y - idx.origin().1) as usize)[3])
             .unwrap_or(0)
     };
-    assert_eq!(alpha_at(&app, 150, 200), 0, "the trimmed span's ink is gone");
+    assert_eq!(
+        alpha_at(&app, 150, 200),
+        0,
+        "the trimmed span's ink is gone"
+    );
     assert!(alpha_at(&app, 70, 200) > 0, "the left piece survives");
     assert!(alpha_at(&app, 220, 200) > 0, "the right piece survives");
     assert!(alpha_at(&app, 100, 170) > 0, "the verticals survive");
@@ -344,7 +375,10 @@ fn an_eraser_miss_spends_nothing() {
     app.end_stroke();
     assert_eq!(app.doc.undo_len(), steps_before, "no step spent");
     assert_eq!(layer_alpha(&app, li), alpha_before, "no ink changed");
-    assert_eq!(app.doc.layers[li].strokes.as_ref().unwrap().strokes.len(), 1);
+    assert_eq!(
+        app.doc.layers[li].strokes.as_ref().unwrap().strokes.len(),
+        1
+    );
 }
 
 /// Phase 4: Alt-drag re-widths — dragging DOWN thins the pressure channel
@@ -376,17 +410,24 @@ fn alt_drag_rewidths_locally_and_undoes_as_one() {
     let steps_before = app.doc.undo_len();
 
     app.tool = Tool::Object;
-    assert!(app.vector_hit(150.0, 200.0, true), "alt grab takes the stroke");
+    assert!(
+        app.vector_hit(150.0, 200.0, true),
+        "alt grab takes the stroke"
+    );
     assert!(app.vector_drag.as_ref().unwrap().width);
     assert!(app.vector_drag_move(150.0, 300.0)); // 100 px down = half width
     assert!(app.vector_drag_release());
 
     let s = &app.doc.layers[li].strokes.as_ref().unwrap().strokes[0];
-    let near = s.points.iter().min_by(|a, b| {
-        (a.0 - 150.0).abs().total_cmp(&(b.0 - 150.0).abs())
-    });
+    let near = s
+        .points
+        .iter()
+        .min_by(|a, b| (a.0 - 150.0).abs().total_cmp(&(b.0 - 150.0).abs()));
     assert!(near.unwrap().2 < 0.55, "pressure halved at the grab");
-    assert!((s.points[0].2 - 0.9).abs() < 1e-3, "the far end kept its width");
+    assert!(
+        (s.points[0].2 - 0.9).abs() < 1e-3,
+        "the far end kept its width"
+    );
     assert_eq!(app.doc.undo_len(), steps_before + 1);
     assert!(
         col_alpha(&app, 150) < mid_before,
@@ -413,10 +454,16 @@ fn deleting_a_selected_stroke_is_one_step() {
     app.vector_drag = None; // press selected; no drag
     let si = app.vector_sel.unwrap();
     crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::VectorDelete { stroke: si });
-    assert_eq!(app.doc.layers[li].strokes.as_ref().unwrap().strokes.len(), 0);
+    assert_eq!(
+        app.doc.layers[li].strokes.as_ref().unwrap().strokes.len(),
+        0
+    );
     assert_eq!(layer_alpha(&app, li), 0);
     crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::Undo);
-    assert_eq!(app.doc.layers[li].strokes.as_ref().unwrap().strokes.len(), 1);
+    assert_eq!(
+        app.doc.layers[li].strokes.as_ref().unwrap().strokes.len(),
+        1
+    );
     assert!(layer_alpha(&app, li) > 0);
 }
 
@@ -441,7 +488,11 @@ fn drawing_selects_the_newest_stroke() {
     drag(&mut app, 260.0);
     let count = |app: &App| app.doc.layers[li].strokes.as_ref().unwrap().strokes.len();
     assert_eq!(count(&app), 2);
-    assert_eq!(app.vector_sel, Some(1), "the newest stroke is the selected one");
+    assert_eq!(
+        app.vector_sel,
+        Some(1),
+        "the newest stroke is the selected one"
+    );
 
     // Undo the newest stroke: the selection must not dangle past the set.
     crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::Undo);
@@ -463,7 +514,10 @@ fn plain_layers_do_not_record() {
     assert!(app.doc.layers[li].strokes.is_none());
     drag(&mut app, 240.0);
     assert!(layer_alpha(&app, li) > 0);
-    assert_eq!(app.vector_sel, None, "a non-recording stroke selects nothing");
+    assert_eq!(
+        app.vector_sel, None,
+        "a non-recording stroke selects nothing"
+    );
     crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::Undo);
     assert_eq!(layer_alpha(&app, li), 0);
 }

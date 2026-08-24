@@ -232,7 +232,6 @@ mod tests {
         assert_eq!(title_case(""), "");
     }
 
-
     /// The owner's own numbers: CSP's "15" and our "0.64 mm" are the same
     /// border at 600 dpi, and the label says both.
     #[test]

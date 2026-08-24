@@ -1307,8 +1307,16 @@ mod tests {
         };
         let out = post(cfg, 1.0, &straight(200));
         assert!((out[0].pressure - 0.2).abs() < 1e-4, "{}", out[0].pressure);
-        assert!((out[25].pressure - 0.6).abs() < 1e-3, "{}", out[25].pressure);
-        assert!((out[60].pressure - 1.0).abs() < 1e-4, "{}", out[60].pressure);
+        assert!(
+            (out[25].pressure - 0.6).abs() < 1e-3,
+            "{}",
+            out[25].pressure
+        );
+        assert!(
+            (out[60].pressure - 1.0).abs() < 1e-4,
+            "{}",
+            out[60].pressure
+        );
         // The entry ramp is causal — it must not hold ink back.
         let mut pc = PostCorrect::new();
         pc.set_cfg(cfg);
@@ -1356,7 +1364,11 @@ mod tests {
         };
         let out = post(cfg, 1.0, &straight(200));
         assert!((out[0].pressure - 1.0).abs() < 1e-4, "{}", out[0].pressure);
-        assert!((out[50].pressure - 0.65).abs() < 1e-3, "{}", out[50].pressure);
+        assert!(
+            (out[50].pressure - 0.65).abs() < 1e-3,
+            "{}",
+            out[50].pressure
+        );
         assert!((out[100].pressure - 0.3).abs() < 1e-4);
         assert!((out[199].pressure - 0.3).abs() < 1e-4, "fade must hold");
         // And it costs nothing: Fade never buffers.
@@ -1373,7 +1385,9 @@ mod tests {
             se_by_speed: true,
             ..Default::default()
         };
-        let slow: Vec<PenSample> = (0..200).map(|i| t(i as f32, 0.0, i as f64 * 60.0)).collect();
+        let slow: Vec<PenSample> = (0..200)
+            .map(|i| t(i as f32, 0.0, i as f64 * 60.0))
+            .collect();
         let fast: Vec<PenSample> = (0..200).map(|i| t(i as f32, 0.0, i as f64 * 0.5)).collect();
         let a = post(cfg, 1.0, &slow)[50].pressure;
         let b = post(cfg, 1.0, &fast)[50].pressure;

@@ -430,13 +430,11 @@ fn asterisk_on(cu: f32, cv: f32, ink: f32, cell: f32) -> bool {
     let half = cell * (A - disc.sqrt()) / (2.0 * B) * 0.5;
     // Distance from each bar's centre line: |−cu·sin θ + cv·cos θ|.
     const SPOKES: [(f32, f32); 3] = [
-        (0.0, 1.0),                    // 0°
-        (0.866_025_4, 0.5),            // 60°
-        (0.866_025_4, -0.5),           // 120°
+        (0.0, 1.0),          // 0°
+        (0.866_025_4, 0.5),  // 60°
+        (0.866_025_4, -0.5), // 120°
     ];
-    SPOKES
-        .iter()
-        .any(|(s, c)| (-cu * s + cv * c).abs() <= half)
+    SPOKES.iter().any(|(s, c)| (-cu * s + cv * c).abs() <= half)
 }
 
 /// Inner/outer radius ratio of the five-pointed star, picked so its area law
@@ -725,7 +723,11 @@ mod tests {
         let c = rasterize_tile(&flat_source(0.4), (0, 0), &whole, 600);
         for y in 0..TILE_SIZE {
             for x in 0..TILE_SIZE {
-                assert_eq!(a.pixel(x, y), c.pixel(x, y), "a full-cell offset moved the screen");
+                assert_eq!(
+                    a.pixel(x, y),
+                    c.pixel(x, y),
+                    "a full-cell offset moved the screen"
+                );
             }
         }
     }
@@ -750,7 +752,11 @@ mod tests {
                 .count()
         };
         let n = TILE_SIZE * TILE_SIZE;
-        assert_eq!(agree(&a, &b), n, "identical params must be identical rasters");
+        assert_eq!(
+            agree(&a, &b),
+            n,
+            "identical params must be identical rasters"
+        );
         assert!(
             agree(&a, &c) < n * 9 / 10,
             "the offset screen still lines up with the original"
@@ -785,7 +791,10 @@ mod tests {
             posterize: Some(4),
             ..Default::default()
         };
-        assert!(levels(&smooth) > 40, "the ramp was not continuous to begin with");
+        assert!(
+            levels(&smooth) > 40,
+            "the ramp was not continuous to begin with"
+        );
         assert_eq!(levels(&stepped), 4, "4 steps means 4 distinct densities");
 
         // And it still rasterizes: a mid-grey posterized to 4 steps is one of

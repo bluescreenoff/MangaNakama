@@ -55,7 +55,10 @@ fn chip_rows(ui: &mut egui::Ui, app: &mut App) {
             }
             let sel = app.material_filter == MaterialFilter::Type(ty);
             if ui
-                .selectable_label(sel, egui::RichText::new(format!("{} {n}", ty.label())).small())
+                .selectable_label(
+                    sel,
+                    egui::RichText::new(format!("{} {n}", ty.label())).small(),
+                )
                 .clicked()
             {
                 app.material_filter = if sel {
@@ -84,8 +87,7 @@ fn chip_rows(ui: &mut egui::Ui, app: &mut App) {
     if !top.is_empty() && !search_active {
         ui.horizontal_wrapped(|ui| {
             for (t, n) in top {
-                let sel =
-                    app.material_filter == MaterialFilter::Tag(t.clone());
+                let sel = app.material_filter == MaterialFilter::Tag(t.clone());
                 if ui
                     .selectable_label(sel, egui::RichText::new(format!("{t} {n}")).small())
                     .clicked()
@@ -181,9 +183,7 @@ fn bottom_bar(ui: &mut egui::Ui, app: &mut App) {
         {
             app.push_cmd(AppCmd::MaterialRegisterLayer);
         }
-        if ui
-            .small_button("Add folder…")
-            .clicked()
+        if ui.small_button("Add folder…").clicked()
             && let Some(p) = rfd::FileDialog::new()
                 .set_title("Add material folder")
                 .pick_folder()
@@ -200,7 +200,10 @@ fn bottom_bar(ui: &mut egui::Ui, app: &mut App) {
 /// reservation either way — a strip you have to scroll to is not a strip —
 /// but the empty state is one line, not four.
 fn info_height(app: &App) -> f32 {
-    if app.material_selected.is_some_and(|i| i < app.materials.len()) {
+    if app
+        .material_selected
+        .is_some_and(|i| i < app.materials.len())
+    {
         INFO_H
     } else {
         INFO_H_EMPTY
@@ -440,8 +443,10 @@ fn tree_column(ui: &mut egui::Ui, app: &mut App, height: f32) {
                             // before it reads the word.
                             if let MaterialFilter::Type(ty) = &filter {
                                 if let Some(icon) = material_type_icon(*ty) {
-                                    let (rect, _) =
-                                        ui.allocate_exact_size(vec2(12.0, 12.0), egui::Sense::hover());
+                                    let (rect, _) = ui.allocate_exact_size(
+                                        vec2(12.0, 12.0),
+                                        egui::Sense::hover(),
+                                    );
                                     let col = ui.visuals().widgets.inactive.fg_stroke.color;
                                     super::icons::paint(ui.painter(), rect, icon, col);
                                 }
@@ -487,8 +492,7 @@ fn visible_order(app: &App) -> Vec<usize> {
     let mut order: Vec<usize> = (0..app.materials.len())
         .filter(|&i| {
             (show_pose3d
-                || app.materials[i].material_type
-                    != crate::app::materials::MaterialType::Pose3d)
+                || app.materials[i].material_type != crate::app::materials::MaterialType::Pose3d)
                 && app.material_filter.accepts(&app.materials[i])
                 && crate::app::materials::material_matches(&app.materials[i], &search)
         })
@@ -847,9 +851,7 @@ fn info_strip(ui: &mut egui::Ui, app: &mut App) {
             ui.separator();
             ui.vertical(|ui| {
                 ui.label(egui::RichText::new("paste").small().weak());
-                let mut p = app
-                    .material_paste_selected()
-                    .unwrap_or_default();
+                let mut p = app.material_paste_selected().unwrap_or_default();
                 let is_tone_material = app
                     .material_selected
                     .and_then(|i| app.materials.get(i))
@@ -874,9 +876,7 @@ fn info_strip(ui: &mut egui::Ui, app: &mut App) {
                             .selected_text(label)
                             .show_ui(ui, |ui| {
                                 for (w, v) in PASTE_SIZE_WORDS {
-                                    changed |= ui
-                                        .selectable_value(&mut size, v, w)
-                                        .changed();
+                                    changed |= ui.selectable_value(&mut size, v, w).changed();
                                 }
                             });
                         if size != p.size.unwrap_or(app.material_size) {
@@ -893,7 +893,11 @@ fn info_strip(ui: &mut egui::Ui, app: &mut App) {
                         app.material_set_paste_selected(Default::default());
                     }
                     if !p.any() {
-                        ui.label(egui::RichText::new("using the palette defaults").small().weak());
+                        ui.label(
+                            egui::RichText::new("using the palette defaults")
+                                .small()
+                                .weak(),
+                        );
                     }
                 });
                 // A tone material's NUMBERS, editable in place: the info
@@ -913,7 +917,10 @@ const PASTE_SIZE_WORDS: [(&str, crate::app::MaterialPasteSize); 5] = [
     ("adjust after", crate::app::MaterialPasteSize::AdjustAfter),
     ("expand in full", crate::app::MaterialPasteSize::ExpandFull),
     ("fit to scale", crate::app::MaterialPasteSize::FitToScale),
-    ("to destination", crate::app::MaterialPasteSize::ToDestination),
+    (
+        "to destination",
+        crate::app::MaterialPasteSize::ToDestination,
+    ),
 ];
 
 fn paste_size_word(s: crate::app::MaterialPasteSize) -> &'static str {
@@ -927,9 +934,15 @@ fn paste_size_word(s: crate::app::MaterialPasteSize) -> &'static str {
 /// Density / frequency / angle for the selected TONE material, written
 /// straight into its `.tone.json` (write_tone_spec's production debut).
 fn tone_settings(ui: &mut egui::Ui, app: &mut App, name: &str) {
-    let Some(i) = app.material_selected else { return };
-    let Some(m) = app.materials.get(i) else { return };
-    let Some(mut spec) = m.tone_spec() else { return };
+    let Some(i) = app.material_selected else {
+        return;
+    };
+    let Some(m) = app.materials.get(i) else {
+        return;
+    };
+    let Some(mut spec) = m.tone_spec() else {
+        return;
+    };
     ui.label(egui::RichText::new("tone").small().weak());
     let mut changed = false;
     ui.horizontal(|ui| {
@@ -975,15 +988,18 @@ fn tone_settings(ui: &mut egui::Ui, app: &mut App, name: &str) {
     });
     if changed
         && let Some(dir) = m.path.parent()
-        && let Some(_) =
-            crate::app::materials::write_tone_spec(dir, name, &spec)
+        && let Some(_) = crate::app::materials::write_tone_spec(dir, name, &spec)
     {
         // The bank entry follows the sidecar in place — a full rescan
         // would throw away every decoded thumbnail for one number.
         if let Some(m) = app.materials.get_mut(i) {
             m.kind = crate::app::materials::MaterialKind::Tone(spec);
         }
-        app.set_status(format!("tone {name}: {} % @ {:.1} lpi", (spec.density * 100.0) as u32, spec.tone.lpi));
+        app.set_status(format!(
+            "tone {name}: {} % @ {:.1} lpi",
+            (spec.density * 100.0) as u32,
+            spec.tone.lpi
+        ));
     }
 }
 

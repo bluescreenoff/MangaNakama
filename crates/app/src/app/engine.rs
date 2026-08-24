@@ -961,8 +961,8 @@ mod preset_engine_tests {
                 "{name} lost its mn-engine key"
             );
         }
-        let pen = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../assets/brushes/classic/pen.myb");
+        let pen =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/brushes/classic/pen.myb");
         assert!(
             preset_engine(&pen).is_none(),
             "an ordinary preset must stay on the MyPaint path"

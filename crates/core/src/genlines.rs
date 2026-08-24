@@ -336,7 +336,11 @@ pub fn render_speed(p: &SpeedLinesParams, size: (u32, u32)) -> HashMap<TileIdx, 
     let mut offsets: Vec<f32> = Vec::new();
     if p.gap_px > 0.0 {
         let gap = p.gap_px.max(0.25);
-        let ggap = if p.group > 1 { p.group_gap.max(1.0) } else { 1.0 };
+        let ggap = if p.group > 1 {
+            p.group_gap.max(1.0)
+        } else {
+            1.0
+        };
         let mut t = lo;
         let mut i = 0u32;
         while t <= hi && (offsets.len() as u32) < MAX_RUNS {
@@ -680,17 +684,19 @@ mod tests {
         // `pre_flash_specs_load_with_the_old_meaning`, which compares the
         // spec's raster to explicit params rather than to a constant.)
         assert_eq!(
-            fingerprint(&GenLinesSpec {
-                focus: false,
-                a: 20.0,
-                b: 100.0,
-                c: 300.0,
-                count: 80,
-                width: 4.0,
-                seed: 3,
-                ..Default::default()
-            }
-            .render((512, 512))),
+            fingerprint(
+                &GenLinesSpec {
+                    focus: false,
+                    a: 20.0,
+                    b: 100.0,
+                    c: 300.0,
+                    count: 80,
+                    width: 4.0,
+                    seed: 3,
+                    ..Default::default()
+                }
+                .render((512, 512))
+            ),
             (57, 25119, 6_096_450_357_538_070_854)
         );
     }
@@ -787,9 +793,7 @@ mod tests {
             seed: 7,
         };
         let cross = |m: &HashMap<TileIdx, Arc<Tile>>, x: i32| {
-            (0..40)
-                .filter(|dy| ink_at(m, x, 256 - 20 + dy))
-                .count() as i32
+            (0..40).filter(|dy| ink_at(m, x, 256 - 20 + dy)).count() as i32
         };
         let flat = render_focus(&p(0.0), (512, 512));
         assert_eq!(

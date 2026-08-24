@@ -659,7 +659,11 @@ mod tests {
             let (start, opp) = (d.bbox[2], d.bbox[0]);
             let g = press(&d, start, false);
             d.apply_gesture(&g, [start[0] + 40.0, start[1] + 25.0], false, false, false);
-            assert!(near(d.bbox[0], opp), "opposite corner moved: {:?}", d.bbox[0]);
+            assert!(
+                near(d.bbox[0], opp),
+                "opposite corner moved: {:?}",
+                d.bbox[0]
+            );
         }
     }
 
@@ -673,7 +677,11 @@ mod tests {
             let to = [start[0] + 40.0, start[1] + 25.0];
             let g = press(&d, start, false);
             d.apply_gesture(&g, to, false, false, false);
-            assert!(near(d.bbox[2], to), "corner off the pointer: {:?}", d.bbox[2]);
+            assert!(
+                near(d.bbox[2], to),
+                "corner off the pointer: {:?}",
+                d.bbox[2]
+            );
         }
     }
 
@@ -728,7 +736,10 @@ mod tests {
         d.apply_gesture(&g, [start[0] + 50.0, start[1] + 30.0], false, true, false);
         assert!(near(d.xform.apply(pivot), pivot), "the pivot held still");
         assert!(!near(d.bbox[0], opp), "the opposite corner moved too");
-        assert!((d.tx, d.ty) == (0.0, 0.0), "Alt keeps the press translation");
+        assert!(
+            (d.tx, d.ty) == (0.0, 0.0),
+            "Alt keeps the press translation"
+        );
     }
 
     /// Shift snaps a rotation drag to 45° steps (a 40° pull lands on 45).
@@ -740,7 +751,13 @@ mod tests {
         let g = press(&d, start, false);
         assert_eq!(g.grab, TransformGrab::Rotate);
         let a = 40.0f32.to_radians();
-        d.apply_gesture(&g, [c[0] + 100.0 * a.cos(), c[1] + 100.0 * a.sin()], true, false, false);
+        d.apply_gesture(
+            &g,
+            [c[0] + 100.0 * a.cos(), c[1] + 100.0 * a.sin()],
+            true,
+            false,
+            false,
+        );
         assert!(
             (d.rad - std::f32::consts::FRAC_PI_4).abs() < 1e-4,
             "snapped to {}°",

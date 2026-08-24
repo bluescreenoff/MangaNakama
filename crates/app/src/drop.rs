@@ -125,14 +125,21 @@ mod tests {
         let (cmds, _) = plan(&[p("a/one.png"), p("a/two.JPG"), p("a/three.webp")]);
         assert_eq!(cmds.len(), 3);
         assert!(is_import(&cmds[0], "a/one.png"));
-        assert!(is_import(&cmds[1], "a/two.JPG"), "extension match is case-insensitive");
+        assert!(
+            is_import(&cmds[1], "a/two.JPG"),
+            "extension match is case-insensitive"
+        );
         assert!(is_import(&cmds[2], "a/three.webp"));
     }
 
     #[test]
     fn a_project_opens_and_wins_over_images_in_the_same_drop() {
         let (cmds, note) = plan(&[p("ref/photo.png"), p("work/ch1.ora")]);
-        assert_eq!(cmds.len(), 1, "opening a document is not something to do twice");
+        assert_eq!(
+            cmds.len(),
+            1,
+            "opening a document is not something to do twice"
+        );
         assert!(matches!(&cmds[0], AppCmd::OpenOraPath(q) if q == &p("work/ch1.ora")));
         assert!(note.is_none());
     }
@@ -142,7 +149,10 @@ mod tests {
         let (cmds, note) = plan(&[p("notes/script.txt")]);
         assert!(cmds.is_empty());
         let note = note.expect("a drop that does nothing must say why");
-        assert!(note.contains("script.txt"), "name the file the user dropped: {note}");
+        assert!(
+            note.contains("script.txt"),
+            "name the file the user dropped: {note}"
+        );
         assert!(note.contains("png"), "say what we DO take: {note}");
     }
 

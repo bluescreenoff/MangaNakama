@@ -173,9 +173,13 @@ fn all_pages_row(ui: &mut egui::Ui, app: &mut App) {
     let why = if pages < 2 {
         Some("this work has one page")
     } else if !app.batch.scope.travels_to_other_pages() {
-        Some("that scope reads the open page's active folder or picked rows — another page has neither. Use All or a name scope.")
+        Some(
+            "that scope reads the open page's active folder or picked rows — another page has neither. Use All or a name scope.",
+        )
     } else if app.batch.op == BatchOp::ExportPngs {
-        Some("export writes the open page's layers; the File menu's Export All Pages does the whole work")
+        Some(
+            "export writes the open page's layers; the File menu's Export All Pages does the whole work",
+        )
     } else {
         None
     };

@@ -129,7 +129,8 @@ pub unsafe fn read_pen_batch(hwnd: HWND, pointer_id: u32) -> PenBatch {
     let pressure_reported = newest.is_some_and(|pi| pi.penMask & PEN_MASK_PRESSURE != 0);
     let tilt_reported =
         newest.is_some_and(|pi| pi.penMask & (PEN_MASK_TILT_X | PEN_MASK_TILT_Y) != 0);
-    let inverted = newest.is_some_and(|pi| pi.penFlags & (PEN_FLAG_INVERTED | PEN_FLAG_ERASER) != 0);
+    let inverted =
+        newest.is_some_and(|pi| pi.penFlags & (PEN_FLAG_INVERTED | PEN_FLAG_ERASER) != 0);
 
     // (3) Drop samples where the pen is not actually touching. The down-event
     // history can include hover entries whose pressure is 0 — the old code

@@ -787,9 +787,8 @@ mod tests {
         // Grey source over grey dest, both OPAQUE (alpha 1, so premultiplied
         // == straight): the general frame reduces to B(cs, cb), and one
         // channel is the whole story.
-        let b = |m: Blend, cs: f32, cb: f32| {
-            blend_premul(m, [cs, cs, cs, 1.0], [cb, cb, cb, 1.0])[0]
-        };
+        let b =
+            |m: Blend, cs: f32, cb: f32| blend_premul(m, [cs, cs, cs, 1.0], [cb, cb, cb, 1.0])[0];
         // The mirror identity below inverts both operands, and `1 - (1 - x)`
         // is not `x` in f32; the slack absorbs that, not a formula error.
         let close5 = |a: f32, b: f32| (a - b).abs() < 1e-5;
@@ -847,9 +846,8 @@ mod tests {
 
     #[test]
     fn part3_separable_are_hand_computable() {
-        let one = |m: Blend, cs: f32, cb: f32| {
-            blend_premul(m, [cs, cs, cs, 1.0], [cb, cb, cb, 1.0])[0]
-        };
+        let one =
+            |m: Blend, cs: f32, cb: f32| blend_premul(m, [cs, cs, cs, 1.0], [cb, cb, cb, 1.0])[0];
         // Colour burn cannot darken a white base, and burns to black under a
         // black blend colour.
         assert!(close(one(Blend::ColorBurn, 0.0, 1.0), 1.0));
@@ -865,7 +863,10 @@ mod tests {
         assert!(close(one(Blend::ColorDodge, 0.25, 0.5), 2.0 / 3.0));
         assert!(close(one(Blend::ColorDodge, 0.9, 0.0), 0.0));
         assert!(one(Blend::GlowDodge, 0.9, 0.0) > 0.99, "glow lifts black");
-        assert!(close(one(Blend::GlowDodge, 0.0, 0.4), 0.4), "identity at cs=0");
+        assert!(
+            close(one(Blend::GlowDodge, 0.0, 0.4), 0.4),
+            "identity at cs=0"
+        );
         // Divide: base over an equal blend is white; a black blend channel
         // is an infinite quotient, which saturates rather than exploding.
         assert!(close(one(Blend::Divide, 0.5, 0.5), 1.0));
@@ -884,9 +885,15 @@ mod tests {
         // .3*.8+.59*.2+.11*.2 = .38; dest lum .3*.2+.59*.7+.11*.2 = .494.
         let (s, d) = ([0.8, 0.2, 0.2, 1.0], [0.2, 0.7, 0.2, 1.0]);
         let out = blend_premul(Blend::DarkerColor, s, d);
-        assert!(approx(out, s), "darker color takes the source whole: {out:?}");
+        assert!(
+            approx(out, s),
+            "darker color takes the source whole: {out:?}"
+        );
         let out = blend_premul(Blend::LighterColor, s, d);
-        assert!(approx(out, d), "lighter color takes the dest whole: {out:?}");
+        assert!(
+            approx(out, d),
+            "lighter color takes the dest whole: {out:?}"
+        );
         // The contrast with per-channel Darken, which emits a colour that is
         // in NEITHER layer — this is the pair the two modes exist to
         // distinguish, and the row a CSP user reads the manual for.
@@ -904,7 +911,11 @@ mod tests {
         assert!(close5(lum(out), lum(d)), "Color takes the dest's: {out:?}");
         // On greyscale there is no hue to carry, so Brightness is just the
         // source — the sanity check that the operands are not swapped.
-        let out = blend_premul(Blend::Luminosity, [0.25, 0.25, 0.25, 1.0], [0.75, 0.75, 0.75, 1.0]);
+        let out = blend_premul(
+            Blend::Luminosity,
+            [0.25, 0.25, 0.25, 1.0],
+            [0.75, 0.75, 0.75, 1.0],
+        );
         assert!(approx(out, [0.25, 0.25, 0.25, 1.0]), "{out:?}");
     }
 
@@ -1111,7 +1122,10 @@ mod layer_colour_tests {
         assert!((g[0] as i32 - 10923).abs() <= 2, "mean of 1,0,0: {}", g[0]);
         // Mono: dark ink goes to black-at-full-alpha, light ink to white,
         // and a soft edge (alpha 40 %) drops out entirely.
-        assert_eq!(expression_reduce([0, 0, 0, 32768], E::Mono), [0, 0, 0, 32768]);
+        assert_eq!(
+            expression_reduce([0, 0, 0, 32768], E::Mono),
+            [0, 0, 0, 32768]
+        );
         assert_eq!(
             expression_reduce([32768; 4], E::Mono),
             [32768, 32768, 32768, 32768]

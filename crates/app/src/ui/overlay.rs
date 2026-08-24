@@ -960,8 +960,10 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
                         2 => (0.0, -1.0),
                         _ => (0.0, 1.0),
                     };
-                    let back = egui::pos2(tip.x - dx * 10.0 - dy * 5.0, tip.y - dy * 10.0 + dx * 5.0);
-                    let back2 = egui::pos2(tip.x - dx * 10.0 + dy * 5.0, tip.y - dy * 10.0 - dx * 5.0);
+                    let back =
+                        egui::pos2(tip.x - dx * 10.0 - dy * 5.0, tip.y - dy * 10.0 + dx * 5.0);
+                    let back2 =
+                        egui::pos2(tip.x - dx * 10.0 + dy * 5.0, tip.y - dy * 10.0 - dx * 5.0);
                     painter.line_segment([back, tip], egui::Stroke::new(2.2, yellow));
                     painter.line_segment([back2, tip], egui::Stroke::new(2.2, yellow));
                 }
@@ -1041,8 +1043,10 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
                     );
                 }
                 // Rotation lollipop above the box's top edge.
-                let lolly =
-                    egui::pos2(boxr.center().x, boxr.top() - crate::app::ROTATE_STALK_SCREEN);
+                let lolly = egui::pos2(
+                    boxr.center().x,
+                    boxr.top() - crate::app::ROTATE_STALK_SCREEN,
+                );
                 painter.line_segment(
                     [egui::pos2(boxr.center().x, boxr.top()), lolly],
                     egui::Stroke::new(1.2, theme::c().accent),

@@ -328,7 +328,11 @@ pub fn save_psd<W: Write>(doc: &Document, mut out: W) -> Result<(), PsdError> {
         if l.folder {
             // The header closes the group it owns.
             depth = l.depth;
-            let blend = if l.through { b"pass" } else { blend_key(l.blend) };
+            let blend = if l.through {
+                b"pass"
+            } else {
+                blend_key(l.blend)
+            };
             push_layer(
                 &mut records,
                 &mut channels,
@@ -390,7 +394,8 @@ pub fn save_psd<W: Write>(doc: &Document, mut out: W) -> Result<(), PsdError> {
         layer_info.push(0);
     }
     let section_len = 4 + layer_info.len() + 4; // layer info + global mask
-    out.write_all(&(section_len as u32).to_be_bytes()).map_err(e)?;
+    out.write_all(&(section_len as u32).to_be_bytes())
+        .map_err(e)?;
     out.write_all(&(layer_info.len() as u32).to_be_bytes())
         .map_err(e)?;
     out.write_all(&layer_info).map_err(e)?;
@@ -510,7 +515,10 @@ mod tests {
         o += 2;
         // NEGATIVE: composite alpha = transparency, not a spare channel —
         // a positive count here is the CSP stocked-selection ghost layer.
-        assert!(count_raw < 0, "layer count must declare merged transparency");
+        assert!(
+            count_raw < 0,
+            "layer count must declare merged transparency"
+        );
         // bottom layer, then the group divider, inner, header = 4 records.
         let count = -count_raw;
         assert_eq!(count, 4);
@@ -557,7 +565,10 @@ mod tests {
         o += chan_total;
         assert!(o <= section_end);
         // The Japanese name survived as luni (check the raw bytes exist).
-        let jp: Vec<u8> = "ベタ".encode_utf16().flat_map(|u| u.to_be_bytes()).collect();
+        let jp: Vec<u8> = "ベタ"
+            .encode_utf16()
+            .flat_map(|u| u.to_be_bytes())
+            .collect();
         assert!(
             buf.windows(jp.len()).any(|w| w == jp),
             "unicode layer name missing"

@@ -37,7 +37,9 @@ use mn_brush::sut::{SRC_PRESSURE, SRC_RANDOM, SRC_TILT, SRC_VELOCITY, SutBrush, 
 use mn_brush::todb::TobdTool;
 use serde_json::json;
 
-use super::abr::{ImportSummary, base_settings, free_slug, rlog, set_slug, spacing_settings, write_brush};
+use super::abr::{
+    ImportSummary, base_settings, free_slug, rlog, set_slug, spacing_settings, write_brush,
+};
 
 /// T5b: the whole Clip Studio tool database — one preset per LEAF sub
 /// tool, grouped by the tool's first CSP group (`csp-pen`, `csp-airbrush`
@@ -176,9 +178,7 @@ pub fn write_sut_import(root: &Path, b: &SutBrush, set_name: &str, doc_dpi: u32)
         ("BrushBlurEffector", "edge blur dynamics"),
         ("BrushIntervalEffector", "spacing dynamics"),
     ] {
-        if b.effectors.get(col).is_some_and(drives_any)
-            && !notes.iter().any(|n| n == label)
-        {
+        if b.effectors.get(col).is_some_and(drives_any) && !notes.iter().any(|n| n == label) {
             notes.push(label.into());
         }
     }
@@ -337,8 +337,8 @@ fn drives_any(e: &SutEffector) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use std::collections::BTreeMap;
+    use std::path::PathBuf;
 
     fn brush(params: &[(&str, f64)]) -> SutBrush {
         SutBrush {
@@ -389,9 +389,7 @@ mod tests {
         );
         assert!((s["opaque"]["base_value"].as_f64().unwrap() - 0.4).abs() < 1e-9);
         assert!((s["hardness"]["base_value"].as_f64().unwrap() - 0.6).abs() < 1e-9);
-        assert!(
-            (s["dabs_per_actual_radius"]["base_value"].as_f64().unwrap() - 5.0).abs() < 1e-9
-        );
+        assert!((s["dabs_per_actual_radius"]["base_value"].as_f64().unwrap() - 5.0).abs() < 1e-9);
         assert_eq!(
             s["opaque_multiply"]["base_value"], 1.0,
             "no pressure effector: alpha must be pinned, not half-faded"
@@ -423,7 +421,9 @@ mod tests {
         let _ = write_sut_import(&root, &b, "pen", 600);
         let myb = read_myb(&root, "pen-1");
         let s = &myb["settings"];
-        let pts = s["radius_logarithmic"]["inputs"]["pressure"].as_array().unwrap();
+        let pts = s["radius_logarithmic"]["inputs"]["pressure"]
+            .as_array()
+            .unwrap();
         let first = pts.first().unwrap();
         let last = pts.last().unwrap();
         assert!((first[1].as_f64().unwrap() - 0.3f64.ln()).abs() < 0.02);
@@ -462,7 +462,9 @@ mod tests {
         let mut brush =
             mn_brush::MyBrush::load(&root.join("imported").join("freeze-1.myb")).unwrap();
         let name = myb["mn-texture"].as_str().expect("tip texture imported");
-        brush.set_texture(Some(mn_brush::load_texture(&root, name).expect("texture loads")));
+        brush.set_texture(Some(
+            mn_brush::load_texture(&root, name).expect("texture loads"),
+        ));
         let mut doc = Document::new(1024, 1024);
         brush.begin(&mut doc);
         for i in 0..=300u32 {
@@ -504,7 +506,9 @@ mod tests {
         let sum = write_sut_import(&root, &b, "hard-airbrush", 600);
         assert_eq!((sum.imported, sum.translated), (1, 1));
         let myb = read_myb(&root, "hard-airbrush-1");
-        let r = myb["settings"]["radius_logarithmic"]["base_value"].as_f64().unwrap();
+        let r = myb["settings"]["radius_logarithmic"]["base_value"]
+            .as_f64()
+            .unwrap();
         // Hard Airbrush: BrushSize 40, unit 0 = 0.40 mm → 0.4 × 600/25.4 px.
         let d: f64 = 0.4 * 600.0 / 25.4;
         assert!(
@@ -629,7 +633,10 @@ mod tests {
         let r = myb["settings"]["radius_logarithmic"]["base_value"]
             .as_f64()
             .unwrap();
-        assert!((r - (d / 2.0).ln()).abs() < 1e-6, "paper-relative size, got {r}");
+        assert!(
+            (r - (d / 2.0).ln()).abs() < 1e-6,
+            "paper-relative size, got {r}"
+        );
         // The airbrush set exists beside it, its own first preset.
         let air = read_myb(&root, "csp-airbrush-1");
         assert_eq!(air["name"], "Hard Airbrush");

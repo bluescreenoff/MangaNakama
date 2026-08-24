@@ -632,7 +632,14 @@ mod test_stroke_tests {
         };
         let fallback = test_stroke_image(None, &props, [0.0, 0.0, 0.0], false, None, 180);
         for name in ["grid-dots", "hairy-bristles", "curve-brush", "dyna-spring"] {
-            let img = test_stroke_image(Some(&krita(name)), &props, [0.0, 0.0, 0.0], false, None, 180);
+            let img = test_stroke_image(
+                Some(&krita(name)),
+                &props,
+                [0.0, 0.0, 0.0],
+                false,
+                None,
+                180,
+            );
             assert!(inked(&img) > 100, "{name}: the strip inked nothing");
             assert_ne!(
                 img.pixels, fallback.pixels,
@@ -641,7 +648,14 @@ mod test_stroke_tests {
         }
         // And the grid engine specifically reads as a LATTICE: dots with paper
         // between them, not one continuous line.
-        let img = test_stroke_image(Some(&krita("grid-dots")), &props, [0.0, 0.0, 0.0], false, None, 180);
+        let img = test_stroke_image(
+            Some(&krita("grid-dots")),
+            &props,
+            [0.0, 0.0, 0.0],
+            false,
+            None,
+            180,
+        );
         let runs = ink_runs(&img);
         assert!(
             runs >= 4,

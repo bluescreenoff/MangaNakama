@@ -217,7 +217,9 @@ pub fn average_srgb(samples: &[[u8; 3]]) -> Option<[u8; 3]> {
             }
             let n = samples.len() as f32;
             Some(std::array::from_fn(|c| {
-                (linear_to_srgb(acc[c] / n) * 255.0).round().clamp(0.0, 255.0) as u8
+                (linear_to_srgb(acc[c] / n) * 255.0)
+                    .round()
+                    .clamp(0.0, 255.0) as u8
             }))
         }
     }
@@ -384,12 +386,7 @@ fn composite_size(
                                 for (p, dst) in accs[cd].iter_mut().enumerate() {
                                     let o = p * 4;
                                     let s = scale_opacity(
-                                        px_to_f32([
-                                            data[o],
-                                            data[o + 1],
-                                            data[o + 2],
-                                            data[o + 3],
-                                        ]),
+                                        px_to_f32([data[o], data[o + 1], data[o + 2], data[o + 3]]),
                                         layer.opacity,
                                     );
                                     if s[3] <= 0.0 {
@@ -414,8 +411,7 @@ fn composite_size(
                         // 1½. Clip-to-folder: someone above clips to this
                         // group — its alpha dies at step 3, so capture now.
                         if folder_base[li] {
-                            folder_alpha
-                                .insert(li, accs[lvl].iter().map(|p| p[3]).collect());
+                            folder_alpha.insert(li, accs[lvl].iter().map(|p| p[3]).collect());
                         }
                         // 2. Blend the isolated group, then the border ink.
                         if layer.opacity > 0.0 {
@@ -801,8 +797,14 @@ pub fn finish_image_cropped(
 ) -> image::RgbaImage {
     let [x0, y0, x1, y1] = crop_px;
     let img = if x1 > x0 && y1 > y0 && (x1 - x0 < img.width() || y1 - y0 < img.height()) {
-        image::imageops::crop_imm(&img, x0, y0, (x1 - x0).min(img.width() - x0), (y1 - y0).min(img.height() - y0))
-            .to_image()
+        image::imageops::crop_imm(
+            &img,
+            x0,
+            y0,
+            (x1 - x0).min(img.width() - x0),
+            (y1 - y0).min(img.height() - y0),
+        )
+        .to_image()
     } else {
         img
     };
@@ -810,9 +812,10 @@ pub fn finish_image_cropped(
         // Exact-height fit, resized HERE so the output height is the asked
         // number, not a rounding neighbour of it. Never up: a 1200px-tall
         // crop asked for 2048 stays 1200 (the dialog says so, not us).
-        let w = ((img.width() as f32 * px_height as f32 / img.height() as f32).round() as u32)
-            .max(1);
-        let img = image::imageops::resize(&img, w, px_height, image::imageops::FilterType::Lanczos3);
+        let w =
+            ((img.width() as f32 * px_height as f32 / img.height() as f32).round() as u32).max(1);
+        let img =
+            image::imageops::resize(&img, w, px_height, image::imageops::FilterType::Lanczos3);
         return finish_image(img, 1.0, colour);
     }
     finish_image(img, scale, colour)
@@ -960,7 +963,10 @@ mod tests {
             (185..=191).contains(&avg[0]),
             "half ink half paper must read ~188, got {avg:?}"
         );
-        assert_eq!(composite_pixel_avg(&doc, 10, 10, 0), composite_pixel(&doc, 10, 10));
+        assert_eq!(
+            composite_pixel_avg(&doc, 10, 10, 0),
+            composite_pixel(&doc, 10, 10)
+        );
         assert_eq!(composite_pixel_avg(&doc, -1, 10, 3), None);
     }
 
@@ -1630,11 +1636,22 @@ mod crop_tests {
     fn crop_rects_follow_the_setup_and_span_spreads() {
         let s = setup();
         let (pw, ph) = s.paper_px();
-        assert_eq!(crop_rect_px(&s, (pw, ph), ExportCrop::Paper), [0, 0, pw, ph]);
+        assert_eq!(
+            crop_rect_px(&s, (pw, ph), ExportCrop::Paper),
+            [0, 0, pw, ph]
+        );
 
         let t = s.trim_rect_px();
         let got = crop_rect_px(&s, (pw, ph), ExportCrop::Trim);
-        assert_eq!(got, [t[0] as u32, t[1] as u32, t[2].round() as u32, t[3].round() as u32]);
+        assert_eq!(
+            got,
+            [
+                t[0] as u32,
+                t[1] as u32,
+                t[2].round() as u32,
+                t[3].round() as u32
+            ]
+        );
 
         let b = s.bleed_rect_px();
         let gb = crop_rect_px(&s, (pw, ph), ExportCrop::TrimBleed);
@@ -1681,7 +1698,11 @@ mod crop_tests {
             200,
             crate::doc::LayerExpression::Colour,
         );
-        assert_eq!((out.width(), out.height()), (100, 200), "exact height, ratio kept");
+        assert_eq!(
+            (out.width(), out.height()),
+            (100, 200),
+            "exact height, ratio kept"
+        );
 
         let out = finish_image_cropped(
             img,

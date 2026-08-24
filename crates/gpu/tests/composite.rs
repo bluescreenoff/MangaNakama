@@ -909,7 +909,10 @@ fn cpu_matches_gpu_with_a_two_tone_layer() {
     // The ends must be the two chips, not one chip and paper white.
     let cpu = export::composite(&doc, Background::White);
     let k = cpu.get_pixel(5, 5).0;
-    assert!(k[2] > 200 && k[0] < 60, "black end → main colour, got {k:?}");
+    assert!(
+        k[2] > 200 && k[0] < 60,
+        "black end → main colour, got {k:?}"
+    );
     let w = cpu.get_pixel(15, 15).0;
     assert!(
         w[0] > 200 && w[1] > 140 && w[2] < 60,

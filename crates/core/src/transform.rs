@@ -472,7 +472,9 @@ mod tests {
             (rect[1] + rect[3]) as f32 * 0.5,
         ];
         let xf = Affine2::scale_rotate_around(pivot, -1.0, 1.0, 0.0, [0.0, 0.0]);
-        assert!(commit_transform(&mut doc, &src, &xf, None, true, false, None));
+        assert!(commit_transform(
+            &mut doc, &src, &xf, None, true, false, None
+        ));
 
         let read = |x: i32, y: i32| -> [u16; 4] {
             let ti = TileIdx::of_pixel(x, y);
@@ -546,7 +548,9 @@ mod tests {
         assert!(xf.inverse().is_none());
         let mut doc = doc_with_box(10, 10, 20, 20);
         let src = lift_region(&doc.layers[0], [10, 10, 20, 20], None);
-        assert!(!commit_transform(&mut doc, &src, &xf, None, true, false, None));
+        assert!(!commit_transform(
+            &mut doc, &src, &xf, None, true, false, None
+        ));
         assert!(!doc.can_undo(), "refused transform pushes no undo");
     }
 
@@ -555,7 +559,9 @@ mod tests {
         let mut doc = doc_with_box(10, 10, 20, 20);
         let src = lift_region(&doc.layers[0], [10, 10, 20, 20], None);
         let xf = Affine2::scale_rotate_around([15.0, 15.0], 1.0, 1.0, 0.0, [100.0, 50.0]);
-        assert!(commit_transform(&mut doc, &src, &xf, None, true, false, None));
+        assert!(commit_transform(
+            &mut doc, &src, &xf, None, true, false, None
+        ));
 
         assert_eq!(alpha_at(&doc, 15, 15), 0, "source cleared");
         assert_eq!(
@@ -580,7 +586,9 @@ mod tests {
         let mut doc = doc_with_box(64, 64, 96, 96); // 32px box
         let src = lift_region(&doc.layers[0], [64, 64, 96, 96], None);
         let xf = Affine2::scale_rotate_around([64.0, 64.0], 2.0, 2.0, 0.0, [0.0, 0.0]);
-        assert!(commit_transform(&mut doc, &src, &xf, None, true, false, None));
+        assert!(commit_transform(
+            &mut doc, &src, &xf, None, true, false, None
+        ));
         // Pivot corner stays; the far corner is now ~64px out.
         assert_eq!(alpha_at(&doc, 65, 65), FIX15_ONE as u16);
         assert_eq!(
@@ -603,7 +611,9 @@ mod tests {
             std::f32::consts::FRAC_PI_2,
             [0.0, 0.0],
         );
-        assert!(commit_transform(&mut doc, &src, &xf, None, true, false, None));
+        assert!(commit_transform(
+            &mut doc, &src, &xf, None, true, false, None
+        ));
         // After 90° cw around (110,105): the box is 10 wide, 20 tall.
         assert_eq!(alpha_at(&doc, 110, 105), FIX15_ONE as u16, "centre stays");
         assert_eq!(alpha_at(&doc, 112, 112), FIX15_ONE as u16, "now taller");
@@ -726,7 +736,15 @@ mod tests {
         // Integer translate: the inverse map lands on exact pixel centres
         // (the flip-is-exact proof), so expectations are closed-form.
         let xf = Affine2::scale_rotate_around([60.0, 60.0], 1.0, 1.0, 0.0, [64.0, 0.0]);
-        assert!(commit_transform(&mut doc, &src, &xf, Some(&sel), true, false, None));
+        assert!(commit_transform(
+            &mut doc,
+            &src,
+            &xf,
+            Some(&sel),
+            true,
+            false,
+            None
+        ));
 
         let mut partial = 0;
         for x in 40..80 {

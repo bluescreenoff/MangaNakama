@@ -245,7 +245,10 @@ impl Icon {
             // is spent on the bin and on the one launcher op that erases.
             Self::Trash | Self::SelClearOutside => Destroy,
             // Files, clipboard, the reader, bank assets.
-            Self::Book | Self::SelCut | Self::SelCopy | Self::SelPaste
+            Self::Book
+            | Self::SelCut
+            | Self::SelCopy
+            | Self::SelPaste
             | Self::Pattern
             | Self::Pose3d => Media,
             // Layer kinds and layer-to-layer ops.

@@ -65,7 +65,9 @@ pub enum Pane {
     /// docs/DOCKING-2.md). Index-bound: after a reorder or in a different
     /// work it simply shows whatever page holds that index now, and an
     /// index past the work's end says so instead of vanishing.
-    PageView { page: usize },
+    PageView {
+        page: usize,
+    },
 }
 
 pub const ALL: [Palette; 16] = [
@@ -406,11 +408,8 @@ pub fn merge_columns(
     let mut canvas_node = NodeIndex::root();
     if has_tabs(&left) {
         let tree = merged.main_surface_mut();
-        let [canvas, slot] = tree.split_left(
-            canvas_node,
-            lfrac,
-            vec![Pane::Palette(Palette::Tool)],
-        );
+        let [canvas, slot] =
+            tree.split_left(canvas_node, lfrac, vec![Pane::Palette(Palette::Tool)]);
         tree.graft_at(slot, left.main_surface());
         canvas_node = canvas;
     }
@@ -419,11 +418,8 @@ pub fn merge_columns(
         // left column; the right fraction is relative to THAT.
         let rel = (rfrac / (1.0 - lfrac)).clamp(0.08, 0.5);
         let tree = merged.main_surface_mut();
-        let [_, slot] = tree.split_right(
-            canvas_node,
-            1.0 - rel,
-            vec![Pane::Palette(Palette::Layers)],
-        );
+        let [_, slot] =
+            tree.split_right(canvas_node, 1.0 - rel, vec![Pane::Palette(Palette::Layers)]);
         tree.graft_at(slot, right.main_surface());
     }
     merged.absorb_windows(left);
@@ -554,17 +550,12 @@ fn page_view_body(ui: &mut egui::Ui, app: &mut App, page: usize) {
     let aspect = {
         let (w, h) = app.pages[page]
             .canvas
-            .or_else(|| {
-                current.then_some((app.doc.size.0, app.doc.size.1))
-            })
+            .or_else(|| current.then_some((app.doc.size.0, app.doc.size.1)))
             .unwrap_or((1, 1));
         h.max(1) as f32 / w.max(1) as f32
     };
     let fit_w = (img_rect.width().min(img_rect.height() / aspect)).max(1.0);
-    let fit = egui::Rect::from_center_size(
-        img_rect.center(),
-        egui::vec2(fit_w, fit_w * aspect),
-    );
+    let fit = egui::Rect::from_center_size(img_rect.center(), egui::vec2(fit_w, fit_w * aspect));
 
     if !current {
         let e = &app.pages[page];
@@ -593,7 +584,10 @@ fn page_view_body(ui: &mut egui::Ui, app: &mut App, page: usize) {
     let tex = if current {
         e.thumb.as_ref()
     } else {
-        e.pane_tex.as_ref().or(e.prev_tex.as_ref()).or(e.thumb.as_ref())
+        e.pane_tex
+            .as_ref()
+            .or(e.prev_tex.as_ref())
+            .or(e.thumb.as_ref())
     };
     match tex {
         Some(t) => {
@@ -896,23 +890,13 @@ mod tests {
         }
         let right = default_right();
 
-        let merged = merge_columns(
-            &to_json(&left),
-            &to_json(&right),
-            186.0,
-            208.0,
-            1280.0,
-        )
-        .expect("default columns must merge");
+        let merged = merge_columns(&to_json(&left), &to_json(&right), 186.0, 208.0, 1280.0)
+            .expect("default columns must merge");
 
         for p in ALL {
             assert!(
-                merged
-                    .iter_all_tabs()
-                    .any(|(_, t)| *t == Pane::Palette(p))
-                    == (left
-                        .iter_all_tabs()
-                        .any(|(_, t)| *t == p)
+                merged.iter_all_tabs().any(|(_, t)| *t == Pane::Palette(p))
+                    == (left.iter_all_tabs().any(|(_, t)| *t == p)
                         || right.iter_all_tabs().any(|(_, t)| *t == p)),
                 "{p:?} must survive the merge exactly when it was open"
             );
@@ -929,8 +913,7 @@ mod tests {
         // fraction sizes the LEFT child by position, so the palette column
         // must get ITS width share — inverted, it swallowed 85% of the
         // window and crushed the canvas (owner's first docking-2 launch).
-        let v: serde_json::Value =
-            serde_json::from_str(&to_json_tree(&merged)).expect("tree json");
+        let v: serde_json::Value = serde_json::from_str(&to_json_tree(&merged)).expect("tree json");
         let root_frac = v["surfaces"][0]["Main"]["nodes"][0]["Horizontal"]["fraction"]
             .as_f64()
             .expect("root split fraction");
@@ -942,8 +925,7 @@ mod tests {
         assert!(
             merged
                 .iter_all_tabs()
-                .any(|(path, t)| *t == Pane::Palette(Palette::Pages)
-                    && !path.surface.is_main()),
+                .any(|(path, t)| *t == Pane::Palette(Palette::Pages) && !path.surface.is_main()),
             "the floating Pages window must ride across as a float"
         );
         // Tab GROUPING survives the graft: ToolProperty and LayerProperty
@@ -957,8 +939,7 @@ mod tests {
             .get_leaf()
             .expect("a leaf");
         assert!(
-            leaf.tabs
-                .contains(&Pane::Palette(Palette::LayerProperty)),
+            leaf.tabs.contains(&Pane::Palette(Palette::LayerProperty)),
             "grouped tabs stay grouped through the graft"
         );
     }
@@ -1009,8 +990,7 @@ mod tests {
 
         // A VALID tree with no canvas pane (hand-edit) also falls back:
         // the canvas must never be losable through ui.txt.
-        let no_canvas: DockState<Pane> =
-            DockState::new(vec![Pane::Palette(Palette::Layers)]);
+        let no_canvas: DockState<Pane> = DockState::new(vec![Pane::Palette(Palette::Layers)]);
         let restored = from_json_tree(&to_json_tree(&no_canvas));
         assert!(
             restored.iter_all_tabs().any(|(_, t)| *t == Pane::Canvas),

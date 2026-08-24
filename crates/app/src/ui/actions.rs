@@ -302,7 +302,15 @@ fn command_bar(ui: &mut egui::Ui, app: &App) -> Option<Pending> {
         {
             pending = sel.map(Pending::Run);
         }
-        if icon_btn(ui, Icon::Duplicate, BTN, false, live, "duplicate the selected action").clicked()
+        if icon_btn(
+            ui,
+            Icon::Duplicate,
+            BTN,
+            false,
+            live,
+            "duplicate the selected action",
+        )
+        .clicked()
         {
             pending = sel.map(Pending::Duplicate);
         }
@@ -371,102 +379,105 @@ pub fn actions_palette(ui: &mut egui::Ui, app: &mut App) {
     // whole docked height and push the four verbs off the bottom edge.
     let bar = BTN + 2.0 * ui.spacing().item_spacing.y + 6.0;
     let room = (ui.available_height() - bar).max(64.0);
-    egui::ScrollArea::vertical().max_height(room).show(ui, |ui| {
-        for (i, (name, readable)) in rows.iter().enumerate() {
-            let readable = *readable;
-            let selected = app.action_selected == Some(i);
-            let recording = app.action_recording == Some(i);
+    egui::ScrollArea::vertical()
+        .max_height(room)
+        .show(ui, |ui| {
+            for (i, (name, readable)) in rows.iter().enumerate() {
+                let readable = *readable;
+                let selected = app.action_selected == Some(i);
+                let recording = app.action_recording == Some(i);
 
-            if !readable {
-                ui.horizontal(|ui| {
-                    // No tick: an action this build cannot read is not going
-                    // to be run by a set either. The space keeps its name
-                    // aligned with the rows above and below it.
-                    ui.add_space(BTN + 4.0);
-                    let r = ui
-                        .add(
-                            egui::Button::new(
-                                egui::RichText::new(format!("{name}  ·  newer version"))
-                                    .color(theme::c().text_weak)
-                                    .italics(),
+                if !readable {
+                    ui.horizontal(|ui| {
+                        // No tick: an action this build cannot read is not going
+                        // to be run by a set either. The space keeps its name
+                        // aligned with the rows above and below it.
+                        ui.add_space(BTN + 4.0);
+                        let r = ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new(format!("{name}  ·  newer version"))
+                                        .color(theme::c().text_weak)
+                                        .italics(),
+                                )
+                                .selected(selected),
                             )
-                            .selected(selected),
-                        )
-                        .on_hover_text(
-                            "this action uses a step this build does not know. It is kept \
+                            .on_hover_text(
+                                "this action uses a step this build does not know. It is kept \
                              exactly as it was found and written back untouched — open the \
                              file in a newer MangaNakama to edit it, or select it and use \
                              the bin below to drop it.",
+                            );
+                        if r.clicked() {
+                            app.action_selected = if selected { None } else { Some(i) };
+                            app.action_picker = None;
+                            app.action_step_edit = None;
+                        }
+                    });
+                    continue;
+                }
+
+                // Inline rename replaces the row, the layer-palette idiom.
+                if matches!(&app.action_renaming, Some((ri, _)) if *ri == i) {
+                    let Some((_, text)) = &mut app.action_renaming else {
+                        unreachable!()
+                    };
+                    let resp = ui.text_edit_singleline(text);
+                    let done =
+                        resp.lost_focus() || ui.input(|inp| inp.key_pressed(egui::Key::Enter));
+                    if done {
+                        let (_, text) = app.action_renaming.take().unwrap();
+                        if !text.trim().is_empty() {
+                            app.actions[i].name = text.trim().to_owned();
+                            dirty = true;
+                        }
+                    } else {
+                        resp.request_focus();
+                    }
+                    continue;
+                }
+
+                ui.horizontal(|ui| {
+                    // CSP's first per-action checkbox, and the only per-row
+                    // control left: is this action IN when the set runs (the ▶
+                    // beside the set combo)? CSP's second checkbox — show the
+                    // step's settings dialog while replaying — has nothing to
+                    // switch here: no step kind opens a dialog, so the box would
+                    // be a dead control on every row.
+                    let mut run = app.actions[i].run;
+                    if ui
+                        .checkbox(&mut run, "")
+                        .on_hover_text("include this action when the whole set runs")
+                        .changed()
+                    {
+                        app.actions[i].run = run;
+                        dirty = true;
+                    }
+                    let r = ui
+                        .add(egui::Button::new(name).selected(selected))
+                        .on_hover_text(
+                            "click: select, and show its steps · double-click: rename\n\
+                         the bar at the bottom acts on the selected action",
                         );
-                    if r.clicked() {
+                    if r.double_clicked() {
+                        app.action_renaming = Some((i, name.clone()));
+                    } else if r.clicked() {
                         app.action_selected = if selected { None } else { Some(i) };
                         app.action_picker = None;
                         app.action_step_edit = None;
                     }
-                });
-                continue;
-            }
-
-            // Inline rename replaces the row, the layer-palette idiom.
-            if matches!(&app.action_renaming, Some((ri, _)) if *ri == i) {
-                let Some((_, text)) = &mut app.action_renaming else {
-                    unreachable!()
-                };
-                let resp = ui.text_edit_singleline(text);
-                let done = resp.lost_focus() || ui.input(|inp| inp.key_pressed(egui::Key::Enter));
-                if done {
-                    let (_, text) = app.action_renaming.take().unwrap();
-                    if !text.trim().is_empty() {
-                        app.actions[i].name = text.trim().to_owned();
-                        dirty = true;
+                    if recording {
+                        let (r, _) =
+                            ui.allocate_exact_size(egui::vec2(9.0, 9.0), egui::Sense::hover());
+                        super::icons::paint(ui.painter(), r, Icon::Record, theme::c().rec);
                     }
-                } else {
-                    resp.request_focus();
-                }
-                continue;
-            }
+                });
 
-            ui.horizontal(|ui| {
-                // CSP's first per-action checkbox, and the only per-row
-                // control left: is this action IN when the set runs (the ▶
-                // beside the set combo)? CSP's second checkbox — show the
-                // step's settings dialog while replaying — has nothing to
-                // switch here: no step kind opens a dialog, so the box would
-                // be a dead control on every row.
-                let mut run = app.actions[i].run;
-                if ui
-                    .checkbox(&mut run, "")
-                    .on_hover_text("include this action when the whole set runs")
-                    .changed()
-                {
-                    app.actions[i].run = run;
-                    dirty = true;
+                if selected {
+                    dirty |= action_steps(ui, app, i, recording);
                 }
-                let r = ui
-                    .add(egui::Button::new(name).selected(selected))
-                    .on_hover_text(
-                        "click: select, and show its steps · double-click: rename\n\
-                         the bar at the bottom acts on the selected action",
-                    );
-                if r.double_clicked() {
-                    app.action_renaming = Some((i, name.clone()));
-                } else if r.clicked() {
-                    app.action_selected = if selected { None } else { Some(i) };
-                    app.action_picker = None;
-                    app.action_step_edit = None;
-                }
-                if recording {
-                    let (r, _) =
-                        ui.allocate_exact_size(egui::vec2(9.0, 9.0), egui::Sense::hover());
-                    super::icons::paint(ui.painter(), r, Icon::Record, theme::c().rec);
-                }
-            });
-
-            if selected {
-                dirty |= action_steps(ui, app, i, recording);
             }
-        }
-    });
+        });
     ui.separator();
     if let Some(p) = command_bar(ui, app) {
         pending = Some(p);

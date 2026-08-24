@@ -229,8 +229,7 @@ impl<'a> Db<'a> {
             // Page 1 carries the 100-byte file header before its page header.
             let hoff = if no == 1 { 100 } else { 0 };
             let typ = *page.get(hoff).ok_or("sut: truncated page header")?;
-            let ncell =
-                u16::from_be_bytes([page[hoff + 3], page[hoff + 4]]) as usize;
+            let ncell = u16::from_be_bytes([page[hoff + 3], page[hoff + 4]]) as usize;
             match typ {
                 0x05 => {
                     // Interior: right-most pointer + per-cell child pointers.
@@ -347,9 +346,7 @@ fn decode_record(b: &[u8]) -> Result<Vec<Value>, String> {
             1..=4 => Value::Int(be_int(take(t as usize, &mut vp)?)),
             5 => Value::Int(be_int(take(6, &mut vp)?)),
             6 => Value::Int(be_int(take(8, &mut vp)?)),
-            7 => Value::Real(f64::from_be_bytes(
-                take(8, &mut vp)?.try_into().unwrap(),
-            )),
+            7 => Value::Real(f64::from_be_bytes(take(8, &mut vp)?.try_into().unwrap())),
             8 => Value::Int(0),
             9 => Value::Int(1),
             t if t >= 12 && t % 2 == 0 => {
@@ -424,8 +421,8 @@ mod tests {
     /// row exposes the named parameter columns the importer maps.
     #[test]
     fn real_sut_walks_and_names_its_columns() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/data/sut_sample.sut");
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/sut_sample.sut");
         let Ok(bytes) = std::fs::read(&path) else {
             return;
         };
@@ -455,8 +452,8 @@ mod tests {
     /// Truncation fuzz: cuts at raw offsets never panic or hang.
     #[test]
     fn truncation_never_panics() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/data/sut_sample.sut");
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/sut_sample.sut");
         let Ok(bytes) = std::fs::read(&path) else {
             return;
         };

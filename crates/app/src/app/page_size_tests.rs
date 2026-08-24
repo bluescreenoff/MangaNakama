@@ -29,7 +29,10 @@ fn parked_doc(app: &crate::App, i: usize) -> Document {
     if let Some((w, h, _)) = app.pages[i].blank {
         return Document::new(w, h);
     }
-    let b = app.pages[i].bytes.as_ref().expect("parked page carries bytes");
+    let b = app.pages[i]
+        .bytes
+        .as_ref()
+        .expect("parked page carries bytes");
     mn_core::project::bytes_to_doc(b).expect("parked page decodes")
 }
 
@@ -54,7 +57,11 @@ fn resizing_the_open_page_honours_the_anchor_and_leaves_the_others_alone() {
     dispatch(&mut app, AppCmd::ResizeCanvasApply);
 
     assert_eq!(app.doc.size, (w + 100, h + 100));
-    assert_eq!(alpha_at(&app.doc, 10, 10), OPAQUE[3], "top-left pins in place");
+    assert_eq!(
+        alpha_at(&app.doc, 10, 10),
+        OPAQUE[3],
+        "top-left pins in place"
+    );
     assert!(!app.doc.can_undo(), "structural: the history is cleared");
     assert_eq!(
         app.pages[1].bytes, parked_before,
@@ -69,7 +76,11 @@ fn resizing_the_open_page_honours_the_anchor_and_leaves_the_others_alone() {
     app.canvas_size_draft.anchor = ResizeAnchor::Center;
     dispatch(&mut app, AppCmd::ResizeCanvasApply);
     assert_eq!(app.doc.size, (w + 100, h + 100));
-    assert_eq!(alpha_at(&app.doc, 60, 60), OPAQUE[3], "centred: +50 on both axes");
+    assert_eq!(
+        alpha_at(&app.doc, 60, 60),
+        OPAQUE[3],
+        "centred: +50 on both axes"
+    );
     assert_eq!(alpha_at(&app.doc, 10, 10), 0, "source vacated");
 }
 
@@ -109,7 +120,11 @@ fn all_pages_resize_reaches_a_parked_page_and_doubles_a_spread() {
             "page {} was resized in place",
             i + 1
         );
-        assert!(app.pages[i].thumb.is_none(), "page {}: thumbnail dropped", i + 1);
+        assert!(
+            app.pages[i].thumb.is_none(),
+            "page {}: thumbnail dropped",
+            i + 1
+        );
     }
     // A still-lazy blank page re-marks instead of encoding: its size moved
     // (asserted above via parked_doc) but no content changed, so no fresh
@@ -152,5 +167,9 @@ fn all_pages_resize_moves_the_default_for_pages_added_later() {
         "the work's paper followed (px→mm→px round trip)"
     );
     dispatch(&mut app, AppCmd::AddPage);
-    assert_eq!(app.doc.size, (w + 100, h + 100), "the added page is the new size");
+    assert_eq!(
+        app.doc.size,
+        (w + 100, h + 100),
+        "the added page is the new size"
+    );
 }

@@ -22,7 +22,11 @@ fn step_row(ui: &mut egui::Ui, n: usize, label: &str, state: Step) -> egui::Resp
             Step::Past => theme::c().text,
             Step::Redo => theme::c().text_weak,
         });
-    let text = if state == Step::Now { text.strong() } else { text };
+    let text = if state == Step::Now {
+        text.strong()
+    } else {
+        text
+    };
     let fill = if state == Step::Now {
         theme::c().sel_row
     } else {

@@ -421,8 +421,7 @@ mod spread_tests {
         let (l, r) = split_spread(&d, 0).unwrap();
 
         let ink_count = |doc: &Document| -> usize {
-            let img =
-                crate::export::composite_for_export(doc, crate::export::Background::White);
+            let img = crate::export::composite_for_export(doc, crate::export::Background::White);
             img.pixels().filter(|p| p.0[0] < 128).count()
         };
         assert_eq!(
@@ -492,14 +491,27 @@ mod side_tests {
         let (pw, _) = s.paper_px();
         let right = s.inner_rect_px_on(true);
         let left = s.inner_rect_px_on(false);
-        assert!(right[0] > left[0], "right page shifts right (小口), left page left");
+        assert!(
+            right[0] > left[0],
+            "right page shifts right (小口), left page left"
+        );
         // Symmetric about the paper centre: left is the right's mirror.
-        assert!((left[0] - (pw as f32 - right[2])).abs() < 0.6, "{left:?} vs {right:?}");
-        assert_eq!(s.inner_rect_px(), s.inner_rect_px_on(true), "raw = right-page orientation");
+        assert!(
+            (left[0] - (pw as f32 - right[2])).abs() < 0.6,
+            "{left:?} vs {right:?}"
+        );
+        assert_eq!(
+            s.inner_rect_px(),
+            s.inner_rect_px_on(true),
+            "raw = right-page orientation"
+        );
 
         let sr = s.safety_rect_px_on(true).unwrap();
         let sl = s.safety_rect_px_on(false).unwrap();
         assert_eq!(s.safety_rect_px().unwrap(), sr, "raw safety = right page");
-        assert!((sl[0] - (pw as f32 - sr[2])).abs() < 0.6, "safety mirrors too");
+        assert!(
+            (sl[0] - (pw as f32 - sr[2])).abs() < 0.6,
+            "safety mirrors too"
+        );
     }
 }

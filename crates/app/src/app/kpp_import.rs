@@ -115,9 +115,8 @@ fn translate(params: &BTreeMap<String, String>) -> (Map<String, Value>, Vec<Stri
     let diameter = match size_px(params) {
         Some(d) => d,
         None => {
-            notes.push(
-                "brush size (no plainly numeric Size/BrushSize; the default is used)".into(),
-            );
+            notes
+                .push("brush size (no plainly numeric Size/BrushSize; the default is used)".into());
             DEFAULT_DIAMETER
         }
     };
@@ -137,7 +136,11 @@ fn translate(params: &BTreeMap<String, String>) -> (Map<String, Value>, Vec<Stri
 
     // -- opacity (stroke alpha) and flow (per-dab) --
     let flow = unit(params, "FlowValue").unwrap_or(1.0);
-    set_base(&mut s, "opaque", unit(params, "OpacityValue").unwrap_or(1.0));
+    set_base(
+        &mut s,
+        "opaque",
+        unit(params, "OpacityValue").unwrap_or(1.0),
+    );
     if flag(params, "PressureOpacity") || flag(params, "PressureFlow") {
         s.insert(
             "opaque_multiply".into(),
@@ -208,9 +211,7 @@ fn flag(params: &BTreeMap<String, String>, key: &str) -> bool {
 /// off in Krita, not something we failed to carry over.
 fn is_inert(v: &str) -> bool {
     let v = v.trim();
-    v.is_empty()
-        || v.eq_ignore_ascii_case("false")
-        || v.parse::<f64>().is_ok_and(|n| n == 0.0)
+    v.is_empty() || v.eq_ignore_ascii_case("false") || v.parse::<f64>().is_ok_and(|n| n == 0.0)
 }
 
 /// One plainly numeric `key="…"` attribute out of an XML blob. The match must
@@ -264,7 +265,12 @@ mod tests {
     fn notes_of(myb: &Value) -> Vec<String> {
         myb["mn"]["unmapped"]
             .as_array()
-            .map(|a| a.iter().filter_map(|v| v.as_str()).map(String::from).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(String::from)
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -295,7 +301,9 @@ mod tests {
         assert_eq!(myb["group"], "imported");
         assert!(myb["mn-texture"].is_null(), "no tip comes with a .kpp");
         // Size 40 px → ln(20); pressure sweeps down to the 10 % floor.
-        assert!((s["radius_logarithmic"]["base_value"].as_f64().unwrap() - 20f64.ln()).abs() < 1e-9);
+        assert!(
+            (s["radius_logarithmic"]["base_value"].as_f64().unwrap() - 20f64.ln()).abs() < 1e-9
+        );
         let pr = &s["radius_logarithmic"]["inputs"]["pressure"];
         assert!((pr[0][1].as_f64().unwrap() - 0.1f64.ln()).abs() < 1e-9);
         assert_eq!(pr[1], json!([1.0, 0.0]));
@@ -307,8 +315,14 @@ mod tests {
         assert_eq!(s["opaque_multiply"]["base_value"], 1.0);
         // Honest notes: the unmodelled param verbatim, the OFF one silent.
         let notes = notes_of(&myb);
-        assert!(notes.iter().any(|n| n == "LightnessStrengthValue"), "{notes:?}");
-        assert!(!notes.iter().any(|n| n.contains("PressureRotation")), "{notes:?}");
+        assert!(
+            notes.iter().any(|n| n == "LightnessStrengthValue"),
+            "{notes:?}"
+        );
+        assert!(
+            !notes.iter().any(|n| n.contains("PressureRotation")),
+            "{notes:?}"
+        );
         let desc = myb["description"].as_str().unwrap();
         assert!(desc.contains("dynamics only"), "{desc}");
         assert!(desc.contains("Not translated:"), "{desc}");
@@ -345,7 +359,9 @@ mod tests {
         // 0.1 = 10 % → 5 dabs per actual radius, NOT autoSpacingCoeff's 1.
         assert!((s["dabs_per_actual_radius"]["base_value"].as_f64().unwrap() - 5.0).abs() < 1e-9);
         assert!(
-            notes_of(&myb).iter().any(|n| n.starts_with("brush_definition")),
+            notes_of(&myb)
+                .iter()
+                .any(|n| n.starts_with("brush_definition")),
             "the tip is a separate resource and must say so"
         );
         std::fs::remove_dir_all(root.parent().unwrap()).ok();
@@ -362,8 +378,11 @@ mod tests {
         let myb = read_myb(&root, "smudge-1");
         // The size it stated plainly still applies; nothing else does.
         assert!(
-            (myb["settings"]["radius_logarithmic"]["base_value"].as_f64().unwrap() - 30f64.ln())
-                .abs()
+            (myb["settings"]["radius_logarithmic"]["base_value"]
+                .as_f64()
+                .unwrap()
+                - 30f64.ln())
+            .abs()
                 < 1e-9
         );
         let notes = notes_of(&myb);

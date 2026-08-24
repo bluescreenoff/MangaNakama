@@ -713,13 +713,9 @@ mod tests {
             "brushPreset",
             &[("Brsh", val_objc("futureBrush", &[("X", val_bool(true))]))],
         );
-        let presets =
-            parse_desc(&section(&[("Brsh", val_list(&[computed, alien]))])).unwrap();
+        let presets = parse_desc(&section(&[("Brsh", val_list(&[computed, alien]))])).unwrap();
         assert_eq!(presets.len(), 1);
-        assert_eq!(
-            presets[0].kind,
-            BrushKind::Computed { hardness_pct: 90.0 }
-        );
+        assert_eq!(presets[0].kind, BrushKind::Computed { hardness_pct: 90.0 });
         assert_eq!(presets[0].diameter_px, Some(20.0));
     }
 
@@ -745,8 +741,8 @@ mod tests {
     /// own serializer, not our test helpers.
     #[test]
     fn real_fixture_desc_parses_and_joins() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/data/abr_v6_sample.abr");
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/abr_v6_sample.abr");
         let Ok(bytes) = std::fs::read(&path) else {
             return; // local-only fixture (see abr.rs): skip silently
         };

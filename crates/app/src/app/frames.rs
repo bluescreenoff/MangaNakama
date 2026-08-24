@@ -366,7 +366,11 @@ mod tests {
             return;
         };
         app.frame_order = None;
-        assert_eq!(app.frame_pos(header(&app, "beta")), None, "no cache, no badge");
+        assert_eq!(
+            app.frame_pos(header(&app, "beta")),
+            None,
+            "no cache, no badge"
+        );
         app.ensure_frame_order();
         assert_eq!(app.frame_pos(header(&app, "beta")).map(|p| p.0), Some(1));
     }

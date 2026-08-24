@@ -63,8 +63,8 @@ use windows_sys::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext,
 };
 use windows_sys::Win32::UI::Input::Ime::{
-    CANDIDATEFORM, CFS_CANDIDATEPOS, CFS_POINT, COMPOSITIONFORM, ImmGetContext,
-    ImmReleaseContext, ImmSetCandidateWindow, ImmSetCompositionWindow,
+    CANDIDATEFORM, CFS_CANDIDATEPOS, CFS_POINT, COMPOSITIONFORM, ImmGetContext, ImmReleaseContext,
+    ImmSetCandidateWindow, ImmSetCompositionWindow,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, VK_SPACE};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
@@ -83,12 +83,11 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow,
     TranslateMessage, WHEEL_DELTA, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED,
     WM_DROPFILES, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_IME_COMPOSITION,
-    WM_IME_STARTCOMPOSITION,
-    WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
-    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MOVE, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_PAINT,
-    WM_POINTERCAPTURECHANGED, WM_POINTERDOWN, WM_POINTERLEAVE, WM_POINTERUP, WM_POINTERUPDATE,
-    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WM_SYSKEYDOWN, WM_TIMER,
-    WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
+    WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MOVE, WM_NCCALCSIZE,
+    WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_PAINT, WM_POINTERCAPTURECHANGED, WM_POINTERDOWN,
+    WM_POINTERLEAVE, WM_POINTERUP, WM_POINTERUPDATE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR,
+    WM_SETFOCUS, WM_SIZE, WM_SYSKEYDOWN, WM_TIMER, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
 };
 use windows_sys::core::BOOL;
 
@@ -540,8 +539,11 @@ fn main() {
     } else {
         None
     };
-    let (want_gpu_dabs, spawn_measurement) =
-        bench::resolve_auto(explicit, bench::load_verdict(), &app.renderer.adapter_line());
+    let (want_gpu_dabs, spawn_measurement) = bench::resolve_auto(
+        explicit,
+        bench::load_verdict(),
+        &app.renderer.adapter_line(),
+    );
     app.gpu_dabs = want_gpu_dabs && app.renderer.gpu_dabs_supported();
     if want_gpu_dabs && !app.gpu_dabs {
         println!("[app] gpu dabs requested (flag/ui.txt) but unsupported here — CPU dab path");
@@ -559,7 +561,10 @@ fn main() {
         // Detached, windowless (GUI-subsystem exe), exits on its own. If it
         // dies the verdict file stays absent and the next launch retries.
         bench_note = Some(match std::env::current_exe() {
-            Ok(exe) => match std::process::Command::new(exe).arg("--bench-verdict").spawn() {
+            Ok(exe) => match std::process::Command::new(exe)
+                .arg("--bench-verdict")
+                .spawn()
+            {
                 Ok(child) => {
                     // Watch for the verdict THIS session. Armed only here,
                     // killed by the first tick that finds it.

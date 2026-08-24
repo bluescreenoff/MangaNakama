@@ -32,7 +32,12 @@ fn lettering(pos: [f32; 2], size: [f32; 2], s: &str) -> mn_core::TextItem {
 }
 
 fn radii(app: &crate::App, layer: usize) -> [f32; 2] {
-    match &app.doc.layers[layer].balloons().expect("balloon layer").balloons[0].shape {
+    match &app.doc.layers[layer]
+        .balloons()
+        .expect("balloon layer")
+        .balloons[0]
+        .shape
+    {
         mn_core::BalloonShape::Ellipse { radii, .. } => *radii,
         s => panic!("expected an ellipse, got {s:?}"),
     }
@@ -92,7 +97,10 @@ fn fit_balloon_to_text_sizes_around_the_topmost_visible_lettering() {
     );
     // The hidden layer's enormous box would have blown the bubble up to the
     // whole page; it did not, so the hidden layer was skipped.
-    assert!(after[0] < 300.0, "the hidden draft was not sized to: {after:?}");
+    assert!(
+        after[0] < 300.0,
+        "the hidden draft was not sized to: {after:?}"
+    );
     assert!(app.status.contains("fitted"), "announced: {}", app.status);
 
     let bs = app.doc.layers[bl].balloons().unwrap();
