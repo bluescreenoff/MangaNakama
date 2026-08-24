@@ -377,6 +377,28 @@ impl<Tab> DockState<Tab> {
         }
     }
 
+    /// MN-PATCH #19 (MangaNakama, 2026-08-26): the BETWEEN-COLUMNS drop —
+    /// split `path`'s leaf on its interior edge and land the dragged tab as
+    /// the new column there. Same fraction arithmetic as
+    /// [`move_tab_to_root_split`]; the split node replacing the leaf sits at
+    /// the SAME node index, so indices the caller holds for the old leaf's
+    /// siblings stay valid.
+    pub fn move_tab_to_leaf_edge_split(
+        &mut self,
+        src: TabPath,
+        path: NodePath,
+        split: Split,
+        new_share: f32,
+    ) {
+        self.move_tab(src, TabDestination::Node(path, TabInsert::Split(split)));
+        if let Node::Horizontal(s) | Node::Vertical(s) = &mut self[path] {
+            s.fraction = match split {
+                Split::Left | Split::Above => new_share,
+                Split::Right | Split::Below => 1.0 - new_share,
+            };
+        }
+    }
+
     /// Takes a tab out of its current surface and puts it in a new window.
     /// Returns the surface index of the new window.
     pub fn detach_tab(&mut self, src: TabPath, window_rect: Rect) -> SurfaceIndex {

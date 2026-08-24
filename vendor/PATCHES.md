@@ -581,3 +581,31 @@ no C change) with `mn-wash`/`mn-wash-opacity`/`mn-brush-blend` keys;
 (mask PNGs under `assets/brushes/textures/`); and the public
 `mapping`/`set_mapping` pair (any setting × any input — the per-sensor
 curve editor's seam).
+
+### 19. Between-columns drop zones — a leaf's interior edges (show/mod.rs, drag_and_drop.rs, dock_state/mod.rs, 2026-08-26)
+
+**What:** during a tab drag, a thin (10 pt) strip along each leaf's
+INTERIOR left/right edge is a drop zone meaning "insert the dragged tab
+as a new column on this side of THIS pane" — the owner's "drag col 1 to
+between col 2 and col 3" ask. The commit is a leaf-edge
+`TabInsert::Split` (`move_tab_to_leaf_edge_split`, fraction 0.3 for the
+new column, same by-position arithmetic as #18's root split), so the
+binary tree needs no restructuring: the boundary between two adjacent
+columns is always the nearer leaf's inner edge, whatever the nesting.
+Hover order: #18's root rims win at the very edge (a leaf edge that IS
+the dock rim is excluded from #19), then #19, then the ordinary leaf
+hover — at a pane edge "insert beside this pane" is the truer reading
+than the tab-bar overlay's four-way arrows (the owner read those arrows
+as an unwanted prompt).
+
+**Why:** upstream can only append to a leaf's tab bar or split via the
+overlay's centre arrows; there is no at-the-boundary insertion, and
+with filled tab bars (our #7 layout) the boundary is exactly where the
+pointer naturally goes.
+
+**Upstream-relevant:** plausibly — boundary drop zones generalise to
+any binary split tree.
+
+**Tests:** `leaf_edge_zones_are_interior_only` (interior edges hit,
+body/outside don't, the rim belongs to #18); run via
+`cargo test --manifest-path vendor/egui_dock/Cargo.toml --lib`.

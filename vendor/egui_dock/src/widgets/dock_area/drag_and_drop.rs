@@ -470,6 +470,46 @@ pub(in super::super) fn draw_edge_zone(ui: &Ui, style: &Style, rect: Rect) {
     painter.rect_filled(rect, 0.0, style.overlay.selection_color);
 }
 
+/// MN-PATCH #19: width (in points) of the leaf-edge drop strips — the
+/// BETWEEN-COLUMNS zones. Thinner than the root edges (#18): those say
+/// "outermost column" and must win at the very rim, these say "insert
+/// HERE, beside this pane" and must not steal ordinary tab-bar hovers.
+pub(in super::super) const LEAF_EDGE_ZONE_W: f32 = 10.0;
+
+/// MN-PATCH #19: is the pointer inside a leaf's INTERIOR left/right edge
+/// strip? A hit means "insert the dragged tab as a new column on that
+/// side of THIS leaf" — the between-columns drop, which the binary tree
+/// expresses as a leaf-edge split (the boundary of two adjacent columns
+/// is always the nearer leaf's inner edge, whatever the nesting). The
+/// dock area's own outer edges are #18's job and excluded here. Pure —
+/// pinned by tests.
+pub(in super::super) fn leaf_edge_zone(
+    leaf_rect: Rect,
+    dock_rect: Rect,
+    pointer: Pos2,
+) -> Option<(Split, Rect)> {
+    if !leaf_rect.contains(pointer) {
+        return None;
+    }
+    let inner_left = Rect::from_min_max(
+        Pos2::new(leaf_rect.left(), leaf_rect.top()),
+        Pos2::new(leaf_rect.left() + LEAF_EDGE_ZONE_W, leaf_rect.bottom()),
+    );
+    // #18 owns the rim: a left-edge strip that touches the dock area's
+    // left edge is a root-edge drop, not a between-columns one.
+    if inner_left.contains(pointer) && leaf_rect.left() > dock_rect.left() + 0.5 {
+        return Some((Split::Left, inner_left));
+    }
+    let inner_right = Rect::from_min_max(
+        Pos2::new(leaf_rect.right() - LEAF_EDGE_ZONE_W, leaf_rect.top()),
+        Pos2::new(leaf_rect.right(), leaf_rect.bottom()),
+    );
+    if inner_right.contains(pointer) && leaf_rect.right() < dock_rect.right() - 0.5 {
+        return Some((Split::Right, inner_right));
+    }
+    None
+}
+
 // Draws a filled rect describing where a tab will be dropped.
 #[inline(always)]
 fn draw_drop_rect(rect: Rect, ui: &Ui, style: &Style) {
@@ -511,6 +551,31 @@ mod edge_zone_tests {
             edge_split_zone(dock, Pos2::new(10.0, 10.0)).is_none(),
             "above the dock area (top bar) is not an edge"
         );
+    }
+
+    /// MN-PATCH #19: the leaf-edge zones are the BETWEEN-COLUMNS drops —
+    /// interior edges only. A leaf edge that IS the dock rim belongs to
+    /// #18; a pointer in the leaf's body or outside it is no edge at all.
+    #[test]
+    fn leaf_edge_zones_are_interior_only() {
+        let dock = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1600.0, 900.0));
+        // An interior leaf (col 2 of 3): both edges are between-columns.
+        let leaf = Rect::from_min_max(Pos2::new(500.0, 0.0), Pos2::new(1100.0, 900.0));
+        let (split, strip) = leaf_edge_zone(leaf, dock, Pos2::new(504.0, 400.0)).expect("left");
+        assert_eq!(split, Split::Left);
+        assert!(strip.max.x <= leaf.left() + LEAF_EDGE_ZONE_W + f32::EPSILON);
+        let (split, _) = leaf_edge_zone(leaf, dock, Pos2::new(1096.0, 400.0)).expect("right");
+        assert_eq!(split, Split::Right);
+        assert!(leaf_edge_zone(leaf, dock, Pos2::new(800.0, 400.0)).is_none(), "body");
+        assert!(leaf_edge_zone(leaf, dock, Pos2::new(1600.0, 400.0)).is_none(), "outside");
+        // The rim leaf: its OUTER edge is #18's, not ours.
+        let leftmost = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(400.0, 900.0));
+        assert!(
+            leaf_edge_zone(leftmost, dock, Pos2::new(4.0, 400.0)).is_none(),
+            "the dock's left rim is the root-edge drop, not a between-columns one"
+        );
+        let (split, _) = leaf_edge_zone(leftmost, dock, Pos2::new(396.0, 400.0)).expect("inner");
+        assert_eq!(split, Split::Right);
     }
 }
 

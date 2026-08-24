@@ -10,8 +10,8 @@ use crate::NodePath;
 use crate::dock_area::tab_removal::ForcedRemoval;
 use crate::tab_viewer::OnCloseResponse;
 use crate::{
-    AllowedSplits, DockArea, Node, NodeIndex, OverlayType, Style, SurfaceIndex, TabDestination,
-    TabInsert,
+    AllowedSplits, DockArea, Node, NodeIndex, OverlayType, Split, Style, SurfaceIndex,
+    TabDestination, TabInsert,
     TabViewer,
     utils::{expand_to_pixel, fade_dock_style, map_to_pixel},
 };
@@ -100,6 +100,27 @@ impl<Tab> DockArea<'_, Tab> {
                         const EDGE_SPLIT_FRACTION: f32 = 0.2;
                         self.dock_state
                             .move_tab_to_root_split(src, split, EDGE_SPLIT_FRACTION);
+                    }
+                }
+                // MN-PATCH #19 (MangaNakama, 2026-08-26): the
+                // BETWEEN-COLUMNS drop. Hovering a leaf's interior edge
+                // strip means "insert as a new column right here" — the
+                // owner's col1-between-col2-and-col3 ask, which the binary
+                // tree expresses as a leaf-edge split. Checked AFTER the
+                // root edges (they own the rim) and BEFORE the leaf hover
+                // (at the edge, "insert beside this pane" is the truer
+                // reading than the tab-bar overlay's arrows).
+                else if let (Some((path, split, zone)), &TreeComponent::Tab(src)) = (
+                    state
+                        .last_hover_pos
+                        .and_then(|p| self.leaf_edge_hover(dock_rect, p)),
+                    &source.src,
+                ) {
+                    super::drag_and_drop::draw_edge_zone(ui, self.style.as_ref().unwrap(), zone);
+                    if ui.input(|i| i.pointer.primary_released()) {
+                        const LEAF_SPLIT_FRACTION: f32 = 0.3;
+                        self.dock_state
+                            .move_tab_to_leaf_edge_split(src, path, split, LEAF_SPLIT_FRACTION);
                     }
                 }
                 // MN-PATCH #14 (MangaNakama, 2026-08-21): a tab drag that
@@ -578,6 +599,35 @@ impl<Tab> DockArea<'_, Tab> {
         }
         self.dock_state[surface][NodeIndex::root()].set_rect(rect);
         rect
+    }
+
+    /// MN-PATCH #19: the leaf whose interior edge strip holds `pointer`,
+    /// as (that leaf's path, the split side, the strip rect). Leaves whose
+    /// edge IS the dock area's rim are skipped inside
+    /// [`leaf_edge_zone`](super::drag_and_drop::leaf_edge_zone) — #18 owns
+    /// the rim. Main surface only: the between-columns gesture is a
+    /// column-layout thing, and windows float alone.
+    fn leaf_edge_hover(
+        &self,
+        dock_rect: egui::Rect,
+        pointer: egui::Pos2,
+    ) -> Option<(NodePath, Split, egui::Rect)> {
+        let surface = SurfaceIndex::main();
+        for (index, node) in self.dock_state[surface].iter().enumerate() {
+            let Node::Leaf(leaf) = node else {
+                continue;
+            };
+            if let Some((split, zone)) =
+                super::drag_and_drop::leaf_edge_zone(leaf.rect(), dock_rect, pointer)
+            {
+                let path = NodePath {
+                    surface,
+                    node: NodeIndex(index),
+                };
+                return Some((path, split, zone));
+            }
+        }
+        None
     }
 
     fn compute_rect_sizes(&mut self, ui: &Ui, path: NodePath, max_rect: Rect) {
