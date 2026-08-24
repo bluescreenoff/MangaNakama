@@ -448,6 +448,9 @@ pub struct BalloonObjDrag {
     pub start: (f32, f32),
     pub cur: (f32, f32),
     pub orig: Balloon,
+    /// Live Shift state, refreshed on every pointer move: moves constrain
+    /// to H/V/45° and rotation snaps to 45° increments (CSP).
+    pub shift_snap: bool,
 }
 
 impl BalloonObjDrag {
@@ -456,7 +459,20 @@ impl BalloonObjDrag {
         let (dx, dy) = (self.cur.0 - self.start.0, self.cur.1 - self.start.1);
         let mut b = self.orig.clone();
         match self.mode {
-            BalloonDragMode::MoveWhole => b.translate(dx, dy),
+            BalloonDragMode::MoveWhole => {
+                // Shift constrains the move to horizontal/vertical/45°
+                // diagonals (CSP manual, moving balloons) — the nearest
+                // of the 8 octants at the drag's own length.
+                let (mx, my) = if self.shift_snap {
+                    let len = dx.hypot(dy);
+                    let oct = (dy.atan2(dx) / std::f32::consts::FRAC_PI_4).round()
+                        * std::f32::consts::FRAC_PI_4;
+                    (oct.cos() * len, oct.sin() * len)
+                } else {
+                    (dx, dy)
+                };
+                b.translate(mx, my)
+            }
             BalloonDragMode::Handle(h) => b.apply_handle(h, [self.cur.0, self.cur.1]),
             BalloonDragMode::BoxCorner(i) => {
                 let bb = self.orig.bbox();
@@ -497,7 +513,14 @@ impl BalloonObjDrag {
                 let c = [(bb[0] + bb[2]) * 0.5, (bb[1] + bb[3]) * 0.5];
                 let a0 = (self.start.1 - c[1]).atan2(self.start.0 - c[0]);
                 let a1 = (self.cur.1 - c[1]).atan2(self.cur.0 - c[0]);
-                b.transform_around(c, 1.0, 1.0, a1 - a0);
+                // Shift = 45° INCREMENTS from the original orientation
+                // (CSP manual, rotating balloons; same rule as frames).
+                let d = if self.shift_snap {
+                    ((a1 - a0) / std::f32::consts::FRAC_PI_4).round() * std::f32::consts::FRAC_PI_4
+                } else {
+                    a1 - a0
+                };
+                b.transform_around(c, 1.0, 1.0, d);
             }
         }
         b
@@ -1690,6 +1713,7 @@ impl App {
                             start: (cx, cy),
                             cur: (cx, cy),
                             orig: b.clone(),
+                            shift_snap: false,
                         });
                         break 'outer;
                     }
@@ -2225,6 +2249,7 @@ impl App {
             return;
         }
         if let Some(d) = &mut self.balloon_obj_drag {
+            d.shift_snap = self.shell.sync_modifiers().shift;
             d.cur = (cx, cy);
             self.needs_redraw = true;
             return;

@@ -114,6 +114,7 @@ fn an_analytic_bubble_never_reports_a_rotation() {
             shape,
             ..Default::default()
         },
+        shift_snap: false,
     };
     assert!(
         mk(mn_core::BalloonShape::Ellipse {
@@ -139,5 +140,93 @@ fn an_analytic_bubble_never_reports_a_rotation() {
     assert!(
         (rad - std::f32::consts::FRAC_PI_2).abs() < 1e-3,
         "a quarter turn: {rad}"
+    );
+}
+
+/// Walk #2 (CSP manual, moving/rotating balloons): Shift constrains a
+/// balloon MOVE to horizontal/vertical/45° and its ROTATION to 45°
+/// increments from the original orientation; without Shift both follow
+/// the pointer freely.
+#[test]
+fn balloon_moves_and_rotates_constrain_under_shift() {
+    use crate::app::canvas_input::{BalloonDragMode, BalloonObjDrag};
+    let ellipse = mn_core::BalloonShape::Ellipse {
+        center: [100.0, 100.0],
+        radii: [40.0, 25.0],
+    };
+    let mut d = BalloonObjDrag {
+        layer: 0,
+        balloon: 0,
+        mode: BalloonDragMode::MoveWhole,
+        start: (0.0, 0.0),
+        cur: (10.0, 6.0),
+        orig: mn_core::Balloon {
+            shape: ellipse,
+            ..Default::default()
+        },
+        shift_snap: true,
+    };
+    // 31° of drag snaps to the 45° octant at the drag's own length.
+    let len = 10.0_f32.hypot(6.0);
+    let oct = std::f32::consts::FRAC_PI_4;
+    let moved = d.preview();
+    let (cx, cy) = match moved.shape {
+        mn_core::BalloonShape::Ellipse {
+            center: [cx, cy], ..
+        } => (cx, cy),
+        _ => panic!("shape preserved"),
+    };
+    assert!(
+        (cx - (100.0 + oct.cos() * len)).abs() < 1e-3
+            && (cy - (100.0 + oct.sin() * len)).abs() < 1e-3,
+        "the move snapped to the 45° octant ({cx}, {cy})"
+    );
+    d.shift_snap = false;
+    let (cx, cy) = match d.preview().shape {
+        mn_core::BalloonShape::Ellipse {
+            center: [cx, cy], ..
+        } => (cx, cy),
+        _ => panic!("shape preserved"),
+    };
+    assert_eq!([cx, cy], [110.0, 106.0], "no Shift → the raw drag");
+
+    // Rotation: 40° of lollipop drag quantizes to 45°, free without Shift.
+    let drawn = drawn_bubble().shape;
+    let c = [200.0, 200.0];
+    let at = |deg: f32| {
+        (
+            c[0] + 100.0 * deg.to_radians().cos(),
+            c[1] + 100.0 * deg.to_radians().sin(),
+        )
+    };
+    let (start, cur) = (at(10.0), at(50.0));
+    let mut r = BalloonObjDrag {
+        layer: 0,
+        balloon: 0,
+        mode: BalloonDragMode::BoxRotate,
+        start,
+        cur,
+        orig: mn_core::Balloon {
+            shape: drawn.clone(),
+            ..Default::default()
+        },
+        shift_snap: true,
+    };
+    let mut want = r.orig.clone();
+    want.transform_around(c, 1.0, 1.0, std::f32::consts::FRAC_PI_4);
+    let got = r.preview();
+    assert!(
+        got.shape == want.shape && got.tails == want.tails,
+        "40° of drag → 45° of turn"
+    );
+    r.shift_snap = false;
+    let a0 = (start.1 - c[1]).atan2(start.0 - c[0]);
+    let a1 = (cur.1 - c[1]).atan2(cur.0 - c[0]);
+    let mut free = r.orig.clone();
+    free.transform_around(c, 1.0, 1.0, a1 - a0);
+    let got = r.preview();
+    assert!(
+        got.shape == free.shape && got.tails == free.tails,
+        "no Shift → the raw angle"
     );
 }
