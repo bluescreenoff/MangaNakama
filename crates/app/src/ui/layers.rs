@@ -1435,7 +1435,8 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
         // no surface — hover carries them now.
         let resp = resp.on_hover_text(
             "Ctrl+click: add/remove from the selected layers · Shift+click: select range · \
-             Ctrl+click the thumbnail: selection from this layer's ink · double-click: rename",
+             Ctrl+click the thumbnail: selection from this layer's ink · Alt+click: clip to \
+             layer below · double-click: rename",
         );
 
         let p = ui.painter();
@@ -2018,6 +2019,14 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
         } else if resp.clicked() && ui.input(|i| i.modifiers.shift) {
             // TC-013: range-select between the active row and this one.
             app.push_cmd(AppCmd::RangeLayerMulti(i));
+        } else if resp.clicked() && ui.input(|i| i.modifiers.alt) {
+            // Walk #4 (CSP's gesture is Alt+click the line between rows;
+            // the row body is the honest egui equivalent — the EYE cell's
+            // Alt stays the solo, and Ctrl+Alt belongs to the selection
+            // op combos): toggle clip to layer below, same command the
+            // palette icon and the row menu push.
+            let clipped = app.doc.layers.get(i).is_some_and(|l| l.clip);
+            app.push_cmd(AppCmd::SetLayerClip(i, !clipped));
         } else if resp.clicked() {
             // `SelectLayer` clears the Paper highlight, but a click on the
             // row that is ALREADY active pushes no command — so clear it
