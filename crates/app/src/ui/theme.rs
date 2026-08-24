@@ -211,10 +211,18 @@ pub const BUILT_INS: &[(&str, Theme)] = &[("dark", DARK), ("sepia", SEPIA), ("vi
 /// `prefs.txt` is a text file people hand-edit, and a `theme=drak` typo must
 /// cost a wrong colour scheme, not a start-up failure.
 pub fn by_name(name: &str) -> Theme {
-    BUILT_INS
-        .iter()
-        .find(|(n, _)| *n == name)
-        .map_or(DARK, |(_, t)| *t)
+    if let Some((n, t)) = BUILT_INS.iter().find(|(n, _)| *n == name) {
+        let _ = n;
+        return *t;
+    }
+    // T1 step 3: a custom file beside the exe. A built-in name always
+    // wins, so a hand-tweaked "dark.txt" cannot shadow the shipped dark.
+    if let Some(dir) = themes_dir()
+        && let Some(t) = load_custom(&dir, name)
+    {
+        return t;
+    }
+    DARK
 }
 
 /// The canonical name for what `name` actually resolves to — what the picker
@@ -249,6 +257,175 @@ pub fn set(t: Theme) {
 /// `set(by_name(name))` — the `prefs.txt` door.
 pub fn set_by_name(name: &str) {
     set(by_name(name));
+}
+
+// --- custom theme files (T1 step 3) --------------------------------------
+
+/// Every colour token, in file/Editor order — see [`token_names`]. The
+/// name is the `k` in `themes/<name>.txt`'s `k=RRGGBB` lines. Radii are
+/// NOT themeable — rounding is this app's build quality, not a colour
+/// scheme's opinion.
+pub fn token_get(t: &Theme, k: &str) -> Option<Color32> {
+    Some(match k {
+        "window" => t.window,
+        "panel" => t.panel,
+        "header" => t.header,
+        "field" => t.field,
+        "hover" => t.hover,
+        "active" => t.active,
+        "button" => t.button,
+        "accent" => t.accent,
+        "accent_fill" => t.accent_fill,
+        "sel_row" => t.sel_row,
+        "sel_active" => t.sel_active,
+        "sel_edge" => t.sel_edge,
+        "border" => t.border,
+        "outline" => t.outline,
+        "text" => t.text,
+        "text_weak" => t.text_weak,
+        "text_strong" => t.text_strong,
+        "warn" => t.warn,
+        "ref_mark" => t.ref_mark,
+        "draft_mark" => t.draft_mark,
+        "rec" => t.rec,
+        "hue_create" => t.hue_create,
+        "hue_destroy" => t.hue_destroy,
+        "hue_media" => t.hue_media,
+        "hue_ink" => t.hue_ink,
+        "hue_select" => t.hue_select,
+        "hue_layer" => t.hue_layer,
+        "hue_nav" => t.hue_nav,
+        _ => return None,
+    })
+}
+
+pub fn token_set(t: &mut Theme, k: &str, v: Color32) -> bool {
+    match k {
+        "window" => t.window = v,
+        "panel" => t.panel = v,
+        "header" => t.header = v,
+        "field" => t.field = v,
+        "hover" => t.hover = v,
+        "active" => t.active = v,
+        "button" => t.button = v,
+        "accent" => t.accent = v,
+        "accent_fill" => t.accent_fill = v,
+        "sel_row" => t.sel_row = v,
+        "sel_active" => t.sel_active = v,
+        "sel_edge" => t.sel_edge = v,
+        "border" => t.border = v,
+        "outline" => t.outline = v,
+        "text" => t.text = v,
+        "text_weak" => t.text_weak = v,
+        "text_strong" => t.text_strong = v,
+        "warn" => t.warn = v,
+        "ref_mark" => t.ref_mark = v,
+        "draft_mark" => t.draft_mark = v,
+        "rec" => t.rec = v,
+        "hue_create" => t.hue_create = v,
+        "hue_destroy" => t.hue_destroy = v,
+        "hue_media" => t.hue_media = v,
+        "hue_ink" => t.hue_ink = v,
+        "hue_select" => t.hue_select = v,
+        "hue_layer" => t.hue_layer = v,
+        "hue_nav" => t.hue_nav = v,
+        _ => return false,
+    }
+    true
+}
+
+/// All tokens, file order — the Editor's row list and the writer's line
+/// order.
+pub fn token_names() -> [&'static str; 28] {
+    [
+        "window", "panel", "header", "field", "hover", "active", "button",
+        "accent", "accent_fill", "sel_row", "sel_active", "sel_edge",
+        "border", "outline", "text", "text_weak", "text_strong", "warn",
+        "ref_mark", "draft_mark", "rec", "hue_create", "hue_destroy",
+        "hue_media", "hue_ink", "hue_select", "hue_layer", "hue_nav",
+    ]
+}
+
+/// A theme as `k=RRGGBB` lines, one per token (a whole theme, not a diff —
+/// a folder of files IS the share mechanism).
+pub fn to_body(t: &Theme) -> String {
+    let mut s = String::new();
+    for k in token_names() {
+        let c = token_get(t, k).unwrap();
+        s.push_str(&format!("{k}={:02x}{:02x}{:02x}\n", c.r(), c.g(), c.b()));
+    }
+    s
+}
+
+/// Parse a theme file over a base: known tokens override, unknown lines are
+/// PRESERVED verbatim (prefs.txt semantics — a newer build's tokens must
+/// survive this one's rewrite), malformed hex ignored.
+pub fn from_body(base: Theme, text: &str) -> (Theme, Vec<String>) {
+    let mut t = base;
+    let mut unknown = Vec::new();
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else {
+            unknown.push(line.to_owned());
+            continue;
+        };
+        let hex = v.trim().trim_start_matches('#');
+        if hex.len() == 6
+            && let Ok(b) = u32::from_str_radix(hex, 16)
+            && token_set(&mut t, k.trim(), Color32::from_rgb(
+                (b >> 16) as u8,
+                ((b >> 8) & 0xff) as u8,
+                (b & 0xff) as u8,
+            ))
+        {
+            continue;
+        }
+        unknown.push(line.to_owned());
+    }
+    (t, unknown)
+}
+
+/// Where custom themes live: a `themes/` folder beside the exe (the same
+/// resolution rule as prefs.txt).
+pub fn themes_dir() -> Option<std::path::PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("themes")))
+}
+
+/// Custom theme names on disk, sorted (the picker lists built-ins first,
+/// then these).
+pub fn custom_names_in(dir: &std::path::Path) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("txt"))
+                && let Some(stem) = p.file_stem()
+            {
+                out.push(stem.to_string_lossy().into_owned());
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// One custom theme over DARK; missing/unreadable is None (the caller falls
+/// back to the built-in rules).
+pub fn load_custom(dir: &std::path::Path, name: &str) -> Option<Theme> {
+    let text = std::fs::read_to_string(dir.join(format!("{name}.txt"))).ok()?;
+    let (t, _) = from_body(DARK, &text);
+    Some(t)
+}
+
+/// Write a custom theme (creates the folder). Returns false only when the
+/// disk refused.
+pub fn save_custom(dir: &std::path::Path, name: &str, t: &Theme) -> bool {
+    let _ = std::fs::create_dir_all(dir);
+    std::fs::write(dir.join(format!("{name}.txt")), to_body(t)).is_ok()
 }
 
 /// Corner rounding: palettes 4, controls 2. Not themed — rounding is this
@@ -607,5 +784,64 @@ mod tests {
         set_by_name("nonsense");
         assert_eq!(c(), DARK, "an unknown name falls back rather than sticking");
         set(DARK);
+    }
+
+    /// T1 step 3: a theme file round-trips EVERY token — a saved custom is
+    /// byte-faithful to what the editor showed, unknown lines survive a
+    /// load-and-rewrite (prefs.txt semantics), and a custom file resolves
+    /// by name while a built-in name always wins.
+    #[test]
+    fn theme_files_round_trip_every_token_and_keep_unknown_lines() {
+        // A modified DARK: every token nudged, so a lost one is visible.
+        let mut t = DARK;
+        for (i, k) in token_names().iter().enumerate() {
+            let base = token_get(&t, k).unwrap();
+            let nudge = egui::Color32::from_rgb(
+                (base.r() ^ (i as u8)).max(1),
+                (base.g() ^ (i as u8).wrapping_mul(3)).max(1),
+                (base.b() ^ (i as u8).wrapping_mul(7)).max(1),
+            );
+            assert!(token_set(&mut t, k, nudge), "{k} is a real token");
+        }
+        let body = to_body(&t);
+        let (back, unknown) = from_body(DARK, &format!("# a comment\n{body}"));
+        assert!(unknown == vec!["# a comment".to_owned()], "{unknown:?}");
+        for k in token_names() {
+            assert_eq!(
+                token_get(&back, k),
+                token_get(&t, k),
+                "{k} survived the round trip"
+            );
+        }
+        // Malformed lines are kept, not applied.
+        let (_, unknown) = from_body(DARK, "accent=xyz\nnot-a-pair\n");
+        assert_eq!(unknown.len(), 2, "garbage preserved verbatim");
+    }
+
+    /// The custom-file life cycle in a scratch dir: save, scan, load, and
+    /// the built-in shadowing rule.
+    #[test]
+    fn custom_theme_files_save_scan_and_load() {
+        let dir = std::env::temp_dir().join(format!("mn-theme-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut t = SEPIA;
+        assert!(token_set(&mut t, "accent", egui::Color32::from_rgb(1, 2, 3)));
+        assert!(save_custom(&dir, "mine", &t));
+        assert_eq!(custom_names_in(&dir), vec!["mine".to_owned()]);
+        let got = load_custom(&dir, "mine").expect("the file loads");
+        assert_eq!(token_get(&got, "accent"), Some(egui::Color32::from_rgb(1, 2, 3)));
+        assert_eq!(
+            token_get(&got, "panel"),
+            Some(SEPIA.panel),
+            "a saved file carries the WHOLE theme — every token came along"
+        );
+        // A hand-written PARTIAL file: named tokens apply, the rest are
+        // the DARK base.
+        std::fs::write(dir.join("partial.txt"), "accent=010203\n").unwrap();
+        let part = load_custom(&dir, "partial").expect("partial loads");
+        assert_eq!(token_get(&part, "accent"), Some(egui::Color32::from_rgb(1, 2, 3)));
+        assert_eq!(token_get(&part, "panel"), Some(DARK.panel), "the base fills the gaps");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

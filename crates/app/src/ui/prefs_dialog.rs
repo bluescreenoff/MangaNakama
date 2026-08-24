@@ -221,7 +221,9 @@ struct Fx {
     changed: bool,
     reset: bool,
     preset_pick: Option<String>,
-    theme_pick: Option<&'static str>,
+    /// A theme to switch to before the window closes. `String`, not
+    /// `&'static str`: custom themes (T1 step 3) have no static names.
+    theme_pick: Option<String>,
 }
 
 /// File ▸ Preferences… — tab rail on the left (Discord), search box above
@@ -343,15 +345,15 @@ pub(super) fn prefs_window(ctx: &egui::Context, app: &mut App) {
     if fx.reset {
         app.prefs.reset();
         app.new_doc_draft.setup = app.prefs.new_preset_setup();
-        fx.theme_pick = Some(theme::resolved_name(&app.prefs.theme));
+        fx.theme_pick = Some(theme::resolved_name(&app.prefs.theme).to_owned());
     }
     // Unconditional, and after `reset`: the checkbox writes the preference
     // and this pushes it into the painters' global — Reset cannot leave
     // the switch and the setting disagreeing.
     super::icons::set_accents(app.prefs.icon_colours);
     if let Some(name) = fx.theme_pick {
-        app.prefs.theme = name.to_owned();
-        theme::set_by_name(name);
+        app.prefs.theme = name.clone();
+        theme::set_by_name(&name);
         theme::apply(ctx);
         fx.changed = true;
     }
@@ -583,7 +585,22 @@ fn tab_interface(ui: &mut egui::Ui, app: &mut App, focus: Option<&str>, fx: &mut
             ui.horizontal(|ui| {
                 for (name, _) in theme::BUILT_INS {
                     if ui.selectable_label(now == *name, *name).clicked() && now != *name {
-                        fx.theme_pick = Some(*name);
+                        fx.theme_pick = Some((*name).to_owned());
+                    }
+                }
+                // T1 step 3: custom themes beside the built-ins — a folder
+                // of files IS the share mechanism. A file named like a
+                // built-in is skipped here: by_name prefers the built-in,
+                // and a chip that cannot win is a lie.
+                if let Some(dir) = theme::themes_dir() {
+                    for name in theme::custom_names_in(&dir)
+                        .into_iter()
+                        .filter(|n| !theme::BUILT_INS.iter().any(|(b, _)| b == n))
+                    {
+                        let is_now = p.theme == name;
+                        if ui.selectable_label(is_now, &name).clicked() && !is_now {
+                            fx.theme_pick = Some(name);
+                        }
                     }
                 }
             });
@@ -614,8 +631,9 @@ fn tab_interface(ui: &mut egui::Ui, app: &mut App, focus: Option<&str>, fx: &mut
         });
     ui.weak(
         "Theme and icons apply immediately; UI size applies when you release \
-         the slider. Only dark themes ship for now.",
+         the slider. Only dark themes ship as built-ins — customise below.",
     );
+    theme_editor(ui, p, fx);
     // The 3D-poses toggle re-derives the bank's tree live (the branch and
     // counts appear/vanish); items did not change, so no rescan/decode.
     // Detected AFTER the grid: `p`'s borrow ends at its last use above.
@@ -631,6 +649,75 @@ fn tab_interface(ui: &mut egui::Ui, app: &mut App, focus: Option<&str>, fx: &mut
     if wants != has {
         app.rebuild_material_tree();
     }
+}
+
+/// T1 step 3: the theme EDITOR. The pickers bind to the LIVE palette — an
+/// edit previews immediately (immediate mode = free); "Save as…" writes
+/// `themes/<name>.txt` beside the exe and switches to it; Reset reloads
+/// the theme's source of truth (built-in or file). No in-app share
+/// ecosystem — a folder of files IS the share mechanism.
+fn theme_editor(ui: &mut egui::Ui, p: &mut crate::app::Prefs, fx: &mut Fx) {
+    ui.collapsing("Customise theme…", |ui| {
+        let mut t = theme::c();
+        let mut edited = false;
+        egui::Grid::new("mn.theme.editor")
+            .num_columns(2)
+            .striped(true)
+            .min_col_width(96.0)
+            .show(ui, |ui| {
+                for k in theme::token_names() {
+                    ui.label(egui::RichText::new(k).small());
+                    let mut rgb = [
+                        theme::token_get(&t, k).unwrap().r(),
+                        theme::token_get(&t, k).unwrap().g(),
+                        theme::token_get(&t, k).unwrap().b(),
+                    ];
+                    if ui.color_edit_button_srgb(&mut rgb).changed() {
+                        let c = egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
+                        theme::token_set(&mut t, k, c);
+                        edited = true;
+                    }
+                    ui.end_row();
+                }
+            });
+        if edited {
+            theme::set(t);
+            theme::apply(ui.ctx());
+        }
+        ui.horizontal(|ui| {
+            ui.label("save as");
+            ui.add(
+                egui::TextEdit::singleline(&mut p.theme_save_name)
+                    .hint_text("my theme")
+                    .desired_width(110.0),
+            );
+            let name = p.theme_save_name.trim().to_owned();
+            let ok = !name.is_empty()
+                && !name.contains(['/', '\\', ':'])
+                && !theme::BUILT_INS.iter().any(|(b, _)| *b == name);
+            if ui
+                .add_enabled(ok, egui::Button::new("Save as…"))
+                .on_disabled_hover_text("a name without path separators; built-in names are reserved")
+                .clicked()
+                && let Some(dir) = theme::themes_dir()
+                && theme::save_custom(&dir, &name, &theme::c())
+            {
+                p.theme = name.clone();
+                theme::set_by_name(&name);
+                theme::apply(ui.ctx());
+                p.theme_save_name = String::new();
+                fx.changed = true;
+            }
+            if ui.button("Reset").clicked() {
+                theme::set_by_name(&p.theme);
+                theme::apply(ui.ctx());
+            }
+        });
+        ui.weak(
+            "custom themes live in themes\\ beside the app — copy the file \
+             to share one; a file named like a built-in is ignored",
+        );
+    });
 }
 
 fn tab_text(ui: &mut egui::Ui, app: &mut App, focus: Option<&str>, fx: &mut Fx) {

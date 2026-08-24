@@ -116,6 +116,10 @@ pub struct Prefs {
     /// (2026-08-24): hidden by default, a setting unhides, never a
     /// "can't use" badge.
     pub show_pose3d_materials: bool,
+    /// T1 step 3: the theme editor's "save as" name field. Deliberately
+    /// NOT serialized — it is typing state, not a preference; to_body
+    /// names its keys explicitly so this never leaks into prefs.txt.
+    pub theme_save_name: String,
     /// `k=v` lines this build does not recognise, kept so saving here does
     /// not delete a newer build's settings.
     unknown: Vec<String>,
@@ -142,6 +146,7 @@ impl Default for Prefs {
             ui_scale: 1.0,
             icon_colours: true,
             show_pose3d_materials: false,
+            theme_save_name: String::new(),
             unknown: Vec::new(),
             dirty: false,
         }
