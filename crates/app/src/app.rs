@@ -2818,6 +2818,18 @@ impl App {
         self.needs_redraw = true;
     }
 
+    /// The direct-feel rule (owner, 2026-08-26, applied at scale): a
+    /// transform float is MODAL state — it must never outlive the context
+    /// it was opened in. Any layer/page/document switch calls this FIRST,
+    /// so the float bakes where it was lifted (an identity float cancels
+    /// itself inside the arm) instead of stamping into whatever document
+    /// or layer happens to be active at commit time.
+    pub fn commit_open_float(&mut self) {
+        if self.transform_drag.is_some() {
+            crate::cmd::dispatch(self, AppCmd::TransformCommit);
+        }
+    }
+
     pub fn end_stroke(&mut self) {
         if self.stroke.is_none() {
             return;

@@ -335,6 +335,10 @@ impl App {
         if i == self.active_doc || i >= self.docs.len() {
             return false;
         }
+        // Direct-feel rule: a transform float is modal — it must not cross a
+        // tab switch (the parked doc would lose it, or it would stamp into
+        // the arriving one).
+        self.commit_open_float();
         // Asked BEFORE the park: the pages we are leaving are still live.
         let note = self.stale_export_note(self.active_doc);
         self.forget_document_caches();
@@ -450,6 +454,9 @@ impl App {
     /// Call it from a load's SUCCESS path, immediately before installing the
     /// new document — a failed load must not leave an empty tab behind.
     pub fn prepare_open_target(&mut self) {
+        // Direct-feel rule: a float must never outlive the document it was
+        // opened in — the open path replaces the whole doc below.
+        self.commit_open_float();
         let untouched = self.doc_path.is_none() && !self.dirty() && self.pages.len() <= 1;
         if untouched {
             self.forget_document_caches();

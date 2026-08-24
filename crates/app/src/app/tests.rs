@@ -7958,6 +7958,84 @@ fn an_object_ink_move_commits_on_release() {
     assert_eq!(undone.0, ox);
 }
 
+/// The direct-feel rule at scale (owner 2026-08-26): a transform float is
+/// MODAL — clicking another layer mid-float BAKES the float on the layer it
+/// was lifted from, instead of silently retargeting its commit's
+/// clear+stamp onto the clicked layer. This is the exact "handles followed
+/// me to a layer that doesn't even have the image" pain, fixed at the
+/// commit seam.
+#[test]
+fn a_layer_click_mid_float_bakes_it_on_its_own_layer() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    let _blank = app.doc.add_layer("blank below");
+    let idx = TileIdx::of_pixel(100, 100);
+    app.doc
+        .active_layer_mut()
+        .tile_mut(idx)
+        .set_pixel((100 - idx.origin().0) as usize, (100 - idx.origin().1) as usize, [1, 2, 3, 32767]);
+    let lifted = app.doc.active;
+    let (ox, _oy, ow, _oh) = tight_ink(&app.doc.layers[lifted]).expect("ink");
+
+    // Ctrl+T lift, drag, then click the OTHER layer in the palette.
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::TransformStart);
+    assert!(app.transform_drag.is_some(), "the float opened");
+    app.transform_drag.as_mut().unwrap().set_params(1.0, 1.0, 0.0, 40.0, 0.0);
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::SelectLayer(0));
+
+    assert!(app.transform_drag.is_none(), "the layer click baked the float");
+    assert_eq!(app.doc.active, 0, "and the switch itself happened");
+    let moved = tight_ink(&app.doc.layers[lifted]).expect("ink after the switch");
+    assert_eq!(moved.0, ox + 40, "the move landed on the LIFTED layer");
+    assert_eq!(moved.2, ow, "same ink width");
+    let blank_ink = app.doc.layers[0]
+        .tiles()
+        .map(|(_, t)| t.alpha_sum())
+        .sum::<u64>();
+    assert_eq!(blank_ink, 0, "nothing stamped onto the clicked layer");
+}
+
+/// Same rule across a PAGE switch: the float bakes on the page it was
+/// lifted on, and the arriving page starts clean — no cross-page stamp.
+#[test]
+fn a_page_switch_mid_float_bakes_it_on_its_own_page() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    // A two-page work: page 0 gets the ink, page 1 stays blank.
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::AddPage);
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::SelectPage(0));
+    let idx = TileIdx::of_pixel(100, 100);
+    app.doc
+        .active_layer_mut()
+        .tile_mut(idx)
+        .set_pixel((100 - idx.origin().0) as usize, (100 - idx.origin().1) as usize, [1, 2, 3, 32767]);
+    let (ox, _oy, ow, _oh) = tight_ink(app.doc.active_layer()).expect("ink");
+
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::TransformStart);
+    app.transform_drag.as_mut().unwrap().set_params(1.0, 1.0, 0.0, 40.0, 0.0);
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::SelectPage(1));
+
+    assert!(app.transform_drag.is_none(), "the page switch baked the float");
+    assert_eq!(app.page_index, 1, "we are on the new page");
+    let arriving = app
+        .doc
+        .active_layer()
+        .tiles()
+        .map(|(_, t)| t.alpha_sum())
+        .sum::<u64>();
+    assert_eq!(arriving, 0, "the arriving page got nothing stamped");
+
+    // And the left page kept the moved ink.
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::SelectPage(0));
+    let moved = tight_ink(app.doc.active_layer()).expect("ink back on page 0");
+    assert_eq!(moved.0, ox + 40, "the move baked on the page it belongs to");
+    assert_eq!(moved.2, ow);
+}
+
 /// Owner 2026-08-24, drawing session: "you should be able to ctrl+t just
 /// to be able to select and transform all non-empty space on a layer" —
 /// the binding predates the ask (Ctrl+T → TransformStart, the Transform

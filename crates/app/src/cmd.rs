@@ -3199,6 +3199,9 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
         },
         AppCmd::NewComicCreate => {
             app.commit_text_edit();
+            // Direct-feel rule: bake any open float before the doc it lives
+            // in is parked for the new comic.
+            app.commit_open_float();
             // A new project opens in a NEW TAB (owner, 2026-08-19: "it would
             // be bad if I have art in the default canvas and making a new
             // manga deletes it"). This one line parks the current document;
@@ -5714,6 +5717,12 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
         }
         AppCmd::SelectLayer(i) => {
             app.commit_text_edit();
+            // The direct-feel rule: a transform float belongs to the layer
+            // it was lifted from — switching layers mid-float would retarget
+            // its commit's clear+stamp to the WRONG layer. Bake it first.
+            if app.transform_drag.is_some() && i != app.doc.active {
+                app.commit_open_float();
+            }
             // PA-001: picking a layer un-picks the Paper row, whichever way
             // the pick arrived (palette row, shortcut, another command).
             app.paper_selected = false;

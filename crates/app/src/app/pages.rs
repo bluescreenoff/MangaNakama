@@ -753,6 +753,10 @@ impl App {
         if i == self.page_index || i >= self.pages.len() {
             return;
         }
+        // Direct-feel rule: a transform float is modal — bake it on the page
+        // it was lifted on BEFORE the doc under it is swapped (otherwise its
+        // commit would stamp into the arriving page).
+        self.commit_open_float();
         let was_clean = !self.dirty();
         let old = self.page_index;
         // The eye-solo snapshot belongs to the page being left.
