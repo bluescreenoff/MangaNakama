@@ -45,6 +45,95 @@ pub struct TextEngine {
     d2d: ID2D1Factory,
     wic: IWICImagingFactory,
     families: Vec<String>,
+    /// Per-(content-hash, dpi) layout cache (plans/05 item 5): the engine
+    /// rebuilt a full DirectWrite layout on every arrow key, from seven
+    /// callers. LRU-capped at 8 — the machine is RAM-starved and a layout
+    /// is a few dozen KB. COM lifetime is the engine's: the map lives here,
+    /// the wrappers Release when it drops.
+    cache: std::cell::RefCell<LayoutCache>,
+    /// TEST seam: how many layouts were actually BUILT (the seven callers'
+    /// cache-hit rate is what this round exists for).
+    pub layout_builds: std::cell::Cell<u32>,
+}
+
+/// The cache itself: key → layout plus LRU order (oldest first).
+struct LayoutCache {
+    map: std::collections::HashMap<u64, IDWriteTextLayout>,
+    order: std::collections::VecDeque<u64>,
+}
+
+impl Default for LayoutCache {
+    fn default() -> Self {
+        Self {
+            map: Default::default(),
+            order: Default::default(),
+        }
+    }
+}
+
+/// Content hash of every item field the LAYOUT depends on, dpi included:
+/// font/size/orientation/alignment/spacing/box/text/ruby-count/runs. A
+/// revision counter (the plan's first idea) was rejected: app-side
+/// closures mutate layout-affecting fields (size_pt, font, …) outside any
+/// core funnel, and one missed bump serves a stale layout — a hash of the
+/// content itself cannot go stale.
+fn layout_key(item: &TextItem, dpi: u32) -> u64 {
+    use std::hash::{Hash, Hasher};
+    fn f32_bits(h: &mut std::collections::hash_map::DefaultHasher, b: f32) {
+        h.write_u32(b.to_bits());
+    }
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    dpi.hash(&mut h);
+    item.font.hash(&mut h);
+    f32_bits(&mut h, item.size_pt);
+    item.vertical.hash(&mut h);
+    std::mem::discriminant(&item.align).hash(&mut h);
+    std::mem::discriminant(&item.frame_align).hash(&mut h);
+    f32_bits(&mut h, item.letter_spacing_pt);
+    match item.line_spacing {
+        LineSpacing::Auto => h.write_u8(0),
+        LineSpacing::Percent(p) => {
+            h.write_u8(1);
+            f32_bits(&mut h, p);
+        }
+        LineSpacing::Pt(v) => {
+            h.write_u8(2);
+            f32_bits(&mut h, v);
+        }
+    }
+    f32_bits(&mut h, item.size[0]);
+    f32_bits(&mut h, item.size[1]);
+    item.text.hash(&mut h);
+    // The Auto+ruby spacing branch reads `!item.ruby.is_empty()` AND
+    // `ruby_px` (which reads ruby_style's size) — presence + style change
+    // the base layout; the drawn readings do not.
+    (item.ruby.len() as u32).hash(&mut h);
+    f32_bits(&mut h, item.ruby_style.size_pct);
+    std::mem::discriminant(&item.ruby_style.align).hash(&mut h);
+    f32_bits(&mut h, item.ruby_style.offset_pt);
+    f32_bits(&mut h, item.ruby_style.gap_pt);
+    item.ruby_style.font.hash(&mut h);
+    // Per-range fonts change glyphs (TX-064) — all of them.
+    for fr in &item.fonts {
+        fr.start.hash(&mut h);
+        fr.len.hash(&mut h);
+        fr.family.hash(&mut h);
+    }
+    // 縦中横 substitution rewrites the string the layout shapes (TX-063).
+    for t in &item.tcy {
+        t.start.hash(&mut h);
+        t.len.hash(&mut h);
+    }
+    item.auto_tcy.hash(&mut h);
+    // Runs are applied to the layout itself (bold is wider) — all of them.
+    for r in &item.runs {
+        r.len.hash(&mut h);
+        r.bold.hash(&mut h);
+        r.italic.hash(&mut h);
+        r.underline.hash(&mut h);
+        r.strike.hash(&mut h);
+    }
+    h.finish()
 }
 
 /// Caret geometry for one text position: the leading-edge point plus the
@@ -138,6 +227,8 @@ impl TextEngine {
             d2d,
             wic,
             families,
+            cache: std::cell::RefCell::new(LayoutCache::default()),
+            layout_builds: std::cell::Cell::new(0),
         })
     }
 
@@ -184,7 +275,40 @@ impl TextEngine {
             .unwrap_or_else(|| "Meiryo".into())
     }
 
+    /// The cached layout for (item content, dpi) — the plan's per-revision
+    /// cache, keyed by a content hash instead (see `layout_key`). All
+    /// seven callers (natural_size, render, hit_test_point, caret,
+    /// selection_rects, line_move, line_bounds) come through here, so one
+    /// arrow key = one cache hit, not seven builds.
     fn layout(&self, item: &TextItem, dpi: u32) -> Result<IDWriteTextLayout> {
+        let key = layout_key(item, dpi);
+        {
+            let mut c = self.cache.borrow_mut();
+            if let Some(l) = c.map.get(&key) {
+                let l = l.clone();
+                // LRU touch.
+                if let Some(i) = c.order.iter().position(|&k| k == key) {
+                    c.order.remove(i);
+                }
+                c.order.push_back(key);
+                return Ok(l);
+            }
+        }
+        let layout = self.build_layout(item, dpi)?;
+        let mut c = self.cache.borrow_mut();
+        const CAP: usize = 8;
+        while c.order.len() >= CAP {
+            if let Some(old) = c.order.pop_front() {
+                c.map.remove(&old);
+            }
+        }
+        c.order.push_back(key);
+        c.map.insert(key, layout.clone());
+        Ok(layout)
+    }
+
+    fn build_layout(&self, item: &TextItem, dpi: u32) -> Result<IDWriteTextLayout> {
+        self.layout_builds.set(self.layout_builds.get() + 1);
         let format = unsafe {
             self.dwrite.CreateTextFormat(
                 &HSTRING::from(item.font.as_str()),
@@ -1008,6 +1132,50 @@ mod tests {
 
     fn ink_count(r: &RenderedText) -> usize {
         r.rgba.chunks_exact(4).filter(|p| p[3] > 64).count()
+    }
+
+    /// plans/05 item 5: the layout cache — every caller shares ONE build
+    /// per (content, dpi). Repeats hit; a content change (text, size_pt)
+    /// or a dpi change misses. The content-HASH key (not the plan's
+    /// revision counter) is what makes the size_pt case safe: app closures
+    /// mutate layout fields outside any core funnel, and a hash cannot go
+    /// stale. NOTE natural_size measures through a huge-box PROBE clone —
+    /// its own stable key, one build for any number of calls.
+    #[test]
+    fn the_layout_cache_hits_until_content_or_dpi_moves() {
+        let e = engine();
+        let it = item("cache me", false);
+        let before = e.layout_builds.get();
+        let _ = e.natural_size(&it, 600);
+        let _ = e.natural_size(&it, 600);
+        assert_eq!(
+            e.layout_builds.get(),
+            before + 1,
+            "the probe key builds once however often natural_size asks"
+        );
+        // The real-box callers share a second key: first line_bounds pays
+        // the build, the caret and repeats ride it.
+        let _ = e.line_bounds(&it, 600, 0);
+        assert_eq!(e.layout_builds.get(), before + 2);
+        let _ = e.line_bounds(&it, 600, 2);
+        let _ = e.caret(&it, 600, 1, false).ok();
+        assert_eq!(e.layout_builds.get(), before + 2, "caret rides the same key");
+        // Text changed → new key → rebuild.
+        let mut it2 = it.clone();
+        it2.insert(0, "x");
+        let _ = e.line_bounds(&it2, 600, 0);
+        assert_eq!(e.layout_builds.get(), before + 3);
+        // Size changed — the closure-mutation case → rebuild.
+        let mut it3 = it.clone();
+        it3.size_pt = 40.0;
+        let _ = e.line_bounds(&it3, 600, 0);
+        assert_eq!(e.layout_builds.get(), before + 4);
+        // DPI changed → rebuild ...
+        let _ = e.line_bounds(&it, 300, 0);
+        assert_eq!(e.layout_builds.get(), before + 5);
+        // ... and the earlier entries are still cached.
+        let _ = e.line_bounds(&it, 600, 0);
+        assert_eq!(e.layout_builds.get(), before + 5);
     }
 
     #[test]
