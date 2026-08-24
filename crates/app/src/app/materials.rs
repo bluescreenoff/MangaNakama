@@ -83,6 +83,18 @@ pub enum MaterialType {
 }
 
 impl MaterialType {
+    /// The tree/chip display name (plural — the rows count many).
+    pub fn label(self) -> &'static str {
+        match self {
+            MaterialType::Tone => "Tones",
+            MaterialType::PatternImage => "Patterns",
+            MaterialType::EffectLines => "Effect lines",
+            MaterialType::Balloon => "Balloons",
+            MaterialType::Pose3d => "3D poses",
+            MaterialType::Other => "Other",
+        }
+    }
+
     /// The `@type=` value word.
     pub fn as_tag(self) -> &'static str {
         match self {
@@ -570,6 +582,11 @@ pub enum MaterialFilter {
     /// A virtual name-prefix group — folder, directory, leading token. See
     /// [`materials_tree`]; this is ours, not CSP's.
     Prefix(usize, PathBuf, String),
+    /// One TYPE's every material, across all registered folders (plans/05
+    /// item 6: the tree's type level above the folder structure).
+    Type(MaterialType),
+    /// Materials carrying this exact USER tag (the chip rows).
+    Tag(String),
 }
 
 impl MaterialFilter {
@@ -581,6 +598,8 @@ impl MaterialFilter {
             Self::All => "all".to_owned(),
             Self::Dir(f, d) => format!("d{f}\u{1f}{}", d.display()),
             Self::Prefix(f, d, t) => format!("p{f}\u{1f}{}\u{1f}{t}", d.display()),
+            Self::Type(t) => format!("t\u{1f}{}", t.as_tag()),
+            Self::Tag(t) => format!("g\u{1f}{t}"),
         }
     }
 
@@ -594,6 +613,12 @@ impl MaterialFilter {
                     && item.rel == *d
                     && name_prefix_token(&item.name).as_deref() == Some(t.as_str())
             }
+            Self::Type(t) => item.material_type == *t,
+            Self::Tag(t) => item
+                .tags
+                .split([',', '\n'])
+                .map(str::trim)
+                .any(|tok| tok.eq_ignore_ascii_case(t)),
         }
     }
 }
@@ -640,15 +665,68 @@ pub fn name_prefix_token(name: &str) -> Option<String> {
 /// Pure and free-standing so it can be tested without an App; the palette
 /// caches the result on `App::material_tree` rather than rebuilding it per
 /// frame (the counts are an O(dirs × items) sweep).
-pub fn materials_tree(items: &[MaterialItem], folder_names: &[String]) -> Vec<MaterialNode> {
+pub fn materials_tree(
+    items: &[MaterialItem],
+    folder_names: &[String],
+    show_pose3d: bool,
+) -> Vec<MaterialNode> {
+    // The hidden type's materials never appear — neither branch nor count
+    // (owner decision, locked 2026-08-24: hidden by default, never a
+    // "can't use" badge).
+    let visible: Vec<MaterialItem> = items
+        .iter()
+        .filter(|i| show_pose3d || i.material_type != MaterialType::Pose3d)
+        .cloned()
+        .collect();
     let mut out = vec![MaterialNode {
         label: "All materials".to_owned(),
         depth: 0,
         filter: MaterialFilter::All,
-        count: items.len(),
+        count: visible.len(),
         children: !folder_names.is_empty(),
     }];
-    for (f, fname) in folder_names.iter().enumerate() {
+    // plans/05 item 6 (b): the TYPE level sits above the folder structure —
+    // CSP's Materials tree shape. Canonical order, empty types skipped.
+    for ty in [
+        MaterialType::Tone,
+        MaterialType::PatternImage,
+        MaterialType::EffectLines,
+        MaterialType::Balloon,
+        MaterialType::Pose3d,
+        MaterialType::Other,
+    ] {
+        let of_type: Vec<MaterialItem> = visible
+            .iter()
+            .filter(|i| i.material_type == ty)
+            .cloned()
+            .collect();
+        if of_type.is_empty() {
+            continue;
+        }
+        out.push(MaterialNode {
+            label: ty.label().to_owned(),
+            depth: 1,
+            filter: MaterialFilter::Type(ty),
+            count: of_type.len(),
+            children: !folder_names.is_empty(),
+        });
+        for (f, fname) in folder_names.iter().enumerate() {
+            folder_nodes(&of_type, f, fname, 2, &mut out);
+        }
+    }
+    out
+}
+
+/// One registered folder's subtree inside a type branch — the tree's
+/// folder level, depth-offset by where it hangs.
+fn folder_nodes(
+    items: &[MaterialItem],
+    f: usize,
+    fname: &str,
+    depth_base: usize,
+    out: &mut Vec<MaterialNode>,
+) {
+    {
         // Directories keyed by their COMPONENT LIST, not by PathBuf: a
         // `Vec<String>` sorts a parent immediately before its own
         // descendants (pre-order), while raw path bytes do not — `a\b`
@@ -679,8 +757,8 @@ pub fn materials_tree(items: &[MaterialItem], folder_names: &[String]) -> Vec<Ma
             let groups = flat_prefix_groups(items, f, &rel);
             out.push(MaterialNode {
                 // The registered folder's own name stays the top node.
-                label: comps.last().cloned().unwrap_or_else(|| fname.clone()),
-                depth: 1 + comps.len(),
+                label: comps.last().cloned().unwrap_or_else(|| fname.to_owned()),
+                depth: depth_base + comps.len(),
                 filter: MaterialFilter::Dir(f, rel.clone()),
                 count,
                 children: has_sub || !groups.is_empty(),
@@ -691,7 +769,7 @@ pub fn materials_tree(items: &[MaterialItem], folder_names: &[String]) -> Vec<Ma
             for (tok, n) in groups {
                 out.push(MaterialNode {
                     label: tok.clone(),
-                    depth: 2 + comps.len(),
+                    depth: depth_base + 1 + comps.len(),
                     filter: MaterialFilter::Prefix(f, rel.clone(), tok),
                     count: n,
                     children: false,
@@ -699,7 +777,6 @@ pub fn materials_tree(items: &[MaterialItem], folder_names: &[String]) -> Vec<Ma
             }
         }
     }
-    out
 }
 
 /// The virtual groups for one directory, `(token, count)` sorted by token.
@@ -746,6 +823,17 @@ impl App {
         None
     }
 
+    /// Rebuild the palette tree from the current bank + prefs. The scan
+    /// and the 3D-poses preference both come through here — the toggle
+    /// must apply live, without a rescan (no thumbnail decode).
+    pub fn rebuild_material_tree(&mut self) {
+        self.material_tree = materials_tree(
+            &self.materials,
+            &self.material_folder_names,
+            self.prefs.show_pose3d_materials,
+        );
+    }
+
     /// Rescan every folder into the bank (idempotent; called at startup,
     /// after folder edits, and by the palette's Rescan button).
     pub fn materials_scan(&mut self) {
@@ -764,7 +852,7 @@ impl App {
                     .unwrap_or_else(|| p.display().to_string())
             })
             .collect();
-        self.material_tree = materials_tree(&self.materials, &self.material_folder_names);
+        self.rebuild_material_tree();
         // A filter (and a selection) is an INDEX into what was just thrown
         // away. Dropping a filter whose row no longer exists is what stops
         // Rescan from leaving the grid mysteriously empty; a filter that
@@ -1542,7 +1630,7 @@ mod tests {
             item_in(0, "sfx/impact", "boom"),
             item_in(1, "", "other"),
         ];
-        let tree = materials_tree(&items, &["bank".into(), "mine".into()]);
+        let tree = materials_tree(&items, &["bank".into(), "mine".into()], true);
         let shape: Vec<(usize, &str, usize)> = tree
             .iter()
             .map(|n| (n.depth, n.label.as_str(), n.count))
@@ -1551,19 +1639,20 @@ mod tests {
             shape,
             vec![
                 (0, "All materials", 4),
-                (1, "bank", 3),
-                (2, "sfx", 2),
-                (3, "impact", 1),
-                (1, "mine", 1),
+                (1, "Other", 4),
+                (2, "bank", 3),
+                (3, "sfx", 2),
+                (4, "impact", 1),
+                (2, "mine", 1),
             ],
-            "roots keep their registered names; a branch counts its subtree"
+            "type level above the folders; a branch counts its subtree"
         );
         // Depth only ever grows by one, which is what makes "skip until the
         // depth drops back" a correct collapse.
         for w in tree.windows(2) {
             assert!(w[1].depth <= w[0].depth + 1, "not pre-order: {tree:?}");
         }
-        let dir_sfx = &tree[2].filter;
+        let dir_sfx = &tree[3].filter;
         assert!(
             items.iter().filter(|i| dir_sfx.accepts(i)).count() == 2,
             "selecting sfx must include sfx/impact"
@@ -1572,7 +1661,11 @@ mod tests {
             !dir_sfx.accepts(&item_in(0, "sfx2", "decoy")),
             "component-wise: sfx2 is not inside sfx"
         );
-        assert!(tree[1].children && !tree[4].children);
+        assert!(tree[1].children && !tree[5].children);
+        // The type row's own filter takes exactly its type, everywhere.
+        let ty = &tree[1].filter;
+        assert!(ty.accepts(&item_in(1, "", "far away")));
+        assert!(!ty.accepts(&item_in(0, "", "tone-dot-60lpi-30")));
     }
 
     /// OUR ADDITION: a flat folder past the threshold grows virtual
@@ -1597,7 +1690,7 @@ mod tests {
         for n in 0..(FLAT_GROUP_MIN + 1 - items.len()) {
             items.push(item_in(0, "", &format!("x{n}y{n}")));
         }
-        let tree = materials_tree(&items, &["bank".into()]);
+        let tree = materials_tree(&items, &["bank".into()], true);
         let groups: Vec<(&str, usize)> = tree
             .iter()
             .filter(|n| matches!(n.filter, MaterialFilter::Prefix(..)))
@@ -1608,14 +1701,25 @@ mod tests {
             vec![("boom", 12), ("painter", 9)],
             "leading separators are skipped, and 5 files are not a folder"
         );
-        assert_eq!(tree[1].depth + 1, tree[2].depth, "groups hang off the root");
-        let boom = &tree[2].filter;
-        assert_eq!(items.iter().filter(|i| boom.accepts(i)).count(), 12);
+        // The rows around the first group: type node, folder node, groups.
+        let boom = tree
+            .iter()
+            .find(|n| matches!(&n.filter, MaterialFilter::Prefix(_, _, t) if t == "boom"))
+            .unwrap();
+        assert_eq!(
+            boom.depth,
+            3,
+            "All(0) → type Other(1) → bank, the flat root(2) → groups(3)"
+        );
+        assert_eq!(
+            items.iter().filter(|i| boom.filter.accepts(i)).count(),
+            12
+        );
 
         // One material short of the threshold: no groups at all.
         items.pop();
         assert!(
-            !materials_tree(&items, &["bank".into()])
+            !materials_tree(&items, &["bank".into()], true)
                 .iter()
                 .any(|n| matches!(n.filter, MaterialFilter::Prefix(..))),
             "a browsable folder must not sprout invented rows"
@@ -1742,6 +1846,53 @@ mod tests {
             "no spec, no sidecar"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// plans/05 item 6 (b), the LOCKED owner decision: 3D poses are
+    /// hidden unless the setting says otherwise — no branch, no counts,
+    /// and the root count excludes them. With it on, the branch exists.
+    #[test]
+    fn pose3d_is_hidden_from_the_tree_until_the_setting_says_otherwise() {
+        let items = vec![
+            item_in(0, "", "tone-dot-60lpi-30"),
+            item_in(0, "", "boy-pose-a"),
+            item_in(0, "", "cat"),
+        ];
+        let hidden = materials_tree(&items, &["bank".into()], false);
+        assert_eq!(hidden[0].count, 2, "the pose did not count");
+        assert!(!hidden.iter().any(|n| matches!(
+            n.filter,
+            MaterialFilter::Type(MaterialType::Pose3d)
+        )));
+        assert_eq!(
+            hidden.iter().filter(|n| n.depth == 1).count(),
+            2,
+            "Tone + Other only: {hidden:?}"
+        );
+
+        let shown = materials_tree(&items, &["bank".into()], true);
+        assert_eq!(shown[0].count, 3);
+        assert!(shown.iter().any(|n| matches!(
+            n.filter,
+            MaterialFilter::Type(MaterialType::Pose3d)
+        )));
+    }
+
+    /// The tag chip filter: exact user-tag match, case-insensitive, and
+    /// the `@type` system tag never matches a tag chip.
+    #[test]
+    fn tag_chips_filter_by_exact_user_tag() {
+        let tagged = item("sheet", "screentone, light");
+        let typed = item("cat", "@type=balloon, pet");
+        let f = |t: &str| MaterialFilter::Tag(t.to_owned());
+        assert!(f("screentone").accepts(&tagged));
+        assert!(f("Light").accepts(&tagged), "case-insensitive");
+        assert!(!f("screen").accepts(&tagged), "exact token, not substring");
+        assert!(f("pet").accepts(&typed));
+        assert!(
+            !f("balloon").accepts(&typed),
+            "the @type system tag is not a chip"
+        );
     }
 
     /// plans/05 item 6 (a): the `@type=` system tag round-trips through

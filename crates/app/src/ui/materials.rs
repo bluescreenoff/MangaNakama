@@ -9,8 +9,98 @@
 
 use super::theme;
 use crate::app::App;
-use crate::app::materials::THUMB_STEPS;
+use crate::app::materials::{MaterialFilter, MaterialType, THUMB_STEPS};
 use crate::cmd::AppCmd;
+use egui::vec2;
+
+/// The glyph a type row/chip wears. `Other` deliberately gets none — an
+/// untyped pile wearing a random glyph would be a lie.
+fn material_type_icon(ty: MaterialType) -> Option<super::icons::Icon> {
+    use super::icons::Icon;
+    Some(match ty {
+        MaterialType::Tone => Icon::Tone,
+        MaterialType::PatternImage => Icon::Pattern,
+        MaterialType::EffectLines => Icon::FocusLines,
+        MaterialType::Balloon => Icon::Balloon,
+        MaterialType::Pose3d => Icon::Pose3d,
+        MaterialType::Other => return None,
+    })
+}
+
+/// plans/05 item 6 (b): the chip rows under the search box — TYPE chips
+/// (with live counts) and the bank's most common USER tags. Clicking a
+/// chip filters; clicking the active chip again clears back to All.
+fn chip_rows(ui: &mut egui::Ui, app: &mut App) {
+    let show_pose3d = app.prefs.show_pose3d_materials;
+    let search_active = !app.material_search.is_empty();
+    ui.horizontal_wrapped(|ui| {
+        for ty in [
+            MaterialType::Tone,
+            MaterialType::PatternImage,
+            MaterialType::EffectLines,
+            MaterialType::Balloon,
+            MaterialType::Pose3d,
+            MaterialType::Other,
+        ] {
+            if ty == MaterialType::Pose3d && !show_pose3d {
+                continue;
+            }
+            let n = app
+                .materials
+                .iter()
+                .filter(|m| m.material_type == ty)
+                .count();
+            if n == 0 {
+                continue;
+            }
+            let sel = app.material_filter == MaterialFilter::Type(ty);
+            if ui
+                .selectable_label(sel, egui::RichText::new(format!("{} {n}", ty.label())).small())
+                .clicked()
+            {
+                app.material_filter = if sel {
+                    MaterialFilter::All
+                } else {
+                    MaterialFilter::Type(ty)
+                };
+                app.material_selected = None;
+            }
+        }
+    });
+    // The bank's top USER tags (system @tags never chip). One row, capped —
+    // the chips are a shortcut, not a second tree.
+    let mut counts: std::collections::HashMap<String, usize> = Default::default();
+    for m in &app.materials {
+        for t in m.tags.split([',', '\n']) {
+            let t = t.trim();
+            if !t.is_empty() && !t.starts_with('@') {
+                *counts.entry(t.to_ascii_lowercase()).or_default() += 1;
+            }
+        }
+    }
+    let mut top: Vec<(String, usize)> = counts.into_iter().collect();
+    top.sort_by(|a, b| (b.1, &a.0).cmp(&(a.1, &b.0)));
+    top.truncate(10);
+    if !top.is_empty() && !search_active {
+        ui.horizontal_wrapped(|ui| {
+            for (t, n) in top {
+                let sel =
+                    app.material_filter == MaterialFilter::Tag(t.clone());
+                if ui
+                    .selectable_label(sel, egui::RichText::new(format!("{t} {n}")).small())
+                    .clicked()
+                {
+                    app.material_filter = if sel {
+                        MaterialFilter::All
+                    } else {
+                        MaterialFilter::Tag(t.clone())
+                    };
+                    app.material_selected = None;
+                }
+            }
+        });
+    }
+}
 
 /// The tree column. Narrow on purpose: it is a navigation strip, and the
 /// grid is what the palette is for.
@@ -104,6 +194,8 @@ fn header(ui: &mut egui::Ui, app: &mut App) {
             thumb_size_button(ui, app);
         });
     });
+    // plans/05 item 6 (b): the type + tag chip rows under search.
+    chip_rows(ui, app);
     if ui.available_width() >= PASTE_ROW_MIN_W {
         ui.horizontal(|ui| paste_options(ui, app));
     }
@@ -300,6 +392,18 @@ fn tree_column(ui: &mut egui::Ui, app: &mut App, height: f32) {
                         }
                         ui.horizontal(|ui| {
                             ui.add_space(depth as f32 * 8.0);
+                            // The TYPE rows wear their glyph (plans/05
+                            // item 6): a halftone patch, a checker, rays, a
+                            // bubble, a mannequin — the eye finds the kind
+                            // before it reads the word.
+                            if let MaterialFilter::Type(ty) = &filter {
+                                if let Some(icon) = material_type_icon(*ty) {
+                                    let (rect, _) =
+                                        ui.allocate_exact_size(vec2(12.0, 12.0), egui::Sense::hover());
+                                    let col = ui.visuals().widgets.inactive.fg_stroke.color;
+                                    super::icons::paint(ui.painter(), rect, icon, col);
+                                }
+                            }
                             // A leaf gets the chevron's WIDTH but no button,
                             // so labels down one branch stay aligned.
                             if children {
@@ -333,11 +437,17 @@ fn tree_column(ui: &mut egui::Ui, app: &mut App, height: f32) {
 /// The filtered, sorted indices into `app.materials`. Indices, not items:
 /// the old code cloned a whole `MaterialItem` per cell per frame.
 fn visible_order(app: &App) -> Vec<usize> {
-    // MT-012: the one box searches names AND tags — no second field.
+    // MT-012: the one box searches names AND tags — no second field. The
+    // hidden type never reaches the grid (owner-locked: hidden by default,
+    // a setting unhides — plans/05 item 6).
+    let show_pose3d = app.prefs.show_pose3d_materials;
     let search = app.material_search.to_lowercase();
     let mut order: Vec<usize> = (0..app.materials.len())
         .filter(|&i| {
-            app.material_filter.accepts(&app.materials[i])
+            (show_pose3d
+                || app.materials[i].material_type
+                    != crate::app::materials::MaterialType::Pose3d)
+                && app.material_filter.accepts(&app.materials[i])
                 && crate::app::materials::material_matches(&app.materials[i], &search)
         })
         .collect();

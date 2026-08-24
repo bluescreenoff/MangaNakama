@@ -130,6 +130,16 @@ pub(crate) const PREF_INDEX: &[PrefMeta] = &[
                (colour, colors, icons, monochrome, tint, hue, greyscale)",
     },
     PrefMeta {
+        id: "show_pose3d_materials",
+        tab: "Interface",
+        label: "Show 3D pose materials",
+        desc: "The materials bank hides its 3D-pose thumbnails until you \
+               turn this on — they cannot be placed on the page yet, and \
+               a pile of things you cannot use is noise while drawing. \
+               (3D, 3d, pose, poses, materials, hidden, hide, bank, \
+               mannequin, figure)",
+    },
+    PrefMeta {
         id: "ui_scale",
         tab: "Interface",
         label: "UI size",
@@ -583,6 +593,10 @@ fn tab_interface(ui: &mut egui::Ui, app: &mut App, focus: Option<&str>, fx: &mut
             fx.changed |= ui.checkbox(&mut p.icon_colours, "").changed();
             ui.end_row();
 
+            row_label(ui, focus, "show_pose3d_materials");
+            fx.changed |= ui.checkbox(&mut p.show_pose3d_materials, "").changed();
+            ui.end_row();
+
             row_label(ui, focus, "ui_scale");
             let mut pct = p.ui_scale * 100.0;
             if ui
@@ -602,6 +616,21 @@ fn tab_interface(ui: &mut egui::Ui, app: &mut App, focus: Option<&str>, fx: &mut
         "Theme and icons apply immediately; UI size applies when you release \
          the slider. Only dark themes ship for now.",
     );
+    // The 3D-poses toggle re-derives the bank's tree live (the branch and
+    // counts appear/vanish); items did not change, so no rescan/decode.
+    // Detected AFTER the grid: `p`'s borrow ends at its last use above.
+    let wants = app.prefs.show_pose3d_materials;
+    let has = app.material_tree.iter().any(|n| {
+        matches!(
+            n.filter,
+            crate::app::materials::MaterialFilter::Type(
+                crate::app::materials::MaterialType::Pose3d
+            )
+        )
+    });
+    if wants != has {
+        app.rebuild_material_tree();
+    }
 }
 
 fn tab_text(ui: &mut egui::Ui, app: &mut App, focus: Option<&str>, fx: &mut Fx) {

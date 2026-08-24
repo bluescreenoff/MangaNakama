@@ -148,6 +148,10 @@ pub enum Icon {
     FocusLines,
     /// Figure ▸ Sea urchin / Solid flash (ウニフラッシュ): a spiky burst.
     UrchinFlash,
+    /// Materials palette: a pattern/texture material — 2×2 checker.
+    Pattern,
+    /// Materials palette: a 3D-pose material — a posing stick mannequin.
+    Pose3d,
 }
 
 // --- accent roles --------------------------------------------------------
@@ -240,8 +244,10 @@ impl Icon {
             // …and unmaking it. Two only: red is the loudest hue here, so it
             // is spent on the bin and on the one launcher op that erases.
             Self::Trash | Self::SelClearOutside => Destroy,
-            // Files, clipboard, the reader.
-            Self::Book | Self::SelCut | Self::SelCopy | Self::SelPaste => Media,
+            // Files, clipboard, the reader, bank assets.
+            Self::Book | Self::SelCut | Self::SelCopy | Self::SelPaste
+            | Self::Pattern
+            | Self::Pose3d => Media,
             // Layer kinds and layer-to-layer ops.
             Self::Folder
             | Self::FolderOpen
@@ -1226,6 +1232,35 @@ pub fn paint_role(p: &Painter, r: Rect, icon: Icon, base: Color32, accent: Optio
                     Stroke::NONE,
                 ));
             }
+        }
+        Icon::Pattern => {
+            // 2x2 checker inside a sheet outline: the two diagonal quadrants
+            // filled, so the glyph reads at palette sizes (a 1px outline
+            // checker closes up).
+            let (b, m, e) = (0.14_f32, 0.50_f32, 0.86_f32);
+            p.add(Shape::closed_line(
+                poly(r, &[(b, b), (e, b), (e, e), (b, e)]),
+                thin,
+            ));
+            p.add(Shape::convex_polygon(
+                poly(r, &[(b, b), (m, b), (m, m), (b, m)]),
+                a,
+                Stroke::NONE,
+            ));
+            p.add(Shape::convex_polygon(
+                poly(r, &[(m, m), (e, m), (e, e), (m, e)]),
+                a,
+                Stroke::NONE,
+            ));
+        }
+        Icon::Pose3d => {
+            // A posing mannequin: head, torso, one arm raised — the gesture
+            // reads even at chip size, which is where this glyph lives.
+            p.circle_filled(pt(r, 0.50, 0.20), w * 0.10, color);
+            p.line(poly(r, &[(0.50, 0.32), (0.50, 0.64)]), line);
+            p.line(poly(r, &[(0.22, 0.36), (0.50, 0.42), (0.78, 0.30)]), thin);
+            p.line(poly(r, &[(0.50, 0.64), (0.30, 0.88)]), thin);
+            p.line(poly(r, &[(0.50, 0.64), (0.72, 0.86)]), thin);
         }
     }
 }

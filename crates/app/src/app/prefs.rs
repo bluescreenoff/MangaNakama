@@ -111,6 +111,11 @@ pub struct Prefs {
     /// that order. Off paints every glyph in plain chrome grey, which is
     /// what this app looked like before 2026-08-22.
     pub icon_colours: bool,
+    /// plans/05 item 6: show 3D-pose materials in the bank (their tree
+    /// branch and grid rows). OFF by default — the owner's locked call
+    /// (2026-08-24): hidden by default, a setting unhides, never a
+    /// "can't use" badge.
+    pub show_pose3d_materials: bool,
     /// `k=v` lines this build does not recognise, kept so saving here does
     /// not delete a newer build's settings.
     unknown: Vec<String>,
@@ -136,6 +141,7 @@ impl Default for Prefs {
             theme: THEME.to_owned(),
             ui_scale: 1.0,
             icon_colours: true,
+            show_pose3d_materials: false,
             unknown: Vec::new(),
             dirty: false,
         }
@@ -203,7 +209,7 @@ impl Prefs {
     /// wrote that this one does not understand, verbatim.
     fn to_body(&self) -> String {
         let mut body = format!(
-            "autosave_min={}\nautosave_every_op={}\nundo_depth={}\nmouse_smooth_px={}\nnew_canvas_w={}\nnew_canvas_h={}\nfit_margin={}\nwheel_step={}\nrotate_step_deg={}\nrecent_depth={}\ntext_size_pt={}\nnew_preset={}\nexport_reminder={}\npalette_icon_px={}\ntheme={}\nicon_colours={}\nui_scale={}\n",
+            "autosave_min={}\nautosave_every_op={}\nundo_depth={}\nmouse_smooth_px={}\nnew_canvas_w={}\nnew_canvas_h={}\nfit_margin={}\nwheel_step={}\nrotate_step_deg={}\nrecent_depth={}\ntext_size_pt={}\nnew_preset={}\nexport_reminder={}\npalette_icon_px={}\ntheme={}\nicon_colours={}\nui_scale={}\nshow_pose3d_materials={}\n",
             self.autosave_min,
             u8::from(self.autosave_every_op),
             self.undo_depth,
@@ -221,6 +227,7 @@ impl Prefs {
             self.theme.replace('\n', ""),
             u8::from(self.icon_colours),
             self.ui_scale,
+            u8::from(self.show_pose3d_materials),
         );
         for line in &self.unknown {
             body.push_str(line);
@@ -285,6 +292,14 @@ impl Prefs {
                     "1" | "true" => true,
                     "0" | "false" => false,
                     _ => self.icon_colours,
+                }
+            }
+            // The same honest-bool rule: gibberish keeps the default.
+            "show_pose3d_materials" => {
+                self.show_pose3d_materials = match v {
+                    "1" | "true" => true,
+                    "0" | "false" => false,
+                    _ => self.show_pose3d_materials,
                 }
             }
             "ui_scale" => self.ui_scale = v.parse().unwrap_or(self.ui_scale),
