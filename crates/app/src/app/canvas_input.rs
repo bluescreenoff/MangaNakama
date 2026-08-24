@@ -348,6 +348,9 @@ pub struct ObjectDrag {
     pub start: (f32, f32),
     pub cur: (f32, f32),
     pub orig: Frame,
+    /// Live Shift state, refreshed on every pointer move: rotate snaps
+    /// to 45° increments while held (CSP).
+    pub shift_snap: bool,
 }
 
 impl ObjectDrag {
@@ -373,7 +376,16 @@ impl ObjectDrag {
                 let c = self.orig.centroid();
                 let a0 = (self.start.1 - c[1]).atan2(self.start.0 - c[0]);
                 let a1 = (self.cur.1 - c[1]).atan2(self.cur.0 - c[0]);
-                f.rotate_around(c, a1 - a0);
+                // Shift = 45° INCREMENTS from the original orientation
+                // (CSP; same rule as the figure tools' Shift constraint —
+                // quantize the delta, not the absolute, so a frame drawn
+                // at 10° still rotates in 45° steps of its own).
+                let d = if self.shift_snap {
+                    ((a1 - a0) / std::f32::consts::FRAC_PI_4).round() * std::f32::consts::FRAC_PI_4
+                } else {
+                    a1 - a0
+                };
+                f.rotate_around(c, d);
             }
             ObjectDragMode::ScaleCorner(i) => {
                 let b = self.orig.bbox();
@@ -1733,6 +1745,7 @@ impl App {
                         start: (cx, cy),
                         cur: (cx, cy),
                         orig: f.clone(),
+                        shift_snap: false,
                     });
                     break 'outer;
                 }
@@ -2143,6 +2156,7 @@ impl App {
             return;
         }
         if let Some(d) = &mut self.object_drag {
+            d.shift_snap = self.shell.sync_modifiers().shift;
             // O-010: an edge drag SNAPS to other frames' edge lines (and
             // their extensions — any edge of the same orientation defines
             // an infinite line) when within 3 canvas px. Axis-aligned

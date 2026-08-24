@@ -4524,7 +4524,30 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 app.set_status("drag out the frame's size");
                 return;
             }
-            let rect = [a.0.min(b.0), a.1.min(b.1), a.0.max(b.0), a.1.max(b.1)];
+            let mut rect = [a.0.min(b.0), a.1.min(b.1), a.0.max(b.0), a.1.max(b.1)];
+            // CSP's rectangle-frame magnet (manual, snapping): a dragged
+            // edge within reach of the 基本枠 lands ON it — panels are
+            // drawn against the guides and hand alignment drifts by
+            // pixels. Same guide the New Frame Layer arm and the canvas
+            // guides use (book-side aware); far-off edges stay put.
+            let right = app.current_page_right().unwrap_or(true);
+            let guide = app
+                .page
+                .as_ref()
+                .filter(|p| p.has_guides())
+                .map(|p| p.inner_rect_px_on(right))
+                .unwrap_or([
+                    app.doc.size.0 as f32 * 0.08,
+                    app.doc.size.1 as f32 * 0.08,
+                    app.doc.size.0 as f32 * 0.92,
+                    app.doc.size.1 as f32 * 0.92,
+                ]);
+            let tol = (app.doc.size.0.min(app.doc.size.1) as f32 * 0.01).clamp(8.0, 32.0);
+            for k in 0..4 {
+                if (rect[k] - guide[k]).abs() <= tol {
+                    rect[k] = guide[k];
+                }
+            }
             let border = if app.frame_draw_border {
                 app.mm_to_px(app.frame_border_mm).max(1.0)
             } else {

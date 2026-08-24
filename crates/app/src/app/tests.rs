@@ -5739,6 +5739,7 @@ fn gutter_carry_reverts_when_a_neighbour_would_break() {
         start: (200.0, 200.0),
         cur: (200.0, 200.0),
         orig: orig.clone(),
+        shift_snap: false,
     });
     app.canvas_up(200.0, 400.0, &[]);
     assert!(
@@ -5771,6 +5772,7 @@ fn gutter_carry_reverts_when_a_neighbour_would_break() {
         start: (200.0, 200.0),
         cur: (200.0, 200.0),
         orig,
+        shift_snap: false,
     });
     app.canvas_up(200.0, 240.0, &[]);
     while let Some(c) = app.cmds.pop_front() {
@@ -7347,6 +7349,7 @@ fn edge_drag_carries_gutters_across_folders() {
         start: (300.0, 100.0),
         cur: (320.0, 100.0),
         orig,
+        shift_snap: false,
     });
     let (sx, sy) = app.viewport.to_screen(320.0, 100.0);
     app.canvas_up(sx, sy, &[]);
@@ -7421,6 +7424,7 @@ fn frame_move_undoes_every_childs_art_and_mask() {
         start: (50.0, 50.0),
         cur: (150.0, 50.0),
         orig,
+        shift_snap: false,
     });
     let (sx, sy) = app.viewport.to_screen(150.0, 50.0);
     app.canvas_up(sx, sy, &[]);
@@ -7497,6 +7501,7 @@ fn frame_move_records_children_when_active_layer_is_elsewhere() {
         start: (50.0, 50.0),
         cur: (150.0, 50.0),
         orig,
+        shift_snap: false,
     });
     let (sx, sy) = app.viewport.to_screen(150.0, 50.0);
     app.canvas_up(sx, sy, &[]);
@@ -7551,6 +7556,7 @@ fn edge_drag_snaps_to_neighbour_edge_lines() {
         start: (300.0, 100.0),
         cur: (300.0, 100.0),
         orig,
+        shift_snap: false,
     });
     // Pointer at 303: the edge lands at 303, 1.5 px from 304.5 -> snap.
     let (sx, sy) = app.viewport.to_screen(303.0, 100.0);
@@ -8359,6 +8365,95 @@ fn figure_lines_cross_the_panel_and_live_inside_it() {
     );
 }
 
+/// Walk #1 leftover (CSP frame snapping): the rectangle-frame tool
+/// MAGNETS to the 基本枠 — a near edge lands on the guide, a far edge
+/// stays where the drag put it.
+#[test]
+fn rect_frame_magnets_to_the_inner_border() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (800, 600), 1.0);
+    app.doc = Document::new(1000, 1000);
+    // No page guides on this doc → the 8%/92% fallback guide:
+    // x0 = y0 = 80, x1 = y1 = 920. Every dragged edge is 4 px off.
+    crate::dispatch(
+        &mut app,
+        AppCmd::FrameRect {
+            a: (76.0, 84.0),
+            b: (924.0, 916.0),
+        },
+    );
+    drain_cmds(&mut app);
+    let fs = app
+        .doc
+        .layers
+        .iter()
+        .find(|l| l.frames().is_some())
+        .expect("frame folder added");
+    assert_eq!(
+        fs.frames().unwrap().frames[0].bbox(),
+        [80.0, 80.0, 920.0, 920.0],
+        "near edges landed on the guide"
+    );
+    // Far from the guide: the rect is exactly the drag.
+    crate::dispatch(
+        &mut app,
+        AppCmd::FrameRect {
+            a: (300.0, 300.0),
+            b: (700.0, 700.0),
+        },
+    );
+    drain_cmds(&mut app);
+    let last = app
+        .doc
+        .layers
+        .iter()
+        .filter(|l| l.frames().is_some())
+        .last()
+        .unwrap();
+    assert_eq!(
+        last.frames().unwrap().frames[0].bbox(),
+        [300.0, 300.0, 700.0, 700.0],
+        "far edges are untouched"
+    );
+}
+
+/// Walk #1 leftover (CSP manual, rotating): Shift rotates a frame in
+/// 45° INCREMENTS from its original orientation; without Shift the
+/// angle follows the pointer freely.
+#[test]
+fn object_rotate_snaps_to_45_increments_under_shift() {
+    use crate::app::canvas_input::{ObjectDrag, ObjectDragMode};
+    let orig = mn_core::Frame::rect(100.0, 100.0, 300.0, 200.0);
+    let c = orig.centroid();
+    let at = |deg: f32| {
+        (
+            c[0] + 100.0 * deg.to_radians().cos(),
+            c[1] + 100.0 * deg.to_radians().sin(),
+        )
+    };
+    let (start, cur) = (at(10.0), at(50.0));
+    let mut d = ObjectDrag {
+        layer: 0,
+        frame: 0,
+        mode: ObjectDragMode::Rotate,
+        start,
+        cur,
+        orig: orig.clone(),
+        shift_snap: true,
+    };
+    let mut want = orig.clone();
+    want.rotate_around(c, std::f32::consts::FRAC_PI_4);
+    assert_eq!(d.preview().points, want.points, "40° of drag → 45° of turn");
+    d.shift_snap = false;
+    let a0 = (start.1 - c[1]).atan2(start.0 - c[0]);
+    let a1 = (cur.1 - c[1]).atan2(cur.0 - c[0]);
+    let mut free = orig.clone();
+    free.rotate_around(c, a1 - a0);
+    assert_eq!(d.preview().points, free.points, "no Shift → the raw angle");
+}
+
 /// Owner repro 2026-08-22: Figure ▸ Saturated line on a PANELED page put a
 /// "Focus lines" row in the palette and NOTHING on the canvas. TWO faults,
 /// each sufficient on its own, which is why this asserts the COMPOSITE and
@@ -8715,6 +8810,7 @@ fn edge_drag_keeps_the_gutter_within_one_folder() {
         start: (100.0, 100.0),
         cur: (100.0, 100.0),
         orig,
+        shift_snap: false,
     });
     app.canvas_up(160.0, 100.0, &[]);
     while let Some(c) = app.cmds.pop_front() {
@@ -8764,6 +8860,7 @@ fn edge_drag_keeps_the_gutter_across_folders() {
         start: (100.0, 100.0),
         cur: (100.0, 100.0),
         orig,
+        shift_snap: false,
     });
     app.canvas_up(160.0, 100.0, &[]);
     while let Some(c) = app.cmds.pop_front() {
@@ -8809,6 +8906,7 @@ fn gutter_align_none_resizes_the_edge_alone() {
         start: (100.0, 100.0),
         cur: (100.0, 100.0),
         orig,
+        shift_snap: false,
     });
     app.canvas_up(130.0, 100.0, &[]);
     while let Some(c) = app.cmds.pop_front() {
@@ -8841,6 +8939,7 @@ fn edge_drag_against_the_page_edge_is_a_plain_resize() {
         start: (100.0, 100.0),
         cur: (100.0, 100.0),
         orig,
+        shift_snap: false,
     });
     app.canvas_up(160.0, 100.0, &[]);
     while let Some(c) = app.cmds.pop_front() {
@@ -8878,6 +8977,7 @@ fn gutter_carry_reverts_when_the_facing_panel_would_collapse() {
         start: (100.0, 100.0),
         cur: (100.0, 100.0),
         orig,
+        shift_snap: false,
     });
     // +100 carries B's left border onto its right at 240: the panel
     // collapses to zero area, so the whole gesture drops.
