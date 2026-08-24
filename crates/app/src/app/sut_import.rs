@@ -12,10 +12,12 @@
 //! stored tool curve is used as-is. The mapping itself (all cspmap's, see
 //! its header):
 //!
-//! - `radius_logarithmic` = ln(BrushSize / 2); a pressure-driven
-//!   BrushSizeEffector becomes an ADDITIVE ln-space pressure mapping,
-//!   midpoint-refined exactly like cspmap's sampler (a linear CSP curve is
-//!   not linear in log space).
+//! - `radius_logarithmic` = ln(diameter_px / 2), where diameter_px is
+//!   BrushSize converted from its stored LENGTH unit (unit 0 = 1/100 mm,
+//!   unit 2 = mm — see `write_sut_import`) at the document's dpi; a
+//!   pressure-driven BrushSizeEffector becomes an ADDITIVE ln-space
+//!   pressure mapping, midpoint-refined exactly like cspmap's sampler (a
+//!   linear CSP curve is not linear in log space).
 //! - `opaque` = Opacity% × BrushFlow% (both per-dab alpha in CSP);
 //!   pressure on the Opacity/Flow effectors → an `opaque_multiply`
 //!   pressure curve, otherwise `opaque_multiply` PINS to 1 (stock MyPaint
@@ -36,8 +38,11 @@ use serde_json::json;
 
 use super::abr::{ImportSummary, base_settings, free_slug, rlog, spacing_settings, write_brush};
 
-/// Import one parsed `.sut` under `root`.
-pub fn write_sut_import(root: &Path, b: &SutBrush, set_name: &str) -> ImportSummary {
+/// Import one parsed `.sut` under `root`. `doc_dpi` is the importing
+/// document's dpi — CSP's brush sizes are LENGTHS (see the unit table
+/// below), so the px the brush lands at is relative to the paper, the
+/// same conversion CSP's own Tool Property display does.
+pub fn write_sut_import(root: &Path, b: &SutBrush, set_name: &str, doc_dpi: u32) -> ImportSummary {
     let _ = std::fs::create_dir_all(root.join("textures"));
     let _ = std::fs::create_dir_all(root.join("imported"));
     let set_name = free_slug(root, set_name);
@@ -45,13 +50,45 @@ pub fn write_sut_import(root: &Path, b: &SutBrush, set_name: &str) -> ImportSumm
     let mut notes: Vec<String> = Vec::new();
     let p = |k: &str, dflt: f64| b.params.get(k).copied().unwrap_or(dflt);
 
-    let authored = p("BrushSize", 20.0).max(0.2);
-    // Same default-size cap as .abr imports (abr::MAX_DEFAULT_PX): the
-    // authored size is a note, the Size control still goes anywhere.
+    // BrushSizeUnit, established 2026-08-24 from the owner's own tool bank
+    // (research/csp-tools.json + the Downloads .sut files): CSP stores
+    // BrushSize as a LENGTH, never px. Unit 2 tools carry textbook-
+    // millimetre fractions (0.75, 1.2, 8.3 — pens and markers); unit 0
+    // tools carry integers exactly 100× their mm sizes (Mapping pen 30 =
+    // 0.30 mm, the owner's Real G-Pen 100 = 1.0 mm, 不気味線 改 170 =
+    // 1.7 mm). Reading unit-0 as px was the "how do sizes balloon" bug:
+    // 1.7 mm became 170 px, the pressure→size curve rode it into the
+    // rlog 6.2 clamp (a 985 px full-pressure dab — the original freeze).
+    // Unknown unit codes stay px-literal with an honest note rather than
+    // a guess.
+    let dpi = if (30..=4800).contains(&doc_dpi) {
+        doc_dpi as f64
+    } else {
+        600.0 // manga standard; a dpi-less startup canvas
+    };
+    let raw_size = p("BrushSize", 20.0);
+    let (authored, size_desc) = match p("BrushSizeUnit", 0.0) as i64 {
+        0 => {
+            let mm = (raw_size / 100.0).max(0.002);
+            let px = mm * dpi / 25.4;
+            (px, format!("{mm:.2} mm ({px:.0} px at {dpi:.0} dpi)"))
+        }
+        2 => {
+            let mm = raw_size.max(0.02);
+            let px = mm * dpi / 25.4;
+            (px, format!("{mm:.2} mm ({px:.0} px at {dpi:.0} dpi)"))
+        }
+        other => {
+            notes.push(format!(
+                "BrushSizeUnit {other} untranslated — size read as px"
+            ));
+            (raw_size.max(0.2), format!("{raw_size:.0} px"))
+        }
+    };
     let diameter = authored.min(super::abr::MAX_DEFAULT_PX);
     if authored > super::abr::MAX_DEFAULT_PX {
         notes.push(format!(
-            "authored at {authored:.0} px (default capped at {:.0})",
+            "authored {size_desc} — default capped at {:.0} px",
             super::abr::MAX_DEFAULT_PX
         ));
     }
@@ -316,13 +353,15 @@ mod tests {
             ("BrushHardness", 60.0),
             ("BrushInterval", 10.0),
         ]);
-        let sum = write_sut_import(&root, &b, "airbrush");
+        let sum = write_sut_import(&root, &b, "airbrush", 600);
         assert_eq!(sum.imported, 1);
         let myb = read_myb(&root, "airbrush-1");
         assert_eq!(myb["name"], "Test Pen");
         let s = &myb["settings"];
+        // BrushSize 40, unit 0 (default) = 0.40 mm → 0.4 × 600/25.4 px.
+        let d: f64 = 0.4 * 600.0 / 25.4;
         assert!(
-            (s["radius_logarithmic"]["base_value"].as_f64().unwrap() - 20f64.ln()).abs() < 1e-6
+            (s["radius_logarithmic"]["base_value"].as_f64().unwrap() - (d / 2.0).ln()).abs() < 1e-6
         );
         assert!((s["opaque"]["base_value"].as_f64().unwrap() - 0.4).abs() < 1e-9);
         assert!((s["hardness"]["base_value"].as_f64().unwrap() - 0.6).abs() < 1e-9);
@@ -357,7 +396,7 @@ mod tests {
         let mut flow = eff(20, SRC_PRESSURE | SRC_RANDOM);
         flow.words[6] = 40;
         b.effectors.insert("BrushFlowEffector".into(), flow);
-        let _ = write_sut_import(&root, &b, "pen");
+        let _ = write_sut_import(&root, &b, "pen", 600);
         let myb = read_myb(&root, "pen-1");
         let s = &myb["settings"];
         let pts = s["radius_logarithmic"]["inputs"]["pressure"].as_array().unwrap();
@@ -381,8 +420,7 @@ mod tests {
     /// PATCHES.md #13 (local-only fixture; skip where absent): the owner's
     /// spotty-tip brush 不気味線 改 froze the app at the first dabs. The tip
     /// texture's hard black speckle made per-pixel ink/zero alternation, the
-    /// C RLE dab-mask buffer overflowed its smooth-profile size and smashed
-    /// the stack, and `end_atomic` then walked ~268 million garbage "dirty
+    /// C RLE dab-mask buffer overflowed its smooth-profile size and smashed    /// the stack, and `end_atomic` then walked ~268 million garbage "dirty
     /// tiles" — the freeze — before the access violation. A CURVED stroke is
     /// load-bearing: a straight horizontal one leaves the speckle aligned
     /// well enough that the old bound happened to survive.
@@ -395,7 +433,7 @@ mod tests {
         };
         let b = mn_brush::sut::parse_sut(&bytes, "freeze").unwrap();
         let root = tmp_root("freeze");
-        assert_eq!(write_sut_import(&root, &b, "freeze").imported, 1);
+        assert_eq!(write_sut_import(&root, &b, "freeze", 600).imported, 1);
         let myb = read_myb(&root, "freeze-1");
         let mut brush =
             mn_brush::MyBrush::load(&root.join("imported").join("freeze-1.myb")).unwrap();
@@ -439,11 +477,110 @@ mod tests {
         };
         let b = mn_brush::sut::parse_sut(&bytes, "hard-airbrush").unwrap();
         let root = tmp_root("real");
-        let sum = write_sut_import(&root, &b, "hard-airbrush");
+        let sum = write_sut_import(&root, &b, "hard-airbrush", 600);
         assert_eq!((sum.imported, sum.translated), (1, 1));
         let myb = read_myb(&root, "hard-airbrush-1");
         let r = myb["settings"]["radius_logarithmic"]["base_value"].as_f64().unwrap();
-        assert!((r - 20f64.ln()).abs() < 1e-6, "Hard Airbrush is 40 px");
+        // Hard Airbrush: BrushSize 40, unit 0 = 0.40 mm → 0.4 × 600/25.4 px.
+        let d: f64 = 0.4 * 600.0 / 25.4;
+        assert!(
+            (r - (d / 2.0).ln()).abs() < 1e-6,
+            "Hard Airbrush is 0.4 mm ({d:.1} px at 600 dpi)"
+        );
+        std::fs::remove_dir_all(root.parent().unwrap()).ok();
+    }
+
+    /// The unit table, established from the owner's tool bank: unit 0 =
+    /// 1/100 mm, unit 2 = mm, anything else = px-literal with an honest
+    /// note. A dpi-less document falls back to 600 (manga standard).
+    #[test]
+    fn sut_sizes_are_lengths_not_pixels() {
+        let root = tmp_root("units");
+        // 不気味線 改's numbers: 170 unit 0 = 1.7 mm = 40.2 px at 600.
+        let b = brush(&[("BrushSize", 170.0), ("BrushSizeUnit", 0.0)]);
+        write_sut_import(&root, &b, "u0", 600);
+        let r0 = read_myb(&root, "u0-1")["settings"]["radius_logarithmic"]["base_value"]
+            .as_f64()
+            .unwrap();
+        let d0: f64 = 1.7 * 600.0 / 25.4;
+        assert!((r0 - (d0 / 2.0).ln()).abs() < 1e-6);
+
+        // 薄墨's numbers: 8.3048 unit 2 = 8.30 mm = 196.2 px at 600.
+        let b = brush(&[("BrushSize", 8.304816848703076), ("BrushSizeUnit", 2.0)]);
+        write_sut_import(&root, &b, "u2", 600);
+        let r2 = read_myb(&root, "u2-1")["settings"]["radius_logarithmic"]["base_value"]
+            .as_f64()
+            .unwrap();
+        let d2: f64 = 8.304816848703076 * 600.0 / 25.4;
+        assert!((r2 - (d2 / 2.0).ln()).abs() < 1e-6);
+
+        // Same 1.7 mm at 72 dpi lands at 4.8 px — the paper-relative
+        // semantic CSP's own Tool Property uses.
+        let b = brush(&[("BrushSize", 170.0), ("BrushSizeUnit", 0.0)]);
+        write_sut_import(&root, &b, "u0-72", 72);
+        let r72 = read_myb(&root, "u0-72-1")["settings"]["radius_logarithmic"]["base_value"]
+            .as_f64()
+            .unwrap();
+        let d72: f64 = 1.7 * 72.0 / 25.4;
+        assert!((r72 - (d72 / 2.0).ln()).abs() < 1e-6);
+
+        // dpi 0 (a dpi-less startup canvas) falls back to 600.
+        let b = brush(&[("BrushSize", 170.0), ("BrushSizeUnit", 0.0)]);
+        write_sut_import(&root, &b, "u0-fb", 0);
+        let rfb = read_myb(&root, "u0-fb-1")["settings"]["radius_logarithmic"]["base_value"]
+            .as_f64()
+            .unwrap();
+        assert!((rfb - r0).abs() < 1e-9);
+
+        // Unknown unit: px-literal (yesterday's reading) + a note.
+        let b = brush(&[("BrushSize", 50.0), ("BrushSizeUnit", 7.0)]);
+        write_sut_import(&root, &b, "u7", 600);
+        let myb = read_myb(&root, "u7-1");
+        let r7 = myb["settings"]["radius_logarithmic"]["base_value"]
+            .as_f64()
+            .unwrap();
+        assert!((r7 - 25f64.ln()).abs() < 1e-6, "unknown unit reads px");
+        let notes: Vec<String> = myb["mn"]["unmapped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            notes.iter().any(|n| n.starts_with("BrushSizeUnit 7")),
+            "the honest note, got {notes:?}"
+        );
+        std::fs::remove_dir_all(root.parent().unwrap()).ok();
+    }
+
+    /// The freeze brush itself (local-only fixture; skip where absent):
+    /// 不気味線 改 — the brush whose misread 170-"px" size (actually
+    /// 1.7 mm) rode the pressure curve into the 985 px rlog clamp and
+    /// froze the app. It now imports at its paper size.
+    #[test]
+    fn the_freeze_brush_imports_at_paper_size() {
+        let path = std::path::PathBuf::from(r"C:\Users\Max\Downloads\不気味線 改.sut");
+        let Ok(bytes) = std::fs::read(&path) else {
+            eprintln!("[fixture] {} missing, skipping", path.display());
+            return;
+        };
+        let b = mn_brush::sut::parse_sut(&bytes, "freeze").unwrap();
+        assert_eq!(
+            b.params.get("BrushSize").copied(),
+            Some(170.0),
+            "the fixture is the brush the unit table was derived from"
+        );
+        let root = tmp_root("paper");
+        write_sut_import(&root, &b, "freeze", 600);
+        let myb = read_myb(&root, "freeze-1");
+        let r = myb["settings"]["radius_logarithmic"]["base_value"]
+            .as_f64()
+            .unwrap();
+        let d: f64 = 1.7 * 600.0 / 25.4;
+        assert!(
+            (r - (d / 2.0).ln()).abs() < 1e-6,
+            "1.7 mm at 600 dpi = {d:.1} px, not 170"
+        );
         std::fs::remove_dir_all(root.parent().unwrap()).ok();
     }
 }

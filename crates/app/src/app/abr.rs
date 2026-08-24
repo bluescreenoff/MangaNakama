@@ -734,9 +734,14 @@ impl App {
             return self.set_error("brush import: no brushes folder found");
         };
         let sum = match ext.as_str() {
-            // Krita: dynamics only — the tip is a separate resource file.
+            // Clip Studio exported sub tool (a SQLite .sut).
             "sut" => match mn_brush::sut::parse_sut_file(path) {
-                Ok(b) => super::sut_import::write_sut_import(&root, &b, &set_slug(&stem)),
+                Ok(b) => super::sut_import::write_sut_import(
+                    &root,
+                    &b,
+                    &set_slug(&stem),
+                    self.page.as_ref().map(|p| p.dpi).unwrap_or(0),
+                ),
                 Err(e) => return self.set_error(format!("brush import failed: {e}")),
             },
             "kpp" => match mn_brush::parse_kpp_file(path) {
