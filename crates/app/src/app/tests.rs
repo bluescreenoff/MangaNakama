@@ -5719,6 +5719,7 @@ fn gutter_carry_reverts_when_a_neighbour_would_break() {
         slot: None,
         reading_pin: None,
         border_ruler: false,
+        color: [0, 0, 0],
     };
     let la = app.doc.add_frame_layer("top", fs([0.0, 0.0, 400.0, 200.0]));
     let lb = app
@@ -8702,6 +8703,7 @@ fn edge_drag_keeps_the_gutter_within_one_folder() {
             slot: None,
             reading_pin: None,
             border_ruler: false,
+            color: [0, 0, 0],
         },
     );
     // A's right edge (points 1..2, x = 100) drags right by 60.

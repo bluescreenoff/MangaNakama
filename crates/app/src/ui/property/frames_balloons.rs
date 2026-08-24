@@ -506,6 +506,20 @@ pub(crate) fn sec_obj_frame(ui: &mut egui::Ui, app: &mut App) {
             });
         }
     }
+    // CSP's frame styling (workflow walk #1, item 33): a selected frame's
+    // border takes a main colour — black by default, black in old files.
+    {
+        let mut rgb = fs.color;
+        let resp = ui.color_edit_button_srgb(&mut rgb);
+        if (resp.changed() && !resp.dragged()) || resp.drag_stopped() {
+            let mut fs2 = fs.clone();
+            fs2.color = rgb;
+            app.push_cmd(AppCmd::FrameCommit {
+                layer: li,
+                frames: fs2,
+            });
+        }
+    }
     // CSP's "Keep gutters aligned" (audit P0-4): All = dragging a border
     // brings the facing border of the panel across the gutter with it, so
     // the gap keeps its width. None = the one edge moves and the gutter

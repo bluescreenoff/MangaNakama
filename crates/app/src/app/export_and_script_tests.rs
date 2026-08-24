@@ -51,6 +51,7 @@ fn script_dump_reads_in_panel_order() {
         ],
         border_px: 2.0,
         border_ruler: false,
+        color: [0, 0, 0],
         slot: None,
         reading_pin: None,
     };

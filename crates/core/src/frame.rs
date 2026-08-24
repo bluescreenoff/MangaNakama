@@ -113,6 +113,15 @@ pub struct FrameSet {
     /// width. `false` in old files = the border draws, as it always did.
     #[serde(default)]
     pub border_ruler: bool,
+    /// Border ink colour, RGB 0-255 (CSP: select frames, pick a main
+    /// colour). `[0, 0, 0]` in old files — and black must keep rendering
+    /// BYTE-IDENTICAL to the alpha-only ink this field replaced.
+    #[serde(default = "black_ink")]
+    pub color: [u8; 3],
+}
+
+fn black_ink() -> [u8; 3] {
+    [0, 0, 0]
 }
 
 /// An edge as a half-plane: signed distance = `n·p - c`, positive outside.
@@ -756,6 +765,7 @@ impl FrameSet {
             slot: None,
             reading_pin: None,
             border_ruler: false,
+            color: [0, 0, 0],
         }
     }
 
@@ -925,8 +935,15 @@ impl FrameSet {
                         }
                         any = true;
                         let o = Tile::offset(px, py);
-                        // Premultiplied black ink.
-                        data[o + 3] = (border * FIX15_ONE as f32).round() as u16;
+                        // Premultiplied ink in the set's colour; black
+                        // writes exactly the alpha-only bytes it always
+                        // did (RGB channels stay 0).
+                        let a = (border * FIX15_ONE as f32).round() as u16;
+                        for k in 0..3 {
+                            data[o + k] =
+                                ((self.color[k] as f32 / 255.0) * a as f32).round() as u16;
+                        }
+                        data[o + 3] = a;
                     }
                 }
                 if any {
@@ -1311,6 +1328,7 @@ mod tests {
             slot: None,
             reading_pin: None,
             border_ruler: false,
+            color: [0, 0, 0],
         };
         let tiles = fs.rasterize((192, 192));
         let px = |x: i32, y: i32| -> [u16; 4] {
@@ -1406,6 +1424,7 @@ mod tests {
             slot: None,
             reading_pin: None,
             border_ruler: false,
+            color: [0, 0, 0],
         };
         let tiles = fs.rasterize((128, 128));
         assert_eq!(tiles.len(), 4);
@@ -1414,6 +1433,44 @@ mod tests {
                 .values()
                 .all(|t| t.pixel(32, 32) == [FIX15_ONE as u16; 4])
         );
+    }
+
+    /// Workflow walk #1, item 33 (CSP frame styling): the border ink
+    /// takes a colour — pure red writes R=A and G=B=0, premultiplied —
+    /// and BLACK keeps the exact alpha-only bytes the ink always wrote
+    /// (RGB channels were and stay 0, same alpha).
+    #[test]
+    fn border_ink_takes_a_colour_and_black_is_byte_stable() {
+        let mut fs = FrameSet::single_rect([16.0, 16.0, 112.0, 112.0], 6.0);
+        let black = fs.rasterize_border((128, 128));
+        fs.color = [255, 0, 0];
+        let red = fs.rasterize_border((128, 128));
+        let probe = |m: &std::collections::HashMap<TileIdx, Arc<Tile>>| {
+            let t = &m[&TileIdx::new(0, 0)];
+            t.pixel(16, 20)
+        };
+        let rb = probe(&red);
+        assert!(rb[3] > 0, "ink on the border");
+        assert_eq!([rb[0], rb[1], rb[2]], [rb[3], 0, 0], "premultiplied red");
+        let bb = probe(&black);
+        assert_eq!(bb, [0, 0, 0, rb[3]], "black = the old alpha-only bytes");
+    }
+
+    /// Old files carry no `color` — they load black, and a round trip
+    /// keeps whatever colour was set.
+    #[test]
+    fn border_colour_defaults_for_old_files_and_round_trips() {
+        let old = serde_json::json!({
+            "frames": [{"points": [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]]}],
+            "border_px": 2.0
+        });
+        let fs: FrameSet = serde_json::from_value(old).expect("old file loads");
+        assert_eq!(fs.color, [0, 0, 0]);
+        let mut coloured = fs.clone();
+        coloured.color = [12, 34, 56];
+        let back: FrameSet =
+            serde_json::from_str(&serde_json::to_string(&coloured).unwrap()).unwrap();
+        assert_eq!(back.color, [12, 34, 56]);
     }
 
     // --- C-061/062: the shape of the division ---------------------------

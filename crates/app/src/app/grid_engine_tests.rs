@@ -245,6 +245,7 @@ fn object_key_cycles_the_stack_and_text_handover_gives_the_balloon() {
             slot: None,
             reading_pin: None,
             border_ruler: false,
+            color: [0, 0, 0],
         },
     );
     crate::cmd::dispatch(

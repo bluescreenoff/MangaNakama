@@ -4565,6 +4565,7 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                     slot: None,
                     reading_pin: None,
                     border_ruler: false,
+                    color: [0, 0, 0],
                 },
                 app.frame_fill_inside,
             );

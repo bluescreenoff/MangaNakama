@@ -448,6 +448,7 @@ mod tests {
             slot,
             reading_pin: None,
             border_ruler: false,
+            color: [0, 0, 0],
         };
         FolderInput {
             layer,
