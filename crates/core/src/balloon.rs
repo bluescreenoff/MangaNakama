@@ -1517,6 +1517,29 @@ pub fn rotate_texts_in(
     moved
 }
 
+/// The move's half of [`rotate_texts_in`]: a translated bubble takes its
+/// lettering along by the same geometric pairing — a text is carried when
+/// its centre was inside the ORIGINAL body. No reshaping: translation
+/// never changes a glyph's layout, so the shaped cache stays valid.
+pub fn translate_texts_in(
+    body: &Balloon,
+    texts: &mut crate::text::TextSet,
+    d: [f32; 2],
+) -> Vec<usize> {
+    if d[0] == 0.0 && d[1] == 0.0 {
+        return Vec::new();
+    }
+    let mut moved = Vec::new();
+    for (i, t) in texts.texts.iter_mut().enumerate() {
+        if !body.contains(t.center()) {
+            continue;
+        }
+        t.pos = [t.pos[0] + d[0], t.pos[1] + d[1]];
+        moved.push(i);
+    }
+    moved
+}
+
 // --- fit a balloon to its lettering (ROADMAP good-first-issue #1) ----------
 
 /// Breathing room left around the lettering, in **ems of the text's own type
@@ -2955,6 +2978,44 @@ mod tests {
             "swung onto the pivot's column: {c2:?}"
         );
         assert!(c2[1] < 100.0 - 40.0, "…and up above it: {c2:?}");
+    }
+
+    /// The move's half of the carry (CSP manual, moving balloons): a
+    /// translated bubble takes its lettering along — pos shifts by the
+    /// exact delta, nothing reshapes (rotation and the shaped cache are
+    /// untouched), and texts outside the original body stay put.
+    #[test]
+    fn texts_move_with_a_translated_balloon() {
+        use crate::text::{StyleRun, TextItem, TextSet};
+        let body = ellipse(100.0, 100.0, 60.0, 40.0);
+        let mut inside = TextItem::new([80.0, 90.0], "Gothic".into(), 9.0, [0, 0, 0], true);
+        inside.text = "オイ".into();
+        inside.runs = vec![StyleRun::plain(2)];
+        inside.size = [40.0, 20.0];
+        let mut outside = TextItem::new([400.0, 400.0], "Gothic".into(), 9.0, [0, 0, 0], true);
+        outside.text = "SFX".into();
+        outside.size = [40.0, 20.0];
+        let (was_pos, was_out_pos) = (inside.pos, outside.pos);
+        let had_cache = inside.cache.is_some();
+
+        let mut ts = TextSet {
+            texts: vec![inside, outside],
+        };
+        let moved = translate_texts_in(&body, &mut ts, [30.0, -12.0]);
+        assert_eq!(moved, vec![0], "only the lettering in the bubble moves");
+        let t = &ts.texts[0];
+        assert_eq!(
+            t.pos,
+            [was_pos[0] + 30.0, was_pos[1] - 12.0],
+            "the exact delta, nothing cleverer"
+        );
+        assert_eq!(t.rotation, 0.0, "no reshaping");
+        assert_eq!(t.cache.is_some(), had_cache, "the cache is untouched");
+        assert_eq!(ts.texts[1].pos, was_out_pos, "outside texts stay put");
+        assert!(
+            translate_texts_in(&body, &mut ts, [0.0, 0.0]).is_empty(),
+            "a zero delta is a no-op"
+        );
     }
 
     /// The reason [`BalloonShape::rotates_exactly`] exists: an analytic body

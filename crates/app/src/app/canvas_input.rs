@@ -1104,6 +1104,44 @@ impl App {
         }
     }
 
+    /// The move's half of the lettering carry (CSP manual, moving
+    /// balloons): a moved bubble takes the texts inside it along, by the
+    /// same geometric pairing as the turn — no stored link, hidden and
+    /// locked layers untouched. Translation never reshapes a glyph, so
+    /// unlike the turn the shaped caches stay valid and no re-render is
+    /// needed.
+    pub(crate) fn translate_texts_with_balloon(&mut self, orig: &Balloon, d: [f32; 2]) {
+        if d[0] == 0.0 && d[1] == 0.0 {
+            return;
+        }
+        let mut carried = 0usize;
+        for li in 0..self.doc.layers.len() {
+            let Some(layer) = self.doc.layers.get(li) else {
+                continue;
+            };
+            if !layer.visible || layer.lock {
+                continue;
+            }
+            let Some(ts) = layer.texts() else { continue };
+            let mut ts = ts.clone();
+            let moved = mn_core::balloon::translate_texts_in(orig, &mut ts, d);
+            if moved.is_empty() {
+                continue;
+            }
+            carried += moved.len();
+            self.push_cmd(AppCmd::TextCommit {
+                layer: li,
+                texts: ts,
+            });
+        }
+        if carried > 0 {
+            self.set_status(format!(
+                "balloon moved — {carried} text{} came with it (still editable; undo takes two steps)",
+                if carried == 1 { "" } else { "s" }
+            ));
+        }
+    }
+
     /// ROADMAP good-first-issue #1 — **fit a balloon to its text**.
     ///
     /// Which text? The same geometric pairing the rest of the app uses: there
@@ -2833,6 +2871,9 @@ impl App {
                 if let (true, Some(bs)) = (b.is_valid(), bs) {
                     let mut bs = bs.clone();
                     if d.balloon < bs.balloons.len() {
+                        // Read off the committed shape BEFORE the store
+                        // moves it — the move-carry branch wants it.
+                        let b1 = b.bbox();
                         bs.balloons[d.balloon] = b;
                         self.push_cmd(AppCmd::BalloonCommit {
                             layer: d.layer,
@@ -2841,6 +2882,20 @@ impl App {
                         // TRIAGE 134: turning the bubble turns its lettering.
                         if let Some((pivot, rad)) = d.rotation() {
                             self.carry_texts_with_balloon(&d.orig, pivot, rad);
+                        } else if let BalloonDragMode::MoveWhole = d.mode {
+                            // …and MOVING it takes the lettering along
+                            // (CSP manual, moving balloons). The delta is
+                            // read off the committed shapes, so a
+                            // Shift-constrained move carries the same
+                            // constrained distance it showed.
+                            let b0 = d.orig.bbox();
+                            self.translate_texts_with_balloon(
+                                &d.orig,
+                                [
+                                    (b1[0] + b1[2]) * 0.5 - (b0[0] + b0[2]) * 0.5,
+                                    (b1[1] + b1[3]) * 0.5 - (b0[1] + b0[3]) * 0.5,
+                                ],
+                            );
                         }
                     }
                 } else {

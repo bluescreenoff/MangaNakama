@@ -230,3 +230,71 @@ fn balloon_moves_and_rotates_constrain_under_shift() {
         "no Shift → the raw angle"
     );
 }
+
+/// Walk #2's open item, closed (CSP manual, moving balloons): MOVING a
+/// bubble takes its lettering along through the real release path — the
+/// exact committed delta, the same geometric pairing as the turn, and a
+/// hidden layer's texts stay untouched. Old code left the text behind.
+#[test]
+fn moving_a_balloon_carries_its_lettering() {
+    use crate::app::canvas_input::{BalloonDragMode, BalloonObjDrag};
+    let Some(mut app) = super::new_document_tests::headless() else {
+        return;
+    };
+    let b = drawn_bubble();
+    let ob = b.bbox();
+    let bl = app.doc.add_balloon_layer(
+        "bubbles",
+        mn_core::BalloonSet {
+            balloons: vec![b.clone()],
+            border_px: 4.0,
+            pressure_width: false,
+        },
+    );
+    let live = app.doc.add_text_layer(
+        "lettering",
+        mn_core::TextSet {
+            texts: vec![lettering([180.0, 170.0], "オイ")],
+        },
+    );
+    let hidden = app.doc.add_text_layer(
+        "draft",
+        mn_core::TextSet {
+            texts: vec![lettering([180.0, 170.0], "draft")],
+        },
+    );
+    app.doc.layers[hidden].visible = false;
+    // Raw canvas coordinates: make to_canvas the identity (the same
+    // reset the edge-drag tests use) or the release maps the drag
+    // through a fitted viewport and the bubble lands elsewhere.
+    app.viewport = mn_gpu::Viewport::default();
+
+    app.balloon_obj_drag = Some(BalloonObjDrag {
+        layer: bl,
+        balloon: 0,
+        mode: BalloonDragMode::MoveWhole,
+        start: (200.0, 200.0),
+        cur: (300.0, 260.0),
+        orig: b,
+        shift_snap: false,
+    });
+    app.canvas_up(300.0, 260.0, &[]);
+    while let Some(c) = app.cmds.pop_front() {
+        dispatch(&mut app, c);
+    }
+
+    let bb = app.doc.layers[bl].balloons().unwrap().balloons[0].bbox();
+    assert_eq!(
+        [bb[0] - ob[0], bb[1] - ob[1]],
+        [100.0, 60.0],
+        "the bubble moved by the drag"
+    );
+    let t = &app.doc.layers[live].texts().unwrap().texts[0];
+    assert_eq!(
+        t.pos,
+        [280.0, 230.0],
+        "the visible lettering came along, by the same delta"
+    );
+    let h = &app.doc.layers[hidden].texts().unwrap().texts[0];
+    assert_eq!(h.pos, [180.0, 170.0], "hidden layers are left alone");
+}
