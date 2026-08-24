@@ -128,6 +128,24 @@ fn push_col(cols: &mut Vec<String>, item: &str) {
 /// Parse a whole SQLite file into its named tables. Structural corruption is
 /// an `Err`; an empty or unknown table is simply absent/empty.
 pub fn parse_sqlite(bytes: &[u8]) -> Result<BTreeMap<String, Table>, String> {
+    parse_sqlite_impl(bytes, None)
+}
+
+/// The whole file, but only the NAMED tables' b-trees are decoded (T5b): a
+/// Clip Studio tool database is huge — thousands of tools, material blobs —
+/// and a bulk import needs three tables of it. Unknown names are simply
+/// absent, same as ever.
+pub fn parse_sqlite_tables(
+    bytes: &[u8],
+    wanted: &[&str],
+) -> Result<BTreeMap<String, Table>, String> {
+    parse_sqlite_impl(bytes, Some(wanted))
+}
+
+fn parse_sqlite_impl(
+    bytes: &[u8],
+    wanted: Option<&[&str]>,
+) -> Result<BTreeMap<String, Table>, String> {
     let db = Db::new(bytes)?;
     // sqlite_master lives at page 1: rows are (type, name, tbl_name,
     // rootpage, sql).
@@ -143,6 +161,11 @@ pub fn parse_sqlite(bytes: &[u8]) -> Result<BTreeMap<String, Table>, String> {
             continue;
         };
         if kind != "table" || root <= 0 {
+            continue;
+        }
+        if let Some(w) = wanted
+            && !w.contains(&name.as_str())
+        {
             continue;
         }
         let rows = db.walk_table(root as u32)?;

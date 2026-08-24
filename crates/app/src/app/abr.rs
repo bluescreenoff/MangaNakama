@@ -744,6 +744,18 @@ impl App {
                 ),
                 Err(e) => return self.set_error(format!("brush import failed: {e}")),
             },
+            // T5b: the whole CSP tool database — every leaf sub tool, one
+            // preset each, grouped by CSP group. Tips ride .sut exports.
+            "todb" => match mn_brush::todb::parse_todb_file(path) {
+                Ok(tools) if tools.is_empty() => {
+                    return self.set_error("that database holds no importable sub tools")
+                }
+                Ok(tools) => {
+                    let dpi = self.page.as_ref().map(|p| p.dpi).unwrap_or(0);
+                    super::sut_import::write_todb_import(&root, &tools, dpi)
+                }
+                Err(e) => return self.set_error(format!("brush import failed: {e}")),
+            },
             "kpp" => match mn_brush::parse_kpp_file(path) {
                 Ok(preset) => {
                     super::kpp_import::write_kpp_import(&root, &preset, &set_slug(&stem))

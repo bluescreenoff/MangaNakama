@@ -25,6 +25,7 @@ mod kpp;
 mod mybrush;
 pub mod sqlite_ro;
 pub mod sut;
+pub mod todb;
 mod surface;
 
 /// Brush setting/input ids, generated from `brushsettings.json` at build time.

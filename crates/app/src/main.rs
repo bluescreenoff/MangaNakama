@@ -1306,7 +1306,7 @@ fn resolve_dialog(hwnd: HWND, cmd: AppCmd) -> Option<AppCmd> {
             .set_title("Import Brushes")
             .add_filter(
                 "Brushes (Photoshop, GIMP, Krita, Clip Studio)",
-                &["abr", "gbr", "gih", "kpp", "sut"],
+                &["abr", "gbr", "gih", "kpp", "sut", "todb"],
             )
             .pick_file()
             .map(AppCmd::ImportAbrPath),

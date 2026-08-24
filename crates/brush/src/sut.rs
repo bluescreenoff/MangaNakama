@@ -112,22 +112,6 @@ pub fn parse_sut(bytes: &[u8], file_stem: &str) -> Result<SutBrush, String> {
         .max_by_key(|r| r.values().filter(|v| !matches!(v, Value::Null)).count())
         .ok_or("sut: Variant table is empty")?;
 
-    let mut params = BTreeMap::new();
-    let mut effectors = BTreeMap::new();
-    for (k, v) in rec {
-        match v {
-            Value::Int(_) | Value::Real(_) => {
-                params.insert(k.clone(), v.as_f64().unwrap_or(0.0));
-            }
-            Value::Blob(b) if k.ends_with("Effector") => {
-                if let Some(e) = parse_effector(b) {
-                    effectors.insert(k.clone(), e);
-                }
-            }
-            _ => {}
-        }
-    }
-
     let name = tables
         .get("Node")
         .map(|t| t.records())
@@ -148,12 +132,37 @@ pub fn parse_sut(bytes: &[u8], file_stem: &str) -> Result<SutBrush, String> {
         .filter_map(extract_png)
         .collect();
 
+    let (params, effectors) = variant_params_effectors(rec);
     Ok(SutBrush {
         name,
         params,
         effectors,
         tip_pngs,
     })
+}
+
+/// One Variant record's numeric params + decoded effectors — the shared
+/// body of the `.sut` slice reader and the whole-database (`.todb`)
+/// walker (T5b).
+pub(crate) fn variant_params_effectors(
+    rec: &std::collections::BTreeMap<String, Value>,
+) -> (BTreeMap<String, f64>, BTreeMap<String, SutEffector>) {
+    let mut params = BTreeMap::new();
+    let mut effectors = BTreeMap::new();
+    for (k, v) in rec {
+        match v {
+            Value::Int(_) | Value::Real(_) => {
+                params.insert(k.clone(), v.as_f64().unwrap_or(0.0));
+            }
+            Value::Blob(b) if k.ends_with("Effector") => {
+                if let Some(e) = parse_effector(b) {
+                    effectors.insert(k.clone(), e);
+                }
+            }
+            _ => {}
+        }
+    }
+    (params, effectors)
 }
 
 /// Parse a `.sut` file from disk.

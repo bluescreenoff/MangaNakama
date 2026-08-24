@@ -34,9 +34,33 @@
 use std::path::Path;
 
 use mn_brush::sut::{SRC_PRESSURE, SRC_RANDOM, SRC_TILT, SRC_VELOCITY, SutBrush, SutEffector};
+use mn_brush::todb::TobdTool;
 use serde_json::json;
 
-use super::abr::{ImportSummary, base_settings, free_slug, rlog, spacing_settings, write_brush};
+use super::abr::{ImportSummary, base_settings, free_slug, rlog, set_slug, spacing_settings, write_brush};
+
+/// T5b: the whole Clip Studio tool database — one preset per LEAF sub
+/// tool, grouped by the tool's first CSP group (`csp-pen`, `csp-airbrush`
+/// …). Bitmap tips are NOT migrated on this path (v1): a tool with a
+/// stamped tip keeps its stamp only through a `.sut` export, which the
+/// caller's status says once rather than per tool.
+pub fn write_todb_import(root: &Path, tools: &[TobdTool], doc_dpi: u32) -> ImportSummary {
+    let mut sum = ImportSummary::default();
+    for t in tools {
+        let group = t
+            .group_path
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "tools".into());
+        let set = format!("csp-{}", set_slug(&group));
+        let s = write_sut_import(root, &t.brush, &set, doc_dpi);
+        sum.imported += s.imported;
+        sum.blank += s.blank;
+        sum.translated += s.translated;
+        sum.notes += s.notes;
+    }
+    sum
+}
 
 /// Import one parsed `.sut` under `root`. `doc_dpi` is the importing
 /// document's dpi — CSP's brush sizes are LENGTHS (see the unit table
@@ -581,6 +605,34 @@ mod tests {
             (r - (d / 2.0).ln()).abs() < 1e-6,
             "1.7 mm at 600 dpi = {d:.1} px, not 170"
         );
+        std::fs::remove_dir_all(root.parent().unwrap()).ok();
+    }
+
+    /// T5b: the whole Clip Studio tool database imports — one preset per
+    /// leaf sub tool, grouped by CSP group name (`csp-pen`, `csp-airbrush`),
+    /// sizes converted as lengths. Local-only fixture; skip where absent.
+    #[test]
+    fn the_whole_tool_database_imports_grouped() {
+        let db = Path::new(env!("CARGO_MANIFEST_DIR")).join("../brush/tests/data/todb_sample.todb");
+        let Ok(tools) = mn_brush::todb::parse_todb_file(&db) else {
+            eprintln!("[fixture] todb_sample.todb missing, skipping");
+            return;
+        };
+        assert_eq!(tools.len(), 3);
+        let root = tmp_root("todb");
+        let sum = write_todb_import(&root, &tools, 600);
+        assert_eq!(sum.imported, 3, "one preset per leaf sub tool");
+        // Mapping pen, 0.30 mm at 600 dpi = 7.09 px, in the csp-pen set.
+        let myb = read_myb(&root, "csp-pen-1");
+        assert_eq!(myb["name"], "Mapping pen");
+        let d: f64 = 0.3 * 600.0 / 25.4;
+        let r = myb["settings"]["radius_logarithmic"]["base_value"]
+            .as_f64()
+            .unwrap();
+        assert!((r - (d / 2.0).ln()).abs() < 1e-6, "paper-relative size, got {r}");
+        // The airbrush set exists beside it, its own first preset.
+        let air = read_myb(&root, "csp-airbrush-1");
+        assert_eq!(air["name"], "Hard Airbrush");
         std::fs::remove_dir_all(root.parent().unwrap()).ok();
     }
 }
