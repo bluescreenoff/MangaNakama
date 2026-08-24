@@ -1819,6 +1819,37 @@ mod in_editor_undo_tests {
         );
     }
 
+    /// plans/05 item 5 (IME v1): the IME windows ride the caret — the
+    /// positioning INPUT (`ime_caret_client_px`) must track caret movement
+    /// during a session, or the composition/candidate windows strand where
+    /// the session began.
+    #[test]
+    fn the_ime_anchor_follows_the_caret() {
+        let Some(mut app) = headless() else {
+            println!("[test] SKIP: no usable adapter");
+            return;
+        };
+        app.start_new_text([300.0, 300.0], None);
+        app.apply_text_prop(|i| {
+            i.vertical = false;
+            i.size_pt = 24.0;
+        });
+        assert!(
+            app.ime_caret_client_px().is_some(),
+            "an open session always has an anchor"
+        );
+        type_str(&mut app, "hello");
+        let after_typing = app.ime_caret_client_px().unwrap();
+        // Back to the start: a different anchor (left of the typing one —
+        // exact layout varies by font, direction is the contract).
+        assert!(app.text_key(0x24, true, false), "Ctrl+Home handled");
+        let at_start = app.ime_caret_client_px().unwrap();
+        assert!(
+            at_start.0 < after_typing.0,
+            "the anchor followed the caret to the start ({at_start:?} vs {after_typing:?})"
+        );
+    }
+
     /// DEFECT 1 (data loss). Ctrl+Z past the last in-editor step used to
     /// commit the session and queue a document `Undo` unconditionally. A
     /// session whose net effect is nothing pushes NO document step — so the

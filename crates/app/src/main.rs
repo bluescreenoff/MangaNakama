@@ -63,7 +63,8 @@ use windows_sys::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext,
 };
 use windows_sys::Win32::UI::Input::Ime::{
-    CFS_POINT, COMPOSITIONFORM, ImmGetContext, ImmReleaseContext, ImmSetCompositionWindow,
+    CANDIDATEFORM, CFS_CANDIDATEPOS, CFS_POINT, COMPOSITIONFORM, ImmGetContext,
+    ImmReleaseContext, ImmSetCandidateWindow, ImmSetCompositionWindow,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, VK_SPACE};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
@@ -81,7 +82,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SW_SHOW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendMessageW,
     SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow,
     TranslateMessage, WHEEL_DELTA, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED,
-    WM_DROPFILES, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_IME_STARTCOMPOSITION,
+    WM_DROPFILES, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_IME_COMPOSITION,
+    WM_IME_STARTCOMPOSITION,
     WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
     WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MOVE, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_PAINT,
     WM_POINTERCAPTURECHANGED, WM_POINTERDOWN, WM_POINTERLEAVE, WM_POINTERUP, WM_POINTERUPDATE,
@@ -2280,28 +2282,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             0
         }
 
-        // Position the IME composition window at the caret, then let the
-        // default composition UI run (WM_CHAR delivers the committed text).
-        WM_IME_STARTCOMPOSITION => {
-            if let Some((x, y)) = app.ime_caret_client_px() {
-                unsafe {
-                    let himc = ImmGetContext(hwnd);
-                    if !himc.is_null() {
-                        let form = COMPOSITIONFORM {
-                            dwStyle: CFS_POINT,
-                            ptCurrentPos: POINT { x, y },
-                            rcArea: RECT {
-                                left: 0,
-                                top: 0,
-                                right: 0,
-                                bottom: 0,
-                            },
-                        };
-                        ImmSetCompositionWindow(himc, &form);
-                        ImmReleaseContext(hwnd, himc);
-                    }
-                }
-            }
+        // Position the IME composition AND candidate windows at the caret,
+        // then let the default composition UI run (WM_CHAR delivers the
+        // committed text). plans/05 item 5 v1: START used to be the only
+        // positioning moment, so a composition whose caret moved left the
+        // window stranded — and the candidate list was never told anything,
+        // parking itself over the text being typed. INLINE preview (the
+        // composition string drawn underlined at the caret, no default UI)
+        // is the later, bigger slice.
+        WM_IME_STARTCOMPOSITION | WM_IME_COMPOSITION => {
+            position_ime_at_caret(hwnd, &app);
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
 
@@ -2335,6 +2325,49 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
 
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    }
+}
+
+/// Point the IME's composition string and its CANDIDATE list at the caret
+/// (plans/05 item 5, v1). Called at composition START and on every
+/// WM_IME_COMPOSITION — a caret that moves mid-composition keeps its
+/// windows with it. The candidate list sits one line under the caret so
+/// it stops covering the text being typed; the OS nudges it for screen
+/// edges itself. (Inline composition preview — the string drawn
+/// underlined at the caret, no default UI — is the later, bigger slice.)
+fn position_ime_at_caret(hwnd: HWND, app: &App) {
+    let Some((x, y)) = app.ime_caret_client_px() else {
+        return;
+    };
+    unsafe {
+        let himc = ImmGetContext(hwnd);
+        if himc.is_null() {
+            return;
+        }
+        let form = COMPOSITIONFORM {
+            dwStyle: CFS_POINT,
+            ptCurrentPos: POINT { x, y },
+            rcArea: RECT {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            },
+        };
+        ImmSetCompositionWindow(himc, &form);
+        let cand = CANDIDATEFORM {
+            dwIndex: 0,
+            dwStyle: CFS_CANDIDATEPOS,
+            ptCurrentPos: POINT { x, y: y + 18 },
+            rcArea: RECT {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            },
+        };
+        ImmSetCandidateWindow(himc, &cand);
+        ImmReleaseContext(hwnd, himc);
     }
 }
 
