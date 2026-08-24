@@ -30,6 +30,11 @@ pub struct SimpleDab {
     /// Distance already consumed past the previous dab, carried across segments
     /// so spacing does not reset (and clump) at every input sample.
     carry: f32,
+    /// Row 42 (A-014, CSP はみ出さない): the anti-overflow barrier this
+    /// stroke paints within — `None` (the default, and every older
+    /// stroke) paints as before, bit for bit. Shared by every MN engine
+    /// through `base`.
+    pub mask: Option<std::sync::Arc<crate::AntiOverflowMask>>,
 }
 
 impl Default for SimpleDab {
@@ -42,6 +47,7 @@ impl Default for SimpleDab {
             spacing: 0.25,
             prev: None,
             carry: 0.0,
+            mask: None,
         }
     }
 }
@@ -107,12 +113,13 @@ impl SimpleDab {
                 let tile = layer.tile_mut(idx);
                 blend_disc(
                     tile,
-                    (ox as f32, oy as f32),
+                    (ox, oy),
                     (lx0, ly0, lx1, ly1),
                     (cx, cy),
                     radius,
                     alpha,
                     src_full,
+                    self.mask.as_deref(),
                 );
             }
         }
@@ -169,12 +176,13 @@ impl SimpleDab {
 #[allow(clippy::too_many_arguments)]
 fn blend_disc(
     tile: &mut Tile,
-    tile_origin: (f32, f32),
+    tile_origin: (i32, i32),
     local: (usize, usize, usize, usize),
     center: (f32, f32),
     radius: f32,
     alpha: f32,
     color: [f32; 3],
+    mask: Option<&crate::AntiOverflowMask>,
 ) {
     let (ox, oy) = tile_origin;
     let (lx0, ly0, lx1, ly1) = local;
@@ -183,14 +191,21 @@ fn blend_disc(
     let one = FIX15_ONE as u32;
 
     for ly in ly0..=ly1 {
-        let py = oy + ly as f32 + 0.5;
-        let ddy = py - cy;
+        let py = oy + ly as i32;
+        let ddy = py as f32 + 0.5 - cy;
         let ddy2 = ddy * ddy;
         let row = ly * TILE_SIZE * TILE_CHANNELS;
 
         for lx in lx0..=lx1 {
-            let px = ox + lx as f32 + 0.5;
-            let ddx = px - cx;
+            // Row 42: the reference barrier — a blocked pixel is never
+            // painted, which is what keeps a scribble inside the lines.
+            if let Some(m) = mask
+                && m.blocked(ox + lx as i32, py)
+            {
+                continue;
+            }
+            let px = ox + lx as i32;
+            let ddx = px as f32 + 0.5 - cx;
             let dist = (ddx * ddx + ddy2).sqrt();
 
             // 1px anti-aliased edge; hard round core.
@@ -963,5 +978,52 @@ mod krita_engine_tests {
             rightmost >= 192,
             "the stroke reaches the lift point (rightmost ink {rightmost}, pen lifted at 194)"
         );
+    }
+}
+
+#[cfg(test)]
+mod anti_overflow_tests {
+    use super::*;
+    use mn_core::{Document, TileIdx};
+
+    /// Row 42 (A-014, はみ出さない): a masked dab never paints a blocked
+    /// pixel — a scribble may reach AROUND the wall, but the reference's
+    /// ink stays exactly as it was.
+    #[test]
+    fn a_masked_dab_never_paints_blocked_pixels() {
+        let mut doc = Document::new(64, 64);
+        let mut d = SimpleDab::default();
+        d.color = [1.0, 0.0, 0.0];
+        let mut allow = vec![255u8; 64 * 64];
+        for y in 0..64 {
+            allow[y * 64 + 32] = 0;
+        }
+        d.mask = Some(std::sync::Arc::new(crate::AntiOverflowMask {
+            w: 64,
+            allow,
+        }));
+        d.dab(&mut doc, 32.0, 32.0, 8.0, 1.0);
+        fn alpha(doc: &Document, x: i32, y: i32) -> u16 {
+            let idx = TileIdx::of_pixel(x, y);
+            doc.active_layer()
+                .tile(idx)
+                .map(|t| {
+                    let (ox, oy) = idx.origin();
+                    t.pixel((x - ox) as usize, (y - oy) as usize)[3]
+                })
+                .unwrap_or(0)
+        }
+        assert!(alpha(&doc, 24, 32) > 0, "the near side painted");
+        assert_eq!(alpha(&doc, 32, 32), 0, "the wall column is untouched");
+        assert!(
+            alpha(&doc, 36, 32) > 0,
+            "the far side painted around the wall"
+        );
+        // And unmasked (the default, every stroke before the switch):
+        // the same dab paints the wall column too.
+        let mut plain = SimpleDab::default();
+        plain.color = [1.0, 0.0, 0.0];
+        plain.dab(&mut doc, 32.0, 10.0, 8.0, 1.0);
+        assert!(alpha(&doc, 32, 10) > 0, "no mask = paint as before");
     }
 }

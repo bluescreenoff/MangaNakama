@@ -45,6 +45,33 @@ pub use mybrush::{
 };
 pub use surface::{TileOracle, set_tile_oracle};
 
+/// Row 42 / A-014 (CSP はみ出さない, "do not cross lines of the reference
+/// layer"): a per-pixel paint barrier shared by every engine, built once
+/// per stroke from the reference set's ink plus frame-border folders
+/// (the owner's widened referent ruling). `allow` is canvas-wide, one byte
+/// per pixel: 255 = paint freely, 0 = the reference's ink — a blocked
+/// pixel is never painted, so a scribble stays inside the lines.
+#[derive(Clone, Debug)]
+pub struct AntiOverflowMask {
+    /// Canvas width in pixels (the stride of `allow`).
+    pub w: usize,
+    /// 255 = paintable, 0 = blocked (reference ink).
+    pub allow: Vec<u8>,
+}
+
+impl AntiOverflowMask {
+    /// True when `(x, y)` is the reference's ink and must stay unpainted.
+    /// Off-canvas coordinates read as blocked — safer than painting past
+    /// an edge the barrier was meant to close.
+    pub fn blocked(&self, x: i32, y: i32) -> bool {
+        if x < 0 || y < 0 {
+            return true;
+        }
+        let i = y as usize * self.w + x as usize;
+        self.allow.get(i).is_none_or(|a| *a == 0)
+    }
+}
+
 /// The engine a preset asks for through its optional `mn-engine` key
 /// (`"grid"` / `"hairy"` / `"curve"` / `"dyna"`), or `None` for an ordinary
 /// MyPaint `.myb`.

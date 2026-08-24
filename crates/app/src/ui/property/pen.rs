@@ -309,6 +309,15 @@ drawn zoomed in. Leave this on if lines only look right to you at high zoom.",
 stops at the angle and picks up on the far side of it.",
     );
 
+    // Row 42 (A-014): CSP はみ出さない. Built from the reference set +
+    // frame folders at each stroke's start.
+    ui.checkbox(&mut app.anti_overflow, "Don't cross reference lines")
+        .on_hover_text(
+            "Scribble freely — the paint stops at the reference layers' ink (and \
+frame borders): a blocked pixel is never painted, so flats stay inside \
+the lineart. The stroke runs on the CPU while this is on.",
+        );
+
     ui.add_space(2.0);
     let mut by_speed = c.stab_by_speed;
     if ui

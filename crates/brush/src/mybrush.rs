@@ -234,6 +234,9 @@ pub struct MyBrush {
     /// Strokes edit the DOCUMENT's selection scratch (selection pen /
     /// eraser / Quick Mask) — alpha is the coverage payload.
     sel_mode: bool,
+    /// Row 42 (A-014): this stroke's anti-overflow barrier — None paints
+    /// freely. Re-stated per stroke by the app, like the modes above.
+    anti: Option<std::sync::Arc<crate::AntiOverflowMask>>,
     /// CSP Advanced ▸ Stroke ▸ Interval (S-028) as the user last set it.
     /// `AsPreset` — the default — never writes the engine's dab spacing.
     interval: Interval,
@@ -704,6 +707,7 @@ impl MyBrush {
             view_flip: false,
             mask_mode: false,
             sel_mode: false,
+            anti: None,
             interval: Interval::AsPreset,
             base_dabs,
             base_linearize,
@@ -1391,6 +1395,12 @@ impl MyBrush {
         self.mask_mode = on;
     }
 
+    /// Row 42 (A-014, はみ出さない): arm this stroke's anti-overflow
+    /// barrier. Re-stated per stroke (None disarms).
+    pub fn set_anti_overflow(&mut self, m: Option<std::sync::Arc<crate::AntiOverflowMask>>) {
+        self.anti = m;
+    }
+
     /// Route strokes to the DOCUMENT's selection scratch (selection pen
     /// / eraser / Quick Mask) — the caller re-states it per stroke.
     pub fn set_sel_mode(&mut self, on: bool) {
@@ -1482,6 +1492,14 @@ impl MyBrush {
             self.surface.bind(doc_ptr);
             self.surface.set_mask_mode(self.mask_mode && !self.sel_mode);
             self.surface.set_sel_mode(self.sel_mode);
+            // Row 42: the barrier rides the batch — armed only for plain
+            // pixel strokes (mask/sel traffic writes other targets).
+            self.surface
+                .set_anti_overflow(if self.mask_mode || self.sel_mode {
+                    None
+                } else {
+                    self.anti.clone()
+                });
             // SMUDGE-UNDER-WASH (TODO #6): the sampler reads buffer OVER
             // layer — the ink the user sees — not the blank buffer alone.
             // (Wash-smudge combos run CPU; the GPU deferral holds.)

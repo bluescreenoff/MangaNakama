@@ -393,6 +393,10 @@ pub struct App {
     /// Row 89: the GLOBAL pen-pressure correction, empty = identity.
     /// Applied to every sample in `push_batch`, before per-tool curves.
     pub global_pressure: Vec<[f32; 2]>,
+    /// Row 42 (A-014, はみ出さない): brush strokes stay inside the
+    /// reference set's ink (and frame-border folders) — the barrier is
+    /// built per stroke in `begin_stroke`; False paints freely.
+    pub anti_overflow: bool,
     /// The pen-pressure wizard (BR-014–016): open flag, the
     /// Stronger/Weaker bend, and the raw pressures of strokes drawn
     /// while it listens.
@@ -1339,6 +1343,7 @@ impl App {
             pen_wizard_open: false,
             pen_wizard_gamma: 1.0,
             pen_wizard_samples: Vec::new(),
+            anti_overflow: false,
             quick_query: String::new(),
             quick_pins: layout
                 .quick_pins
@@ -2669,10 +2674,27 @@ impl App {
         self.dab_stroke = None;
         // Rulers part 2: the sticky lock is stroke-scoped.
         self.ruler_lock = Default::default();
+        // Row 42 (A-014, はみ出さない): build the stroke's anti-overflow
+        // barrier ONCE — reference set composite + frame-border folders
+        // (the owner's widened referent ruling) — and hand it to every
+        // engine. None paints freely, exactly as before.
+        let anti_mask = if self.anti_overflow && !self.mask_edit && !live && !sel_paint {
+            mn_core::fill::anti_overflow_barrier(&self.doc)
+                .map(|(w, allow)| std::sync::Arc::new(mn_brush::AntiOverflowMask { w, allow }))
+        } else {
+            None
+        };
+        self.brush
+            .inner_mut()
+            .inner_mut()
+            .set_anti_overflow_all(anti_mask.clone());
         let gpu_path = self.gpu_dabs
             && !self.mask_edit // LM-004: mask strokes are CPU (the GPU path writes layer tiles)
             && !live // a live layer's strokes ARE mask strokes (TRIAGE 137)
             && !sel_paint // selection strokes are CPU too (same reason — they write the scratch)
+            // Row 42: the GPU dab path writes layer tiles with no barrier
+            // — anti-overflow strokes run CPU.
+            && anti_mask.is_none()
             && self.renderer.gpu_dabs_supported()
             && self.brush.inner().inner().gpu_dab_ready();
         self.brush
@@ -3042,6 +3064,12 @@ impl App {
                 });
             }
         }
+        // Row 42: the barrier is stroke-scoped — disarm for whatever the
+        // next stroke is (begin_stroke re-arms from the toggle).
+        self.brush
+            .inner_mut()
+            .inner_mut()
+            .set_anti_overflow_all(None);
         if let Some(s) = self.stroke.take() {
             s.report();
             if s.samples == 0 {

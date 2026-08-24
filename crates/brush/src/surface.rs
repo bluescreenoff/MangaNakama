@@ -92,6 +92,12 @@ pub(crate) struct SurfaceState {
     /// libmypaint always gets a writable 64x64 tile even where we store none.
     /// Writes to it are discarded by design.
     scratch: Box<[u16]>,
+    /// Row 42: the anti-overflow barrier for this stroke (None = paint
+    /// freely, the behaviour of every stroke before the switch existed).
+    anti: Option<std::sync::Arc<crate::AntiOverflowMask>>,
+    /// The write-tile snapshot belonging to the barrier — taken at the
+    /// writable request START, replayed over blocked pixels at END.
+    anti_snap: Option<(TileIdx, Vec<u16>, std::sync::Arc<crate::AntiOverflowMask>)>,
 }
 
 /// A `MyPaintTiledSurface` subclass backed by a `core::Document`'s active layer.
@@ -110,6 +116,8 @@ impl TileSurface {
             sel_mode: false,
             composite_base: std::ptr::null_mut(),
             scratch: vec![0u16; TILE_LEN].into_boxed_slice(),
+            anti: None,
+            anti_snap: None,
         }));
         let raw = unsafe { ffi::mn_surface_new(state as *mut c_void) };
         assert!(!raw.is_null(), "mn_surface_new: out of memory");
@@ -138,6 +146,17 @@ impl TileSurface {
     /// scratch (selection pen / eraser / Quick Mask).
     pub(crate) unsafe fn set_sel_mode(&self, on: bool) {
         unsafe { (*self.state).sel_mode = on };
+    }
+
+    /// Row 42: arm the anti-overflow barrier for this batch — writable
+    /// tile requests snapshot, and their END restores every blocked pixel.
+    pub(crate) unsafe fn set_anti_overflow(
+        &self,
+        m: Option<std::sync::Arc<crate::AntiOverflowMask>>,
+    ) {
+        let st = unsafe { &mut *self.state };
+        st.anti = m;
+        st.anti_snap = None;
     }
 
     /// Set the smudge-under-wash composite base (TODO #6): the sampler
@@ -384,25 +403,65 @@ pub unsafe extern "C" fn mn_brush_tile_request_start(
 
     // The paint path. `tile_mut` creates-if-absent, does the copy-on-write
     // unshare against undo snapshots, and bumps the revision the GPU watches.
-    doc.active_layer_mut().tile_mut(idx).data_mut().as_mut_ptr()
+    let t = doc.active_layer_mut().tile_mut(idx);
+    // Row 42 (anti-overflow): C writes straight into the tile, so the
+    // barrier is enforced by snapshot/restore — remember the tile as it
+    // stood, and `tile_request_end` puts every BLOCKED pixel back.
+    if let Some(m) = st.anti.as_ref() {
+        st.anti_snap = Some((idx, t.data().to_vec(), m.clone()));
+    }
+    t.data_mut().as_mut_ptr()
 }
 
 /// `tile_request_end` — called from `csrc/mn_surface.c`.
 ///
-/// Nothing to do: writes landed directly in the tile and `tile_mut` already
-/// published a fresh revision at request time. Kept because libmypaint's
-/// contract requires the callback to exist, and because per-tile dirty tracking
-/// (if the GPU ever wants finer grain than "revision changed") belongs here.
+/// Normally nothing to do: writes landed directly in the tile and
+/// `tile_mut` already published a fresh revision at request time. Kept
+/// because libmypaint's contract requires the callback to exist, and
+/// because per-tile dirty tracking (if the GPU ever wants finer grain
+/// than "revision changed") belongs here.
+///
+/// Row 42: with the anti-overflow barrier armed, the matching snapshot
+/// taken at request START is replayed here over every blocked pixel —
+/// C's dab never keeps its paint on the reference's ink.
 ///
 /// # Safety
 /// `state` must be the `SurfaceState` pointer given to `mn_surface_new`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mn_brush_tile_request_end(
-    _state: *mut c_void,
-    _tx: c_int,
-    _ty: c_int,
-    _readonly: c_int,
+    state: *mut c_void,
+    tx: c_int,
+    ty: c_int,
+    readonly: c_int,
 ) {
+    if readonly != 0 {
+        return;
+    }
+    let st = unsafe { &mut *(state as *mut SurfaceState) };
+    let Some((snap_idx, snap, mask)) = st.anti_snap.take() else {
+        return;
+    };
+    if snap_idx != TileIdx::new(tx, ty) {
+        return;
+    }
+    let Some(doc) = (unsafe { st.doc.as_mut() }) else {
+        return;
+    };
+    let (ox, oy) = snap_idx.origin();
+    let tile = doc.active_layer_mut().tile_mut(snap_idx);
+    let data = tile.data_mut();
+    let ts = mn_core::TILE_SIZE as usize;
+    for (i, (d, s)) in data
+        .chunks_exact_mut(4)
+        .zip(snap.chunks_exact(4))
+        .enumerate()
+    {
+        let x = ox as usize + i % ts;
+        let y = oy as usize + i / ts;
+        if mask.blocked(x as i32, y as i32) {
+            d.copy_from_slice(s);
+        }
+    }
 }
 
 /// `over` premultiplied fix15 tile composited onto `under` into `out`

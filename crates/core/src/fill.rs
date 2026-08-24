@@ -208,6 +208,59 @@ fn source_pixels(doc: &Document, opts: &FillOpts) -> Vec<[u8; 3]> {
     }
 }
 
+/// Row 42 / A-014 (CSP はみ出さない): the BRUSH anti-overflow barrier —
+/// `(width, allow)` with one byte per canvas pixel: 255 = paint freely,
+/// 0 = the REFERENCE SET's ink plus frame-border folders' border ink
+/// (the owner's widened referent ruling, 2026-08-17). Same mostly-paper
+/// rule as [`FillOpts::semi_transparent_paper`]: composite luma below the
+/// midpoint is ink. `None` when there is nothing to refer to — the toggle
+/// is then honestly a no-op, not an all-paper mask.
+pub fn anti_overflow_barrier(doc: &Document) -> Option<(usize, Vec<u8>)> {
+    let (w, h) = (doc.size.0 as usize, doc.size.1 as usize);
+    let refs = doc.reference_layers();
+    let frame_sets: Vec<&crate::frame::FrameSet> = doc
+        .layers
+        .iter()
+        .filter(|l| l.folder && l.frames().is_some())
+        .filter_map(|l| l.frames())
+        .collect();
+    if refs.is_empty() && frame_sets.is_empty() {
+        return None;
+    }
+    let mut allow = vec![255u8; w * h];
+    if !refs.is_empty() {
+        let src = source_pixels(
+            doc,
+            &FillOpts {
+                refer: FillRefer::Reference,
+                ..FillOpts::default()
+            },
+        );
+        for (a, px) in allow.iter_mut().zip(&src) {
+            if luma_u8(*px) < 128 {
+                *a = 0;
+            }
+        }
+    }
+    for fs in frame_sets {
+        for (idx, t) in fs.rasterize_border(doc.size) {
+            let (ox, oy) = idx.origin();
+            for py in 0..crate::tile::TILE_SIZE {
+                for px in 0..crate::tile::TILE_SIZE {
+                    if t.pixel(px, py)[3] == 0 {
+                        continue;
+                    }
+                    let (x, y) = (ox as usize + px, oy as usize + py);
+                    if x < w && y < h {
+                        allow[y * w + x] = 0;
+                    }
+                }
+            }
+        }
+    }
+    Some((w, allow))
+}
+
 /// 2. Barrier mask from the seed colour: pixels farther than `tolerance`.
 fn barrier_from(src: &[[u8; 3]], seed_px: [u8; 3], tolerance: f32) -> Vec<bool> {
     let tol = (tolerance.clamp(0.0, 1.0) * 255.0) as i16;
@@ -2048,5 +2101,46 @@ mod tests {
         doc.set_layer_visible(b, false);
         let filled2 = flood_region(&doc, (5, 4), &opts).expect("region 2");
         assert_eq!(filled, filled2, "reference sampling ignores eye state");
+    }
+
+    /// Row 42: the brush anti-overflow barrier — reference-set ink and
+    /// frame BORDER ink block (the owner's widened referent ruling),
+    /// paper everywhere else paints freely, and a document with nothing
+    /// to refer to yields None (the toggle is an honest no-op).
+    #[test]
+    fn anti_overflow_barrier_blocks_reference_ink_and_frame_borders() {
+        let mut doc = Document::new(128, 128);
+        assert!(
+            anti_overflow_barrier(&doc).is_none(),
+            "nothing to refer to — no mask"
+        );
+
+        // A reference layer with a vertical black line at x=10.
+        let r = doc.add_layer("ref");
+        doc.layers[r].reference = true;
+        for y in 0..128i32 {
+            let idx = TileIdx::of_pixel(10, y);
+            let (ox, oy) = idx.origin();
+            let t = doc.layers[r].tile_mut(idx);
+            let d = t.data_mut();
+            let o = ((y - oy) as usize * TILE_SIZE + (10 - ox) as usize) * 4;
+            let f = f32_to_fix15(0.0);
+            d[o] = f;
+            d[o + 1] = f;
+            d[o + 2] = f;
+            d[o + 3] = f32_to_fix15(1.0);
+        }
+        // A frame folder whose border ink runs at the panel edge.
+        let fs = crate::frame::FrameSet::single_rect([16.0, 16.0, 112.0, 112.0], 4.0);
+        doc.add_frame_folder("panel", fs);
+
+        let (w, allow) = anti_overflow_barrier(&doc).expect("references exist");
+        assert_eq!(w, 128);
+        let at = |x: usize, y: usize| allow[y * 128 + x];
+        assert_eq!(at(64, 64), 255, "panel paper is paintable");
+        assert_eq!(at(0, 0), 255, "gutter paper is paintable");
+        assert_eq!(at(10, 64), 0, "the reference line blocks");
+        assert_eq!(at(16, 64), 0, "the frame border ink blocks");
+        assert_eq!(at(20, 64), 255, "just inside the border is paintable");
     }
 }

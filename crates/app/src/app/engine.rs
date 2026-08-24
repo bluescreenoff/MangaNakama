@@ -213,6 +213,20 @@ impl Engine {
         });
     }
 
+    /// Row 42 (A-014, はみ出さない): arm the anti-overflow barrier on
+    /// every engine — the MyPaint surface snapshot/restores around C's
+    /// dabs, the MN engines skip blocked pixels in `blend_disc`.
+    pub fn set_anti_overflow_all(&mut self, m: Option<std::sync::Arc<mn_brush::AntiOverflowMask>>) {
+        self.each_kind(|k| match k {
+            EngineKind::My(b) => b.set_anti_overflow(m.clone()),
+            EngineKind::Dab(d) => d.mask = m.clone(),
+            EngineKind::Grid(e) => e.base.mask = m.clone(),
+            EngineKind::Hairy(e) => e.base.mask = m.clone(),
+            EngineKind::Curve(e) => e.base.mask = m.clone(),
+            EngineKind::Dyna(e) => e.base.mask = m.clone(),
+        });
+    }
+
     /// Run a setter on the main engine and every twin.
     fn each_kind(&mut self, mut f: impl FnMut(&mut EngineKind)) {
         f(&mut self.main);
