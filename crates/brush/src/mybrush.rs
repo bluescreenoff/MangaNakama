@@ -1278,6 +1278,15 @@ impl MyBrush {
         std::mem::take(&mut self.record)
     }
 
+    /// Dabs the C side clamped to the per-dab tile budget (PATCHES.md #19)
+    /// so far — take-and-reset, so one stroke reads exactly its own
+    /// clamps. Associated (no `self`) on purpose: the counter is
+    /// per-THREAD and the app strokes symmetry/wrap twins through it too,
+    /// so the count belongs to the stroke, not to one brush instance.
+    pub fn take_dab_clamp_count() -> u32 {
+        DAB_CLAMP_COUNT.with(|c| c.replace(0))
+    }
+
     /// Publish the view transform for the speed/direction input compensation
     /// (PATCHES.md #12). `1.0` / `0.0` / `false` — the defaults — reproduce
     /// the stock legacy `stroke_to` exactly. `rotation_rad` is RADIANS — the
@@ -1705,6 +1714,16 @@ thread_local! {
     /// inside one call, never across strokes.
     static RECORD_MODE: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
     static RECORD_BUF: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Per-dab tile budget (PATCHES.md #19): max tiles one dab may touch
+    /// before `draw_dab_internal` clamps its radius. 1024 = a 32×32-tile
+    /// ≈ 2048 px square dab — above the size slider's 2000 px ceiling, so
+    /// every hand-authored brush renders bit-identically; the guard exists
+    /// for imported tips whose stored "size" is not pixels. 0 = unlimited
+    /// (stock).
+    static DAB_TILE_BUDGET: std::cell::Cell<u32> = const { std::cell::Cell::new(1024) };
+    /// Dabs clamped by that budget this stroke (PATCHES.md #19) — read via
+    /// [`MyBrush::take_dab_clamp_count`].
+    static DAB_CLAMP_COUNT: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
 /// Point the vendored record hooks at this brush's recorder for the coming
@@ -1792,6 +1811,29 @@ pub extern "C" fn mnc_record_dab(
 #[unsafe(no_mangle)]
 pub extern "C" fn mnc_record_dab_mode() -> c_int {
     RECORD_MODE.with(|c| c.get())
+}
+
+/// Override the per-dab tile budget (PATCHES.md #19). TEST seam only — the
+/// shipping guard is the 1024 constant in the thread-local above; restore
+/// it on exit (tests on one harness thread run sequentially, a leaked low
+/// budget would clamp every later stroke's dabs).
+#[cfg(test)]
+pub fn set_dab_tile_budget(n: u32) {
+    DAB_TILE_BUDGET.with(|c| c.set(n));
+}
+
+/// Called from the patched `mypaint-tiled-surface.c` per dab (PATCHES.md
+/// #19): the active per-dab tile budget, 0 = unlimited.
+#[unsafe(no_mangle)]
+pub extern "C" fn mnc_dab_tile_budget() -> c_int {
+    DAB_TILE_BUDGET.with(|c| c.get() as c_int)
+}
+
+/// Called from the patched `mypaint-tiled-surface.c` when a dab's radius
+/// was shrunk to fit the budget (PATCHES.md #19).
+#[unsafe(no_mangle)]
+pub extern "C" fn mnc_notify_dab_clamped() {
+    DAB_CLAMP_COUNT.with(|c| c.set(c.get().saturating_add(1)));
 }
 
 fn set_radius_random_abs(on: bool) {
@@ -2261,5 +2303,164 @@ mod wash_smudge_tests {
             "the smudge must pick up the layer's red under the wash buffer ({red_dominant} px)"
         );
         let _ = TILE_LEN;
+    }
+
+    /// PATCHES.md #19: a dab whose tile footprint exceeds the budget is
+    /// clamped BEFORE the record tap — the GPU replay sees the same clamped
+    /// radius — and the clamp counter moves. Runs with a lowered budget
+    /// because the engine's own `ACTUAL_RADIUS_MAX` (1000 px radius) already
+    /// caps what can arrive at ~32×32 tiles: the SHIPPING 1024 budget is a
+    /// rail for the 2b unit fix (which will raise that ceiling), inert until
+    /// then — pinned inert by `normal_brush_strokes_record_zero_clamps`.
+    #[test]
+    fn giant_dab_radius_is_clamped_to_the_tile_budget() {
+        struct RestoreBudget;
+        impl Drop for RestoreBudget {
+            fn drop(&mut self) {
+                set_dab_tile_budget(1024);
+            }
+        }
+        set_dab_tile_budget(16);
+        let _restore = RestoreBudget;
+
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/brushes/csp/real-g-pen.myb");
+        let Ok(mut b) = MyBrush::load(&path) else {
+            eprintln!("[probe] preset missing, skipping");
+            return;
+        };
+        b.set_size_px(5000.0); // engine caps the arrival radius at 1000
+        // BYPASS: record only, skip the tile queue — the clamp is asserted
+        // from the record, so the test pays nothing for the giant dabs.
+        b.set_dab_recording(RecordMode::Bypass);
+        let mut doc = Document::new(512, 512);
+        b.begin(&mut doc);
+        // At ~1000 px radius the engine spaces dabs ~500 px apart — a long
+        // travel is what a real giant-size stroke looks like.
+        for i in 0..40 {
+            b.sample(
+                &mut doc,
+                PenSample {
+                    x: -600.0 + i as f32 * 40.0,
+                    y: 200.0,
+                    pressure: 0.8,
+                    tilt_x: 0.0,
+                    tilt_y: 0.0,
+                    t_ms: i as f64 * 16.0,
+                },
+            );
+        }
+        b.end(&mut doc);
+        assert!(
+            MyBrush::take_dab_clamp_count() >= 1,
+            "the over-budget dabs must count as clamped"
+        );
+        // 16 tiles = a 4-tile square = 256 px across → radius ≤ 129
+        // (+1 fringe, floor alignment).
+        let rec = b.take_dab_record();
+        assert!(!rec.dabs.is_empty(), "the stroke must record its dabs");
+        for d in &rec.dabs {
+            assert!(
+                d.radius <= 4.0 * 64.0 / 2.0 + 1.0,
+                "recorded radius {} escaped the budget clamp",
+                d.radius
+            );
+        }
+    }
+
+    /// PATCHES.md #19 negative control: a normal 300 px brush (the `.abr`
+    /// import cap, above most hand-authored sizes) never trips the guard —
+    /// stock presets render bit-identically and the app warning cannot
+    /// fire for them.
+    #[test]
+    fn normal_brush_strokes_record_zero_clamps() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/brushes/csp/real-g-pen.myb");
+        let Ok(mut b) = MyBrush::load(&path) else {
+            eprintln!("[probe] preset missing, skipping");
+            return;
+        };
+        b.set_size_px(300.0);
+        b.set_dab_recording(RecordMode::Tap);
+        let mut doc = Document::new(512, 512);
+        b.begin(&mut doc);
+        for i in 0..30 {
+            b.sample(
+                &mut doc,
+                PenSample {
+                    x: 100.0 + i as f32 * 4.0,
+                    y: 200.0,
+                    pressure: 0.8,
+                    tilt_x: 0.0,
+                    tilt_y: 0.0,
+                    t_ms: i as f64 * 8.0,
+                },
+            );
+        }
+        b.end(&mut doc);
+        assert_eq!(
+            MyBrush::take_dab_clamp_count(),
+            0,
+            "a 300 px brush must not trip the tile budget"
+        );
+        let rec = b.take_dab_record();
+        assert!(!rec.dabs.is_empty());
+        for d in &rec.dabs {
+            assert!(
+                d.radius <= 151.0,
+                "radius {} exceeds the authored 150 px — clamp touched a stock brush",
+                d.radius
+            );
+        }
+    }
+
+    /// PATCHES.md #19: the RASTER path clamps too, not just the record —
+    /// with a tiny test budget, a stationary dab inks at most the budget's
+    /// tile footprint. This is the O(r²)-stall guard itself.
+    #[test]
+    fn raster_dabs_are_clamped_by_the_tile_budget() {
+        // Restore on unwind AND on assert-failure — a leaked 4-tile budget
+        // would clamp every later stroke on this test thread.
+        struct RestoreBudget;
+        impl Drop for RestoreBudget {
+            fn drop(&mut self) {
+                set_dab_tile_budget(1024);
+            }
+        }
+        set_dab_tile_budget(4);
+        let _restore = RestoreBudget;
+
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/brushes/csp/real-g-pen.myb");
+        let Ok(mut b) = MyBrush::load(&path) else {
+            eprintln!("[probe] preset missing, skipping");
+            return;
+        };
+        b.set_size_px(400.0); // radius ~200 → ~25-36 tiles/dab, over 4
+        let mut doc = Document::new(512, 512);
+        b.begin(&mut doc);
+        for i in 0..30 {
+            b.sample(
+                &mut doc,
+                PenSample {
+                    x: 200.0 + i as f32 * 4.0,
+                    y: 200.0,
+                    pressure: 0.8,
+                    tilt_x: 0.0,
+                    tilt_y: 0.0,
+                    t_ms: i as f64 * 8.0,
+                },
+            );
+        }
+        b.end(&mut doc);
+        assert!(
+            MyBrush::take_dab_clamp_count() >= 1,
+            "the over-budget dabs must count as clamped under a 4-tile budget"
+        );
+        // Clamped to a ≤2×2-tile footprint per dab: the whole 120 px path
+        // inks at most a 3×3 tile neighbourhood (unclamped ~200 px dabs
+        // would touch ~4×4).
+        let tiles = doc.active_layer().tiles().count();
+        assert!(tiles <= 9, "{tiles} tiles inked — dab escaped the budget");
     }
 }

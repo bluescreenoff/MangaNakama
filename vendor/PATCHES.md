@@ -526,7 +526,48 @@ writes are index-bounded, not run-length. Pinned by
 `spotty_sut_tip_strokes_without_queue_corruption` in mn-app (real
 fixture, skip-if-absent), verified crashing against the old bound.
 
+### 19. Per-dab tile budget (`mypaint-tiled-surface.c`, 2026-08-24)
+
+**What:** `draw_dab_internal` computes its touched-tile range BEFORE the
+#11 record tap now, and clamps the dab's radius while
+`(tx2-tx1+1)*(ty2-ty1+1) > mnc_dab_tile_budget()` (area-ratio shrink,
+≤8 iterations, floor at the 0.1 px early-out). The budget hook and a
+`mnc_notify_dab_clamped()` counter are Rust thread-locals
+(`MyBrush::take_dab_clamp_count`, take-and-reset; the app warns once per
+brush+size in `end_stroke`: "brush size clamped — the imported size looks
+wrong"). `get_color_internal` (the smudge sampler, which runs per dab
+BEFORE the ink clamp and pays the same O(r²) walk with a full
+`render_dab_mask` per tile) clamps its sampling radius to the same
+budget's closed-form bound, without counting — the dab itself counts.
+
+**Why:** imported `.sut`/`.abr` tips author kilo-pixel sizes (owner
+freeze report, 985 px shown in CSP); per-dab cost is quadratic in radius
+(one malloc + one 64² mask render per tile). The clamp sits before the
+record tap so the GPU replay rasterizes the same clamped radius by
+construction.
+
+**THE MEASUREMENT THAT SETS THE NUMBER (2026-08-24):** the engine already
+caps every arriving dab at `ACTUAL_RADIUS_MAX` = 1000 px radius
+(mypaint-brush.c:1097) ≈ 32×32 = 1024 tiles worst-case — so the default
+budget **1024 is deliberately a rail, not a brake**: nothing the engine
+can deliver today is meaningfully clamped (worst alignment shrinks ~3%),
+all parity/TAP-pinned output stays byte-identical, pinned by
+`normal_brush_strokes_record_zero_clamps` (300 px brush, zero clamps at
+the default budget). The rail arms when plans/05 item 2b (`.sut` unit
+fix) raises the arrival ceiling behind it. Tests drive the clamp through
+a lowered budget (`set_dab_tile_budget`, test-only):
+`giant_dab_radius_is_clamped_to_the_tile_budget` (BYPASS record: clamped
+radii + counter) and `raster_dabs_are_clamped_by_the_tile_budget`
+(raster footprint ≤ budget's tiles).
+
+**Also noted (not guarded):** spray/scatter dab COUNT at slider-max size
+is a per-sample cost, not per-dab — this patch does not bound it.
+
+**Upstream-relevant:** arguably — an overload guard with a lower default
+would suit upstream; ours is sized to sit silent.
+
 ### Companion Rust side (`crates/brush/src/mybrush.rs`)
+
 
 `set_hard_dab`/`set_scatter` + readbacks; thread-local hook state per the
 round-20 lesson (a process-global raced under parallel test runners).

@@ -154,6 +154,10 @@ pub struct App {
     /// per sub tool — `props` is the memory, keyed by preset path.
     pub props_current: ToolProps,
     props: HashMap<PathBuf, ToolProps>,
+    /// Latch for the per-dab tile-budget warning (PATCHES.md #19): the
+    /// preset-key@size that last warned, so one clamped brush says so once
+    /// instead of per stroke.
+    dab_clamp_warned: Option<String>,
     /// Shipped texture-tip mask names (Tool Property's picker list).
     pub texture_names: Vec<String>,
     /// The brushes root the presets came from — masks load from under it.
@@ -1213,6 +1217,7 @@ impl App {
             slot: Slot::Main,
             props_current: ToolProps::default(),
             props: HashMap::new(),
+            dab_clamp_warned: None,
             texture_names,
             brushes_root: root,
             curve_setting: Default::default(),
@@ -2708,6 +2713,10 @@ impl App {
         // The baseline is the count from BEFORE the report being handled: a
         // pen-down whose whole batch was filtered out must own those drops,
         // and it is decoded before it is dispatched here.
+        // PATCHES.md #19: drain any stale clamp count here (a path that
+        // abandoned a stroke without `end_stroke`) so the end-of-stroke
+        // warning fires only on this stroke's own clamps.
+        let _ = MyBrush::take_dab_clamp_count();
         self.stroke = Some(StrokeStats::new(
             kind,
             self.last_pointer,
@@ -2839,6 +2848,23 @@ impl App {
         // `end`, so those last dabs must still land inside the open undo op —
         // and the selection mask must clamp them before the op closes.
         self.brush.end(&mut self.doc);
+        // PATCHES.md #19: some dab(s) exceeded the per-dab tile budget and
+        // were clamped — an imported tip whose stored "size" is not pixels.
+        // Warn once per brush+size (re-picking the brush or moving the size
+        // slider re-arms it); the stroke itself is already safe.
+        if MyBrush::take_dab_clamp_count() > 0 {
+            let key = format!(
+                "{}@{:.0}",
+                self.selected_preset
+                    .and_then(|i| self.presets.get(i).map(|(_, p)| self.preset_key(p)))
+                    .unwrap_or_default(),
+                self.props_current.size_px
+            );
+            if self.dab_clamp_warned.as_deref() != Some(key.as_str()) {
+                self.set_status("brush size clamped — the imported size looks wrong");
+                self.dab_clamp_warned = Some(key);
+            }
+        }
         self.finish_gpu_dab_stroke();
         self.doc.mask_stroke_to_selection();
         // Transparent-pixel lock clamps ONCE at stroke end (not per batch —

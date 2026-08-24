@@ -28,6 +28,19 @@
  * gaussian hardness falloff — Krita/CSP-style crisp ink edges. */
 float mnc_brush_hard_dab(void);
 
+/* mnc (PATCHES.md #19): per-dab TILE BUDGET guard, implemented in Rust.
+ * mnc_dab_tile_budget() returns the max number of tiles one dab may touch
+ * (0 = unlimited, stock). Imported tips (`.sut`/`.abr` sets authoring
+ * kilo-pixel sizes) can ask for a dab spanning thousands of tiles — the
+ * per-tile malloc + raster in draw_dab_internal is O(r²) and a scatter
+ * brush at that size stalls the engine for minutes. Over budget, the
+ * dab's radius is shrunk until it fits and mnc_notify_dab_clamped()
+ * counts the clamp where the Rust side can surface it. The shipping
+ * budget (1024 = a 32×32-tile ≈ 2048 px square dab) sits above every
+ * hand-authored brush, so stock presets render bit-identically. */
+int mnc_dab_tile_budget(void);
+void mnc_notify_dab_clamped(void);
+
 /* mnc (round 26, 2026-08-16): Krita-style TEXTURE tips, also implemented in
  * Rust — see vendor/PATCHES.md #10. When mnc_brush_texture_size() returns
  * > 0, each dab's opacity is multiplied by a grayscale mask sampled in
@@ -760,6 +773,44 @@ gboolean draw_dab_internal (
         op->tex_angle = mnc_brush_texture_stamp_angle();
     }
 
+    /* mnc (PATCHES.md #19): per-dab TILE BUDGET. Computed BEFORE the
+     * record tap on purpose — the GPU path replays the record, so it must
+     * see the same clamped radius the rasterizer below sees. Shrunk by
+     * the area ratio (the tile footprint is quadratic in radius); 2-3
+     * iterations converge from any sane overshoot, the 8-cap is float
+     * pathology insurance only. */
+    const int mn_tile_budget = mnc_dab_tile_budget();
+    /* mnc (#10 amendment 3): anchored stamps rotate a square — sqrt(2) reach. */
+    float r_fringe =
+        (mnc_brush_texture_size() > 0 && mnc_brush_texture_anchor_dab() > 0)
+            ? op->radius * 1.41421356f + 1.0f
+            : op->radius + 1.0f; // +1.0 should not be required, only to be sure
+    int tx1 = floor(floor(x - r_fringe) / MYPAINT_TILE_SIZE);
+    int tx2 = floor(floor(x + r_fringe) / MYPAINT_TILE_SIZE);
+    int ty1 = floor(floor(y - r_fringe) / MYPAINT_TILE_SIZE);
+    int ty2 = floor(floor(y + r_fringe) / MYPAINT_TILE_SIZE);
+    if (mn_tile_budget > 0) {
+        int mn_clamped = 0;
+        for (int i = 0; i < 8; i++) {
+            const float tiles = (float)(tx2 - tx1 + 1) * (float)(ty2 - ty1 + 1);
+            if (tiles <= (float)mn_tile_budget) break;
+            op->radius *= sqrtf((float)mn_tile_budget / tiles);
+            mn_clamped = 1;
+            if (op->radius < 0.1f) break;
+            r_fringe =
+                (mnc_brush_texture_size() > 0 && mnc_brush_texture_anchor_dab() > 0)
+                    ? op->radius * 1.41421356f + 1.0f
+                    : op->radius + 1.0f;
+            tx1 = floor(floor(x - r_fringe) / MYPAINT_TILE_SIZE);
+            tx2 = floor(floor(x + r_fringe) / MYPAINT_TILE_SIZE);
+            ty1 = floor(floor(y - r_fringe) / MYPAINT_TILE_SIZE);
+            ty2 = floor(floor(y + r_fringe) / MYPAINT_TILE_SIZE);
+        }
+        if (mn_clamped) {
+            mnc_notify_dab_clamped();
+        }
+    }
+
     /* mnc (round 27): record-mode tap/bypass (PATCHES.md #11). Placed after
      * the early-outs and clamps so the record sees exactly what the raster
      * path sees. */
@@ -781,18 +832,9 @@ gboolean draw_dab_internal (
         }
     }
 
-    // Determine the tiles influenced by operation, and queue it for processing for each tile
-    /* mnc (#10 amendment 3): anchored stamps rotate a square — sqrt(2) reach. */
-    float r_fringe =
-        (mnc_brush_texture_size() > 0 && mnc_brush_texture_anchor_dab() > 0)
-            ? radius * 1.41421356f + 1.0f
-            : radius + 1.0f; // +1.0 should not be required, only to be sure
-
-    int tx1 = floor(floor(x - r_fringe) / MYPAINT_TILE_SIZE);
-    int tx2 = floor(floor(x + r_fringe) / MYPAINT_TILE_SIZE);
-    int ty1 = floor(floor(y - r_fringe) / MYPAINT_TILE_SIZE);
-    int ty2 = floor(floor(y + r_fringe) / MYPAINT_TILE_SIZE);
-
+    // Determine the tiles influenced by operation, and queue it for
+    // processing for each tile — the tx/ty ranges were computed by the
+    // #19 guard above, pre-record-tap, so the queue and the record agree.
     for (int ty = ty1; ty <= ty2; ty++) {
         for (int tx = tx1; tx <= tx2; tx++) {
             const TileIndex tile_index = {tx, ty};
@@ -847,6 +889,20 @@ void get_color_internal
   )
 {
     if (radius < 1.0f) radius = 1.0f;
+    /* mnc (PATCHES.md #19): the SAME per-dab tile budget guards the smudge
+     * sampler. It runs per dab BEFORE draw_dab_internal clamps, and pays
+     * the full O(r²) walk here (render_dab_mask renders a whole tile mask
+     * per tile) even though the ink dab is clamped later — a giant
+     * imported smudge tip would freeze right here. Sampling no wider than
+     * a dab can ink is also the consistent behaviour; the clamp itself is
+     * counted where the dab is, in draw_dab_internal. */
+    {
+        const int mn_tile_budget = mnc_dab_tile_budget();
+        if (mn_tile_budget > 0) {
+            const float mn_max_r = sqrtf((float)mn_tile_budget) * MYPAINT_TILE_SIZE / 2.0f;
+            if (radius > mn_max_r) radius = mn_max_r;
+        }
+    }
     const float hardness = 0.5f;
     const float aspect_ratio = 1.0f;
     const float angle = 0.0f;
