@@ -1728,6 +1728,9 @@ impl App {
                         ty0: d.ty,
                     };
                     d.gesture = Some(g);
+                    // An ink grab's pure MOVE commits on release (CSP's
+                    // Object tool feel); see canvas_up.
+                    d.object_lift = true;
                     self.set_status("layer lifted — drag to move, Enter commits, Esc cancels");
                 }
             }
@@ -2357,10 +2360,23 @@ impl App {
             .is_some_and(|d| d.gesture.is_some())
         {
             // Fold the final motion in, then release the gesture — the
-            // float itself stays until Enter/Esc.
+            // float itself stays until Enter/Esc. ONE exception, the
+            // CSP-parity rule (owner 2026-08-25): the OBJECT tool's ink
+            // grab commits on release when all that happened was a MOVE —
+            // CSP's Object tool drags layers directly, no Enter. A grab
+            // that scaled or rotated keeps the float. (Evaluated AFTER
+            // the fold: the release delta is part of the move.)
             self.transform_move(cx, cy);
+            let commit_now = self.transform_drag.as_ref().is_some_and(|d| {
+                d.object_lift
+                    && d.xform.m == mn_core::Affine2::IDENTITY.m
+                    && (d.xform.t[0] != 0.0 || d.xform.t[1] != 0.0)
+            });
             if let Some(d) = &mut self.transform_drag {
                 d.gesture = None;
+            }
+            if commit_now {
+                self.push_cmd(AppCmd::TransformCommit);
             }
             self.needs_redraw = true;
             return;

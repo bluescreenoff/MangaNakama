@@ -7086,6 +7086,7 @@ fn transform_translation_drags_a_linked_mask_only() {
         lift_selection: None,
         create_in: None,
         paste_new_layer: false,
+        object_lift: false,
         order: crate::app::MaterialLayerOrder::Above,
         preview_tex: None,
     };
@@ -7912,6 +7913,49 @@ fn object_press_on_ink_lifts_the_layer_into_a_drag() {
     assert_eq!((moved.2, moved.3), (ow, oh), "same ink, moved");
     assert_eq!(moved.0, ox + 30, "moved by the drag delta");
     let _ = oy;
+}
+
+/// CSP-parity rule (owner's standing directive 2026-08-25): the OBJECT
+/// tool's ink grab commits a pure MOVE on pointer RELEASE — CSP's Object
+/// tool drags layers directly, no Enter. A scale/rotate grab keeps the
+/// float.
+#[test]
+fn an_object_ink_move_commits_on_release() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    let idx = TileIdx::of_pixel(100, 100);
+    app.doc
+        .active_layer_mut()
+        .tile_mut(idx)
+        .set_pixel((100 - idx.origin().0) as usize, (100 - idx.origin().1) as usize, [1, 2, 3, 32767]);
+    let lineart = app.doc.active;
+    let (ox, _oy, ow, oh) = tight_ink(&app.doc.layers[lineart]).expect("ink");
+
+    app.tool = Tool::Object;
+    // Press on the ink, drag to (150, 100), release — canvas_up.
+    app.object_hit(100.0, 100.0);
+    let up = app.viewport.to_screen(150.0, 100.0);
+    app.canvas_up(up.0, up.1, &[]);
+    // The release QUEUES the commit (one frame, like the real pump).
+    drain_cmds(&mut app);
+
+    assert!(
+        app.transform_drag.is_none(),
+        "the release committed the move — no Enter, CSP's Object feel"
+    );
+    let moved = tight_ink(&app.doc.layers[lineart]).expect("ink after release");
+    assert_eq!((moved.2, moved.3), (ow, oh), "same ink, moved");
+    assert!(
+        moved.0 > ox,
+        "the drag moved it right (source x {ox}, landed {})",
+        moved.0
+    );
+    // ...and one undo takes it back.
+    assert!(app.doc.undo());
+    let undone = tight_ink(&app.doc.layers[lineart]).expect("ink after undo");
+    assert_eq!(undone.0, ox);
 }
 
 /// Owner 2026-08-24, drawing session: "you should be able to ctrl+t just

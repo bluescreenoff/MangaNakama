@@ -54,6 +54,13 @@ pub struct TransformDrag {
     /// never stamping the active layer's pixels. With `create_in` set it
     /// is redundant (the folder path already creates).
     pub paste_new_layer: bool,
+    /// Set by the OBJECT tool's ink grab (owner 2026-08-24): a pure
+    /// translation of that lift commits on pointer RELEASE — CSP's Object
+    /// tool moves layers directly, and "drag the lineart somewhere, then
+    /// press Enter" is the weird half of the gesture. A scale/rotate grab
+    /// (corners, stalk, outside-box) keeps the float: those are transform
+    /// work, not moves.
+    pub object_lift: bool,
     /// MT-034: where that fresh layer sits in the folder (material pastes
     /// set it from the palette dropdown; everything else keeps Above).
     pub order: crate::app::MaterialLayerOrder,
@@ -493,6 +500,7 @@ mod tests {
             lift_selection: None,
             create_in: None,
             paste_new_layer: false,
+            object_lift: false,
             order: crate::app::MaterialLayerOrder::Above,
             preview_tex: None,
         };

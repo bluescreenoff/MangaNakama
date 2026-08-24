@@ -328,6 +328,7 @@ fn open_float_drag(app: &mut App, src: mn_core::FloatSource, center_on_view: boo
         lift_selection: None,
         create_in: None,
         paste_new_layer: false,
+        object_lift: false,
         order: crate::app::MaterialLayerOrder::Above,
         preview_tex,
     };
@@ -667,6 +668,7 @@ pub(crate) fn open_layer_transform(app: &mut App, li: usize, r: [i32; 4]) -> boo
         lift_selection: app.doc.selection.clone(),
         create_in: None,
         paste_new_layer: false,
+        object_lift: false,
         order: crate::app::MaterialLayerOrder::Above,
         preview_tex,
     });
