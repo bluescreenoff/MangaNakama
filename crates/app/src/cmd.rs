@@ -241,22 +241,11 @@ fn paste_float(app: &mut App, where_: PasteWhere) {
     } else {
         None
     };
-    // Stamping the active layer keeps today's guards; a target that creates
-    // its own layer (a pointer panel the active layer is NOT in) skips them.
-    let creates_layer = target
-        .as_ref()
-        .is_some_and(|t| !t.owns_active && t.folder.is_some());
-    if !creates_layer {
-        let l = app.doc.active_layer();
-        if l.lock {
-            app.set_status("layer is locked");
-            return;
-        }
-        if l.is_vector() || l.folder {
-            app.set_status("Paste targets raster layers");
-            return;
-        }
-    }
+    // Owner 2026-08-24: a paste lands on its OWN new layer, committed
+    // immediately — no float, no corner handles under the Pen, nothing
+    // following a layer switch (the old guards stamped the active layer;
+    // the active layer is never a paste target now, so lock/vector state
+    // stops mattering).
     let aim = target.as_ref().map(|t| t.rect);
     let src = app.clipboard.clone().or_else(|| {
         let (bgra, w, h) = crate::clipboard::clipboard_get_dib()?;
@@ -289,6 +278,19 @@ fn paste_float(app: &mut App, where_: PasteWhere) {
         open_float_drag(app, src, true);
     } else {
         open_float_aimed(app, src, target.as_ref());
+    }
+    // ...and commit it NOW. The float-open above is reused for its aim and
+    // sizing math only; the drag never survives this call, so no handles
+    // can appear under the Pen and no paste state can follow a layer
+    // switch. Adjust afterwards with Ctrl+T or the Object tool.
+    if let Some(mut drag) = app.transform_drag.take() {
+        drag.paste_new_layer = true;
+        // ANY folder target (owning or foreign): the new layer lands
+        // inside it, so the folder seal clips the art to the panel.
+        if let Some(t) = target.as_ref() {
+            drag.create_in = t.folder;
+        }
+        commit_transform_drag(app, drag);
     }
 }
 
@@ -325,6 +327,7 @@ fn open_float_drag(app: &mut App, src: mn_core::FloatSource, center_on_view: boo
         clear_source: false,
         lift_selection: None,
         create_in: None,
+        paste_new_layer: false,
         order: crate::app::MaterialLayerOrder::Above,
         preview_tex,
     };
@@ -419,6 +422,170 @@ pub(crate) fn open_float_aimed_sized(
     app.set_status(status);
 }
 
+/// The TransformCommit arm's commit body, extracted so the paste path can
+/// call it DIRECTLY (owner 2026-08-24: a paste commits onto its own new
+/// layer immediately — no float, no handles under the Pen, nothing
+/// following a layer switch). Assumes the caller already decided this
+/// drag must stamp; the identity-cancel check is the arm's, not ours.
+fn commit_transform_drag(app: &mut App, drag: crate::app::TransformDrag) {
+    // Paste-into-panel (owner HIGH): the fresh layer lands INSIDE the
+    // frame folder as its topmost child and active, so the stamp below
+    // hits it and the folder seal clips the art to the panel. The layer
+    // add and the stamp record separately and are wrapped into ONE
+    // "Paste" press at the end; a canceled float leaves nothing behind.
+    let mut refused = false;
+    // Paste into a selection (owner 2026-08-21). A paste is a float that
+    // never lifted anything (`!clear_source`); with ants up it must arrive
+    // MASKED to them. Two shapes, and exactly one of them fires per
+    // commit — applying both would weight a feathered edge twice:
+    //  · a paste that CREATES its layer gets a non-destructive layer mask
+    //    built from the selection's coverage (the user can disable it to
+    //    reveal the whole paste), or
+    //  · a paste that stamps an existing layer is clamped to the coverage
+    //    inside the commit's own op.
+    let mut masked = false;
+    // A paste that creates its layer records several steps (Structure
+    // add, the stamp, maybe a reorder) — wrapped into ONE "Paste" press
+    // below, now that structural ops record instead of clearing.
+    let created = drag.create_in.is_some() || drag.paste_new_layer;
+    let ops_before = app.doc.op_count();
+    if let Some(folder) = drag.create_in {
+        // Index captured at paste time; anything that reshuffled the
+        // stack while the float was open must not silently redirect the
+        // stamp.
+        let ok = app.doc.layers.get(folder).is_some_and(|l| l.is_frame())
+            && app.doc.add_layer_in_folder(folder, "Pasted").is_some();
+        refused = !ok;
+        // The mask rides the layer that was just created, so there is no
+        // prior mask to restore and nothing to record — undoing the add's
+        // Structure step takes the layer and its mask away together.
+        if ok && !drag.clear_source {
+            let m = app
+                .doc
+                .selection
+                .as_ref()
+                .and_then(|s| mn_core::fill_layer::mask_from_selection(&app.doc, s));
+            if let Some(m) = m {
+                let li = app.doc.active;
+                app.doc.layers[li].mask = Some(m);
+                app.renderer.invalidate();
+                masked = true;
+            }
+        }
+    } else if drag.paste_new_layer {
+        // Owner 2026-08-24: no folder target — the paste still gets its
+        // OWN layer, above the active one. No refusal mode:
+        // add_layer_above always lands.
+        app.doc.add_layer_above(app.doc.active, "Pasted");
+        if !drag.clear_source {
+            let m = app
+                .doc
+                .selection
+                .as_ref()
+                .and_then(|s| mn_core::fill_layer::mask_from_selection(&app.doc, s));
+            if let Some(m) = m {
+                let li = app.doc.active;
+                app.doc.layers[li].mask = Some(m);
+                app.renderer.invalidate();
+                masked = true;
+            }
+        }
+    }
+    // The stamping case: no fresh layer to hang a mask on, so the
+    // coverage is baked at commit (undoable in one step).
+    let clamp = !drag.clear_source
+        && drag.create_in.is_none()
+        && !drag.paste_new_layer
+        && app.doc.selection.is_some();
+    masked |= clamp;
+    if refused {
+        app.set_status("transform refused — target folder is gone");
+    } else {
+        // commit_transform brackets its own single undo op. The source
+        // clear (lifted floats only) uses the LIFT-TIME selection:
+        // deselecting or re-lassoing while the float was open must not
+        // change what gets erased.
+        app.doc.set_op_label("Transform");
+        let ok = mn_core::transform::commit_transform(
+            &mut app.doc,
+            &drag.source,
+            &drag.xform,
+            drag.lift_selection.as_ref(),
+            drag.clear_source,
+            clamp,
+            None, // CPU resample; GPU path is a follow-up
+        );
+        // LM-009: a pure translation drags a LINKED mask with the art
+        // (the hole stays over the same ink); scale/rotate/skew leave it
+        // (mask resampling is a later cut). Raster masks are pixel grids
+        // — the translation rounds. Its own mask-op undo group: the
+        // dual-step convention (content + mask), same as the Object
+        // tool's frame move.
+        if ok {
+            let li = app.doc.active;
+            let pure_t = drag.xform.m == mn_core::Affine2::IDENTITY.m
+                && (drag.xform.t[0] != 0.0 || drag.xform.t[1] != 0.0);
+            // Lifted floats only: a PASTE translation moves pasted
+            // pixels, not the layer's art, so the layer's mask must stay
+            // where its ink is.
+            if pure_t
+                && drag.clear_source
+                && let Some(l) = app.doc.layers.get_mut(li)
+                && l.mask.is_some()
+                && l.mask_linked
+            {
+                let dx = drag.xform.t[0].round() as i32;
+                let dy = drag.xform.t[1].round() as i32;
+                app.doc.mask_op_begin();
+                if let Some(l) = app.doc.layers.get_mut(li)
+                    && let Some(m) = &mut l.mask
+                {
+                    m.tiles = mn_core::doc::shift_tile_map(&m.tiles, dx, dy);
+                    m.revision = mn_core::tile::next_revision();
+                }
+                app.doc.mask_op_end();
+                app.renderer.invalidate();
+            }
+            // MT-034: where the pasted layer sits in the panel folder
+            // (the palette dropdown set drag.order; Above is the default).
+            if drag.order != crate::app::MaterialLayerOrder::Above
+                && let Some(folder) = drag.create_in
+                // add_layer_in_folder inserts AT the header index, so the
+                // header moved to folder + 1 with the new layer.
+                && app.doc.layers.get(folder + 1).is_some_and(|l| l.folder)
+            {
+                let folder = folder + 1;
+                let li = app.doc.active;
+                let to = match drag.order {
+                    crate::app::MaterialLayerOrder::BottomOfPanel => {
+                        Some(app.doc.children_range(folder).start)
+                    }
+                    crate::app::MaterialLayerOrder::Above => None,
+                };
+                if let Some(to) = to {
+                    app.doc.move_layer(li, to);
+                }
+            }
+        }
+        app.set_status(match (ok, masked) {
+            (true, true) if drag.paste_new_layer => "pasted onto a new layer — masked by the selection",
+            (true, false) if drag.paste_new_layer => {
+                "pasted onto a new layer — Ctrl+T or the Object tool to adjust"
+            }
+            (true, true) => "pasted into the selection — masked",
+            (true, false) => "transform committed",
+            (false, _) => "transform refused",
+        });
+        if created {
+            let pushed = app.doc.op_count().saturating_sub(ops_before) as usize;
+            if pushed > 1 {
+                app.doc
+                    .wrap_recent("Paste", pushed.min(app.doc.undo_len()));
+            }
+        }
+    }
+}
+
 /// The selection-combine op for one gesture: held modifiers OVERRIDE the
 /// persistent 4-way mode (the owner's everyday path — Shift = add,
 /// Alt = subtract, Shift+Alt = intersect).
@@ -454,6 +621,56 @@ pub(crate) fn transform_lift_rect(app: &App) -> Option<[i32; 4]> {
             r[3].min(app.doc.size.1 as i32),
         ]
     })
+}
+
+/// Open the Transform float for layer `li`'s content over the canvas-
+/// clipped lift rect `r` — the shared body of TransformStart and the
+/// Object tool's raster-ink fallback (owner 2026-08-24: the Object tool
+/// can grab e.g. the lineart and drag it immediately). False = nothing
+/// liftable there. The caller owns the guards (lock / raster) and the
+/// status line.
+pub(crate) fn open_layer_transform(app: &mut App, li: usize, r: [i32; 4]) -> bool {
+    let src = {
+        let l = &app.doc.layers[li];
+        mn_core::transform::lift_region(l, r, app.doc.selection.as_ref())
+    };
+    if src.tiles.is_empty() {
+        return false;
+    }
+    // The overlay preview is uploaded once, here; the drag then only
+    // moves the quad (GPU-drawn).
+    let preview_tex = crate::app::transform_preview(&src, 2048).map(|img| {
+        app.shell
+            .ctx
+            .load_texture("mn.transform.preview", img, egui::TextureOptions::LINEAR)
+    });
+    app.transform_drag = Some(crate::app::TransformDrag {
+        source: src,
+        xform: mn_core::Affine2::IDENTITY,
+        bbox: [
+            [r[0] as f32, r[1] as f32],
+            [r[2] as f32, r[1] as f32],
+            [r[2] as f32, r[3] as f32],
+            [r[0] as f32, r[3] as f32],
+        ],
+        sx: 1.0,
+        sy: 1.0,
+        rad: 0.0,
+        tx: 0.0,
+        ty: 0.0,
+        pivot_override: None,
+        gesture: None,
+        stamp_on_identity: false,
+        // A genuine lift off the layer: commit clears the source,
+        // weighted by the selection as it stands right now.
+        clear_source: true,
+        lift_selection: app.doc.selection.clone(),
+        create_in: None,
+        paste_new_layer: false,
+        order: crate::app::MaterialLayerOrder::Above,
+        preview_tex,
+    });
+    true
 }
 
 /// The keeper's slot after a division (owner top item 2026-08-18): the
@@ -5258,57 +5475,17 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 // Source rect: the selection's bounds when one exists, else
                 // the layer's populated tile bounds (shared with Flip).
                 match transform_lift_rect(app) {
-                    None => app.set_status("nothing to transform"),
-                    Some(r) if r[0] >= r[2] || r[1] >= r[3] => {
-                        app.set_status("nothing to transform")
-                    }
-                    Some(r) => {
-                        let src = mn_core::transform::lift_region(l, r, app.doc.selection.as_ref());
-                        if src.tiles.is_empty() {
-                            app.set_status("nothing to transform");
-                        } else {
-                            // The overlay preview is uploaded once, here; the
-                            // drag then only moves the quad (GPU-drawn).
-                            let preview_tex =
-                                crate::app::transform_preview(&src, 2048).map(|img| {
-                                    app.shell.ctx.load_texture(
-                                        "mn.transform.preview",
-                                        img,
-                                        egui::TextureOptions::LINEAR,
-                                    )
-                                });
-                            app.transform_drag = Some(crate::app::TransformDrag {
-                                source: src,
-                                xform: mn_core::Affine2::IDENTITY,
-                                bbox: [
-                                    [r[0] as f32, r[1] as f32],
-                                    [r[2] as f32, r[1] as f32],
-                                    [r[2] as f32, r[3] as f32],
-                                    [r[0] as f32, r[3] as f32],
-                                ],
-                                sx: 1.0,
-                                sy: 1.0,
-                                rad: 0.0,
-                                tx: 0.0,
-                                ty: 0.0,
-                                pivot_override: None,
-                                gesture: None,
-                                stamp_on_identity: false,
-                                // A genuine lift off the layer: commit
-                                // clears the source, weighted by the
-                                // selection as it stands RIGHT NOW.
-                                clear_source: true,
-                                lift_selection: app.doc.selection.clone(),
-                                create_in: None,
-                                order: crate::app::MaterialLayerOrder::Above,
-                                preview_tex,
-                            });
+                    Some(r) if r[0] < r[2] && r[1] < r[3] => {
+                        if open_layer_transform(app, app.doc.active, r) {
                             app.set_status(
                                 "transform: drag inside to move, corners to scale, outside to rotate — Enter commits, Esc cancels",
                             );
                             app.mark_dirty();
+                        } else {
+                            app.set_status("nothing to transform");
                         }
                     }
+                    _ => app.set_status("nothing to transform"),
                 }
             }
         }
@@ -5319,150 +5496,7 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                     // Nothing moved — drop the float without an undo step.
                     app.set_status("transform canceled");
                 } else {
-                    // Paste-into-panel (owner HIGH): the fresh layer lands
-                    // INSIDE the frame folder as its topmost child and
-                    // active, so the stamp below hits it and the folder
-                    // seal clips the art to the panel. The layer add and
-                    // the stamp record separately and are wrapped into ONE
-                    // "Paste" press at the end of the arm; Esc before
-                    // this point leaves nothing behind.
-                    // (MT-034 note: the pre-paste active is not needed — BelowActive
-                    // turned out unreachable under r74 rules and was cut.)
-                    let mut refused = false;
-                    // Paste into a selection (owner 2026-08-21). A paste is a
-                    // float that never lifted anything (`!clear_source`); with
-                    // ants up it must arrive MASKED to them. Two shapes, and
-                    // exactly one of them fires per commit — applying both
-                    // would weight a feathered edge twice:
-                    //  · a paste that CREATES its layer gets a non-destructive
-                    //    layer mask built from the selection's coverage (the
-                    //    user can disable it to reveal the whole paste), or
-                    //  · a paste that stamps an existing layer is clamped to
-                    //    the coverage inside the commit's own op.
-                    let mut masked = false;
-                    // A paste that creates its layer records several steps
-                    // (Structure add, the stamp, maybe a reorder) — wrapped
-                    // into ONE "Paste" press below, now that structural ops
-                    // record instead of clearing (2026-08-21).
-                    let created = drag.create_in.is_some();
-                    let ops_before = app.doc.op_count();
-                    if let Some(folder) = drag.create_in {
-                        // Index captured at paste time; anything that
-                        // reshuffled the stack while the float was open must
-                        // not silently redirect the stamp.
-                        let ok = app.doc.layers.get(folder).is_some_and(|l| l.is_frame())
-                            && app.doc.add_layer_in_folder(folder, "Pasted").is_some();
-                        refused = !ok;
-                        // The mask rides the layer that was just created, so
-                        // there is no prior mask to restore and nothing to
-                        // record — undoing the add's Structure step takes
-                        // the layer and its mask away together.
-                        if ok && !drag.clear_source {
-                            let m = app
-                                .doc
-                                .selection
-                                .as_ref()
-                                .and_then(|s| mn_core::fill_layer::mask_from_selection(&app.doc, s));
-                            if let Some(m) = m {
-                                let li = app.doc.active;
-                                app.doc.layers[li].mask = Some(m);
-                                app.renderer.invalidate();
-                                masked = true;
-                            }
-                        }
-                    }
-                    // The stamping case: no fresh layer to hang a mask on, so
-                    // the coverage is baked at commit (undoable in one step).
-                    let clamp = !drag.clear_source
-                        && drag.create_in.is_none()
-                        && app.doc.selection.is_some();
-                    masked |= clamp;
-                    if refused {
-                        app.set_status("transform refused — target folder is gone");
-                    } else {
-                        // commit_transform brackets its own single undo op.
-                        // The source clear (lifted floats only) uses the
-                        // LIFT-TIME selection: deselecting or re-lassoing
-                        // while the float was open must not change what
-                        // gets erased.
-                        app.doc.set_op_label("Transform");
-                        let ok = mn_core::transform::commit_transform(
-                            &mut app.doc,
-                            &drag.source,
-                            &drag.xform,
-                            drag.lift_selection.as_ref(),
-                            drag.clear_source,
-                            clamp,
-                            None, // CPU resample; GPU path is a follow-up
-                        );
-                        // LM-009: a pure translation drags a LINKED mask
-                        // with the art (the hole stays over the same ink);
-                        // scale/rotate/skew leave it (mask resampling is a
-                        // later cut). Raster masks are pixel grids — the
-                        // translation rounds. Its own mask-op undo group:
-                        // the dual-step convention (content + mask), same
-                        // as the Object tool's frame move.
-                        if ok {
-                            let li = app.doc.active;
-                            let pure_t = drag.xform.m == mn_core::Affine2::IDENTITY.m
-                                && (drag.xform.t[0] != 0.0 || drag.xform.t[1] != 0.0);
-                            // Lifted floats only: a PASTE translation moves
-                            // pasted pixels, not the layer's art, so the
-                            // layer's mask must stay where its ink is.
-                            if pure_t
-                                && drag.clear_source
-                                && let Some(l) = app.doc.layers.get_mut(li)
-                                && l.mask.is_some()
-                                && l.mask_linked
-                            {
-                                let dx = drag.xform.t[0].round() as i32;
-                                let dy = drag.xform.t[1].round() as i32;
-                                app.doc.mask_op_begin();
-                                if let Some(l) = app.doc.layers.get_mut(li)
-                                    && let Some(m) = &mut l.mask
-                                {
-                                    m.tiles = mn_core::doc::shift_tile_map(&m.tiles, dx, dy);
-                                    m.revision = mn_core::tile::next_revision();
-                                }
-                                app.doc.mask_op_end();
-                                app.renderer.invalidate();
-                            }
-                            // MT-034: where the pasted layer sits in the
-                            // panel folder (only rule-2 pastes create a
-                            // layer; the palette dropdown set drag.order).
-                            if drag.order != crate::app::MaterialLayerOrder::Above
-                                && let Some(folder) = drag.create_in
-                                // add_layer_in_folder inserts AT the header index,
-                                // so the header moved to folder + 1 with the new layer.
-                                && app.doc.layers.get(folder + 1).is_some_and(|l| l.folder)
-                            {
-                                let folder = folder + 1;
-                                let li = app.doc.active;
-                                let to = match drag.order {
-                                    crate::app::MaterialLayerOrder::BottomOfPanel => {
-                                        Some(app.doc.children_range(folder).start)
-                                    }
-                                    crate::app::MaterialLayerOrder::Above => None,
-                                };
-                                if let Some(to) = to {
-                                    app.doc.move_layer(li, to);
-                                }
-                            }
-                        }
-                        app.set_status(match (ok, masked) {
-                            (true, true) => "pasted into the selection — masked",
-                            (true, false) => "transform committed",
-                            (false, _) => "transform refused",
-                        });
-                        if created {
-                            let pushed =
-                                app.doc.op_count().saturating_sub(ops_before) as usize;
-                            if pushed > 1 {
-                                app.doc
-                                    .wrap_recent("Paste", pushed.min(app.doc.undo_len()));
-                            }
-                        }
-                    }
+                    commit_transform_drag(app, drag);
                 }
                 app.mark_dirty();
             }

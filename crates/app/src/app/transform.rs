@@ -49,6 +49,11 @@ pub struct TransformDrag {
     /// layer add is structural (clears history, like every layer-list
     /// change); cancel leaves nothing behind.
     pub create_in: Option<usize>,
+    /// Owner 2026-08-24: a clipboard paste commits onto its OWN fresh
+    /// layer even with no folder target — `add_layer_above` the active,
+    /// never stamping the active layer's pixels. With `create_in` set it
+    /// is redundant (the folder path already creates).
+    pub paste_new_layer: bool,
     /// MT-034: where that fresh layer sits in the folder (material pastes
     /// set it from the palette dropdown; everything else keeps Above).
     pub order: crate::app::MaterialLayerOrder,
@@ -487,6 +492,7 @@ mod tests {
             clear_source: false,
             lift_selection: None,
             create_in: None,
+            paste_new_layer: false,
             order: crate::app::MaterialLayerOrder::Above,
             preview_tex: None,
         };

@@ -586,28 +586,21 @@ at a hard line. Paint and fill read the same feather — the edge is a
 gradient, not a step.</div>
 
 <h2>Pasting into a selection</h2>
-<div class="quirk"><b>With a selection up, a paste arrives masked to
-it.</b> Paste while ants are on screen and the pasted art is confined to
-the selected area instead of landing across the whole page. A feathered
-selection blends the edge rather than cutting it, the same coverage the
-brush and the fill read.</div>
-<div class="quirk"><b>How it is masked depends on where the paste
-lands.</b> A paste that stamps the layer you are already on is
-<i>clamped</i> — the pixels outside the selection are simply never
-written, and it is one undo step. A paste that arrives as its OWN layer
-(pasting into another panel makes a layer inside that frame folder)
-instead wears a <b>layer mask</b> built from the selection. That one is
-not destructive: remove or disable the mask and the whole paste is
-there.</div>
-<div class="quirk warn"><b>The mask is taken from the selection at
-COMMIT, not at paste.</b> The pasted art sits as a float until you press
-<kbd>Enter</kbd>; the selection that shapes it is whatever is active at
-that moment, so changing the selection while the float is open changes
-the result. If you want the paste unmasked, deselect
-(<kbd>Ctrl+D</kbd>) <i>before</i> you commit. The status line says
-"pasted into the selection — masked" whenever a mask or a clamp was
-applied, so a paste that vanished into a small selection tells you
-why.</div>
+<div class="quirk"><b>Every paste lands on its own new layer.</b>
+Ctrl+V no longer opens the move float under the pen: the pasted art
+commits immediately as a fresh <i>Pasted</i> layer (inside the frame
+folder when you paste into a panel), aimed and sized exactly as before.
+To move, scale or rotate it afterwards, press <kbd>Ctrl+T</kbd> — or
+just grab it with the Object tool.</div>
+<div class="quirk"><b>With a selection up, the paste arrives masked to
+it.</b> Paste while ants are on screen and the ants become the pasted
+layer's <b>layer mask</b> — not destructive: remove or disable the mask
+and the whole paste is there. A feathered selection blends the edge
+rather than cutting it, the same coverage the brush and the fill read.
+The mask is taken from the selection as it stands at the paste itself;
+deselect first (<kbd>Ctrl+D</kbd>) if you want the paste unmasked. The
+status line says "masked" when it happened, so a paste that vanished
+into a small selection tells you why.</div>
 
 <footer><a href="index.html">← manual</a> · the deep records live in
 the repository's <code>docs/DECISIONS.md</code>.</footer>

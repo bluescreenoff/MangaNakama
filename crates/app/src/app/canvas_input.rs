@@ -1671,6 +1671,66 @@ impl App {
             self.object_sel = None;
             self.balloon_sel = None;
             self.gen_sel = None;
+            // Owner 2026-08-24: no shape under the pointer — the Object
+            // tool grabs RASTER INK directly ("drag the lineart"): the
+            // topmost visible plain-raster layer with ink near the press
+            // becomes active and lifts into the Transform float, the drag
+            // already moving it. Same flow as Ctrl+T, invoked by grabbing.
+            let tol2 = (10.0 / self.viewport.zoom.max(0.01)).max(2.0);
+            let mut ink = None;
+            for li in (0..self.doc.layers.len()).rev() {
+                let l = &self.doc.layers[li];
+                if !l.visible
+                    || l.lock
+                    || l.folder
+                    || l.is_vector()
+                    // Shape-carrier layers have their own Object-tool
+                    // affordances (handled above); text layers belong to
+                    // the text flow, which ran before us.
+                    || l.balloons().is_some()
+                    || l.frames().is_some()
+                    || l.genlines.is_some()
+                    || l.texts().is_some()
+                {
+                    continue;
+                }
+                if layer_ink_near(l, cx, cy, tol2) {
+                    ink = Some(li);
+                    break;
+                }
+            }
+            if let Some(li) = ink {
+                self.doc.set_active(li);
+                let size = self.doc.size;
+                let rect = self.doc.layers[li].tile_bounds().map(|(x, y, w, h)| {
+                    [
+                        x.max(0),
+                        y.max(0),
+                        (x + w as i32).min(size.0 as i32),
+                        (y + h as i32).min(size.1 as i32),
+                    ]
+                });
+                if let Some(r) = rect.filter(|r| r[0] < r[2] && r[1] < r[3])
+                    && crate::cmd::open_layer_transform(self, li, r)
+                    && let Some(d) = self.transform_drag.as_mut()
+                {
+                    // The press that opened the float IS the drag: arm the
+                    // move gesture so the ink follows the pointer at once
+                    // (same state the float's own press handler sets).
+                    let g = crate::app::TransformGesture {
+                        grab: crate::app::TransformGrab::Move,
+                        start: [cx, cy],
+                        bbox0: d.bbox,
+                        sx0: d.sx,
+                        sy0: d.sy,
+                        rad0: d.rad,
+                        tx0: d.tx,
+                        ty0: d.ty,
+                    };
+                    d.gesture = Some(g);
+                    self.set_status("layer lifted — drag to move, Enter commits, Esc cancels");
+                }
+            }
         }
     }
 

@@ -1206,10 +1206,10 @@ fn gpu_dab_parity_smudge() {
 }
 
 /// TRIAGE 131, the clipboard: Cut clears exactly the selected pixels
-/// (one undo step), Paste opens the float at its original coordinates,
-/// and committing at identity restores the pixels EXACTLY — the
-/// cut→paste round trip is lossless, which is the whole point of the
-/// internal fix15 clipboard over the OS 8-bit DIB.
+/// (one undo step), and Paste lands them on their OWN new layer at the
+/// original coordinates (owner 2026-08-24 — pastes commit immediately,
+/// no float), losslessly — the whole point of the internal fix15
+/// clipboard over the OS 8-bit DIB.
 #[test]
 fn cut_paste_round_trips_the_selection() {
     let Some(renderer) = headless_renderer() else {
@@ -1254,22 +1254,26 @@ fn cut_paste_round_trips_the_selection() {
     assert!(app.clipboard.is_some(), "Cut stores the clipboard");
 
     crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::Paste);
-    let drag = app
-        .transform_drag
-        .as_ref()
-        .expect("Paste opens the move float");
-    assert_eq!(
-        drag.source.rect,
-        [120, 190, 140, 200],
-        "Paste returns the float to its source coordinates"
+    // Owner 2026-08-24: the paste commits onto its OWN layer immediately —
+    // no float. The round trip still lands the pixels at their source
+    // coordinates (the selection's bbox aims the paste there).
+    assert!(
+        app.transform_drag.is_none(),
+        "a paste no longer opens the move float"
     );
-    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::TransformCommit);
+    let pasted = app
+        .doc
+        .layers
+        .iter()
+        .position(|l| l.name == "Pasted")
+        .expect("the paste made its own layer");
+    assert_eq!(app.doc.active, pasted, "the pasted layer is active");
     assert_eq!(
         px(&app, 132, 195),
         [1000, 2000, 3000, 32767],
-        "the identity commit must restore the pixels exactly"
+        "the paste restores the cut pixels exactly"
     );
-    assert_eq!(px(&app, 152, 195), [500, 500, 500, 32767]);
+    assert_eq!(px(&app, 152, 195), [0, 0, 0, 0], "the blob outside the cut never rode the clipboard");
 }
 
 /// DECISIONS 8.73: Cut through a FEATHERED selection (SE-007 blur)
@@ -1482,12 +1486,12 @@ fn cut_without_selection_uses_the_whole_layer() {
     assert_eq!(alpha_total(&app), full, "the round trip is lossless");
 }
 
-/// The r69–r115 audit's worst finding, pinned: Copy is NOT Cut. A pasted
-/// float dragged away and committed must leave the original art exactly
-/// where it was — the paste never lifted anything off the layer, so the
-/// commit has no source to clear.
+/// The r69–r115 audit's worst finding, pinned: Copy is NOT Cut. Since the
+/// owner's 2026-08-24 paste-directive that is structural — the paste
+/// lands on its OWN fresh layer, so the original art cannot be touched —
+/// and this pins exactly that, plus the one-undo round trip.
 #[test]
-fn committing_a_moved_paste_keeps_the_original() {
+fn paste_keeps_the_original_on_its_own_layer() {
     let Some(renderer) = headless_renderer() else {
         return;
     };
@@ -1511,39 +1515,54 @@ fn committing_a_moved_paste_keeps_the_original() {
 
     crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::Copy);
     assert_eq!(alpha_total(&app), full, "Copy leaves the layer alone");
+    let layers_before = app.doc.layers.len();
     crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::Paste);
-    {
-        // Drag the float well away from its source before committing —
-        // this is exactly the step that used to expose the source clear.
-        let drag = app.transform_drag.as_mut().expect("the float opened");
-        drag.set_params(1.0, 1.0, 0.0, 200.0, 150.0);
-    }
-    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::TransformCommit);
+    // Owner 2026-08-24: the copy lands on its OWN new layer, committed —
+    // "Copy is not Cut" is now structural (the original layer is never a
+    // paste target), and this pins it anyway.
     assert!(
         app.transform_drag.is_none(),
-        "the commit consumed the float"
+        "the paste committed — no float to drag"
     );
-    // Original + the stamped copy: strictly MORE ink than before, and the
-    // source pixels themselves are untouched.
-    assert!(
-        alpha_total(&app) > full,
-        "the copy landed somewhere on the layer"
-    );
-    let p = app.doc.active_layer().tile(idx).expect("source tile lives");
-    assert_eq!(
-        p.pixel(2, 3),
-        [1000, 2000, 3000, 32767],
-        "the copied-from art survived the commit"
-    );
-    // And one undo removes the paste, restoring the exact original count.
+    assert_eq!(app.doc.layers.len(), layers_before + 1);
+    let pasted = app
+        .doc
+        .layers
+        .iter()
+        .position(|l| l.name == "Pasted")
+        .expect("the paste made its own layer");
+    let orig = app.doc.layers.len() - 1 - pasted; // two layers: the other one
+    let orig_ink = app.doc.layers[orig]
+        .tiles()
+        .map(|(_, t)| t.alpha_sum())
+        .sum::<u64>();
+    assert_eq!(orig_ink, full, "the copied-from layer kept every pixel");
+    let pasted_ink = app.doc.layers[pasted]
+        .tiles()
+        .map(|(_, t)| t.alpha_sum())
+        .sum::<u64>();
+    assert!(pasted_ink > 0, "the copy landed on its own layer");
+    // And one undo removes the paste (layer and stamp wrapped), restoring
+    // the exact original stack.
     assert!(app.doc.undo());
-    assert_eq!(alpha_total(&app), full, "one undo = just the paste gone");
+    assert_eq!(app.doc.layers.len(), layers_before, "one undo = just the paste gone");
+    assert_eq!(
+        app.doc
+            .active_layer()
+            .tiles()
+            .map(|(_, t)| t.alpha_sum())
+            .sum::<u64>(),
+        full,
+        "the original layer is exactly as it was"
+    );
 }
 
-/// TRIAGE 131: Paste to shown position centres the float on the current
-/// view instead of its source coordinates (the other-page case).
+/// TRIAGE 131: Paste to shown position centres the new layer's ink on
+/// the current view instead of its source coordinates (the other-page
+/// case). Owner 2026-08-24: the paste commits onto its own layer — the
+/// assert reads that layer's ink bounds.
 #[test]
-fn paste_to_shown_position_centres_the_float() {
+fn paste_to_shown_position_centres_the_new_layer() {
     let Some(renderer) = headless_renderer() else {
         return;
     };
@@ -1559,29 +1578,52 @@ fn paste_to_shown_position_centres_the_float() {
         &app.doc, 120.0, 190.0, 140.0, 200.0,
     ));
     crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::Copy);
+    app.doc.selection = None; // the other-page case: ants don't follow
+    // A headless App has no laid-out canvas rect (and its renderer reports
+    // a 0-sized surface), so the "view centre" is whatever to_canvas says
+    // it is. Pin the viewport so that point sits well inside the page, and
+    // keep the assert self-consistent with the same to_canvas the handler
+    // uses.
+    app.viewport.zoom = 1.0;
+    app.viewport.pan = [-200.0, -300.0];
 
-    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::PasteShown);
-    let drag = app.transform_drag.as_ref().expect("the float opened");
-    // The float's centre (midpoint of the transformed bbox) must sit at
-    // the canvas position of the view centre — computed the same way
-    // the handler does, so the assert pins the geometry, not a constant.
+    // Where the handler will aim: the view centre, through the same
+    // mapping it uses.
     let c = app
         .viewport
         .to_canvas(app.canvas_center()[0], app.canvas_center()[1]);
-    let mut bmin = [f32::INFINITY, f32::INFINITY];
-    let mut bmax = [f32::NEG_INFINITY, f32::NEG_INFINITY];
-    for p in drag.bbox {
-        bmin[0] = bmin[0].min(p[0]);
-        bmin[1] = bmin[1].min(p[1]);
-        bmax[0] = bmax[0].max(p[0]);
-        bmax[1] = bmax[1].max(p[1]);
-    }
-    let centre = [(bmin[0] + bmax[0]) * 0.5, (bmin[1] + bmax[1]) * 0.5];
+    // The ink's tight bounds pre-paste (the blob does not fill its 20×10
+    // clipboard region — the paste centres the REGION, so the ink lands
+    // region-centred, not self-centred).
+    let (ox, oy, ow, oh) = tight_ink(&app.doc.layers[0]).expect("source ink");
+
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::PasteShown);
+    assert!(app.transform_drag.is_none(), "the paste committed — no float");
+    let pasted = app
+        .doc
+        .layers
+        .iter()
+        .position(|l| l.name == "Pasted")
+        .expect("the paste made its own layer");
+    let (bx, by, bw, bh) = tight_ink(&app.doc.layers[pasted])
+        .unwrap_or_else(|| panic!("ink landed — status {:?}", app.status));
+    // Region centre [120,190,140,200] lands exactly at c; the ink follows
+    // with the same offset it had inside the region.
+    let d = (
+        c.0 - (120.0 + 140.0) * 0.5,
+        c.1 - (190.0 + 200.0) * 0.5,
+    );
     assert!(
-        (centre[0] - c.0).abs() <= 1.0 && (centre[1] - c.1).abs() <= 1.0,
-        "float centre {centre:?} vs view centre ({}, {})",
-        c.0,
-        c.1
+        (bx as f32 - (ox as f32 + d.0)).abs() < 1.0
+            && (by as f32 - (oy as f32 + d.1)).abs() < 1.0,
+        "ink origin ({bx},{by}) vs expected ({}, {})",
+        ox as f32 + d.0,
+        oy as f32 + d.1
+    );
+    assert_eq!(
+        (bw, bh),
+        (ow, oh),
+        "the stamp is 1:1 — no resampling at identity scale"
     );
 }
 
@@ -6915,6 +6957,7 @@ fn transform_translation_drags_a_linked_mask_only() {
         clear_source: true,
         lift_selection: None,
         create_in: None,
+        paste_new_layer: false,
         order: crate::app::MaterialLayerOrder::Above,
         preview_tex: None,
     };
@@ -7426,11 +7469,12 @@ fn clip_blob(at: [i32; 2]) -> mn_core::FloatSource {
     crate::clipboard::bgra_to_floatsource(&bgra, 8, 8, at, 4096, 4096)
 }
 
-/// Rule 1 e2e: active layer inside the frame folder — the float opens
-/// CENTRED on the panel, stamps the active layer, creates no layer,
-/// and the status names the target.
+/// Rule 1 e2e: active layer inside the frame folder — the paste lands
+/// CENTRED on the panel, on its OWN new layer inside that folder (owner
+/// 2026-08-24 — the draw layer is never a paste target), and the status
+/// says where it went.
 #[test]
-fn paste_into_owning_folder_centres_and_stamps_active() {
+fn paste_into_owning_folder_lands_on_its_own_layer_inside_it() {
     let Some(renderer) = headless_renderer() else {
         return;
     };
@@ -7444,28 +7488,38 @@ fn paste_into_owning_folder_centres_and_stamps_active() {
     app.clipboard = Some(clip_blob([0, 0]));
 
     crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::Paste);
-    let drag = app.transform_drag.as_ref().expect("float opened");
-    assert_eq!(
-        drag.create_in, None,
-        "owning folder stamps the active layer"
-    );
-    let c = (
-        (drag.bbox[0][0] + drag.bbox[2][0]) * 0.5,
-        (drag.bbox[0][1] + drag.bbox[2][1]) * 0.5,
-    );
-    assert!((c.0 - 192.0).abs() < 1.5, "centred on panel x, got {c:?}");
-    assert!((c.1 - 232.0).abs() < 1.5, "centred on panel y, got {c:?}");
-
-    assert!(app.status.contains("Frame 1"), "status names the target");
-    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::TransformCommit);
-    assert_eq!(app.doc.layers.len(), before, "no layer created");
+    assert!(app.transform_drag.is_none(), "the paste committed — no float");
+    assert_eq!(app.doc.layers.len(), before + 1, "the paste made a layer");
+    let pasted = app
+        .doc
+        .layers
+        .iter()
+        .position(|l| l.name == "Pasted")
+        .expect("the pasted layer");
+    let hd = app.doc.layers.iter().position(|l| l.is_frame()).unwrap();
     assert!(
+        app.doc.children_range(hd).contains(&pasted),
+        "the pasted layer sits inside the frame folder"
+    );
+    assert_eq!(app.doc.active, pasted, "the pasted layer is active");
+    assert!(
+        app.status.contains("new layer"),
+        "status says it landed on a new layer, got {:?}",
+        app.status
+    );
+    // Centred on the panel.
+    let (bx, by, bw, bh) = tight_ink(&app.doc.layers[pasted]).expect("ink landed");
+    let centre = (bx as f32 + bw as f32 * 0.5, by as f32 + bh as f32 * 0.5);
+    assert!((centre.0 - 192.0).abs() < 2.0, "centred on panel x, got {centre:?}");
+    assert!((centre.1 - 232.0).abs() < 2.0, "centred on panel y, got {centre:?}");
+    // The draw layer the owner is inking on is untouched.
+    assert_eq!(
         app.doc.layers[draw]
             .tiles()
             .map(|(_, t)| t.alpha_sum())
-            .sum::<u64>()
-            > 0,
-        "stamped the draw layer"
+            .sum::<u64>(),
+        0,
+        "the paste never stamps the layer being drawn on"
     );
 }
 
@@ -7528,25 +7582,18 @@ fn paste_into_foreign_panel_creates_layer_inside_folder() {
     assert_eq!(app.doc.layers.len(), n, "cancel created no layer");
 }
 
-/// Paste into a selection (owner 2026-08-21), the STAMPING shape: with
-/// ants up, a paste that lands on the active layer is clamped to the
-/// selection's coverage — the half outside never lands. The selection
-/// survives (CSP keeps it), the whole paste is ONE undo step, and the
-/// same paste with no selection is unchanged.
+/// Paste into a selection (owner 2026-08-21; reshaped by the 2026-08-24
+/// paste-directive — the old stamp-the-active-layer shape is gone, every
+/// paste makes its own layer): with ants up, the DIRECT paste gets them
+/// as its new layer's NON-DESTRUCTIVE mask — ink outside the ants is on
+/// the layer, hidden. The selection survives, the whole paste is ONE
+/// undo step, and the same paste with no selection lands whole.
 #[test]
-fn paste_into_a_selection_masks_the_stamp() {
+fn paste_into_a_selection_masks_the_new_layer() {
     let Some(renderer) = headless_renderer() else {
         return;
     };
     let mut app = App::new(renderer, (600, 400), 1.0);
-    let alpha = |a: &App, x: i32, y: i32| -> u16 {
-        let ti = TileIdx::of_pixel(x, y);
-        a.doc
-            .active_layer()
-            .tile(ti)
-            .map(|t| t.pixel((x - ti.origin().0) as usize, (y - ti.origin().1) as usize)[3])
-            .unwrap_or(0)
-    };
     // An 8x8 opaque blob at canvas (100,100)..(108,108). The ants cover
     // x < 104, splitting it down the middle.
     app.clipboard = Some(clip_blob([100, 100]));
@@ -7554,28 +7601,69 @@ fn paste_into_a_selection_masks_the_stamp() {
         &app.doc, 0.0, 0.0, 104.0, 400.0,
     ));
     crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::PasteInPlace);
-    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::TransformCommit);
-    assert!(alpha(&app, 101, 101) > 0, "inside the ants the paste lands");
-    assert_eq!(alpha(&app, 106, 101), 0, "outside the ants nothing lands");
+    let pasted = app
+        .doc
+        .layers
+        .iter()
+        .position(|l| l.name == "Pasted")
+        .expect("the paste made its own layer");
+    assert_eq!(app.doc.active, pasted);
+    let at = |x: i32, y: i32| -> (u16, u16) {
+        let ti = TileIdx::of_pixel(x, y);
+        let (lx, ly) = ((x - ti.origin().0) as usize, (y - ti.origin().1) as usize);
+        let l = &app.doc.layers[pasted];
+        let ink = l.tile(ti).map(|t| t.pixel(lx, ly)[3]).unwrap_or(0);
+        let cov = l
+            .mask
+            .as_ref()
+            .and_then(|m| m.tiles.get(&ti))
+            .map(|t| t.pixel(lx, ly)[3])
+            .unwrap_or(0);
+        (ink, cov)
+    };
+    let inside = at(101, 101);
+    let outside = at(106, 101);
+    assert!(inside.0 > 0, "the ink landed");
+    assert!(
+        inside.1 > 0 && outside.1 == 0,
+        "the selection became the layer mask (coverage {inside:?} / {outside:?})"
+    );
+    assert!(
+        app.doc.layers[pasted].mask.as_ref().is_some_and(|m| m.enabled),
+        "the mask is enabled"
+    );
     assert!(
         app.status.contains("masked"),
         "the status says it was masked, got {:?}",
         app.status
     );
     assert!(app.doc.selection.is_some(), "the selection survives a paste");
-    assert_eq!(app.doc.undo_len(), 1, "one paste = one undo step");
+    let n = app.doc.layers.len();
     assert!(app.doc.undo());
-    assert_eq!(alpha(&app, 101, 101), 0, "one undo takes the paste back");
+    assert_eq!(app.doc.layers.len(), n - 1, "one undo takes the paste back");
 
-    // No selection: the pre-feature behaviour, both halves land.
+    // No selection: the pre-feature behaviour, the whole blob lands.
     app.doc.selection = None;
     crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::PasteInPlace);
-    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::TransformCommit);
-    assert!(alpha(&app, 101, 101) > 0);
+    let whole = app
+        .doc
+        .layers
+        .iter()
+        .position(|l| l.name == "Pasted")
+        .expect("the second paste");
+    let ink_at = |li: usize, x: i32, y: i32| -> u16 {
+        let ti = TileIdx::of_pixel(x, y);
+        app.doc.layers[li]
+            .tile(ti)
+            .map(|t| t.pixel((x - ti.origin().0) as usize, (y - ti.origin().1) as usize)[3])
+            .unwrap_or(0)
+    };
+    assert!(ink_at(whole, 101, 101) > 0);
     assert!(
-        alpha(&app, 106, 101) > 0,
+        ink_at(whole, 106, 101) > 0,
         "no selection, no mask — the whole blob lands"
     );
+    assert!(app.doc.layers[whole].mask.is_none());
     assert!(!app.status.contains("masked"), "got {:?}", app.status);
 }
 
@@ -7658,7 +7746,118 @@ fn paste_into_a_selection_masks_a_created_layer() {
     );
 }
 
-/// Oversized content scales uniformly DOWN into the panel, never up.
+/// Owner 2026-08-24, drawing session: "in object mode ... you should be
+/// able to just drag e.g. the lineart in a layer immediately". A press
+/// that hits no shape grabs the RASTER INK under it — the topmost
+/// plain-raster layer with ink near the press becomes active and lifts
+/// into the Transform float with the move gesture already armed.
+#[test]
+fn object_press_on_ink_lifts_the_layer_into_a_drag() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    // A blank layer below, lineart above with ink at (100,100).
+    let _blank = app.doc.add_layer("blank below");
+    let idx = TileIdx::of_pixel(100, 100);
+    app.doc
+        .active_layer_mut()
+        .tile_mut(idx)
+        .set_pixel((100 - idx.origin().0) as usize, (100 - idx.origin().1) as usize, [1, 2, 3, 32767]);
+    let lineart = app.doc.active;
+
+    app.tool = Tool::Object;
+    app.object_hit(100.0, 100.0);
+    assert_eq!(app.doc.active, lineart, "grabbing the ink selects its layer");
+    let drag = app.transform_drag.as_ref().expect("the ink lifted into the float");
+    assert!(drag.clear_source, "a lift off the layer, not a paste");
+    assert!(
+        drag.gesture.as_ref().is_some_and(|g| g.grab == crate::app::TransformGrab::Move),
+        "the move gesture is armed — the press IS the drag"
+    );
+
+    // Move and commit: the ink follows, in ONE undo step.
+    let (ox, oy, ow, oh) = tight_ink(&app.doc.layers[lineart]).expect("source ink");
+    app.transform_drag.as_mut().unwrap().set_params(1.0, 1.0, 0.0, 30.0, 0.0);
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::TransformCommit);
+    let moved = tight_ink(&app.doc.layers[lineart]).expect("ink after move");
+    assert_eq!((moved.2, moved.3), (ow, oh), "same ink, moved");
+    assert_eq!(moved.0, ox + 30, "moved by the drag delta");
+    let _ = oy;
+}
+
+/// Owner 2026-08-24, drawing session: "you should be able to ctrl+t just
+/// to be able to select and transform all non-empty space on a layer" —
+/// the binding predates the ask (Ctrl+T → TransformStart, the Transform
+/// tool's lift); this pins it on a plain raster layer with NO selection:
+/// everything non-empty lifts (the populated-tile bounds), move + commit
+/// is one undo step, and undo restores bit-identical ink.
+#[test]
+fn transform_start_lifts_all_non_empty_space() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    // Two distant ink spots — the lift must cover BOTH (whole-layer).
+    for (cx, cy) in [(100usize, 100usize), (500usize, 300usize)] {
+        let ti = TileIdx::of_pixel(cx as i32, cy as i32);
+        app.doc
+            .active_layer_mut()
+            .tile_mut(ti)
+            .set_pixel(cx - ti.origin().0 as usize, cy - ti.origin().1 as usize, [9, 9, 9, 32767]);
+    }
+    let (ox, oy, ow, oh) = tight_ink(app.doc.active_layer()).expect("ink");
+
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::TransformStart);
+    let drag = app.transform_drag.as_ref().expect("the float opened");
+    assert!(drag.clear_source);
+    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for p in drag.bbox {
+        x0 = x0.min(p[0]);
+        y0 = y0.min(p[1]);
+        x1 = x1.max(p[0]);
+        y1 = y1.max(p[1]);
+    }
+    assert!(ox as f32 >= x0 - 1.0 && (ox + ow as i32) as f32 <= x1 + 1.0);
+    assert!(oy as f32 >= y0 - 1.0 && (oy + oh as i32) as f32 <= y1 + 1.0);
+    assert_eq!(
+        app.status.contains("transform"),
+        true,
+        "the status guides the gesture"
+    );
+
+    app.transform_drag.as_mut().unwrap().set_params(1.0, 1.0, 0.0, -40.0, 25.0);
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::TransformCommit);
+    let moved = tight_ink(app.doc.active_layer()).expect("ink after move");
+    assert_eq!((moved.0, moved.1, moved.2, moved.3), (ox - 40, oy + 25, ow, oh));
+    assert!(app.doc.undo(), "one undo step for the transform");
+    let undone = tight_ink(app.doc.active_layer()).expect("ink after undo");
+    assert_eq!((undone.0, undone.1, undone.2, undone.3), (ox, oy, ow, oh));
+}
+
+/// Oversized content scales uniformly DOWN into the panel, never up —
+/// now pinned on the pasted layer's own ink (owner 2026-08-24: pastes
+/// commit immediately). Tight pixel bounds: `tile_bounds` is
+/// tile-granular and too coarse to pin geometry.
+fn tight_ink(l: &mn_core::Layer) -> Option<(i32, i32, u32, u32)> {
+    let (mut x0, mut y0, mut x1, mut y1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+    for (ti, t) in l.tiles() {
+        for py in 0..64usize {
+            for px in 0..64usize {
+                if t.pixel(px, py)[3] > 0 {
+                    let cx = ti.origin().0 + px as i32;
+                    let cy = ti.origin().1 + py as i32;
+                    x0 = x0.min(cx);
+                    y0 = y0.min(cy);
+                    x1 = x1.max(cx + 1);
+                    y1 = y1.max(cy + 1);
+                }
+            }
+        }
+    }
+    (x0 < x1).then(|| (x0, y0, (x1 - x0) as u32, (y1 - y0) as u32))
+}
+
 #[test]
 fn oversized_paste_scales_to_fit_the_panel() {
     let Some(renderer) = headless_renderer() else {
@@ -7680,11 +7879,19 @@ fn oversized_paste_scales_to_fit_the_panel() {
         4096,
     ));
     crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::Paste);
-    let drag = app.transform_drag.as_ref().expect("float opened");
-    let w = drag.bbox[2][0] - drag.bbox[0][0];
-    let h = drag.bbox[2][1] - drag.bbox[0][1];
-    assert!(w <= 257.0, "fit-scaled width {w}");
-    assert!((w / h - 1.0).abs() < 0.01, "uniform scale, {w}x{h}");
+    assert!(app.transform_drag.is_none(), "the paste committed — no float");
+    let pasted = app
+        .doc
+        .layers
+        .iter()
+        .position(|l| l.name == "Pasted")
+        .expect("the pasted layer");
+    let (bx, by, bw, bh) = tight_ink(&app.doc.layers[pasted]).expect("ink landed");
+    assert!(bw <= 257, "fit-scaled width {bw}");
+    assert!(
+        (bw as f32 / bh as f32 - 1.0).abs() < 0.02,
+        "uniform scale, {bw}x{bh} at {bx},{by}"
+    );
 }
 
 /// Figure ▸ Stream/Saturated line (owner order 2026-08-22, CSP's 流線 /
