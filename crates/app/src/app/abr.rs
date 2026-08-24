@@ -636,7 +636,7 @@ fn bilinear(gray: &[u8], w: u32, h: u32, x: f64, y: f64) -> u8 {
 /// Center the tip in a square canvas (the texture-mask contract: square,
 /// ≤1024), downscaling over-long edges with a smooth filter — masks read
 /// better bilinear than nearest.
-fn square_mask(gray: &[u8], w: u32, h: u32) -> image::GrayImage {
+pub(super) fn square_mask(gray: &[u8], w: u32, h: u32) -> image::GrayImage {
     let src = image::GrayImage::from_raw(w, h, gray.to_vec()).expect("tip buffer matches dims");
     let long = w.max(h);
     let (tw, th) = if long > 1024 {

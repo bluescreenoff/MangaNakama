@@ -157,6 +157,20 @@ pub struct MyBrush {
     wash_erase: bool,
     /// Krita texture tip: the grayscale mask multiplying every dab's profile.
     texture: Option<Arc<TextureMask>>,
+    /// Generated-variation tips (M4): the full tip LIST — when non-empty,
+    /// the per-dab hook swaps the ACTIVE mask among these (seeded random),
+    /// so one brush stamps a whole family of marks. `mn-texture-list`.
+    texture_tips: Vec<Arc<TextureMask>>,
+    /// 0..1 — how much per-dab MIRRORING and angle JITTER the tip list
+    /// gets (0 = tips swap but never mirror/rotate). `mn-variation`.
+    variation: f32,
+    /// The variant table for [`variation`]/`texture_tips`: each tip plus
+    /// its mirrored copies (when variation > 0), as (data ptr, size)
+    /// pairs. BOXED: the hook publishes this buffer's address, so it must
+    /// never move — and its Arcs' buffers never move either.
+    tip_variants: Box<[(*const u8, i32)]>,
+    /// Keeps the mirrored variant buffers alive (the table points in).
+    _variant_masks: Vec<Arc<TextureMask>>,
     /// Texture crawl per dab, in mask px (0 = the pattern is static, Krita's
     /// default). The step direction is fixed diagonal (1, 0.5) so the crawl
     /// reads as drift, not wobble.
@@ -591,6 +605,45 @@ impl MyBrush {
             .map(|v| v as f32)
             .filter(|v| v.is_finite())
             .unwrap_or(0.0);
+        // M4 generated variation: a tip LIST (`mn-texture-list`, slugs under
+        // textures/) + `mn-variation`. A list that resolves to fewer than
+        // two masks keeps the single-mask behaviour (a name that does not
+        // resolve is ignored, exactly like `mn-texture`).
+        let texture_tips: Vec<Arc<TextureMask>> = json
+            .get("mn-texture-list")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str())
+                    .filter_map(|name| {
+                        let brushes_root = path.parent().and_then(Path::parent)?;
+                        load_texture(brushes_root, name)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let variation = json
+            .get("mn-variation")
+            .and_then(Value::as_f64)
+            .map(|v| v as f32)
+            .unwrap_or(0.0)
+            .clamp(0.0, 1.0);
+        // The variant table: plain pointers when there is no variation,
+        // mirrored copies when there is. Built once here; the per-stroke
+        // hook only publishes its address.
+        let mut variant_masks: Vec<Arc<TextureMask>> = Vec::new();
+        for t in &texture_tips {
+            variant_masks.push(t.clone());
+            if variation > 0.0 {
+                variant_masks.push(Arc::new(mirror_mask(t, true, false)));
+                variant_masks.push(Arc::new(mirror_mask(t, false, true)));
+                variant_masks.push(Arc::new(mirror_mask(t, true, true)));
+            }
+        }
+        let tip_variants: Box<[(*const u8, i32)]> = variant_masks
+            .iter()
+            .map(|m| (m.data.as_ptr(), m.size as i32))
+            .collect();
 
         // Krita sketch mode (round 27): link the stroke back to its recent
         // history — scribble webs / hatching for roughing.
@@ -630,6 +683,10 @@ impl MyBrush {
             wash_buf: None,
             wash_erase: false,
             texture,
+            texture_tips,
+            variation,
+            tip_variants,
+            _variant_masks: variant_masks,
             texture_scroll_px,
             texture_anchor_dab,
             texture_rotate_direction,
@@ -1391,6 +1448,21 @@ impl MyBrush {
             self.texture_rotate_direction,
             self.texture_angle_deg,
         );
+        // M4: a tip list overrides the single mask's pointer at the first
+        // advance anyway; arming the set is what makes dabs VARY. No list
+        // (every stock preset) arms count 0 — the advance hook's early
+        // return keeps this path bit-identical.
+        if self.texture_tips.len() >= 2 {
+            set_tip_set_hook(
+                self.tip_variants.as_ptr(),
+                self.tip_variants.len(),
+                self.variation,
+                self.texture_angle_deg,
+                self.texture_anchor_dab && !self.texture_rotate_direction,
+            );
+        } else {
+            set_tip_set_hook(std::ptr::null(), 0, 0.0, 0.0, false);
+        }
         set_record_hook(self.record_mode, &mut self.record);
         let surface = self.surface.interface();
         // Wash mode paints into the stroke buffer, not the document — the
@@ -1724,6 +1796,48 @@ thread_local! {
     /// Dabs clamped by that budget this stroke (PATCHES.md #19) — read via
     /// [`MyBrush::take_dab_clamp_count`].
     static DAB_CLAMP_COUNT: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// M4 generated variation: the ACTIVE-TIP SET for this stroke — a
+    /// leaked box of (data ptr, size) pairs, one per VARIANT (each tip,
+    /// plus mirrored copies when variation > 0). The per-dab advance hook
+    /// swaps TEXTURE_PTR/SIZE among these, seeded-random, so the C sampler
+    /// and the GPU record both see the swap by construction.
+    static TIP_SET: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static TIP_COUNT: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// The variant rng (xorshift64), fixed seed per stroke series —
+    /// identical strokes stamp identically (pinned); variation is between
+    /// DABS, not between strokes.
+    static TIP_RNG: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static VARIATION: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// The un-jittered stamp angle (advance re-publishes base ± jitter).
+    static TIP_ANGLE_BASE: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// 1 = base-angle mode, so jitter may apply (direction mode
+    /// re-publishes its own angle per dab and would eat it).
+    static TIP_JITTER_OK: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+}
+
+/// The mirrored copy of a tip mask (M4's variation variants).
+fn mirror_mask(t: &TextureMask, flip_x: bool, flip_y: bool) -> TextureMask {
+    let s = t.size as usize;
+    let mut out: Vec<u8> = t.data.as_ref().clone();
+    if flip_x {
+        for y in 0..s {
+            let row = &mut out[y * s..(y + 1) * s];
+            row.reverse();
+        }
+    }
+    if flip_y {
+        for y in 0..s / 2 {
+            let (a, b) = (y * s, (s - 1 - y) * s);
+            for i in 0..s {
+                out.swap(a + i, b + i);
+            }
+        }
+    }
+    TextureMask {
+        name: t.name.clone(),
+        size: t.size,
+        data: Arc::new(out),
+    }
 }
 
 /// Point the vendored record hooks at this brush's recorder for the coming
@@ -1962,19 +2076,81 @@ pub extern "C" fn mnc_brush_texture_scroll(dx: *mut f32, dy: *mut f32) {
 /// Called from the patched `mypaint-brush.c` ONCE per dab (patch #10): step
 /// the owning brush's crawl offset and publish it. Fixed diagonal direction
 /// (1, 0.5) × step so the pattern drifts instead of wobble-marching.
+/// M4: when a tip SET is armed, this also picks the dab's VARIANT —
+/// seeded-random tip, mirrored or not — and (base-angle mode) re-publishes
+/// the stamp angle with the variation's jitter. Still one call per dab, so
+/// a multi-tile dab stays seamless.
 #[unsafe(no_mangle)]
 pub extern "C" fn mnc_brush_texture_advance() {
     let step = f32::from_bits(TEXTURE_STEP.with(|c| c.get()));
     let accum = TEXTURE_ACCUM.with(|c| c.get()) as *mut (f32, f32);
-    if accum.is_null() {
+    if !accum.is_null() {
+        unsafe {
+            (*accum).0 += step;
+            (*accum).1 += step * 0.5;
+            TEXTURE_SCROLL_X.with(|c| c.set((*accum).0.to_bits()));
+            TEXTURE_SCROLL_Y.with(|c| c.set((*accum).1.to_bits()));
+        }
+    }
+    // M4 variant swap. Empty set (every stock preset) leaves the pointers
+    // exactly as set_texture_hook left them — bit-identical path.
+    let count = TIP_COUNT.with(|c| c.get());
+    if count == 0 {
         return;
     }
+    let r = tip_rng_next();
+    let set = TIP_SET.with(|c| c.get()) as *const (*const u8, i32);
+    let idx = ((r >> 33) % count as u64) as usize;
     unsafe {
-        (*accum).0 += step;
-        (*accum).1 += step * 0.5;
-        TEXTURE_SCROLL_X.with(|c| c.set((*accum).0.to_bits()));
-        TEXTURE_SCROLL_Y.with(|c| c.set((*accum).1.to_bits()));
+        if !set.is_null() {
+            let (p, s) = *set.add(idx);
+            TEXTURE_PTR.with(|c| c.set(p as usize));
+            TEXTURE_SIZE.with(|c| c.set(s));
+        }
+    }    // Angle jitter, base-angle mode only (see TIP_JITTER_OK's doc).
+    if TIP_JITTER_OK.with(|c| c.get()) != 0 {
+        let v = f32::from_bits(VARIATION.with(|c| c.get()));
+        if v > 0.0 {
+            // (r >> 2) low bits as a signed 0..1 range: the two draws are
+            // independent enough at this sample size and cost nothing.
+            let unit = ((r & 0xffff) as f32 / 65535.0) * 2.0 - 1.0;
+            let base = f32::from_bits(TIP_ANGLE_BASE.with(|c| c.get()));
+            TEXTURE_STAMP_ANGLE.with(|c| c.set((base + unit * v * 90.0).to_bits()));
+        }
     }
+}
+
+/// One xorshift64 step of the variant rng (M4). A Cell, not a Rc<RefCell>:
+/// the C calls this from the middle of its dab loop.
+fn tip_rng_next() -> u64 {
+    TIP_RNG.with(|c| {
+        let mut x = c.get();
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        c.set(x);
+        x
+    })
+}
+
+/// Arm the M4 tip set for the coming `stroke_to`. `set` is the brush's own
+/// stable variant table (built at load, Boxed so its address never moves):
+/// each tip plus mirrored copies when variation > 0 — mirroring is a MASK
+/// swap (a precomputed flipped buffer), not a C sampler change, so CPU, GPU
+/// record and repair raster all agree by construction.
+fn set_tip_set_hook(
+    set: *const (*const u8, i32),
+    count: usize,
+    variation: f32,
+    base_angle: f32,
+    jitter_ok: bool,
+) {
+    TIP_SET.with(|c| c.set(set as usize));
+    TIP_COUNT.with(|c| c.set(count as u32));
+    TIP_RNG.with(|c| c.set(0x9E3779B97F4A7C15));
+    VARIATION.with(|c| c.set(variation.to_bits()));
+    TIP_ANGLE_BASE.with(|c| c.set(base_angle.to_bits()));
+    TIP_JITTER_OK.with(|c| c.set(jitter_ok as i32));
 }
 
 fn set_hard_dab_flag(on: bool) {
@@ -2462,5 +2638,116 @@ mod wash_smudge_tests {
         // would touch ~4×4).
         let tiles = doc.active_layer().tiles().count();
         assert!(tiles <= 9, "{tiles} tiles inked — dab escaped the budget");
+    }
+
+    /// M4: the per-dab variant swap. Two tips armed → successive advance
+    /// calls publish DIFFERENT active masks (the seeded rng visits both);
+    /// no set armed → the pointers stand still, bit-identical to stock.
+    #[test]
+    fn tip_sets_swap_the_active_mask_per_dab() {
+        use std::sync::Arc;
+        let mk = |v: u8| Arc::new(TextureMask {
+            name: format!("t{v}"),
+            size: 4,
+            data: Arc::new(vec![v; 16]),
+        });
+        let a = mk(10);
+        let b = mk(200);
+        let variants: Box<[(*const u8, i32)]> =
+            vec![(a.data.as_ptr(), 4), (b.data.as_ptr(), 4)].into();
+        set_tip_set_hook(variants.as_ptr(), variants.len(), 0.0, 0.0, false);
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..64 {
+            mnc_brush_texture_advance();
+            unsafe {
+                seen.insert(*mnc_brush_texture_data());
+            }
+        }
+        assert!(seen.len() >= 2, "both tips took their turn: {seen:?}");
+        // Disarm: stock presets' path — the pointer must not move.
+        set_tip_set_hook(std::ptr::null(), 0, 0.0, 0.0, false);
+        let before = mnc_brush_texture_data();
+        for _ in 0..8 {
+            mnc_brush_texture_advance();
+        }
+        assert_eq!(mnc_brush_texture_data(), before, "no set, no swap");
+    }
+
+    /// M4: seeded stability — identical strokes through a tip-list brush
+    /// stamp IDENTICALLY (the variant rng is fixed-seed per series;
+    /// variation is between dabs, never between strokes).
+    #[test]
+    fn tip_list_strokes_are_seeded_bit_stable() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/brushes/csp/real-g-pen.myb");
+        let Ok(_) = MyBrush::load(&path) else {
+            eprintln!("[probe] preset missing, skipping");
+            return;
+        };
+        // Build a preset in-memory is not the API; exercise via two loads of
+        // the same list brush written to a temp root instead.
+        let dir = std::env::temp_dir().join(format!("mn-tips-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let tex_dir = dir.join("textures");
+        std::fs::create_dir_all(&tex_dir).unwrap();
+        for (k, v) in [(0u8, 40u8), (1, 220)] {
+            image::GrayImage::from_pixel(8, 8, image::Luma([v]))
+                .save(tex_dir.join(format!("tip{k}.png")))
+                .unwrap();
+        }
+        let base = MyBrush::load(&path).unwrap();
+        let (settings, _tex) = (serde_json::to_value(&"").unwrap(), ());
+        let _ = (settings, base);
+        // Hand-write the preset: real-g-pen's settings + the list keys.
+        let src = std::fs::read_to_string(&path).unwrap();
+        let mut v: serde_json::Value = serde_json::from_str(&src).unwrap();
+        v["mn-texture-anchor"] = serde_json::json!("dab");
+        v["mn-texture-list"] = serde_json::json!(["tip0", "tip1"]);
+        v["mn-variation"] = serde_json::json!(0.4);
+        let preset = dir.join("mine").join("var.myb");
+        std::fs::create_dir_all(dir.join("mine")).unwrap();
+        std::fs::write(&preset, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+
+        let ink_of = || {
+            let mut b = MyBrush::load(&preset).unwrap();
+            // TAP: record AND rasterize — the hash covers real ink, and the
+            // record pins the variant stream (mask/angle per dab).
+            b.set_dab_recording(RecordMode::Tap);
+            let mut doc = Document::new(512, 512);
+            b.begin(&mut doc);
+            for i in 0..40 {
+                b.sample(
+                    &mut doc,
+                    PenSample {
+                        x: 60.0 + i as f32 * 6.0,
+                        y: 200.0,
+                        pressure: 0.8,
+                        tilt_x: 0.0,
+                        tilt_y: 0.0,
+                        t_ms: i as f64 * 8.0,
+                    },
+                );
+            }
+            b.end(&mut doc);
+            let rec = b.take_dab_record();
+            let mut racc = 0u64;
+            for d in &rec.dabs {
+                racc = racc
+                    .wrapping_mul(31)
+                    .wrapping_add((d.radius as u64) ^ ((d.tex_angle as i64 as u64) << 32));
+            }
+            let mut acc = 0u64;
+            for (_, t) in doc.active_layer().tiles() {
+                // Sum, not a position-dependent chain: tile iteration order
+                // is not stable across runs, and order must not matter here.
+                acc = acc.wrapping_add(t.alpha_sum() as u64);
+            }
+            (acc, racc)
+        };
+        let (a, ra) = ink_of();
+        let (b, rb) = ink_of();
+        assert_eq!(ra, rb, "the variant stream itself is seeded-stable");
+        assert_eq!(a, b, "identical strokes, identical ink (seeded rng)");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

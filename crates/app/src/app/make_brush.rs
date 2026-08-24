@@ -103,6 +103,16 @@ impl App {
         let gray = if flat { dark } else { alpha };
         let (gray, tw, th) = tight_crop(&gray, w, h)?;
 
+        // M4: marks that fall apart into ISLANDS become a multi-tip brush —
+        // one tight tip per connected component, stamped in seeded-random
+        // variation (mn-texture-list + mn-variation). One island (or none
+        // big enough) keeps today's single-tip preset exactly.
+        let natural_hint = tw.max(th) as f64;
+        let islands = connected_islands(&gray, tw, th);
+        if islands.len() >= 2 {
+            return register_variant_brush_into(&root, &gray, tw, th, &islands, natural_hint);
+        }
+
         let natural = tw.max(th) as f64;
         let mut settings = base_settings(natural.min(MAX_DEFAULT_PX));
         // Stamps clearly separated by default (interval ≈ the tip's own
@@ -159,6 +169,122 @@ fn next_index(root: &Path) -> usize {
         }
     }
     max + 1
+}
+
+/// Islands of ink in the lifted mask, 4-connected, as bboxes — the M4
+/// multi-tip split. Components under [`ISLAND_MIN_PX`] painted pixels are
+/// noise, not marks.
+const ISLAND_MIN_PX: usize = 4;
+
+fn connected_islands(gray: &[u8], w: u32, h: u32) -> Vec<(u32, u32, u32, u32)> {
+    let (w, h) = (w as usize, h as usize);
+    let mut seen = vec![false; w * h];
+    let mut out = Vec::new();
+    let mut stack = Vec::new();
+    for start in 0..w * h {
+        if seen[start] || gray[start] == 0 {
+            continue;
+        }
+        stack.clear();
+        stack.push(start);
+        seen[start] = true;
+        let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0usize, 0usize);
+        let mut area = 0usize;
+        while let Some(i) = stack.pop() {
+            let (x, y) = (i % w, i / w);
+            area += 1;
+            x0 = x0.min(x);
+            y0 = y0.min(y);
+            x1 = x1.max(x);
+            y1 = y1.max(y);
+            for (dx, dy) in [(!0, 0), (1, 0), (0, !0), (0, 1)] {
+                let (nx, ny) = match (x.checked_add_signed(dx as isize), y.checked_add_signed(dy as isize)) {
+                    (Some(a), Some(b)) if a < w && b < h => (a, b),
+                    _ => continue,
+                };
+                let n = ny * w + nx;
+                if !seen[n] && gray[n] > 0 {
+                    seen[n] = true;
+                    stack.push(n);
+                }
+            }
+        }
+        if area >= ISLAND_MIN_PX {
+            out.push((x0 as u32, y0 as u32, (x1 + 1) as u32, (y1 + 1) as u32));
+        }
+    }
+    out
+}
+
+/// The multi-tip write (M4): one PNG per island under
+/// `textures/<set>-<n>-t<k>.png`, one preset whose `mn-texture-list`
+/// names them all and `mn-variation` sets the mirror/rotate jitter.
+fn register_variant_brush_into(
+    root: &Path,
+    gray: &[u8],
+    w: u32,
+    // The mask's own height never enters the island math (islands carry
+    // their own bboxes); kept in the signature so the call reads like the
+    // caller's shape.
+    _h: u32,
+    islands: &[(u32, u32, u32, u32)],
+    natural: f64,
+) -> Option<(PathBuf, String)> {
+    use super::abr::square_mask;
+
+    let n = next_index(root);
+    let slug = format!("mine-{n}");
+    let _ = std::fs::create_dir_all(root.join("textures"));
+    let mut list = Vec::new();
+    for (k, &(x0, y0, x1, y1)) in islands.iter().enumerate() {
+        let (iw, ih) = ((x1 - x0) as usize, (y1 - y0) as usize);
+        let mut tip = vec![0u8; iw * ih];
+        for y in 0..ih {
+            let src = ((y0 as usize + y) * w as usize) + x0 as usize;
+            tip[iw * y..iw * (y + 1)].copy_from_slice(&gray[src..src + iw]);
+        }
+        let tip_slug = format!("{slug}-t{k}");
+        square_mask(&tip, iw as u32, ih as u32)
+            .save(root.join("textures").join(format!("{tip_slug}.png")))
+            .ok()?;
+        list.push(json!(tip_slug));
+    }
+    // The size dial keys off the LARGEST island; each stamp scales by its
+    // own tip's natural size inside the shared square mask.
+    let biggest = islands
+        .iter()
+        .map(|&(x0, y0, x1, y1)| (x1 - x0).max(y1 - y0))
+        .max()
+        .unwrap_or(1) as f64;
+    let mut settings = base_settings(biggest.min(MAX_DEFAULT_PX));
+    set_base(&mut settings, "dabs_per_basic_radius", 0.5);
+    set_base(&mut settings, "dabs_per_actual_radius", 0.5);
+    let mut extras = serde_json::Map::new();
+    extras.insert("mn-texture-anchor".into(), json!("dab"));
+    extras.insert("mn-texture-list".into(), json!(list));
+    extras.insert("mn-variation".into(), json!(0.4));
+    let mut notes = Vec::new();
+    if natural > MAX_DEFAULT_PX {
+        notes.push(format!(
+            "captured at {natural:.0} px (default capped at {MAX_DEFAULT_PX})"
+        ));
+    }
+    notes.push(format!("{} tips, seeded variation 0.4", islands.len()));
+    let name = format!("Canvas brush {n} ({} tips)", islands.len());
+    let desc = "Brush tips captured from canvas marks (multi-tip variation)".to_string();
+    let ok = write_brush(
+        root,
+        "mine",
+        "mine",
+        n,
+        &name,
+        None,
+        settings,
+        extras,
+        desc,
+        &notes,
+    );
+    ok.then(|| (root.join("mine").join(format!("{slug}.myb")), name))
 }
 
 #[cfg(test)]
@@ -280,5 +406,73 @@ mod tests {
             app.register_brush_from_selection_into(root).is_none(),
             "selection over empty canvas"
         );
+    }
+
+    /// M4: a TWO-island selection registers a multi-tip brush — one PNG per
+    /// island, `mn-texture-list` naming both, `mn-variation` set. A
+    /// ONE-island selection keeps today's single-tip preset shape
+    /// (`mn-texture`, no list).
+    #[test]
+    fn two_islands_register_a_variation_brush() {
+        let Some(renderer) = headless_renderer() else {
+            return;
+        };
+        let mut app = App::new(renderer, (600, 400), 1.0);
+        let root = tmp_root("var");
+        // Two 8×8 blobs, far apart inside one selection.
+        let mut px = Vec::new();
+        for y in 60..68 {
+            for x in 60..76 {
+                px.push((x, y));
+            }
+        }
+        for y in 60..68 {
+            for x in 160..176 {
+                px.push((x, y));
+            }
+        }
+        ink(&mut app, &px, [W, 0, 0, W]);
+        app.doc.selection = Some(mn_core::Selection::from_rect(
+            &app.doc, 40.0, 40.0, 200.0, 100.0,
+        ));
+        let Some((path, name)) = app.register_brush_from_selection_into(root.clone()) else {
+            panic!("the two-island capture registered");
+        };
+        assert!(name.contains("2 tips"), "{name}");
+        let myb: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let list = myb["mn-texture-list"].as_array().expect("the list key");
+        assert_eq!(list.len(), 2, "{list:?}");
+        assert_eq!(myb["mn-variation"], 0.4);
+        assert!(myb.get("mn-texture").is_none(), "no single-mask key");
+        for slug in list.iter().filter_map(|v| v.as_str()) {
+            assert!(
+                root.join("textures").join(format!("{slug}.png")).exists(),
+                "{slug} written"
+            );
+        }
+
+        // One island alone: today's single-tip preset.
+        let mut app2 = App::new(headless_renderer().unwrap(), (600, 400), 1.0);
+        let root2 = tmp_root("one");
+        let mut px2 = Vec::new();
+        for y in 60..68 {
+            for x in 60..76 {
+                px2.push((x, y));
+            }
+        }
+        ink(&mut app2, &px2, [W, 0, 0, W]);
+        app2.doc.selection = Some(mn_core::Selection::from_rect(
+            &app2.doc, 40.0, 40.0, 120.0, 100.0,
+        ));
+        let Some((p2, _)) = app2.register_brush_from_selection_into(root2.clone()) else {
+            panic!("the one-island capture registered");
+        };
+        let m2: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&p2).unwrap()).unwrap();
+        assert!(m2.get("mn-texture").is_some(), "single mask as ever");
+        assert!(m2.get("mn-texture-list").is_none());
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+        let _ = std::fs::remove_dir_all(root2.parent().unwrap());
     }
 }
