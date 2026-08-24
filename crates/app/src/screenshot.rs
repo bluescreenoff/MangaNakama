@@ -388,7 +388,7 @@ const TILE: i32 = 128;
 /// panels, pages 2 and 3 left as the single default frame. The README should
 /// show the manuscript the app is for, not a demo page of art.
 ///
-/// Built entirely through the real commands: New Comic (the dialog's draft +
+/// Built entirely through the real commands: New Manga (the dialog's draft +
 /// `NewComicCreate`) and the Frame tool's divide, aimed the way a drag across
 /// a panel aims it.
 fn hero_doc(app: &mut App) {
@@ -441,7 +441,7 @@ fn hero_doc(app: &mut App) {
     app.new_doc_draft.frame_folder = true;
     app.new_doc_draft.story = String::new();
     dispatch(app, AppCmd::NewComicCreate);
-    // New Comic parks the startup canvas in a tab of its own; the README
+    // New Manga parks the startup canvas in a tab of its own; the README
     // wants one document, not a spare empty one beside it.
     app.close_doc(0);
 
@@ -489,7 +489,12 @@ fn hero_doc(app: &mut App) {
     // the shot that exists to show it), and the README wants white paper.
     // `add_frame_folder` pushes White, draw, header, so the draw layer is
     // the row directly under the header.
-    if let Some(fi) = app.doc.layers.iter().rposition(|l| l.folder && l.is_frame()) {
+    if let Some(fi) = app
+        .doc
+        .layers
+        .iter()
+        .rposition(|l| l.folder && l.is_frame())
+    {
         app.doc.set_active(fi.saturating_sub(1));
     }
     // The ACTIVE page's Pages-panel thumbnail is minted at the head of

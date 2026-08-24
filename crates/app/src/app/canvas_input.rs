@@ -211,10 +211,7 @@ pub fn gen_anchor(spec: &mn_core::genlines::GenLinesSpec, size: (u32, u32)) -> [
 /// paper the run is drawn on.
 fn page_reach(a: [f32; 2], dir: [f32; 2], size: (u32, u32)) -> f32 {
     let mut best = f32::INFINITY;
-    for (p, d, hi) in [
-        (a[0], dir[0], size.0 as f32),
-        (a[1], dir[1], size.1 as f32),
-    ] {
+    for (p, d, hi) in [(a[0], dir[0], size.0 as f32), (a[1], dir[1], size.1 as f32)] {
         if d.abs() < 1e-6 {
             continue;
         }
@@ -224,6 +221,61 @@ fn page_reach(a: [f32; 2], dir: [f32; 2], size: (u32, u32)) -> f32 {
         }
     }
     if best.is_finite() { best } else { 0.0 }
+}
+
+/// Even-odd containment for a frame polygon (any winding; the frame SDF
+/// signs concave frames by the same rule).
+fn poly_contains(pts: &[[f32; 2]], p: [f32; 2]) -> bool {
+    let n = pts.len();
+    if n < 3 {
+        return false;
+    }
+    let mut inside = false;
+    for i in 0..n {
+        let (a, b) = (pts[i], pts[(i + 1) % n]);
+        if (a[1] > p[1]) != (b[1] > p[1]) {
+            let t = (p[1] - a[1]) / (b[1] - a[1]);
+            if a[0] + t * (b[0] - a[0]) > p[0] {
+                inside = !inside;
+            }
+        }
+    }
+    inside
+}
+
+/// The panel a placement gesture starts in: the SMALLEST frame folder
+/// whose polygon contains the point (nesting = innermost wins), with
+/// that polygon's AABB. `None` in the gutter or on a bare page.
+pub(crate) fn panel_at(doc: &mn_core::Document, p: [f32; 2]) -> Option<(usize, [f32; 4])> {
+    let mut best: Option<(f32, usize, [f32; 4])> = None; // (|2·area|, folder, aabb)
+    for (i, l) in doc.layers.iter().enumerate() {
+        if !(l.folder && l.is_frame()) {
+            continue;
+        }
+        let Some(fs) = l.frames() else { continue };
+        for f in &fs.frames {
+            if !poly_contains(&f.points, p) {
+                continue;
+            }
+            let mut twice_area = 0.0;
+            let mut aabb = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+            for k in 0..f.points.len() {
+                let (q, r) = (f.points[k], f.points[(k + 1) % f.points.len()]);
+                twice_area += q[0] * r[1] - r[0] * q[1];
+                aabb[0] = aabb[0].min(q[0]);
+                aabb[1] = aabb[1].min(q[1]);
+                aabb[2] = aabb[2].max(q[0]);
+                aabb[3] = aabb[3].max(q[1]);
+            }
+            if best
+                .as_ref()
+                .map_or(true, |(ba, _, _)| twice_area.abs() < *ba)
+            {
+                best = Some((twice_area.abs(), i, aabb));
+            }
+        }
+    }
+    best.map(|(_, i, aabb)| (i, aabb))
 }
 
 /// The spec as a drag would leave it (shared by the live overlay and
@@ -1216,9 +1268,9 @@ impl App {
         let len = (b.0 - a.0).hypot(b.1 - a.1);
         if len < 8.0 {
             self.set_status(if radial {
-                "drag from the centre out to where the lines should reach"
+                "drag from the centre out to size the inner hole — the lines reach the border on their own"
             } else {
-                "drag along the motion — length sets the line length"
+                "drag along the motion to set the angle — the lines cross the panel on their own"
             });
             return;
         }
@@ -1233,63 +1285,94 @@ impl App {
             self.figure_stream.seed = o.seed.wrapping_add(1);
             o
         };
+        // CSP default lengths (owner, 2026-08-24): the lines CROSS the
+        // panel — from the ring past the border, protrusions hidden by
+        // the frame folder's coverage. The gesture keeps centre, hole
+        // and angle; the drag distance no longer caps the length.
+        let panel = panel_at(&self.doc, [a.0, a.1]);
+        let bounds = panel.map_or(
+            [0.0, 0.0, self.doc.size.0 as f32, self.doc.size.1 as f32],
+            |(_, b)| b,
+        );
         let (pa, pb, pc, pd) = if radial {
-            // center, r_in, r_out from the drag; the inner hole is a
-            // fraction knob so one drag places a ready donut.
-            (a.0, a.1, len * opts.r_in_frac.clamp(0.0, 0.95), len)
+            // Centre from the press, hole from the drag (the fraction
+            // knob); the reach runs to the panel's/page's farthest
+            // corner plus a border-crossing margin, never shorter than
+            // the drag.
+            let far = [
+                [bounds[0], bounds[1]],
+                [bounds[2], bounds[1]],
+                [bounds[0], bounds[3]],
+                [bounds[2], bounds[3]],
+            ]
+            .iter()
+            .map(|c| (c[0] - a.0).hypot(c[1] - a.1))
+            .fold(0.0f32, f32::max);
+            let r_out = (far + (far * 0.05).max(32.0)).max(len);
+            (a.0, a.1, len * opts.r_in_frac.clamp(0.0, 0.95), r_out)
         } else {
-            // Angle from the drag direction; lengths bracket the dragged
-            // distance so the strokes read like the gesture that made them.
+            // Angle from the drag direction; the runs cross the whole
+            // panel edge to edge (the AABB diagonal outruns any crossing
+            // at any angle), protruding past both sides until the panel
+            // clips them.
             let angle = (b.1 - a.1).atan2(b.0 - a.0).to_degrees();
-            (angle, len * 0.7, len * 1.3, 0.0)
+            let cross = ((bounds[2] - bounds[0]).hypot(bounds[3] - bounds[1]) * 1.05).max(len);
+            (angle, cross, cross, 0.0)
         };
         let kind = self.figure_mode.gen_kind();
-        self.push_cmd(AppCmd::GenLinesPlace(mn_core::genlines::GenLinesSpec {
-            // Kinds 1/2 keep focus = true: the Object tool's driver
-            // handles and their clamps key on it (GenLinesSpec's doc).
-            focus: radial,
-            kind,
-            a: pa,
-            b: pb,
-            c: pc,
-            d: pd,
-            count: opts.count,
-            width: opts.width,
-            jitter: opts.jitter,
-            // Focus rays taper toward the convergence like Stream tails
-            // (the renderer swaps endpoints for that); the flash kinds'
-            // teeth carry their own shape and ignore it.
-            taper: match self.figure_mode {
-                FigureMode::Focus | FigureMode::Stream => opts.taper,
-                _ => 0.0,
+        self.push_cmd(AppCmd::GenLinesPlace(
+            mn_core::genlines::GenLinesSpec {
+                // Kinds 1/2 keep focus = true: the Object tool's driver
+                // handles and their clamps key on it (GenLinesSpec's doc).
+                focus: radial,
+                kind,
+                a: pa,
+                b: pb,
+                c: pc,
+                d: pd,
+                count: opts.count,
+                width: opts.width,
+                jitter: opts.jitter,
+                // Focus rays taper toward the convergence like Stream tails
+                // (the renderer swaps endpoints for that); the flash kinds'
+                // teeth carry their own shape and ignore it.
+                taper: match self.figure_mode {
+                    FigureMode::Focus | FigureMode::Stream => opts.taper,
+                    _ => 0.0,
+                },
+                // Density: the radial kinds are gap-driven in DEGREES, the
+                // stream in px — a flash counts its teeth and takes neither
+                // (its `width` is a spike base, and gapping it would fight
+                // the renderer's own neighbour clamp).
+                gap_deg: if radial && kind == 0 {
+                    opts.gap_deg
+                } else {
+                    0.0
+                },
+                gap_px: if radial { 0.0 } else { opts.gap_px },
+                group: if radial { 0 } else { opts.group },
+                group_gap: if radial { 0.0 } else { opts.group_gap },
+                jit_gap: opts.jit_gap,
+                jit_len: opts.jit_len,
+                jit_width: opts.jit_width,
+                // WHERE THE DRIVER HANDLES GO. Screen-side only — no
+                // renderer reads either — but without them a burst placed
+                // near the right edge put its radius handles off the page and
+                // a stream's reference line sat at the canvas centre instead
+                // of on the run you just drew: nothing to aim at, which is
+                // half of "I cannot re-select them" (owner, 2026-08-23).
+                hand_deg: if radial {
+                    (b.1 - a.1).atan2(b.0 - a.0).to_degrees()
+                } else {
+                    0.0
+                },
+                anchor: (!radial).then_some([(a.0 + b.0) * 0.5, (a.1 + b.1) * 0.5]),
+                converge: None,
+                color: [0, 0, 0],
+                seed: opts.seed,
             },
-            // Density: the radial kinds are gap-driven in DEGREES, the
-            // stream in px — a flash counts its teeth and takes neither
-            // (its `width` is a spike base, and gapping it would fight
-            // the renderer's own neighbour clamp).
-            gap_deg: if radial && kind == 0 { opts.gap_deg } else { 0.0 },
-            gap_px: if radial { 0.0 } else { opts.gap_px },
-            group: if radial { 0 } else { opts.group },
-            group_gap: if radial { 0.0 } else { opts.group_gap },
-            jit_gap: opts.jit_gap,
-            jit_len: opts.jit_len,
-            jit_width: opts.jit_width,
-            // WHERE THE DRIVER HANDLES GO. Screen-side only — no
-            // renderer reads either — but without them a burst placed
-            // near the right edge put its radius handles off the page and
-            // a stream's reference line sat at the canvas centre instead
-            // of on the run you just drew: nothing to aim at, which is
-            // half of "I cannot re-select them" (owner, 2026-08-23).
-            hand_deg: if radial {
-                (b.1 - a.1).atan2(b.0 - a.0).to_degrees()
-            } else {
-                0.0
-            },
-            anchor: (!radial).then_some([(a.0 + b.0) * 0.5, (a.1 + b.1) * 0.5]),
-            converge: None,
-            color: [0, 0, 0],
-            seed: opts.seed,
-        }));
+            panel.map(|(i, _)| i),
+        ));
     }
 
     /// Figure ▸ Polygon release: ink the clicked vertex loop.
@@ -1727,9 +1810,7 @@ impl App {
                 const GRAB_MAX_TILES: u64 = 4096;
                 let oversize = self.doc.layers[li]
                     .tile_bounds()
-                    .map(|(_, _, w, h)| {
-                        (w as u64 / 64) * (h as u64 / 64) > GRAB_MAX_TILES
-                    })
+                    .map(|(_, _, w, h)| (w as u64 / 64) * (h as u64 / 64) > GRAB_MAX_TILES)
                     .unwrap_or(true);
                 if oversize {
                     self.doc.set_active(li);
@@ -2553,19 +2634,20 @@ impl App {
                                 // measured before anything moves.
                                 let mut nearest = f32::INFINITY;
                                 if let Some(nrm) = facing {
-                                    let mut scan = |set: &mn_core::FrameSet, skip: Option<usize>| {
-                                        for (si, sib) in set.frames.iter().enumerate() {
-                                            if Some(si) == skip {
-                                                continue;
+                                    let mut scan =
+                                        |set: &mn_core::FrameSet, skip: Option<usize>| {
+                                            for (si, sib) in set.frames.iter().enumerate() {
+                                                if Some(si) == skip {
+                                                    continue;
+                                                }
+                                                if let Some((dist, _)) =
+                                                    mn_core::frame::facing_vertices(sib, a, b, nrm)
+                                                    && dist > 1.5
+                                                {
+                                                    nearest = nearest.min(dist);
+                                                }
                                             }
-                                            if let Some((dist, _)) =
-                                                mn_core::frame::facing_vertices(sib, a, b, nrm)
-                                                && dist > 1.5
-                                            {
-                                                nearest = nearest.min(dist);
-                                            }
-                                        }
-                                    };
+                                        };
                                     scan(&fs, Some(d.frame));
                                     for (li, l) in self.doc.layers.iter().enumerate() {
                                         if li != d.layer
@@ -3301,7 +3383,8 @@ impl App {
         if !moved {
             return false;
         }
-        let valid = nf.area() >= mn_core::frame::MIN_FRAME_AREA && (nf.is_convex() || nf.is_simple());
+        let valid =
+            nf.area() >= mn_core::frame::MIN_FRAME_AREA && (nf.is_convex() || nf.is_simple());
         if !valid {
             self.set_status("expand refused — the panel would collapse");
             return true;

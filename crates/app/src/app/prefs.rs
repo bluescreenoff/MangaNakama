@@ -13,7 +13,7 @@
 //!
 //! **Every default here is today's constant, exactly.** Adding the panel
 //! changes nothing for a user who never opens it; the values the owner has
-//! opinions about (the undo depth, the 2048² canvas, the New Comic preset)
+//! opinions about (the undo depth, the 2048² canvas, the New Manga preset)
 //! become his to change without a code change, which is the point.
 //!
 //! **Unknown keys survive a round trip in BOTH directions.** Forward: a key
@@ -82,7 +82,7 @@ pub struct Prefs {
     pub recent_depth: usize,
     /// New text items' point size, 4..=72 (the Tool Property slider's range).
     pub text_size_pt: f32,
-    /// New Comic's starting page preset, by `PageSetup::name`. Empty — the
+    /// New Manga's starting page preset, by `PageSetup::name`. Empty — the
     /// default — and any name this build does not know both resolve to the
     /// first preset, which is exactly today's behaviour.
     pub new_preset: String,
@@ -162,7 +162,11 @@ pub const THEME: &str = "dark";
 /// Clamp that also catches NaN and infinity — `f32::clamp` passes NaN
 /// straight through, and a NaN fit margin is a canvas that never appears.
 fn finite(v: f32, fallback: f32, lo: f32, hi: f32) -> f32 {
-    if v.is_finite() { v.clamp(lo, hi) } else { fallback }
+    if v.is_finite() {
+        v.clamp(lo, hi)
+    } else {
+        fallback
+    }
 }
 
 impl Prefs {
@@ -171,7 +175,7 @@ impl Prefs {
         self.autosave_min.saturating_mul(60_000)
     }
 
-    /// The New Comic starting preset. An unknown name (a `prefs.txt` from a
+    /// The New Manga starting preset. An unknown name (a `prefs.txt` from a
     /// build with a different preset list, or a typo) falls back to the
     /// first preset rather than failing.
     pub fn new_preset_setup(&self) -> mn_core::PageSetup {
@@ -587,7 +591,10 @@ mod tests {
         assert_eq!(p.undo_depth, 5000);
         assert_eq!(p.autosave_min, 5, "below the range, not off");
         assert_eq!(p.mouse_smooth_px, mn_core::stabilize::MAX_STRING_PX);
-        assert_eq!(p.fit_margin, FIT_MARGIN, "NaN falls back, it does not clamp");
+        assert_eq!(
+            p.fit_margin, FIT_MARGIN,
+            "NaN falls back, it does not clamp"
+        );
         assert_eq!(p.wheel_step, WHEEL_STEP, "infinity likewise");
         assert_eq!(p.rotate_step_deg, 1.0);
         assert_eq!(p.recent_depth, 1);

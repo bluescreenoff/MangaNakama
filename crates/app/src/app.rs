@@ -13,32 +13,32 @@
 mod abr;
 pub mod actions;
 mod adjust;
+pub mod batch;
+mod brush_manage;
 pub(crate) mod canvas_input;
 mod comps;
 mod diag;
 mod engine;
 mod frames;
-mod brush_manage;
 mod kpp_import;
-mod make_brush;
-mod sut_import;
 /// TRIAGE 36 (`L-001`/`L-002` magnetic lasso) and 38 (`S-001` layer pick),
 /// end to end through the real pointer path. Its own file so app.rs does not
 /// grow another 200 lines of test.
 #[cfg(test)]
 mod lasso_tests;
 mod layout;
+mod make_brush;
 pub mod materials;
 mod pages;
-pub mod batch;
 pub mod pattern;
-pub(crate) mod tone_tool;
-pub(crate) mod vector_edit;
 pub mod prefs;
 pub(crate) mod reader;
 mod session;
 mod story;
+mod sut_import;
+pub(crate) mod tone_tool;
 mod transform;
+pub(crate) mod vector_edit;
 mod view;
 mod workspaces;
 
@@ -199,7 +199,7 @@ pub struct App {
     pub page_index: usize,
     pub story: String,
     pub binding_right: bool,
-    /// New pages get a frame border folder (New Comic checkbox).
+    /// New pages get a frame border folder (New Manga checkbox).
     pub seed_frame_folder: bool,
     pub new_doc_open: bool,
     pub new_doc_draft: NewComicDraft,
@@ -2342,7 +2342,10 @@ impl App {
         Some(match grab {
             TransformGrab::Corner(i) => {
                 // Along the diagonal out of the opposite corner.
-                if matches!(sector(drag.bbox[(i + 2) % 4], drag.bbox[i], 8.0), 0 | 1 | 4 | 5) {
+                if matches!(
+                    sector(drag.bbox[(i + 2) % 4], drag.bbox[i], 8.0),
+                    0 | 1 | 4 | 5
+                ) {
                     egui::CursorIcon::ResizeNwSe
                 } else {
                     egui::CursorIcon::ResizeNeSw
@@ -2769,7 +2772,10 @@ impl App {
                 // so the pen slides along the ruler like Krita/CSP. Sticky
                 // (part 2): the first snapped sample locks the ruler for the
                 // whole stroke; crossing rulers cannot flicker mid-stroke.
-                let snapped = self.doc.rulers.snap_sticky([r.x, r.y], &mut self.ruler_lock);
+                let snapped = self
+                    .doc
+                    .rulers
+                    .snap_sticky([r.x, r.y], &mut self.ruler_lock);
                 let r = PenSample {
                     x: snapped[0],
                     y: snapped[1],
@@ -2792,11 +2798,7 @@ impl App {
                     if !dabs.is_empty() {
                         let hard = self.dab_stroke.as_ref().map(|s| s.hard).unwrap_or(false);
                         let wash = self.dab_stroke.as_ref().map(|s| s.wash).unwrap_or(false);
-                        let tex = self
-                            .brush
-                            .inner()
-                            .inner()
-                            .texture_flush();
+                        let tex = self.brush.inner().inner().texture_flush();
                         if wash {
                             // Wash+smudge (P4): per-sample dispatch into the
                             // wash sentinel, so the oracle's readback shows
@@ -2845,7 +2847,10 @@ impl App {
         // the dab record AFTER stroke end instead of working around the old
         // finish-order bug: the tail dabs were visibly off the ruler).
         for r in self.input_resampler.flush() {
-            let snapped = self.doc.rulers.snap_sticky([r.x, r.y], &mut self.ruler_lock);
+            let snapped = self
+                .doc
+                .rulers
+                .snap_sticky([r.x, r.y], &mut self.ruler_lock);
             let r = PenSample {
                 x: snapped[0],
                 y: snapped[1],
@@ -3040,11 +3045,7 @@ impl App {
         }
         let hard = self.dab_stroke.as_ref().map(|s| s.hard).unwrap_or(false);
         let wash = self.dab_stroke.as_ref().map(|s| s.wash).unwrap_or(false);
-        let tex = self
-            .brush
-            .inner()
-            .inner()
-            .texture_flush();
+        let tex = self.brush.inner().inner().texture_flush();
         if wash {
             // #0.1: seed/read from the CPU wash buffer (blank under BYPASS —
             // zero-seed, wet semantics identical to the CPU path). A live
@@ -3101,11 +3102,7 @@ impl App {
             }
         }
         if !dabs.is_empty() {
-            let tex = self
-                .brush
-                .inner()
-                .inner()
-                .texture_flush();
+            let tex = self.brush.inner().inner().texture_flush();
             if st.wash {
                 // `end` left the buffer alive under BYPASS (the GPU owns the
                 // commit). The fallback blank exists only for the impossible
@@ -3157,11 +3154,7 @@ impl App {
                     st.all_dabs.len()
                 );
                 let mut scratch = mn_core::Document::new(self.doc.size.0, self.doc.size.1);
-                let tex = self
-                    .brush
-                    .inner()
-                    .inner()
-                    .texture_flush();
+                let tex = self.brush.inner().inner().texture_flush();
                 mn_brush::rasterize_dabs(&mut scratch, 0, &st.all_dabs, st.hard, tex);
                 let (opacity, blend, erase) = self.brush.inner().inner().wash_commit_params();
                 mn_brush::commit_wash(&scratch, &mut self.doc, opacity, blend, erase);
@@ -3197,11 +3190,7 @@ impl App {
                 st.all_dabs.len()
             ));
             self.diag.dab_canary_repairs += 1;
-            let tex = self
-                .brush
-                .inner()
-                .inner()
-                .texture_flush();
+            let tex = self.brush.inner().inner().texture_flush();
             mn_brush::rasterize_dabs(&mut self.doc, layer, &st.all_dabs, st.hard, tex);
             self.dab_path_last = "gpu → cpu repair!".into();
         }

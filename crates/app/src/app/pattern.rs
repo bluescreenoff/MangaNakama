@@ -65,7 +65,7 @@ impl Default for PatternStudio {
 
 impl App {
     /// One gesture: a fresh square canvas in a NEW tab (the current document
-    /// parks, same as New Comic), wrap on for both axes, studio open.
+    /// parks, same as New Manga), wrap on for both axes, studio open.
     pub fn pattern_new(&mut self) {
         self.commit_text_edit();
         self.push_doc_slot();
@@ -241,7 +241,11 @@ mod tests {
         // Full canvas, never trimmed to the ink: the rectangle IS the tile.
         assert_eq!(img.dimensions(), (PATTERN_SIZE, PATTERN_SIZE));
         assert!(img.get_pixel(3, 4)[3] > 0);
-        assert_eq!(img.get_pixel(100, 100)[3], 0, "background stays transparent");
+        assert_eq!(
+            img.get_pixel(100, 100)[3],
+            0,
+            "background stays transparent"
+        );
 
         // The same name again suffixes instead of clobbering.
         let (_, s2) = app.pattern_save_material_into(dir.clone()).expect("saves");

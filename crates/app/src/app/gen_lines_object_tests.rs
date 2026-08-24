@@ -35,9 +35,9 @@ fn fingerprint(app: &App, li: usize) -> (usize, u64) {
             for x in 0..mn_core::tile::TILE_SIZE {
                 if t.pixel(x, y)[3] > 0 {
                     n += 1;
-                    sum = sum.wrapping_mul(0x0100_0000_01B3).wrapping_add(
-                        (ox + x as i32) as u64 * 65_537 + (oy + y as i32) as u64,
-                    );
+                    sum = sum
+                        .wrapping_mul(0x0100_0000_01B3)
+                        .wrapping_add((ox + x as i32) as u64 * 65_537 + (oy + y as i32) as u64);
                 }
             }
         }
@@ -82,6 +82,20 @@ fn a_click_near_the_ink_selects_the_run_and_activates_its_layer() {
     app.viewport.zoom = 1.0;
     let li = place_focus(&mut app, (300.0, 200.0), (300.0, 80.0));
 
+    // 2026-08-24: placements now reach past the panel/page border by
+    // default (the owner's CSP default), which fills the page with rays.
+    // This test is about the HIT TEST, so shrink the run back to the
+    // drag's reach first; the reach defaults are pinned in tests.rs.
+    let mut small = app.doc.layers[li].genlines.clone().unwrap();
+    small.d = 120.0;
+    dispatch(
+        &mut app,
+        AppCmd::GenLinesApplyTo {
+            layer: li,
+            spec: small,
+        },
+    );
+
     // A point with NO ink on it but ink close by — i.e. the paper between
     // two rays, which is most of a 集中線 and is where a real click lands.
     // Well away from the driver handles, or the handle branch of the hit
@@ -106,7 +120,8 @@ fn a_click_near_the_ink_selects_the_run_and_activates_its_layer() {
             // enough that the old single-pixel read could not have hit.
             let near = |r: i32| {
                 (-r..=r).any(|dy| {
-                    (-r..=r).any(|dx| dx * dx + dy * dy <= r * r && ink_at(&app, li, x + dx, y + dy))
+                    (-r..=r)
+                        .any(|dx| dx * dx + dy * dy <= r * r && ink_at(&app, li, x + dx, y + dy))
                 })
             };
             if near(4) && !near(2) {
@@ -154,9 +169,8 @@ fn every_handle_stays_on_the_page_for_any_drag_direction() {
     };
     let mut app = App::new(renderer, (600, 400), 1.0);
     let size = app.doc.size;
-    let page = |p: [f32; 2]| {
-        p[0] >= 0.0 && p[1] >= 0.0 && p[0] <= size.0 as f32 && p[1] <= size.1 as f32
-    };
+    let page =
+        |p: [f32; 2]| p[0] >= 0.0 && p[1] >= 0.0 && p[0] <= size.0 as f32 && p[1] <= size.1 as f32;
 
     for centre in [(560.0f32, 360.0f32), (40.0, 40.0), (300.0, 200.0)] {
         for k in 0..8 {
@@ -172,11 +186,25 @@ fn every_handle_stays_on_the_page_for_any_drag_direction() {
             }
             // The sweep moves the ANGLE, never the radius: the drag reads
             // distance from the centre, so a handle at the wrong radius
-            // would make the grab jump.
+            // would make the grab jump. That holds while the ring FITS —
+            // but the 2026-08-24 reach defaults can exceed the
+            // centre-to-farthest-corner distance, where no angle of the
+            // ring is on the paper at all and the handle falls back to
+            // the ray (on-page, grabbable; a drag re-sets d). There only
+            // the on-page assert above applies.
+            let far = [
+                [0.0, 0.0],
+                [size.0 as f32, 0.0],
+                [0.0, size.1 as f32],
+                [size.0 as f32, size.1 as f32],
+            ]
+            .iter()
+            .map(|c| (c[0] - spec.a).hypot(c[1] - spec.b))
+            .fold(0.0f32, f32::max);
             for (mode, p) in gen_handle_points(&spec, size) {
                 let want = match mode {
                     crate::app::canvas_input::GenDragMode::RIn => spec.c,
-                    crate::app::canvas_input::GenDragMode::ROut => spec.d,
+                    crate::app::canvas_input::GenDragMode::ROut if spec.d <= far => spec.d,
                     _ => continue,
                 };
                 let r = (p[0] - spec.a).hypot(p[1] - spec.b);
@@ -242,9 +270,6 @@ fn apply_to_regenerates_the_selected_run() {
     // A layer that was never generated refuses, rather than inventing a
     // spec for it.
     let plain = app.doc.add_layer("plain");
-    dispatch(
-        &mut app,
-        AppCmd::GenLinesApplyTo { layer: plain, spec },
-    );
+    dispatch(&mut app, AppCmd::GenLinesApplyTo { layer: plain, spec });
     assert_eq!(app.doc.layers[plain].genlines, None);
 }

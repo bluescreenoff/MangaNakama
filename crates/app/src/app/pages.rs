@@ -139,7 +139,7 @@ pub enum SpreadOp {
     Split,
 }
 
-/// The New Comic dialog's working state.
+/// The New Manga dialog's working state.
 #[derive(Clone)]
 pub struct NewComicDraft {
     pub setup: PageSetup,
@@ -825,43 +825,43 @@ impl App {
         {
             let doc = arriving;
             self.adopt_page_doc(doc);
-                self.page_index = i;
-                // The page's bytes now equal the decoded doc — record its
-                // revision so an untouched stash is a no-op.
-                self.pages[i].doc_rev = self.doc.revision;
-                // A clean document stays clean across a page switch even
-                // though the decoded page carries fresh revisions.
-                if was_clean {
-                    self.saved_revision = self.doc.revision;
+            self.page_index = i;
+            // The page's bytes now equal the decoded doc — record its
+            // revision so an untouched stash is a no-op.
+            self.pages[i].doc_rev = self.doc.revision;
+            // A clean document stays clean across a page switch even
+            // though the decoded page carries fresh revisions.
+            if was_clean {
+                self.saved_revision = self.doc.revision;
+            }
+            self.renderer.invalidate();
+            self.fit_to_view();
+            self.layer_thumbs.clear();
+            // The reading order is per-page (different geometry).
+            self.renumber_frames();
+            // The Story Editor (if open) holds DECODED page copies. The
+            // page we just left has FRESH bytes now — its old entry was
+            // `None` (it was live), and the page we arrived at is live
+            // now, so its decode must go. Without this, editing a field
+            // on the just-left page re-encoded a decode from when the
+            // editor OPENED, replacing everything drawn on that page
+            // since — the same wholesale-replace hazard the tab-switch
+            // path already guards (forget_document_caches), open here
+            // through the page door.
+            if self.story_open {
+                if self.story_docs.len() != self.pages.len() {
+                    self.story_open_refresh();
+                } else {
+                    self.story_docs[old] = self.pages[old]
+                        .bytes
+                        .as_ref()
+                        .and_then(|b| mn_core::project::bytes_to_doc(b).ok());
+                    self.story_docs[i] = None;
+                    self.story_sel = None;
+                    self.story_rebuffer();
                 }
-                self.renderer.invalidate();
-                self.fit_to_view();
-                self.layer_thumbs.clear();
-                // The reading order is per-page (different geometry).
-                self.renumber_frames();
-                // The Story Editor (if open) holds DECODED page copies. The
-                // page we just left has FRESH bytes now — its old entry was
-                // `None` (it was live), and the page we arrived at is live
-                // now, so its decode must go. Without this, editing a field
-                // on the just-left page re-encoded a decode from when the
-                // editor OPENED, replacing everything drawn on that page
-                // since — the same wholesale-replace hazard the tab-switch
-                // path already guards (forget_document_caches), open here
-                // through the page door.
-                if self.story_open {
-                    if self.story_docs.len() != self.pages.len() {
-                        self.story_open_refresh();
-                    } else {
-                        self.story_docs[old] = self.pages[old]
-                            .bytes
-                            .as_ref()
-                            .and_then(|b| mn_core::project::bytes_to_doc(b).ok());
-                        self.story_docs[i] = None;
-                        self.story_sel = None;
-                        self.story_rebuffer();
-                    }
-                }
-                self.set_status(format!("page {}", i + 1));
+            }
+            self.set_status(format!("page {}", i + 1));
         }
         self.needs_redraw = true;
     }
@@ -909,7 +909,7 @@ impl App {
         self.blank_page_doc_at(w, h, after)
     }
 
-    /// Same, at an explicit size (New Comic runs before `self.doc` exists).
+    /// Same, at an explicit size (New Manga runs before `self.doc` exists).
     /// Page 1's side by the book rule.
     pub fn blank_page_doc_sized(&self, w: u32, h: u32) -> Document {
         self.blank_page_doc_at(w, h, 1)

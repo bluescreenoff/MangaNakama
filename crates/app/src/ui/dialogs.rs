@@ -1,4 +1,4 @@
-//! Modal dialogs and always-on-top windows: New Comic, Work Settings, the
+//! Modal dialogs and always-on-top windows: New Manga, Work Settings, the
 //! Sub Tool Detail wrench window, and the F1 Diagnostics HUD.
 
 use super::property::{Section, brush_sliders, prop_sections};
@@ -203,7 +203,7 @@ pub(super) fn new_doc_window(ctx: &egui::Context, app: &mut App) {
     let mut open = app.new_doc_open;
     let mut create = false;
     let mut cancel = false;
-    egui::Window::new("New Comic")
+    egui::Window::new("New Manga")
         .open(&mut open)
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, -30.0))
@@ -718,7 +718,8 @@ fn tone_curve_editor(ui: &mut egui::Ui, pts: &mut [[f32; 2]; mn_core::TONE_CURVE
     let id = ui.make_persistent_id("mn.tone_curve.drag");
     let mut drag: Option<usize> = ui.data(|d| d.get_temp(id));
 
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(SIDE, SIDE), egui::Sense::click_and_drag());
+    let (rect, resp) =
+        ui.allocate_exact_size(egui::vec2(SIDE, SIDE), egui::Sense::click_and_drag());
     let painter = ui.painter_at(rect);
     let to_px = |p: [f32; 2]| -> Pos2 {
         pos2(
@@ -1477,8 +1478,7 @@ pub(super) fn export_all_window(ctx: &egui::Context, app: &mut App) {
 
                     ui.label("File prefix");
                     ui.add(
-                        egui::TextEdit::singleline(&mut app.export_all_prefix)
-                            .desired_width(160.0),
+                        egui::TextEdit::singleline(&mut app.export_all_prefix).desired_width(160.0),
                     )
                     .on_hover_text("empty falls back to the work name");
                     ui.end_row();
@@ -1504,10 +1504,9 @@ pub(super) fn export_all_window(ctx: &egui::Context, app: &mut App) {
                     ui.end_row();
 
                     ui.label("Split spreads");
-                    ui.checkbox(&mut app.export_all_split, "")
-                        .on_hover_text(
-                            "a spread page leaves as two files — a is the half a reader meets first",
-                        );
+                    ui.checkbox(&mut app.export_all_split, "").on_hover_text(
+                        "a spread page leaves as two files — a is the half a reader meets first",
+                    );
                     ui.end_row();
 
                     ui.label("Write text to file");
@@ -1565,11 +1564,7 @@ pub(super) fn export_all_window(ctx: &egui::Context, app: &mut App) {
                                     mn_core::export::ExportCrop::TrimBleed,
                                     mn_core::export::ExportCrop::Trim,
                                 ] {
-                                    ui.selectable_value(
-                                        &mut app.export_all_crop,
-                                        c,
-                                        crop_label(c),
-                                    );
+                                    ui.selectable_value(&mut app.export_all_crop, c, crop_label(c));
                                 }
                             })
                             .response
@@ -2101,7 +2096,9 @@ pub(super) fn filter_window(ctx: &egui::Context, app: &mut App) {
                     // The one-shots have no parameters and never open this.
                     _ => {}
                 });
-            ui.weak("Applies to the active layer, inside the selection. No preview — undo to compare.");
+            ui.weak(
+                "Applies to the active layer, inside the selection. No preview — undo to compare.",
+            );
             ui.add_space(2.0);
             ui.separator();
             ui.horizontal(|ui| {
@@ -2215,7 +2212,11 @@ pub(super) fn text_styles_window(ctx: &egui::Context, app: &mut App) {
                     if fresp.secondary_clicked() {
                         s.font.clear();
                     }
-                    if ui.button("Apply").on_hover_text("save + reflow this page").clicked() {
+                    if ui
+                        .button("Apply")
+                        .on_hover_text("save + reflow this page")
+                        .clicked()
+                    {
                         apply = Some(i);
                     }
                     if ui.small_button("✕").clicked() {

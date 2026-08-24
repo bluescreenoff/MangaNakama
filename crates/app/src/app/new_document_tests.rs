@@ -116,7 +116,7 @@ fn every_page_of_a_new_comic_matches_its_book_side() {
 }
 
 /// Creating a comic remembers its preset (owner, 2026-08-23): the NEXT
-/// New Comic — including after a restart, via prefs — opens on the one
+/// New Manga — including after a restart, via prefs — opens on the one
 /// last used, not the app default. A hand-renamed/unknown setup name must
 /// NOT be written: it would silently read back as the default preset.
 #[test]

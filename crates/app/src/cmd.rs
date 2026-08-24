@@ -569,7 +569,9 @@ fn commit_transform_drag(app: &mut App, drag: crate::app::TransformDrag) {
             }
         }
         app.set_status(match (ok, masked) {
-            (true, true) if drag.paste_new_layer => "pasted onto a new layer — masked by the selection",
+            (true, true) if drag.paste_new_layer => {
+                "pasted onto a new layer — masked by the selection"
+            }
             (true, false) if drag.paste_new_layer => {
                 "pasted onto a new layer — Ctrl+T or the Object tool to adjust"
             }
@@ -580,8 +582,7 @@ fn commit_transform_drag(app: &mut App, drag: crate::app::TransformDrag) {
         if created {
             let pushed = app.doc.op_count().saturating_sub(ops_before) as usize;
             if pushed > 1 {
-                app.doc
-                    .wrap_recent("Paste", pushed.min(app.doc.undo_len()));
+                app.doc.wrap_recent("Paste", pushed.min(app.doc.undo_len()));
             }
         }
     }
@@ -1821,7 +1822,7 @@ impl CurveSensor {
 pub enum AppCmd {
     Undo,
     Redo,
-    /// Open the New Comic dialog (an egui window, not a native dialog).
+    /// Open the New Manga dialog (an egui window, not a native dialog).
     NewDoc,
     /// One-gesture tiling-pattern authoring: a square wrap-on canvas in a
     /// new tab + the Pattern Studio window (`app/pattern.rs`).
@@ -1937,7 +1938,12 @@ pub enum AppCmd {
     /// grown density, jitter, colour and handle attributes, and spelling
     /// each of them out twice is how `kind` came to be droppable by the
     /// dialog's own Apply (see `GenLinesApply`'s carry comment).
-    GenLinesPlace(mn_core::genlines::GenLinesSpec),
+    ///
+    /// The `Option<usize>` is the panel the gesture started in: `Some`
+    /// (a frame-folder index) nests the layer INSIDE it — the coverage
+    /// mask eats the protrusions past the border, the printed 集中線
+    /// look (owner, 2026-08-24). `None` = the page-level sheet.
+    GenLinesPlace(mn_core::genlines::GenLinesSpec, Option<usize>),
     /// The Tool Property editor's commit for an ALREADY PLACED run: the
     /// selected layer's own spec, regenerated in place. Unlike
     /// `GenLinesApply` it names its layer instead of keying on the active
@@ -2058,7 +2064,9 @@ pub enum AppCmd {
     BatchExportPngs,
     BatchExportPngsPath(PathBuf),
     /// Delete the Object tool's selected recorded stroke (Del).
-    VectorDelete { stroke: usize },
+    VectorDelete {
+        stroke: usize,
+    },
     /// New empty folder above the active layer (CSP layer-palette button).
     AddFolder,
     /// Expand/collapse a folder row in the Layers palette.
@@ -2640,11 +2648,7 @@ pub fn default_export_stem(app: &App) -> String {
 /// wide as a normal page. The flag is a session flag on the page entry
 /// and does NOT survive a reload, so the width test is what keeps a
 /// reopened work splitting correctly.
-pub(crate) fn is_spread_page(
-    d: &mn_core::Document,
-    flagged: bool,
-    normal_w: Option<u32>,
-) -> bool {
+pub(crate) fn is_spread_page(d: &mn_core::Document, flagged: bool, normal_w: Option<u32>) -> bool {
     flagged || normal_w.is_some_and(|w| w > 0 && d.size.0 as f32 >= w as f32 * 1.5)
 }
 
@@ -2698,28 +2702,52 @@ fn resync_rulers(app: &mut App, before: &mn_core::Rulers) {
 /// Shared by the dialog's Generate and by the Materials bank's generator
 /// materials, which is the point: a `.gen.json` material places the same
 /// live, Object-tool-editable layer, never a decoded bitmap.
-fn genlines_new_layer(app: &mut App, spec: mn_core::genlines::GenLinesSpec) -> Option<&'static str> {
+fn genlines_new_layer(
+    app: &mut App,
+    spec: mn_core::genlines::GenLinesSpec,
+    nest: Option<usize>,
+) -> Option<&'static str> {
     let tiles = spec.render(app.doc.size);
     if tiles.is_empty() {
         return None;
     }
     let name = spec.layer_name();
-    // Never SEALED inside a frame folder. `add_layer` inserts above the
-    // active layer at its depth, and a frame folder leaves its draw layer
-    // active — so the generated layer used to land inside the folder, where
-    // the panel coverage mask clipped it. A burst drawn outside the panel
-    // window then vanished completely: a layer in the palette, nothing on
-    // the page (owner repro 2026-08-22, Figure ▸ Saturated line). The
-    // placing gesture skips the frame-layer guard on purpose — "these never
-    // ink the active layer" (canvas_input.rs) — which is exactly why the
-    // destination has to be chosen here. CSP's call too: effect lines are a
-    // page-level sheet you clip DOWN into a panel deliberately, not an
-    // accident of which draw layer happened to be selected. The loop climbs
-    // out of nested frame folders; `add_layer_above` still hops clip runs.
-    let mut anchor = app.doc.active;
-    while let Some(f) = app.doc.enclosing_frame_folder(anchor) {
-        anchor = f;
-    }
+    // Destination, two rules. (1) A gesture that STARTS inside a panel
+    // places the layer INSIDE that panel's folder — the coverage mask
+    // eats the protrusions past the border, which is the whole look of
+    // printed 集中線 (owner, 2026-08-24: "they all make it to the panel
+    // border, though the protrusions are not seen"). Deliberate, keyed
+    // on the gesture — not on whichever layer happened to be selected.
+    // (2) Everything else stays a page-level sheet, never SEALED inside
+    // a frame folder by accident: `add_layer` inserts above the active
+    // layer at its depth, and a frame folder leaves its draw layer
+    // active — a burst drawn outside the panel window used to vanish
+    // completely, a layer in the palette and nothing on the page (owner
+    // repro 2026-08-22, Figure ▸ Saturated line). The loop climbs out of
+    // nested frame folders; `add_layer_above` still hops clip runs.
+    // (A folder with no children left cannot be nested into — inserting
+    // "above the last child" would land OUTSIDE it; fall back to the
+    // sheet rather than guess.)
+    let anchor = match nest.filter(|&f| {
+        app.doc
+            .layers
+            .get(f)
+            .is_some_and(|l| l.folder && l.is_frame())
+            && app.doc.block_range(f).len() > 1
+    }) {
+        // The block is [children…, header] — the header is the LAST
+        // entry. Anchoring on `end - 1` (the header) inserts BELOW the
+        // folder at its own depth; `end - 2` is the last child, and
+        // inserting above it lands INSIDE, over the panel's art.
+        Some(f) => app.doc.block_range(f).end - 2,
+        None => {
+            let mut anchor = app.doc.active;
+            while let Some(f) = app.doc.enclosing_frame_folder(anchor) {
+                anchor = f;
+            }
+            anchor
+        }
+    };
     app.doc.add_layer_above(anchor, name);
     app.doc.layers[app.doc.active].genlines = Some(spec);
     app.doc.begin_op();
@@ -3115,19 +3143,17 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 }
                 return;
             }
-            match genlines_new_layer(app, spec) {
+            match genlines_new_layer(app, spec, None) {
                 Some(name) => app.set_status(format!("{name} generated — {count} lines")),
                 None => app.set_status("generator produced nothing — widen the parameters"),
             }
         }
-        AppCmd::GenLinesPlace(spec) => {
-            match genlines_new_layer(app, spec) {
-                Some(name) => app.set_status(format!(
-                    "{name} placed — the Object tool's handles (or Layer ▸ effect lines) adjust it"
-                )),
-                None => app.set_status("no lines landed on the canvas — drag further out"),
-            }
-        }
+        AppCmd::GenLinesPlace(spec, nest) => match genlines_new_layer(app, spec, nest) {
+            Some(name) => app.set_status(format!(
+                "{name} placed — the Object tool's handles (or Layer ▸ effect lines) adjust it"
+            )),
+            None => app.set_status("no lines landed on the canvas — drag further out"),
+        },
         AppCmd::GenLinesApplyTo { layer, spec } => {
             // Spec-on-success, exactly like the dialog's Apply: a regen
             // that renders nothing leaves BOTH halves alone, so the
@@ -3210,10 +3236,12 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             app.push_doc_slot();
             let d = app.new_doc_draft.clone();
             // Remember the preset actually used (owner, 2026-08-23): the next
-            // New Comic opens on it. Only a known preset name is written —
+            // New Manga opens on it. Only a known preset name is written —
             // hand-tweaked paper values keep the name they started from, and
             // an unknown name would just fall back to the default on read.
-            if mn_core::PageSetup::presets().iter().any(|p| p.name == d.setup.name)
+            if mn_core::PageSetup::presets()
+                .iter()
+                .any(|p| p.name == d.setup.name)
                 && app.prefs.new_preset != d.setup.name
             {
                 app.prefs.new_preset = d.setup.name.clone();
@@ -3262,7 +3290,10 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
         AppCmd::SelectPage(i) => app.switch_page(i),
         AppCmd::OpenPageInPane(i) => {
             crate::ui::dock::open_page_pane(app, i);
-            app.set_status(format!("page {} opened in a pane — click it to edit", i + 1));
+            app.set_status(format!(
+                "page {} opened in a pane — click it to edit",
+                i + 1
+            ));
         }
         // PM-021/022: navigation with end-of-chapter guards — switching
         // itself goes through switch_page (stash + decode + fit).
@@ -3425,17 +3456,13 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                     app.pages[t].bytes.clone()
                 });
             let from_template = seed.is_some();
-            let blank =
-                seed.or_else(|| mn_core::project::doc_to_bytes(&app.blank_page_doc()).ok());
+            let blank = seed.or_else(|| mn_core::project::doc_to_bytes(&app.blank_page_doc()).ok());
             let at = app.page_index + 1;
             let e = app.fresh_page(blank, None);
             app.pages.insert(at, e);
             app.mark_pages_dirty();
             if from_template {
-                app.set_status(format!(
-                    "page {} added from the template page",
-                    at + 1
-                ));
+                app.set_status(format!("page {} added from the template page", at + 1));
             } else {
                 app.set_status(format!("page {} added", at + 1));
             }
@@ -4855,16 +4882,27 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
         }
 
         AppCmd::TextStyleUpsert(style) => {
-            match app.doc.text_styles.iter_mut().find(|s| s.name == style.name) {
+            match app
+                .doc
+                .text_styles
+                .iter_mut()
+                .find(|s| s.name == style.name)
+            {
                 Some(s) => *s = style.clone(),
                 None => app.doc.text_styles.push(style.clone()),
             }
             let n = app.apply_text_style_current(&style);
             app.doc.touch();
             app.set_status(if n > 0 {
-                format!("style \"{}\": {n} text(s) on this page restyled", style.name)
+                format!(
+                    "style \"{}\": {n} text(s) on this page restyled",
+                    style.name
+                )
             } else {
-                format!("style \"{}\" saved — no text on this page uses it yet", style.name)
+                format!(
+                    "style \"{}\" saved — no text on this page uses it yet",
+                    style.name
+                )
             });
             app.mark_dirty();
         }
@@ -4880,7 +4918,9 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                     .get(li)
                     .and_then(|l| l.texts())
                     .is_some_and(|ts| {
-                        ts.texts.iter().any(|t| t.style.as_deref() == Some(name.as_str()))
+                        ts.texts
+                            .iter()
+                            .any(|t| t.style.as_deref() == Some(name.as_str()))
                     });
                 if !hit {
                     continue;
@@ -5258,7 +5298,7 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                     (spec.a, spec.b) = genlines_aim_point(app);
                 }
                 app.material_note_use(&path);
-                match genlines_new_layer(app, spec) {
+                match genlines_new_layer(app, spec, None) {
                     Some(name) => app.set_status(format!(
                         "{name} placed live — the Object tool edits the handles"
                     )),
@@ -5428,13 +5468,7 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 .as_ref()
                 .map(|tg| format!(" into {}", tg.label))
                 .unwrap_or_default();
-            open_float_aimed_sized(
-                app,
-                src,
-                target.as_ref(),
-                size,
-                order,
-            );
+            open_float_aimed_sized(app, src, target.as_ref(), size, order);
             app.set_status(format!(
                 "material {} pasted{n}{t}{into} — drag to move, Enter to commit",
                 path.file_stem()
@@ -6935,8 +6969,12 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             app.refresh_tones();
             let color = app.active_color();
             let opts = app.fill_opts;
-            let (n, auto) =
-                mn_core::fill::bucket_fill_measured(&mut app.doc, (x as i32, y as i32), color, &opts);
+            let (n, auto) = mn_core::fill::bucket_fill_measured(
+                &mut app.doc,
+                (x as i32, y as i32),
+                color,
+                &opts,
+            );
             if opts.auto {
                 app.fill_auto = auto;
             }
@@ -7162,7 +7200,8 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
     // a recorded sequence reads in execution order.
     if let (Some(idx), Some(step)) = (app.action_recording, rec_step) {
         if let Some(a) = app.actions.get_mut(idx) {
-            a.steps.push(crate::app::actions::StepRow { step, on: true });
+            a.steps
+                .push(crate::app::actions::StepRow { step, on: true });
             app.actions_save();
             app.mark_dirty();
         }

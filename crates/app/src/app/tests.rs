@@ -277,7 +277,10 @@ fn brush_size_survives_a_relaunch_for_the_sub_tools_that_moved() {
     };
     let other = other.clone();
     crate::cmd::dispatch(&mut app, AppCmd::SelectBrush(other.clone()));
-    if app.selected_preset.is_some_and(|j| app.presets[j].1 == other) {
+    if app
+        .selected_preset
+        .is_some_and(|j| app.presets[j].1 == other)
+    {
         assert!(
             !app.layout
                 .sub_tool_size_px
@@ -1056,7 +1059,10 @@ fn gpu_dab_parity_wash_smudge() {
             .collect()
     };
     let (cpu, gpu) = (collect(0), collect(gpu_layer));
-    assert!(!cpu.is_empty(), "the CPU wash+smudge stroke painted nothing");
+    assert!(
+        !cpu.is_empty(),
+        "the CPU wash+smudge stroke painted nothing"
+    );
     assert_eq!(
         cpu.keys().collect::<Vec<_>>(),
         gpu.keys().collect::<Vec<_>>(),
@@ -1273,7 +1279,11 @@ fn cut_paste_round_trips_the_selection() {
         [1000, 2000, 3000, 32767],
         "the paste restores the cut pixels exactly"
     );
-    assert_eq!(px(&app, 152, 195), [0, 0, 0, 0], "the blob outside the cut never rode the clipboard");
+    assert_eq!(
+        px(&app, 152, 195),
+        [0, 0, 0, 0],
+        "the blob outside the cut never rode the clipboard"
+    );
 }
 
 /// DECISIONS 8.73: Cut through a FEATHERED selection (SE-007 blur)
@@ -1545,7 +1555,11 @@ fn paste_keeps_the_original_on_its_own_layer() {
     // And one undo removes the paste (layer and stamp wrapped), restoring
     // the exact original stack.
     assert!(app.doc.undo());
-    assert_eq!(app.doc.layers.len(), layers_before, "one undo = just the paste gone");
+    assert_eq!(
+        app.doc.layers.len(),
+        layers_before,
+        "one undo = just the paste gone"
+    );
     assert_eq!(
         app.doc
             .active_layer()
@@ -1598,7 +1612,10 @@ fn paste_to_shown_position_centres_the_new_layer() {
     let (ox, oy, ow, oh) = tight_ink(&app.doc.layers[0]).expect("source ink");
 
     crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::PasteShown);
-    assert!(app.transform_drag.is_none(), "the paste committed — no float");
+    assert!(
+        app.transform_drag.is_none(),
+        "the paste committed — no float"
+    );
     let pasted = app
         .doc
         .layers
@@ -1609,13 +1626,9 @@ fn paste_to_shown_position_centres_the_new_layer() {
         .unwrap_or_else(|| panic!("ink landed — status {:?}", app.status));
     // Region centre [120,190,140,200] lands exactly at c; the ink follows
     // with the same offset it had inside the region.
-    let d = (
-        c.0 - (120.0 + 140.0) * 0.5,
-        c.1 - (190.0 + 200.0) * 0.5,
-    );
+    let d = (c.0 - (120.0 + 140.0) * 0.5, c.1 - (190.0 + 200.0) * 0.5);
     assert!(
-        (bx as f32 - (ox as f32 + d.0)).abs() < 1.0
-            && (by as f32 - (oy as f32 + d.1)).abs() < 1.0,
+        (bx as f32 - (ox as f32 + d.0)).abs() < 1.0 && (by as f32 - (oy as f32 + d.1)).abs() < 1.0,
         "ink origin ({bx},{by}) vs expected ({}, {})",
         ox as f32 + d.0,
         oy as f32 + d.1
@@ -2033,14 +2046,19 @@ fn generator_material_places_live_effect_lines_in_one_undo_press() {
         .iter()
         .find(|m| m.name == "focus-lines")
         .expect("the focus-lines generator ships");
-    assert!(focus.is_generator(), "it scans as a generator, not a bitmap");
+    assert!(
+        focus.is_generator(),
+        "it scans as a generator, not a bitmap"
+    );
     assert_eq!(
         focus.thumb_path().file_name().unwrap(),
         "focus-lines.png",
         "the shipped PNG is its thumbnail"
     );
     assert!(
-        !app.materials.iter().any(|m| m.name == "speed-lines" && !m.is_generator()),
+        !app.materials
+            .iter()
+            .any(|m| m.name == "speed-lines" && !m.is_generator()),
         "the shipped effect-line PNGs must not also scan as bitmap materials"
     );
     let path = focus.path.clone();
@@ -2420,7 +2438,10 @@ fn text_style_edit_reflows_the_page_as_one_undo() {
     };
     let before = snapshot(&app);
     assert_eq!(
-        before.iter().filter(|(_, s)| s.as_deref() == Some("Dialogue")).count(),
+        before
+            .iter()
+            .filter(|(_, s)| s.as_deref() == Some("Dialogue"))
+            .count(),
         2,
         "two texts follow the style: {before:?}"
     );
@@ -4717,7 +4738,11 @@ fn a_materials_own_paste_tags_override_the_globals() {
         image::ExtendedColorType::Rgba8,
     )
     .unwrap();
-    std::fs::write(tmp.join(crate::app::materials::TAGS_FILE), "grass.png=@tile\n").unwrap();
+    std::fs::write(
+        tmp.join(crate::app::materials::TAGS_FILE),
+        "grass.png=@tile\n",
+    )
+    .unwrap();
     app.material_folders.push(tmp.clone());
     app.materials_scan();
     app.material_tile = false; // the global says no tiling
@@ -4743,12 +4768,12 @@ fn a_materials_own_paste_tags_override_the_globals() {
     app.material_set_tags(&path, "");
     crate::cmd::dispatch(
         &mut app,
-        crate::cmd::AppCmd::PasteMaterial {
-            path,
-            tile: false,
-        },
+        crate::cmd::AppCmd::PasteMaterial { path, tile: false },
     );
-    let drag = app.transform_drag.as_ref().expect("the second paste opened");
+    let drag = app
+        .transform_drag
+        .as_ref()
+        .expect("the second paste opened");
     assert_eq!(
         drag.source.rect[2] - drag.source.rect[0],
         4,
@@ -4792,8 +4817,7 @@ fn user_tag_edits_preserve_the_paste_tags() {
     );
     let m = app.materials.iter().find(|m| m.name == "grass").unwrap();
     assert_eq!(
-        m.tags,
-        "@type=pattern, @tile, @size=fit, grass, green",
+        m.tags, "@type=pattern, @tile, @size=fit, grass, green",
         "every system tag survived the user edit"
     );
     let _ = std::fs::remove_dir_all(&tmp);
@@ -4804,7 +4828,8 @@ fn user_tag_edits_preserve_the_paste_tags() {
 /// search box matches tags; and a rescan re-reads the sidecar, so tags on
 /// materials the OWNER added (or hand-wrote entries for) survive it.
 #[test]
-fn material_tags_sidecar_search_and_rescan() {    let Some(renderer) = headless_renderer() else {
+fn material_tags_sidecar_search_and_rescan() {
+    let Some(renderer) = headless_renderer() else {
         return;
     };
     let mut app = App::new(renderer, (600, 400), 1.0);
@@ -4950,8 +4975,10 @@ fn material_tags_sidecar_search_and_rescan() {    let Some(renderer) = headless_
         "only the system tags and the comment are left: {body}"
     );
     assert!(
-        app.materials.iter().all(|m| m.path.parent() != Some(tmp.as_path())
-            || crate::app::materials::MaterialType::user_tags(&m.tags).is_empty()),
+        app.materials
+            .iter()
+            .all(|m| m.path.parent() != Some(tmp.as_path())
+                || crate::app::materials::MaterialType::user_tags(&m.tags).is_empty()),
         "no USER tags remain on anything"
     );
 
@@ -7617,7 +7644,10 @@ fn paste_into_owning_folder_lands_on_its_own_layer_inside_it() {
     app.clipboard = Some(clip_blob([0, 0]));
 
     crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::Paste);
-    assert!(app.transform_drag.is_none(), "the paste committed — no float");
+    assert!(
+        app.transform_drag.is_none(),
+        "the paste committed — no float"
+    );
     assert_eq!(app.doc.layers.len(), before + 1, "the paste made a layer");
     let pasted = app
         .doc
@@ -7639,8 +7669,14 @@ fn paste_into_owning_folder_lands_on_its_own_layer_inside_it() {
     // Centred on the panel.
     let (bx, by, bw, bh) = tight_ink(&app.doc.layers[pasted]).expect("ink landed");
     let centre = (bx as f32 + bw as f32 * 0.5, by as f32 + bh as f32 * 0.5);
-    assert!((centre.0 - 192.0).abs() < 2.0, "centred on panel x, got {centre:?}");
-    assert!((centre.1 - 232.0).abs() < 2.0, "centred on panel y, got {centre:?}");
+    assert!(
+        (centre.0 - 192.0).abs() < 2.0,
+        "centred on panel x, got {centre:?}"
+    );
+    assert!(
+        (centre.1 - 232.0).abs() < 2.0,
+        "centred on panel y, got {centre:?}"
+    );
     // The draw layer the owner is inking on is untouched.
     assert_eq!(
         app.doc.layers[draw]
@@ -7758,7 +7794,10 @@ fn paste_into_a_selection_masks_the_new_layer() {
         "the selection became the layer mask (coverage {inside:?} / {outside:?})"
     );
     assert!(
-        app.doc.layers[pasted].mask.as_ref().is_some_and(|m| m.enabled),
+        app.doc.layers[pasted]
+            .mask
+            .as_ref()
+            .is_some_and(|m| m.enabled),
         "the mask is enabled"
     );
     assert!(
@@ -7766,7 +7805,10 @@ fn paste_into_a_selection_masks_the_new_layer() {
         "the status says it was masked, got {:?}",
         app.status
     );
-    assert!(app.doc.selection.is_some(), "the selection survives a paste");
+    assert!(
+        app.doc.selection.is_some(),
+        "the selection survives a paste"
+    );
     let n = app.doc.layers.len();
     assert!(app.doc.undo());
     assert_eq!(app.doc.layers.len(), n - 1, "one undo takes the paste back");
@@ -7828,11 +7870,16 @@ fn paste_into_a_selection_masks_a_created_layer() {
     let (x0, x1) = (b[0][0], b[2][0]);
     let mid = ((x0 + x1) * 0.5).round();
     let row = ((b[0][1] + b[2][1]) * 0.5).round() as i32;
-    app.doc.selection = Some(mn_core::Selection::from_rect(&app.doc, 0.0, 0.0, mid, 400.0));
+    app.doc.selection = Some(mn_core::Selection::from_rect(
+        &app.doc, 0.0, 0.0, mid, 400.0,
+    ));
     crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::TransformCommit);
 
     let li = app.doc.active;
-    assert_eq!(app.doc.layers[li].name, "Pasted", "the paste made its layer");
+    assert_eq!(
+        app.doc.layers[li].name, "Pasted",
+        "the paste made its layer"
+    );
     let at = |x: i32, y: i32| -> (u16, u16) {
         let ti = TileIdx::of_pixel(x, y);
         let (lx, ly) = ((x - ti.origin().0) as usize, (y - ti.origin().1) as usize);
@@ -7858,7 +7905,10 @@ fn paste_into_a_selection_masks_a_created_layer() {
         outside.0 > 0,
         "non-destructive: the hidden pixels are still on the layer"
     );
-    assert!(app.doc.selection.is_some(), "the selection survives a paste");
+    assert!(
+        app.doc.selection.is_some(),
+        "the selection survives a paste"
+    );
     // Three entries: the setup's frame folder and "rough" layer (structural
     // adds record now), then ONE wrapped "Paste" step for the layer-create
     // + stamp pair.
@@ -7889,25 +7939,37 @@ fn object_press_on_ink_lifts_the_layer_into_a_drag() {
     // A blank layer below, lineart above with ink at (100,100).
     let _blank = app.doc.add_layer("blank below");
     let idx = TileIdx::of_pixel(100, 100);
-    app.doc
-        .active_layer_mut()
-        .tile_mut(idx)
-        .set_pixel((100 - idx.origin().0) as usize, (100 - idx.origin().1) as usize, [1, 2, 3, 32767]);
+    app.doc.active_layer_mut().tile_mut(idx).set_pixel(
+        (100 - idx.origin().0) as usize,
+        (100 - idx.origin().1) as usize,
+        [1, 2, 3, 32767],
+    );
     let lineart = app.doc.active;
 
     app.tool = Tool::Object;
     app.object_hit(100.0, 100.0);
-    assert_eq!(app.doc.active, lineart, "grabbing the ink selects its layer");
-    let drag = app.transform_drag.as_ref().expect("the ink lifted into the float");
+    assert_eq!(
+        app.doc.active, lineart,
+        "grabbing the ink selects its layer"
+    );
+    let drag = app
+        .transform_drag
+        .as_ref()
+        .expect("the ink lifted into the float");
     assert!(drag.clear_source, "a lift off the layer, not a paste");
     assert!(
-        drag.gesture.as_ref().is_some_and(|g| g.grab == crate::app::TransformGrab::Move),
+        drag.gesture
+            .as_ref()
+            .is_some_and(|g| g.grab == crate::app::TransformGrab::Move),
         "the move gesture is armed — the press IS the drag"
     );
 
     // Move and commit: the ink follows, in ONE undo step.
     let (ox, oy, ow, oh) = tight_ink(&app.doc.layers[lineart]).expect("source ink");
-    app.transform_drag.as_mut().unwrap().set_params(1.0, 1.0, 0.0, 30.0, 0.0);
+    app.transform_drag
+        .as_mut()
+        .unwrap()
+        .set_params(1.0, 1.0, 0.0, 30.0, 0.0);
     crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::TransformCommit);
     let moved = tight_ink(&app.doc.layers[lineart]).expect("ink after move");
     assert_eq!((moved.2, moved.3), (ow, oh), "same ink, moved");
@@ -7926,10 +7988,11 @@ fn an_object_ink_move_commits_on_release() {
     };
     let mut app = App::new(renderer, (600, 400), 1.0);
     let idx = TileIdx::of_pixel(100, 100);
-    app.doc
-        .active_layer_mut()
-        .tile_mut(idx)
-        .set_pixel((100 - idx.origin().0) as usize, (100 - idx.origin().1) as usize, [1, 2, 3, 32767]);
+    app.doc.active_layer_mut().tile_mut(idx).set_pixel(
+        (100 - idx.origin().0) as usize,
+        (100 - idx.origin().1) as usize,
+        [1, 2, 3, 32767],
+    );
     let lineart = app.doc.active;
     let (ox, _oy, ow, oh) = tight_ink(&app.doc.layers[lineart]).expect("ink");
 
@@ -7972,20 +8035,27 @@ fn a_layer_click_mid_float_bakes_it_on_its_own_layer() {
     let mut app = App::new(renderer, (600, 400), 1.0);
     let _blank = app.doc.add_layer("blank below");
     let idx = TileIdx::of_pixel(100, 100);
-    app.doc
-        .active_layer_mut()
-        .tile_mut(idx)
-        .set_pixel((100 - idx.origin().0) as usize, (100 - idx.origin().1) as usize, [1, 2, 3, 32767]);
+    app.doc.active_layer_mut().tile_mut(idx).set_pixel(
+        (100 - idx.origin().0) as usize,
+        (100 - idx.origin().1) as usize,
+        [1, 2, 3, 32767],
+    );
     let lifted = app.doc.active;
     let (ox, _oy, ow, _oh) = tight_ink(&app.doc.layers[lifted]).expect("ink");
 
     // Ctrl+T lift, drag, then click the OTHER layer in the palette.
     crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::TransformStart);
     assert!(app.transform_drag.is_some(), "the float opened");
-    app.transform_drag.as_mut().unwrap().set_params(1.0, 1.0, 0.0, 40.0, 0.0);
+    app.transform_drag
+        .as_mut()
+        .unwrap()
+        .set_params(1.0, 1.0, 0.0, 40.0, 0.0);
     crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::SelectLayer(0));
 
-    assert!(app.transform_drag.is_none(), "the layer click baked the float");
+    assert!(
+        app.transform_drag.is_none(),
+        "the layer click baked the float"
+    );
     assert_eq!(app.doc.active, 0, "and the switch itself happened");
     let moved = tight_ink(&app.doc.layers[lifted]).expect("ink after the switch");
     assert_eq!(moved.0, ox + 40, "the move landed on the LIFTED layer");
@@ -8009,17 +8079,24 @@ fn a_page_switch_mid_float_bakes_it_on_its_own_page() {
     crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::AddPage);
     crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::SelectPage(0));
     let idx = TileIdx::of_pixel(100, 100);
-    app.doc
-        .active_layer_mut()
-        .tile_mut(idx)
-        .set_pixel((100 - idx.origin().0) as usize, (100 - idx.origin().1) as usize, [1, 2, 3, 32767]);
+    app.doc.active_layer_mut().tile_mut(idx).set_pixel(
+        (100 - idx.origin().0) as usize,
+        (100 - idx.origin().1) as usize,
+        [1, 2, 3, 32767],
+    );
     let (ox, _oy, ow, _oh) = tight_ink(app.doc.active_layer()).expect("ink");
 
     crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::TransformStart);
-    app.transform_drag.as_mut().unwrap().set_params(1.0, 1.0, 0.0, 40.0, 0.0);
+    app.transform_drag
+        .as_mut()
+        .unwrap()
+        .set_params(1.0, 1.0, 0.0, 40.0, 0.0);
     crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::SelectPage(1));
 
-    assert!(app.transform_drag.is_none(), "the page switch baked the float");
+    assert!(
+        app.transform_drag.is_none(),
+        "the page switch baked the float"
+    );
     assert_eq!(app.page_index, 1, "we are on the new page");
     let arriving = app
         .doc
@@ -8051,10 +8128,11 @@ fn transform_start_lifts_all_non_empty_space() {
     // Two distant ink spots — the lift must cover BOTH (whole-layer).
     for (cx, cy) in [(100usize, 100usize), (500usize, 300usize)] {
         let ti = TileIdx::of_pixel(cx as i32, cy as i32);
-        app.doc
-            .active_layer_mut()
-            .tile_mut(ti)
-            .set_pixel(cx - ti.origin().0 as usize, cy - ti.origin().1 as usize, [9, 9, 9, 32767]);
+        app.doc.active_layer_mut().tile_mut(ti).set_pixel(
+            cx - ti.origin().0 as usize,
+            cy - ti.origin().1 as usize,
+            [9, 9, 9, 32767],
+        );
     }
     let (ox, oy, ow, oh) = tight_ink(app.doc.active_layer()).expect("ink");
 
@@ -8076,10 +8154,16 @@ fn transform_start_lifts_all_non_empty_space() {
         "the status guides the gesture"
     );
 
-    app.transform_drag.as_mut().unwrap().set_params(1.0, 1.0, 0.0, -40.0, 25.0);
+    app.transform_drag
+        .as_mut()
+        .unwrap()
+        .set_params(1.0, 1.0, 0.0, -40.0, 25.0);
     crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::TransformCommit);
     let moved = tight_ink(app.doc.active_layer()).expect("ink after move");
-    assert_eq!((moved.0, moved.1, moved.2, moved.3), (ox - 40, oy + 25, ow, oh));
+    assert_eq!(
+        (moved.0, moved.1, moved.2, moved.3),
+        (ox - 40, oy + 25, ow, oh)
+    );
     assert!(app.doc.undo(), "one undo step for the transform");
     let undone = tight_ink(app.doc.active_layer()).expect("ink after undo");
     assert_eq!((undone.0, undone.1, undone.2, undone.3), (ox, oy, ow, oh));
@@ -8129,7 +8213,10 @@ fn oversized_paste_scales_to_fit_the_panel() {
         4096,
     ));
     crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::Paste);
-    assert!(app.transform_drag.is_none(), "the paste committed — no float");
+    assert!(
+        app.transform_drag.is_none(),
+        "the paste committed — no float"
+    );
     let pasted = app
         .doc
         .layers
@@ -8156,9 +8243,10 @@ fn figure_line_drags_place_fresh_effect_layers() {
         return;
     };
     let mut app = App::new(renderer, (600, 400), 1.0);
+    app.doc = Document::new(600, 400);
     app.tool = Tool::Figure;
 
-    // Saturated line: press = convergence point, release = reach.
+    // Saturated line: press = convergence point, release sizes the hole.
     app.figure_mode = crate::cmd::FigureMode::Focus;
     let seed0 = app.figure_focus.seed;
     let layers_before = app.doc.layers.len();
@@ -8169,21 +8257,34 @@ fn figure_line_drags_place_fresh_effect_layers() {
     let g = app.doc.active_layer().genlines.expect("spec on the layer");
     assert!(g.focus);
     assert_eq!([g.a, g.b], [300.0, 200.0], "converges on the press point");
-    assert!((g.d - 120.0).abs() < 0.01, "outer radius = drag length");
+    // CSP default (owner 2026-08-24): no panel on this page, so the
+    // reach runs past the PAGE's farthest corner — never the 120 px
+    // drag distance.
+    let far = 300.0_f32.hypot(200.0);
+    let want_d = far + (far * 0.05).max(32.0);
+    assert!((g.d - want_d).abs() < 0.5, "reaches past the page border");
     assert!(
         (g.c - 120.0 * app.figure_focus.r_in_frac).abs() < 0.5,
         "inner hole from the fraction knob"
     );
     assert!(app.doc.active_layer().tiles().count() > 0, "ink landed");
-    assert_eq!(app.figure_focus.seed, seed0 + 1, "seed bumped for the reroll");
+    assert_eq!(
+        app.figure_focus.seed,
+        seed0 + 1,
+        "seed bumped for the reroll"
+    );
 
     // A second drag while the generated layer is ACTIVE: another fresh
     // layer (the CSP behaviour), not an in-place overwrite of the first.
     app.finish_figure_drag((150.0, 150.0), (150.0, 250.0));
     drain_cmds(&mut app);
-    assert_eq!(app.doc.layers.len(), layers_before + 2, "second fresh layer");
+    assert_eq!(
+        app.doc.layers.len(),
+        layers_before + 2,
+        "second fresh layer"
+    );
 
-    // Stream line: the drag sets angle and length bracket.
+    // Stream line: the drag sets the angle; the runs cross the page.
     app.figure_mode = crate::cmd::FigureMode::Stream;
     app.finish_figure_drag((100.0, 100.0), (400.0, 100.0));
     drain_cmds(&mut app);
@@ -8191,13 +8292,70 @@ fn figure_line_drags_place_fresh_effect_layers() {
     let s = app.doc.active_layer().genlines.expect("spec on the layer");
     assert!(!s.focus);
     assert_eq!(s.a, 0.0, "rightward drag = 0 degrees");
-    assert!((s.b - 210.0).abs() < 0.01 && (s.c - 390.0).abs() < 0.01);
+    let cross = 600.0_f32.hypot(400.0) * 1.05;
+    assert!(
+        (s.b - cross).abs() < 0.5 && (s.c - cross).abs() < 0.5,
+        "every run crosses the page edge to edge"
+    );
 
     // A tiny drag refuses with guidance instead of a degenerate burst.
     let n = app.doc.layers.len();
     app.finish_figure_drag((200.0, 200.0), (203.0, 202.0));
     drain_cmds(&mut app);
     assert_eq!(app.doc.layers.len(), n, "tiny drag places nothing");
+}
+
+/// CSP default, owner 2026-08-24: lines drawn INSIDE a panel cross it —
+/// "they all make it to the panel border (though the protrusions are not
+/// seen)" — because the layer lives in the panel's folder, where the
+/// coverage mask eats the overflow. The old behaviour failed both halves:
+/// r_out = the 130 px drag, layer parked at page level.
+#[test]
+fn figure_lines_cross_the_panel_and_live_inside_it() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (1280, 800), 1.0);
+    app.doc = Document::new(2048, 2048);
+    let fs = mn_core::FrameSet::single_rect([120.0, 120.0, 900.0, 900.0], 8.0);
+    app.doc.add_frame_folder("Frame", fs);
+
+    app.tool = Tool::Figure;
+    app.figure_mode = crate::cmd::FigureMode::Focus;
+    app.finish_figure_drag((510.0, 510.0), (510.0, 380.0));
+    drain_cmds(&mut app);
+    // The folder's INDEX is captured before the insert shifts it — key
+    // off identity instead: the only frame folder in this doc.
+    let f = app
+        .doc
+        .enclosing_frame_folder(app.doc.active)
+        .expect("the burst is panel content — the folder clips the protrusions");
+    assert!(
+        app.doc.layers[f].is_frame(),
+        "inside THE frame folder, not some other group"
+    );
+    let g = app.doc.active_layer().genlines.expect("spec on the layer");
+    let far = 390.0_f32.hypot(390.0);
+    assert!(
+        g.d >= far + 32.0,
+        "the rays run past the panel's far corner (r_out {} vs {far})",
+        g.d
+    );
+
+    app.figure_mode = crate::cmd::FigureMode::Stream;
+    app.finish_figure_drag((200.0, 200.0), (700.0, 200.0));
+    drain_cmds(&mut app);
+    let f2 = app
+        .doc
+        .enclosing_frame_folder(app.doc.active)
+        .expect("the stream is panel content too");
+    assert!(app.doc.layers[f2].is_frame());
+    let s = app.doc.active_layer().genlines.expect("spec on the layer");
+    let cross = 780.0_f32.hypot(780.0) * 1.05;
+    assert!(
+        (s.b - cross).abs() < 0.5 && (s.c - cross).abs() < 0.5,
+        "every run crosses the panel edge to edge"
+    );
 }
 
 /// Owner repro 2026-08-22: Figure ▸ Saturated line on a PANELED page put a
@@ -8235,10 +8393,30 @@ fn figure_line_drags_are_visible_on_a_paneled_page() {
 
     app.tool = Tool::Figure;
     for (mode, name, a, b) in [
-        (crate::cmd::FigureMode::Focus, "Focus lines", (1500.0, 1500.0), (1500.0, 1200.0)),
-        (crate::cmd::FigureMode::Urchin, "Urchin flash", (600.0, 1600.0), (600.0, 1300.0)),
-        (crate::cmd::FigureMode::SolidFlash, "Solid flash", (1600.0, 500.0), (1600.0, 250.0)),
-        (crate::cmd::FigureMode::Stream, "Speed lines", (200.0, 1900.0), (900.0, 1900.0)),
+        (
+            crate::cmd::FigureMode::Focus,
+            "Focus lines",
+            (1500.0, 1500.0),
+            (1500.0, 1200.0),
+        ),
+        (
+            crate::cmd::FigureMode::Urchin,
+            "Urchin flash",
+            (600.0, 1600.0),
+            (600.0, 1300.0),
+        ),
+        (
+            crate::cmd::FigureMode::SolidFlash,
+            "Solid flash",
+            (1600.0, 500.0),
+            (1600.0, 250.0),
+        ),
+        (
+            crate::cmd::FigureMode::Stream,
+            "Speed lines",
+            (200.0, 1900.0),
+            (900.0, 1900.0),
+        ),
     ] {
         app.figure_mode = mode;
         app.finish_figure_drag(a, b);
@@ -8334,6 +8512,7 @@ fn figure_flash_drags_place_urchin_and_solid_layers() {
         return;
     };
     let mut app = App::new(renderer, (600, 400), 1.0);
+    app.doc = Document::new(600, 400);
     app.tool = Tool::Figure;
     // The values the "Sea urchin flash" sub tool row arms.
     app.figure_focus.count = 64;
@@ -8355,7 +8534,14 @@ fn figure_flash_drags_place_urchin_and_solid_layers() {
         assert_eq!(g.kind, kind, "{name}: the generator kind rode along");
         assert!(g.focus, "{name}: radial, so the driver handles apply");
         assert_eq!([g.a, g.b], [300.0, 200.0], "centred on the press point");
-        assert!((g.d - 140.0).abs() < 0.01, "rim = drag length");
+        // The rim crosses the page (owner default 2026-08-24), not the
+        // 140 px drag.
+        let far = 300.0_f32.hypot(200.0);
+        let want_d = far + (far * 0.05).max(32.0);
+        assert!(
+            (g.d - want_d).abs() < 0.5,
+            "{name}: rim reaches past the page border"
+        );
         assert!(
             app.doc.active_layer().tiles().count() > 0,
             "{name}: ink landed"
@@ -8588,7 +8774,10 @@ fn edge_drag_keeps_the_gutter_across_folders() {
         (fb[0] - 200.0).abs() < 0.01,
         "the sibling folder moved: {fb:?}"
     );
-    assert!((fb[2] - 240.0).abs() < 0.01, "its far border did not: {fb:?}");
+    assert!(
+        (fb[2] - 240.0).abs() < 0.01,
+        "its far border did not: {fb:?}"
+    );
 }
 
 /// "Keep gutters aligned = None" is the pre-fix behaviour on purpose: the
@@ -8703,10 +8892,13 @@ fn gutter_carry_reverts_when_the_facing_panel_would_collapse() {
         (fa[2] - 100.0).abs() < 0.01,
         "the dragged panel reverted: {fa:?}"
     );
-    assert!((fb[0] - 140.0).abs() < 0.01, "the neighbour reverted: {fb:?}");
+    assert!(
+        (fb[0] - 140.0).abs() < 0.01,
+        "the neighbour reverted: {fb:?}"
+    );
 }
 
-/// Owner report 2026-08-26: a long pause after Create in the New Comic
+/// Owner report 2026-08-26: a long pause after Create in the New Manga
 /// dialog. Timing probe at the heaviest real preset (B4 600 dpi, frame
 /// folder): the blank-page encodes dominate — this pins where the time
 /// goes so a regression shows up as a number, not a feel.
@@ -8730,7 +8922,10 @@ fn new_comic_create_timing_at_b4_600() {
     assert_eq!(app.pages.len(), 4);
     // The lazy-blank contract: creation NEVER encodes a page (one B4
     // encode is a ~40 s walk that froze the UI after Create).
-    assert!(ms < 5_000, "create took {ms} ms — a blank encode crept back in");
+    assert!(
+        ms < 5_000,
+        "create took {ms} ms — a blank encode crept back in"
+    );
     assert!(
         app.pages[1].bytes.is_none() && app.pages[1].blank.is_some(),
         "pages 2..N carry the lazy marker, not bytes"
@@ -8739,7 +8934,10 @@ fn new_comic_create_timing_at_b4_600() {
     // and switching back leaves it pristine — no encode, marker intact.
     crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::SelectPage(1));
     assert_eq!(app.page_index, 1, "the switch happened");
-    assert!(app.pages[1].blank.is_some(), "still lazily blank while live");
+    assert!(
+        app.pages[1].blank.is_some(),
+        "still lazily blank while live"
+    );
     crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::SelectPage(0));
     assert!(
         app.pages[1].bytes.is_none() && app.pages[1].blank.is_some(),
@@ -8753,16 +8951,19 @@ fn new_comic_create_timing_at_b4_600() {
 /// the layer, say so, no float.
 #[test]
 fn an_oversize_ink_grab_selects_instead_of_lifting() {
-    let Some(renderer) = headless_renderer() else { return; };
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
     let mut app = App::new(renderer, (600, 400), 1.0);
     // A 6000² page, ink in the far corners: bounds ≈ 94×94 tiles.
     app.doc = mn_core::Document::new(6000, 6000);
     for (x, y) in [(50i32, 50i32), (5900, 5900)] {
         let idx = TileIdx::of_pixel(x, y);
-        app.doc
-            .active_layer_mut()
-            .tile_mut(idx)
-            .set_pixel((x - idx.origin().0) as usize, (y - idx.origin().1) as usize, [1, 2, 3, 32767]);
+        app.doc.active_layer_mut().tile_mut(idx).set_pixel(
+            (x - idx.origin().0) as usize,
+            (y - idx.origin().1) as usize,
+            [1, 2, 3, 32767],
+        );
     }
     app.tool = Tool::Object;
     app.object_hit(50.0, 50.0);

@@ -1356,7 +1356,10 @@ mod tests {
         // always there, and a today-capture only ADDS keys.
         let j = serde_json::to_string(&comps).unwrap();
         assert!(j.contains("\"vis\""), "{j}");
-        assert!(!j.contains("opacity"), "absent stays absent on rewrite: {j}");
+        assert!(
+            !j.contains("opacity"),
+            "absent stays absent on rewrite: {j}"
+        );
         let fresh = crate::doc::LayerComp::capture("new", &doc.layers);
         let j = serde_json::to_string(&fresh).unwrap();
         assert!(
@@ -1822,10 +1825,7 @@ mod tests {
         let mut item =
             crate::text::TextItem::new([10.0, 10.0], "Gothic".into(), 12.0, [0, 0, 0], true);
         item.style = Some(doc.text_styles[0].name.clone());
-        doc.add_text_layer(
-            "Dialogue",
-            crate::text::TextSet { texts: vec![item] },
-        );
+        doc.add_text_layer("Dialogue", crate::text::TextSet { texts: vec![item] });
 
         let back = roundtrip(&doc);
         assert_eq!(back.text_styles, doc.text_styles, "styles survived");
@@ -2052,7 +2052,7 @@ mod tests {
     /// the loss belongs to derived rasters alone.
     #[test]
     fn a_decoded_frame_folder_page_activates_the_derived_header() {
-        // A New Comic page, exactly as `App::blank_page_doc_sized` seeds it.
+        // A New Manga page, exactly as `App::blank_page_doc_sized` seeds it.
         let mut doc = Document::new(256, 256);
         doc.add_frame_folder(
             "Frame 1",
@@ -2400,7 +2400,10 @@ mod tests {
             let mut z = zip::ZipArchive::new(std::io::Cursor::new(buf.get_ref().clone())).unwrap();
             let mut s = String::new();
             std::io::Read::read_to_string(&mut z.by_name("stack.xml").unwrap(), &mut s).unwrap();
-            assert!(s.contains("mnc-paper=\"#faf3e0\""), "colour on the image el");
+            assert!(
+                s.contains("mnc-paper=\"#faf3e0\""),
+                "colour on the image el"
+            );
             assert!(s.contains("mnc-paper-hidden=\"1\""), "and the eye");
         }
         let back = load_from(std::io::Cursor::new(buf.into_inner())).unwrap();

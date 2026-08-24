@@ -77,8 +77,8 @@ pub(crate) const PREF_INDEX: &[PrefMeta] = &[
     PrefMeta {
         id: "new_preset",
         tab: "Canvas & view",
-        label: "New Comic preset",
-        desc: "The page preset the New Comic dialog opens on. Creating a \
+        label: "New Manga preset",
+        desc: "The page preset the New Manga dialog opens on. Creating a \
                comic also remembers the preset it used. (paper size, B4, \
                B5, doujinshi, default preset, page setup)",
     },
@@ -202,8 +202,12 @@ fn row_label(ui: &mut egui::Ui, focus: Option<&str>, id: &'static str) {
     };
     let lit = focus == Some(m.id);
     let text = egui::RichText::new(m.label);
-    ui.label(if lit { text.color(theme::c().accent) } else { text })
-        .on_hover_text(m.desc);
+    ui.label(if lit {
+        text.color(theme::c().accent)
+    } else {
+        text
+    })
+    .on_hover_text(m.desc);
 }
 
 /// The Autosave dropdown's labels — CSP's own range, plus Off.
@@ -293,10 +297,7 @@ pub(super) fn prefs_window(ctx: &egui::Context, app: &mut App) {
                     ui.weak("no matching setting");
                 }
                 for (_, m) in hits.into_iter().take(12) {
-                    let row = ui.selectable_label(
-                        false,
-                        format!("{}   —   {}", m.label, m.tab),
-                    );
+                    let row = ui.selectable_label(false, format!("{}   —   {}", m.label, m.tab));
                     if row.on_hover_text(m.desc).clicked() {
                         app.prefs_focus = Some(m.id);
                         app.prefs_search.clear();
@@ -329,9 +330,7 @@ pub(super) fn prefs_window(ctx: &egui::Context, app: &mut App) {
                     match TABS[app.prefs_tab.min(TABS.len() - 1)] {
                         "Saving" => tab_saving(ui, app, focus, &mut fx),
                         "Drawing" => tab_drawing(ui, app, focus, &mut fx),
-                        "Canvas & view" => {
-                            tab_canvas(ui, app, focus, &preset_now, &mut fx)
-                        }
+                        "Canvas & view" => tab_canvas(ui, app, focus, &preset_now, &mut fx),
                         "Interface" => tab_interface(ui, app, focus, &mut fx),
                         "Text" => tab_text(ui, app, focus, &mut fx),
                         "History" => tab_history(ui, app, focus, &mut fx),
@@ -697,7 +696,9 @@ fn theme_editor(ui: &mut egui::Ui, p: &mut crate::app::Prefs, fx: &mut Fx) {
                 && !theme::BUILT_INS.iter().any(|(b, _)| *b == name);
             if ui
                 .add_enabled(ok, egui::Button::new("Save as…"))
-                .on_disabled_hover_text("a name without path separators; built-in names are reserved")
+                .on_disabled_hover_text(
+                    "a name without path separators; built-in names are reserved",
+                )
                 .clicked()
                 && let Some(dir) = theme::themes_dir()
                 && theme::save_custom(&dir, &name, &theme::c())
@@ -791,7 +792,12 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         for m in PREF_INDEX {
             assert!(seen.insert(m.id), "duplicate id {}", m.id);
-            assert!(TABS.contains(&m.tab), "{} names unknown tab {}", m.id, m.tab);
+            assert!(
+                TABS.contains(&m.tab),
+                "{} names unknown tab {}",
+                m.id,
+                m.tab
+            );
             assert!(
                 m.desc.trim_end().ends_with(')'),
                 "{}'s description must end in (catch, terms)",
@@ -800,10 +806,7 @@ mod tests {
         }
         // Every tab has at least one row (Performance's is the info row).
         for t in TABS {
-            assert!(
-                PREF_INDEX.iter().any(|m| m.tab == t),
-                "tab {t} has no rows"
-            );
+            assert!(PREF_INDEX.iter().any(|m| m.tab == t), "tab {t} has no rows");
         }
     }
 
@@ -814,9 +817,7 @@ mod tests {
         let hit = |q: &str| {
             PREF_INDEX
                 .iter()
-                .find(|m| {
-                    m.label.to_lowercase().contains(q) || m.desc.to_lowercase().contains(q)
-                })
+                .find(|m| m.label.to_lowercase().contains(q) || m.desc.to_lowercase().contains(q))
                 .map(|m| m.id)
         };
         assert_eq!(hit("text too small"), Some("ui_scale"));
