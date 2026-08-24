@@ -10,6 +10,12 @@ use mn_core::{Document, PageSetup, ResizeAnchor};
 /// (`mn_core::project` currency) plus a thumbnail for the Pages panel.
 pub struct PageEntry {
     pub bytes: Option<Vec<u8>>,
+    /// LAZY BLANK (owner freeze report 2026-08-26): a page that is still
+    /// the work's own untouched template — (w, h, 1-based page number, for
+    /// the book side). Never encoded until it must be (a folder save); a
+    /// switch to it materializes the blank DOC directly, which is a
+    /// build, not a 40-second ORA walk of a B4 page.
+    pub blank: Option<(u32, u32, usize)>,
     pub thumb: Option<egui::TextureHandle>,
     /// Stable RUNTIME identity — this page, for as long as the session
     /// holds it, whatever index it drifts to. Caches key on it instead of
@@ -81,6 +87,7 @@ impl PageEntry {
     pub fn active() -> Self {
         Self {
             bytes: None,
+            blank: None,
             thumb: None,
             uid: Self::next_uid(),
             id: 0,
@@ -257,6 +264,7 @@ impl App {
         let rev = self.page_rev_next();
         PageEntry {
             bytes,
+            blank: None,
             thumb,
             uid: PageEntry::next_uid(),
             id: 0,
@@ -400,7 +408,17 @@ impl App {
                     rev: e.rev,
                     saved_rev: e.saved_rev,
                     exported_rev: e.exported_rev,
-                    bytes: e.bytes.clone().unwrap_or_default(),
+                    // A still-blank template page materializes HERE — the
+                    // one place bytes are truly required (the save). This
+                    // is the lazy-blank design's single deliberate cost.
+                    bytes: match (&e.bytes, e.blank) {
+                        (Some(b), _) => b.clone(),
+                        (None, Some((bw, bh, n))) => {
+                            let doc = self.blank_page_doc_at(bw, bh, n);
+                            mn_core::project::doc_to_bytes(&doc).unwrap_or_default()
+                        }
+                        (None, None) => Vec::new(),
+                    },
                 })
                 .collect(),
         };
@@ -631,7 +649,10 @@ impl App {
         self.commit_text_edit();
         let i = self.page_index;
         let changed = self.pages[i].doc_rev != self.doc.revision;
-        if !changed && self.pages[i].bytes.is_some() {
+        // A lazy-blank page that was never touched stashes to NOTHING: its
+        // template marker still describes it exactly (and encoding a B4
+        // blank is the 40-second walk this marker exists to avoid).
+        if !changed && (self.pages[i].bytes.is_some() || self.pages[i].blank.is_some()) {
             return Ok(());
         }
         // Owner preview tier: the sharp preview rides the page bytes
@@ -646,6 +667,8 @@ impl App {
         let e = &mut self.pages[i];
         e.bytes = Some(bytes);
         e.thumb = Some(thumb);
+        // It has real content now — the template marker is spent.
+        e.blank = None;
         if changed {
             e.rev = rev;
             e.doc_rev = self.doc.revision;
@@ -688,6 +711,21 @@ impl App {
         for i in 0..self.pages.len() {
             if i == self.page_index {
                 continue; // the live document already took it
+            }
+            // A still-LAZY blank never encodes for this: resizing a blank
+            // page is re-marking its template size, which keeps the whole
+            // point of the marker (no ORA walk for untouched pages).
+            if self.pages[i].bytes.is_none() && self.pages[i].blank.is_some() {
+                let spread = self.pages[i].spread;
+                let target = if spread {
+                    (w.saturating_mul(2).max(1), h)
+                } else {
+                    (w, h)
+                };
+                let n = self.pages[i].blank.unwrap().2;
+                self.pages[i].blank = Some((target.0, target.1, n));
+                done += 1;
+                continue;
             }
             let Some(bytes) = self.pages[i].bytes.as_deref() else {
                 failed += 1;
@@ -765,13 +803,28 @@ impl App {
             self.set_error(format!("page stash failed: {e}"));
             return;
         }
-        let Some(bytes) = self.pages[i].bytes.take() else {
-            self.set_error(format!("page {} has no data", i + 1));
-            return;
+        // The arriving doc: decoded bytes, or a still-blank template page
+        // MATERIALIZED directly (the lazy-blank path — a build, not a
+        // decode, and nothing was ever encoded for it).
+        let arriving = match self.pages[i].bytes.take() {
+            Some(bytes) => match mn_core::project::bytes_to_doc(&bytes) {
+                Ok(doc) => doc,
+                Err(e) => {
+                    self.set_error(format!("page {} failed to decode: {e}", i + 1));
+                    return;
+                }
+            },
+            None => match self.pages[i].blank {
+                Some((bw, bh, n)) => self.blank_page_doc_at(bw, bh, n),
+                None => {
+                    self.set_error(format!("page {} has no data", i + 1));
+                    return;
+                }
+            },
         };
-        match mn_core::project::bytes_to_doc(&bytes) {
-            Ok(doc) => {
-                self.adopt_page_doc(doc);
+        {
+            let doc = arriving;
+            self.adopt_page_doc(doc);
                 self.page_index = i;
                 // The page's bytes now equal the decoded doc — record its
                 // revision so an untouched stash is a no-op.
@@ -809,12 +862,6 @@ impl App {
                     }
                 }
                 self.set_status(format!("page {}", i + 1));
-            }
-            Err(e) => {
-                // Put the bytes back; the page is not lost.
-                self.pages[i].bytes = Some(bytes);
-                self.set_error(format!("page {} decode failed: {e}", i + 1));
-            }
         }
         self.needs_redraw = true;
     }

@@ -24,6 +24,11 @@ fn alpha_at(doc: &Document, x: i32, y: i32) -> u16 {
 }
 
 fn parked_doc(app: &crate::App, i: usize) -> Document {
+    // A still-lazy blank materializes directly (the app's own switch path);
+    // only real pages decode.
+    if let Some((w, h, _)) = app.pages[i].blank {
+        return Document::new(w, h);
+    }
     let b = app.pages[i].bytes.as_ref().expect("parked page carries bytes");
     mn_core::project::bytes_to_doc(b).expect("parked page decodes")
 }
@@ -86,7 +91,6 @@ fn all_pages_resize_reaches_a_parked_page_and_doubles_a_spread() {
     e.spread = true;
     app.pages.push(e);
 
-    let rev_before = app.pages[1].rev;
     app.canvas_size_draft.w = w + 100;
     app.canvas_size_draft.h = h + 100;
     app.canvas_size_draft.anchor = ResizeAnchor::Center;
@@ -107,7 +111,13 @@ fn all_pages_resize_reaches_a_parked_page_and_doubles_a_spread() {
         );
         assert!(app.pages[i].thumb.is_none(), "page {}: thumbnail dropped", i + 1);
     }
-    assert!(app.pages[1].rev > rev_before, "fresh content revision");
+    // A still-lazy blank page re-marks instead of encoding: its size moved
+    // (asserted above via parked_doc) but no content changed, so no fresh
+    // revision — the marker IS the cheap path working.
+    assert!(
+        app.pages[1].blank.is_some(),
+        "the untouched page stayed lazy through the resize"
+    );
     assert_eq!(
         parked_doc(&app, 3).size,
         ((w + 100) * 2, h + 100),

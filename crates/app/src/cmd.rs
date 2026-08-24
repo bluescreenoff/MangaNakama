@@ -3228,28 +3228,26 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             app.binding_right = d.binding_right;
             app.doc = app.blank_page_doc_sized(w, h);
             app.story = d.story;
-            // Facing pages get facing frames: one encoding per BOOK SIDE,
-            // picked by page number. Reusing one blank for every page put
-            // the same gutter offset on both halves of every spread — the
-            // owner's 2026-08-22 report, visible in the hero shot's pages
-            // 2/3 thumbnails.
-            let n_right = if app.binding_right { 2 } else { 1 };
-            let blank_right =
-                mn_core::project::doc_to_bytes(&app.blank_page_doc_at(w, h, n_right)).ok();
-            let blank_left =
-                mn_core::project::doc_to_bytes(&app.blank_page_doc_at(w, h, 3 - n_right)).ok();
+            // Facing pages get facing frames: one blank per BOOK SIDE,
+            // picked by page number. THE FREEZE FIX (owner 2026-08-26):
+            // encoding even one B4 600 dpi blank is a ~40 s ORA walk
+            // (debug) that blocked the UI after Create — new pages now
+            // carry the LAZY BLANK marker instead (PageEntry::blank), and
+            // nothing encodes until a save actually needs page bytes.
             app.pages = vec![PageEntry::active()];
             for n in 2..=(d.pages.max(1) as usize) {
-                let right = mn_core::page::PageSetup::page_is_right(n, app.binding_right);
-                let bytes = if right {
-                    blank_right.clone()
-                } else {
-                    blank_left.clone()
-                };
-                let e = app.fresh_page(bytes, None);
+                let mut e = app.fresh_page(None, None);
+                e.blank = Some((w, h, n));
                 app.pages.push(e);
             }
             app.page_index = 0;
+            // Page 1 is the same untouched template: mark it lazily blank
+            // TOO and pre-stamp its doc_rev, so the FIRST switch away from
+            // a fresh comic costs nothing (the live doc compares
+            // unchanged, the marker survives, nothing encodes until the
+            // page is actually drawn or the work is saved).
+            app.pages[0].blank = Some((w, h, 1));
+            app.pages[0].doc_rev = app.doc.revision;
             app.new_doc_open = false;
             app.set_doc_path(None);
             app.reset_folder_state();
@@ -3915,6 +3913,7 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                                         autosaved_rev: 0,
                                         exported_rev: fp.exported_rev,
                                         doc_rev: if i == 0 { app.doc.revision } else { 0 },
+                                        blank: None,
                                         spread: false,
                                         preview_img: None,
                                         prev_tex: None,

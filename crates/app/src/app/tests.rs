@@ -8705,3 +8705,84 @@ fn gutter_carry_reverts_when_the_facing_panel_would_collapse() {
     );
     assert!((fb[0] - 140.0).abs() < 0.01, "the neighbour reverted: {fb:?}");
 }
+
+/// Owner report 2026-08-26: a long pause after Create in the New Comic
+/// dialog. Timing probe at the heaviest real preset (B4 600 dpi, frame
+/// folder): the blank-page encodes dominate — this pins where the time
+/// goes so a regression shows up as a number, not a feel.
+#[test]
+fn new_comic_create_timing_at_b4_600() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    let b4 = mn_core::PageSetup::presets()
+        .into_iter()
+        .find(|p| p.name.contains("B4 600"))
+        .unwrap();
+    app.new_doc_draft.setup = b4.clone();
+    app.new_doc_draft.pages = 4;
+    app.new_doc_draft.frame_folder = true;
+    let t0 = std::time::Instant::now();
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::NewComicCreate);
+    let ms = t0.elapsed().as_millis();
+    eprintln!("[new-comic] B4/600 x4 create: {ms} ms");
+    assert_eq!(app.pages.len(), 4);
+    // The lazy-blank contract: creation NEVER encodes a page (one B4
+    // encode is a ~40 s walk that froze the UI after Create).
+    assert!(ms < 5_000, "create took {ms} ms — a blank encode crept back in");
+    assert!(
+        app.pages[1].bytes.is_none() && app.pages[1].blank.is_some(),
+        "pages 2..N carry the lazy marker, not bytes"
+    );
+    // Switching to a blank page MATERIALIZES it (a build, not a decode)
+    // and switching back leaves it pristine — no encode, marker intact.
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::SelectPage(1));
+    assert_eq!(app.page_index, 1, "the switch happened");
+    assert!(app.pages[1].blank.is_some(), "still lazily blank while live");
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::SelectPage(0));
+    assert!(
+        app.pages[1].bytes.is_none() && app.pages[1].blank.is_some(),
+        "an untouched blank page never encodes"
+    );
+}
+
+/// The ink-grab SIZE CAP (owner freeze 2026-08-26): a layer whose ink
+/// spans a whole page must not be lifted into a float by an Object press —
+/// that lift is the freeze and the mystery second rect. Oversize: select
+/// the layer, say so, no float.
+#[test]
+fn an_oversize_ink_grab_selects_instead_of_lifting() {
+    let Some(renderer) = headless_renderer() else { return; };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    // A 6000² page, ink in the far corners: bounds ≈ 94×94 tiles.
+    app.doc = mn_core::Document::new(6000, 6000);
+    for (x, y) in [(50i32, 50i32), (5900, 5900)] {
+        let idx = TileIdx::of_pixel(x, y);
+        app.doc
+            .active_layer_mut()
+            .tile_mut(idx)
+            .set_pixel((x - idx.origin().0) as usize, (y - idx.origin().1) as usize, [1, 2, 3, 32767]);
+    }
+    app.tool = Tool::Object;
+    app.object_hit(50.0, 50.0);
+    assert!(
+        app.transform_drag.is_none(),
+        "a page-spanning layer never lifts from a grab"
+    );
+    assert!(
+        app.status.contains("Ctrl+T"),
+        "the status says where the deliberate door is: {:?}",
+        app.status
+    );
+    // The small-ink grab still works on the same page (the cap is on the
+    // LIFT SIZE, not the feature).
+    app.doc = mn_core::Document::new(6000, 6000);
+    let idx = TileIdx::of_pixel(50, 50);
+    app.doc
+        .active_layer_mut()
+        .tile_mut(idx)
+        .set_pixel(50, 50, [1, 2, 3, 32767]);
+    app.object_hit(50.0, 50.0);
+    assert!(app.transform_drag.is_some(), "a small mark still grabs");
+}

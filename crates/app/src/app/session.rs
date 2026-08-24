@@ -109,7 +109,31 @@ impl DocSession {
                 if i == self.page_index {
                     active.clone()
                 } else {
-                    e.bytes.clone().unwrap_or_default()
+                    match (&e.bytes, e.blank) {
+                        (Some(b), _) => b.clone(),
+                        // Lazy blank (the New Comic freeze fix): materialize
+                        // on demand — the one place bytes are required.
+                        (None, Some((w, h, n))) => {
+                            let mut doc = mn_core::Document::new(w, h);
+                            if self.seed_frame_folder
+                                && let Some(p) = self.page.as_ref().filter(|p| p.has_guides())
+                            {
+                                // The same seeding blank_page_doc_at does —
+                                // DocSession is not an App, so the frame
+                                // folder build is inlined (keep the two in
+                                // sync; that fn is the reference).
+                                let border = (0.8 / 25.4 * p.dpi.max(1) as f32).max(2.0);
+                                let right =
+                                    mn_core::page::PageSetup::page_is_right(n, self.binding_right);
+                                doc.add_frame_folder(
+                                    "Frame 1",
+                                    mn_core::FrameSet::single_rect(p.inner_rect_px_on(right), border),
+                                );
+                            }
+                            mn_core::project::doc_to_bytes(&doc).unwrap_or_default()
+                        }
+                        (None, None) => Vec::new(),
+                    }
                 }
             })
             .collect();

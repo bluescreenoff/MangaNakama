@@ -1699,6 +1699,33 @@ impl App {
                     break;
                 }
             }
+            // THE SIZE CAP (owner freeze report 2026-08-26): a layer whose
+            // ink spans a whole page lifts a page-sized float — the copy,
+            // the preview and every dragged frame of a giant quad froze
+            // the app on integrated graphics (the mystery "second rect"
+            // was exactly that float). CSP's Object tool never lifts
+            // raster layers at all; our grab is for LINEART — whole-layer
+            // ink of modest size. Oversize: select the layer and say so;
+            // Ctrl+T remains the deliberate door for whole-page layers.
+            if let Some(li) = ink {
+                // 4096 populated tiles ≈ a 4096² page of ink, or roughly
+                // half a B4 600 dpi page — the most a drag should ever
+                // carry on this GPU.
+                const GRAB_MAX_TILES: u64 = 4096;
+                let oversize = self.doc.layers[li]
+                    .tile_bounds()
+                    .map(|(_, _, w, h)| {
+                        (w as u64 / 64) * (h as u64 / 64) > GRAB_MAX_TILES
+                    })
+                    .unwrap_or(true);
+                if oversize {
+                    self.doc.set_active(li);
+                    self.set_status(
+                        "layer selected — too much ink to grab directly; Ctrl+T transforms it",
+                    );
+                    ink = None;
+                }
+            }
             if let Some(li) = ink {
                 self.doc.set_active(li);
                 let size = self.doc.size;
