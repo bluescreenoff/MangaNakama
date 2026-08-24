@@ -152,6 +152,48 @@ pub(super) fn materials_palette(ui: &mut egui::Ui, app: &mut App) {
     });
     ui.separator();
     info_strip(ui, app);
+    // plans/05 item 6 piece 8: the CSP-style command strip — the
+    // every-minute operations out of the ≡ menu, one click deep.
+    ui.separator();
+    bottom_bar(ui, app);
+}
+
+/// The palette's bottom command bar: paste, register, folder ops. The ≡
+/// keeps the full set; these four are the ones a working session touches.
+fn bottom_bar(ui: &mut egui::Ui, app: &mut App) {
+    ui.horizontal(|ui| {
+        let selected = app.material_selected.is_some();
+        if ui
+            .add_enabled(selected, egui::Button::new("Paste").small())
+            .clicked()
+        {
+            if let Some(i) = app.material_selected
+                && let Some(m) = app.materials.get(i)
+            {
+                let path = m.path.clone();
+                paste(app, &path);
+            }
+        }
+        if ui
+            .small_button("Register layer")
+            .on_hover_text("the active layer becomes an image material — a selection scopes it")
+            .clicked()
+        {
+            app.push_cmd(AppCmd::MaterialRegisterLayer);
+        }
+        if ui
+            .small_button("Add folder…")
+            .clicked()
+            && let Some(p) = rfd::FileDialog::new()
+                .set_title("Add material folder")
+                .pick_folder()
+        {
+            app.push_cmd(AppCmd::MaterialAddFolder(p));
+        }
+        if ui.small_button("Rescan").clicked() {
+            app.push_cmd(AppCmd::MaterialRescan);
+        }
+    });
 }
 
 /// What the information strip costs the grid this frame. It is a fixed
@@ -798,8 +840,151 @@ fn info_strip(ui: &mut egui::Ui, app: &mut App) {
                     }
                 });
             });
+            // plans/05 item 6c: the material's OWN paste settings + tone
+            // numbers. Untagged controls read the palette globals (the
+            // header behaviour every bank used before); touching one writes
+            // this material's @paste tags; the ⟲ strips them again.
+            ui.separator();
+            ui.vertical(|ui| {
+                ui.label(egui::RichText::new("paste").small().weak());
+                let mut p = app
+                    .material_paste_selected()
+                    .unwrap_or_default();
+                let is_tone_material = app
+                    .material_selected
+                    .and_then(|i| app.materials.get(i))
+                    .is_some_and(|m| m.tone_spec().is_some());
+                let mut changed = false;
+                ui.horizontal(|ui| {
+                    let mut tile = p.tile.unwrap_or(app.material_tile);
+                    ui.add_enabled_ui(!is_tone_material, |ui| {
+                        if ui.checkbox(&mut tile, "Tile").changed() {
+                            p.tile = Some(tile);
+                            changed = true;
+                        }
+                        let mut tone = p.tone.unwrap_or(app.material_tone);
+                        if ui.checkbox(&mut tone, "Tone").changed() {
+                            p.tone = Some(tone);
+                            changed = true;
+                        }
+                        let mut size = p.size.unwrap_or(app.material_size);
+                        let label = paste_size_word(size);
+                        egui::ComboBox::from_id_salt("mn.mat.own.size")
+                            .width(84.0)
+                            .selected_text(label)
+                            .show_ui(ui, |ui| {
+                                for (w, v) in PASTE_SIZE_WORDS {
+                                    changed |= ui
+                                        .selectable_value(&mut size, v, w)
+                                        .changed();
+                                }
+                            });
+                        if size != p.size.unwrap_or(app.material_size) {
+                            p.size = Some(size);
+                            changed = true;
+                        }
+                    });
+                });
+                if changed {
+                    app.material_set_paste_selected(p);
+                }
+                ui.horizontal(|ui| {
+                    if p.any() && ui.small_button("⟲ defaults").clicked() {
+                        app.material_set_paste_selected(Default::default());
+                    }
+                    if !p.any() {
+                        ui.label(egui::RichText::new("using the palette defaults").small().weak());
+                    }
+                });
+                // A tone material's NUMBERS, editable in place: the info
+                // pane is what makes the 2399 bank's tones live-usable
+                // (plans/05 item 6 piece 7).
+                if is_tone_material {
+                    ui.separator();
+                    tone_settings(ui, app, &name);
+                }
+            });
         });
     });
+}
+
+const PASTE_SIZE_WORDS: [(&str, crate::app::MaterialPasteSize); 5] = [
+    ("fit panel", crate::app::MaterialPasteSize::FitPanel),
+    ("adjust after", crate::app::MaterialPasteSize::AdjustAfter),
+    ("expand in full", crate::app::MaterialPasteSize::ExpandFull),
+    ("fit to scale", crate::app::MaterialPasteSize::FitToScale),
+    ("to destination", crate::app::MaterialPasteSize::ToDestination),
+];
+
+fn paste_size_word(s: crate::app::MaterialPasteSize) -> &'static str {
+    PASTE_SIZE_WORDS
+        .iter()
+        .find(|(_, v)| *v == s)
+        .map(|(w, _)| *w)
+        .unwrap_or("fit panel")
+}
+
+/// Density / frequency / angle for the selected TONE material, written
+/// straight into its `.tone.json` (write_tone_spec's production debut).
+fn tone_settings(ui: &mut egui::Ui, app: &mut App, name: &str) {
+    let Some(i) = app.material_selected else { return };
+    let Some(m) = app.materials.get(i) else { return };
+    let Some(mut spec) = m.tone_spec() else { return };
+    ui.label(egui::RichText::new("tone").small().weak());
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        let mut pct = spec.density * 100.0;
+        if ui
+            .add(
+                egui::DragValue::new(&mut pct)
+                    .range(1.0..=100.0)
+                    .speed(1.0)
+                    .fixed_decimals(0)
+                    .suffix(" %"),
+            )
+            .changed()
+        {
+            spec.density = (pct / 100.0).clamp(0.01, 1.0);
+            spec.tone.density = mn_core::tone::ToneDensity::Specified(spec.density);
+            changed = true;
+        }
+        if ui
+            .add(
+                egui::DragValue::new(&mut spec.tone.lpi)
+                    .range(5.0..=80.0)
+                    .speed(0.5)
+                    .fixed_decimals(1)
+                    .suffix(" lpi"),
+            )
+            .changed()
+        {
+            changed = true;
+        }
+        if ui
+            .add(
+                egui::DragValue::new(&mut spec.tone.angle_deg)
+                    .range(0.0..=360.0)
+                    .speed(1.0)
+                    .fixed_decimals(0)
+                    .suffix(" °"),
+            )
+            .changed()
+        {
+            changed = true;
+        }
+    });
+    if changed
+        && let Some(dir) = m.path.parent()
+        && let Some(_) =
+            crate::app::materials::write_tone_spec(dir, name, &spec)
+    {
+        // The bank entry follows the sidecar in place — a full rescan
+        // would throw away every decoded thumbnail for one number.
+        if let Some(m) = app.materials.get_mut(i) {
+            m.kind = crate::app::materials::MaterialKind::Tone(spec);
+        }
+        app.set_status(format!("tone {name}: {} % @ {:.1} lpi", (spec.density * 100.0) as u32, spec.tone.lpi));
+    }
 }
 
 /// MT-012's editor: the bank's per-item actions live on the cell itself, so

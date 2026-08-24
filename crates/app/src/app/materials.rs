@@ -21,6 +21,7 @@ use mn_core::tone::{ToneDensity, ToneParams, TonePattern};
 use serde::{Deserialize, Serialize};
 
 use super::App;
+use super::{MaterialLayerOrder, MaterialPasteSize};
 
 /// One scanned material. Display name = file stem; the full path is the
 /// identity (use counters key on it — folders that move lose their
@@ -304,9 +305,8 @@ pub fn read_tone_spec(path: &Path) -> Option<ToneSpec> {
 }
 
 /// Write `<stem>.tone.json` into `dir`, returning the path on success.
-/// Test-only today; the material-properties dialog (M8 follow-up) is the
-/// production caller this is waiting for.
-#[cfg_attr(not(test), allow(dead_code))]
+/// The info pane's tone settings (plans/05 item 6c) write through this —
+/// the "test-only" era ended when the palette learned to edit a tone.
 pub fn write_tone_spec(dir: &Path, stem: &str, spec: &ToneSpec) -> Option<PathBuf> {
     let p = dir.join(format!("{stem}{TONE_SUFFIX}"));
     let text = serde_json::to_string_pretty(spec).ok()?;
@@ -1071,12 +1071,10 @@ impl App {
         };
         let file = file.to_string_lossy().into_owned();
         let mut side = MaterialTags::load(folder);
-        // plans/05 item 6: the user edits USER tags — the `@type` system
-        // tag rides along untouched (the tag editor only ever shows the
-        // user half).
-        let kept_type = MaterialType::from_tags(side.get(&file));
-        let full = MaterialType::with_type_tag(tags, kept_type);
-        side.set(&file, &full);
+        // RAW line setter: the input is the complete tag line, @-tags
+        // included (callers compose — see material_set_user_tags for the
+        // editor path, which preserves every system tag).
+        side.set(&file, tags);
         if !side.save(folder) {
             return false;
         }
@@ -1085,6 +1083,158 @@ impl App {
             m.tags = now.clone();
         }
         true
+    }
+
+    /// The TAG EDITOR's path: the input is USER tags only (that is all the
+    /// editor shows), so every `@` system tag in the old line — the type,
+    /// the material's own paste settings — rides along untouched.
+    pub fn material_set_user_tags(&mut self, path: &Path, user_tags: &str) -> bool {
+        let old = self
+            .materials
+            .iter()
+            .find(|m| m.path == path)
+            .map(|m| m.tags.clone())
+            .unwrap_or_default();
+        let mut parts: Vec<String> = old
+            .split([',', '\n'])
+            .map(str::trim)
+            .filter(|t| t.starts_with('@'))
+            .map(str::to_owned)
+            .collect();
+        let input = MaterialType::user_tags(user_tags);
+        if !input.is_empty() {
+            parts.push(input);
+        }
+        self.material_set_tags(path, &parts.join(", "))
+    }
+}
+
+/// A material's OWN paste settings, from its `@`-tags (plans/05 item 6c):
+/// `@tile` / `@tone` (present = on), `@size=fit|adjust|expand|scale|dest`,
+/// `@order=above|bottom`. Absent fields fall back to the palette's global
+/// settings at paste time — the header behaviour every bank used before
+/// this, still the default for untagged materials.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MaterialPaste {
+    pub tile: Option<bool>,
+    pub tone: Option<bool>,
+    pub size: Option<MaterialPasteSize>,
+    pub order: Option<MaterialLayerOrder>,
+}
+
+impl MaterialPaste {
+    /// Parse the paste tags out of a tag line. Unknown words are ignored
+    /// (kept on disk, no effect) — the same honest rule as `@type`.
+    pub fn from_tags(tags: &str) -> Self {
+        let mut p = Self::default();
+        for t in tags.split([',', '\n']) {
+            let t = t.trim();
+            match t {
+                "@tile" => p.tile = Some(true),
+                "@notile" => p.tile = Some(false),
+                "@tone" => p.tone = Some(true),
+                "@notone" => p.tone = Some(false),
+                _ if t.starts_with("@size=") => {
+                    p.size = match t["@size=".len()..].trim() {
+                        "fit" => Some(MaterialPasteSize::FitPanel),
+                        "adjust" => Some(MaterialPasteSize::AdjustAfter),
+                        "expand" => Some(MaterialPasteSize::ExpandFull),
+                        "scale" => Some(MaterialPasteSize::FitToScale),
+                        "dest" => Some(MaterialPasteSize::ToDestination),
+                        _ => None,
+                    };
+                }
+                _ if t.starts_with("@order=") => {
+                    p.order = match t["@order=".len()..].trim() {
+                        "above" => Some(MaterialLayerOrder::Above),
+                        "bottom" => Some(MaterialLayerOrder::BottomOfPanel),
+                        _ => None,
+                    };
+                }
+                _ => {}
+            }
+        }
+        p
+    }
+
+    /// Any paste tag set at all (drives "uses its own settings" vs the
+    /// global fallback).
+    pub fn any(self) -> bool {
+        self.tile.is_some() || self.tone.is_some() || self.size.is_some() || self.order.is_some()
+    }
+
+    /// Re-serialize ONLY the paste tags — everything else in the line
+    /// (user tags, `@type`) passes through untouched.
+    pub fn onto(self, tags: &str) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(t) = self.tile {
+            parts.push(if t { "@tile".into() } else { "@notile".into() });
+        }
+        if let Some(t) = self.tone {
+            parts.push(if t { "@tone".into() } else { "@notone".into() });
+        }
+        if let Some(s) = self.size {
+            parts.push(format!(
+                "@size={}",
+                match s {
+                    MaterialPasteSize::FitPanel => "fit",
+                    MaterialPasteSize::AdjustAfter => "adjust",
+                    MaterialPasteSize::ExpandFull => "expand",
+                    MaterialPasteSize::FitToScale => "scale",
+                    MaterialPasteSize::ToDestination => "dest",
+                }
+            ));
+        }
+        if let Some(o) = self.order {
+            parts.push(format!(
+                "@order={}",
+                match o {
+                    MaterialLayerOrder::Above => "above",
+                    MaterialLayerOrder::BottomOfPanel => "bottom",
+                }
+            ));
+        }
+        let rest: Vec<String> = tags
+            .split([',', '\n'])
+            .map(str::trim)
+            .filter(|t| {
+                !t.is_empty()
+                    && !t.starts_with("@tile")
+                    && !t.starts_with("@notile")
+                    && !t.starts_with("@tone")
+                    && !t.starts_with("@notone")
+                    && !t.starts_with("@size=")
+                    && !t.starts_with("@order=")
+            })
+            .map(str::to_owned)
+            .collect();
+        parts.extend(rest);
+        parts.join(", ")
+    }
+}
+
+impl App {
+    /// The SELECTED material's own paste settings (None when nothing is
+    /// selected) — the info pane's paste block binds to this.
+    pub fn material_paste_selected(&self) -> Option<MaterialPaste> {
+        let i = self.material_selected?;
+        self.materials.get(i).map(|m| MaterialPaste::from_tags(&m.tags))
+    }
+
+    /// Write the selected material's paste tags (persisted beside its
+    /// other tags; the bank entry updates in place). `paste` is the FULL
+    /// own-settings set — an all-None write strips the paste tags, putting
+    /// the material back on the global defaults.
+    pub fn material_set_paste_selected(&mut self, paste: MaterialPaste) -> bool {
+        let Some(i) = self.material_selected else {
+            return false;
+        };
+        let Some(m) = self.materials.get(i) else {
+            return false;
+        };
+        let path = m.path.clone();
+        let new_tags = paste.onto(&m.tags);
+        self.material_set_tags(&path, &new_tags)
     }
 }
 
@@ -1893,6 +2043,47 @@ mod tests {
             !f("balloon").accepts(&typed),
             "the @type system tag is not a chip"
         );
+    }
+
+    /// plans/05 item 6c: the @paste tags parse, re-serialize, and leave
+    /// everything else in the line (@type, user tags) untouched. An
+    /// all-None write strips them — the material returns to the globals.
+    #[test]
+    fn paste_tags_round_trip_and_strip() {
+        let line = "@type=tone, @tile, @size=expand, @order=bottom, dots";
+        let p = MaterialPaste::from_tags(line);
+        assert_eq!(
+            p,
+            MaterialPaste {
+                tile: Some(true),
+                tone: None,
+                size: Some(MaterialPasteSize::ExpandFull),
+                order: Some(MaterialLayerOrder::BottomOfPanel),
+            }
+        );
+        // onto() writes the paste tags first, then the survivors in their
+        // original order — parse is token-based, order is cosmetic.
+        assert_eq!(
+            p.onto(line),
+            "@tile, @size=expand, @order=bottom, @type=tone, dots",
+            "idempotent round trip"
+        );
+        // Change one: the rest of the line survives.
+        let mut q = p;
+        q.tile = None;
+        q.tone = Some(false);
+        assert_eq!(
+            q.onto(line),
+            "@notone, @size=expand, @order=bottom, @type=tone, dots"
+        );
+        // All-None strips every paste tag, keeps @type + user tags.
+        assert_eq!(
+            MaterialPaste::default().onto(line),
+            "@type=tone, dots"
+        );
+        // Unknown size words are ignored, not guessed.
+        assert_eq!(MaterialPaste::from_tags("@size=huge").size, None);
+        assert!(!MaterialPaste::from_tags("dots, @type=tone").any());
     }
 
     /// plans/05 item 6 (a): the `@type=` system tag round-trips through

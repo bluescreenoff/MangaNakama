@@ -4695,13 +4695,116 @@ fn materials_register_layer_and_import_folder() {
 }
 
 /// ROADMAP good-first-issue #3 / MT-012: material tags live in a per-folder
+/// plans/05 item 6c: a material's OWN @paste tags override the palette
+/// globals at paste time — here, @tile against a Tile-OFF global. The
+/// observable: the float the handler opens spans the WHOLE CANVAS (the
+/// tiled path) instead of the image's own 4×4.
+#[test]
+fn a_materials_own_paste_tags_override_the_globals() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    let tmp = std::env::temp_dir().join(format!("mn-mat-paste-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let one = image::RgbaImage::from_pixel(4, 4, image::Rgba([0, 0, 0, 255]));
+    image::save_buffer(
+        tmp.join("grass.png"),
+        one.as_raw(),
+        4,
+        4,
+        image::ExtendedColorType::Rgba8,
+    )
+    .unwrap();
+    std::fs::write(tmp.join(crate::app::materials::TAGS_FILE), "grass.png=@tile\n").unwrap();
+    app.material_folders.push(tmp.clone());
+    app.materials_scan();
+    app.material_tile = false; // the global says no tiling
+    let path = tmp.join("grass.png");
+    crate::cmd::dispatch(
+        &mut app,
+        crate::cmd::AppCmd::PasteMaterial {
+            path: path.clone(),
+            tile: false,
+        },
+    );
+    let drag = app.transform_drag.as_ref().expect("the paste opened");
+    let (w, h) = (app.doc.size.0 as i32, app.doc.size.1 as i32);
+    assert_eq!(
+        drag.source.rect,
+        [0, 0, w, h],
+        "@tile pasted tiled over the whole canvas, global said no"
+    );
+    app.transform_drag = None;
+
+    // Strip the tag: the same paste falls back to the global — the
+    // float is the image's own size again.
+    app.material_set_tags(&path, "");
+    crate::cmd::dispatch(
+        &mut app,
+        crate::cmd::AppCmd::PasteMaterial {
+            path,
+            tile: false,
+        },
+    );
+    let drag = app.transform_drag.as_ref().expect("the second paste opened");
+    assert_eq!(
+        drag.source.rect[2] - drag.source.rect[0],
+        4,
+        "back to the image's own 4px width"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// plans/05 item 6c: a USER tag edit through the palette's editor path
+/// preserves every system tag — the type AND the material's own paste
+/// settings ride along untouched.
+#[test]
+fn user_tag_edits_preserve_the_paste_tags() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    let tmp = std::env::temp_dir().join(format!("mn-mat-usertags-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let one = image::RgbaImage::from_pixel(2, 2, image::Rgba([0, 0, 0, 255]));
+    image::save_buffer(
+        tmp.join("grass.png"),
+        one.as_raw(),
+        2,
+        2,
+        image::ExtendedColorType::Rgba8,
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.join(crate::app::materials::TAGS_FILE),
+        "grass.png=@type=pattern, @tile, @size=fit, grass\n",
+    )
+    .unwrap();
+    app.material_folders.push(tmp.clone());
+    app.materials_scan();
+
+    assert!(
+        app.material_set_user_tags(&tmp.join("grass.png"), "grass, green"),
+        "the write succeeded"
+    );
+    let m = app.materials.iter().find(|m| m.name == "grass").unwrap();
+    assert_eq!(
+        m.tags,
+        "@type=pattern, @tile, @size=fit, grass, green",
+        "every system tag survived the user edit"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 /// `tags.txt` sidecar. A folder with no sidecar behaves exactly as before;
 /// tagging writes the file and refreshes the bank without a rescan; the one
 /// search box matches tags; and a rescan re-reads the sidecar, so tags on
 /// materials the OWNER added (or hand-wrote entries for) survive it.
 #[test]
-fn material_tags_sidecar_search_and_rescan() {
-    let Some(renderer) = headless_renderer() else {
+fn material_tags_sidecar_search_and_rescan() {    let Some(renderer) = headless_renderer() else {
         return;
     };
     let mut app = App::new(renderer, (600, 400), 1.0);

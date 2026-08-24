@@ -5231,6 +5231,18 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             app.mark_dirty();
         }
         AppCmd::PasteMaterial { path, tile } => {
+            // plans/05 item 6c: the material's OWN paste settings win, the
+            // palette's globals are the fallback for untagged materials.
+            let own = app
+                .materials
+                .iter()
+                .find(|m| m.path == path)
+                .map(|m| crate::app::materials::MaterialPaste::from_tags(&m.tags))
+                .unwrap_or_default();
+            let tile = own.tile.unwrap_or(tile);
+            let tone = own.tone.unwrap_or(app.material_tone);
+            let size = own.size.unwrap_or(app.material_size);
+            let order = own.order.unwrap_or(app.material_order);
             // A GENERATOR material (`<name>.gen.json`) places LIVE: a new
             // layer carrying the spec, with Object-tool handles from the
             // first click. No bitmap is decoded on this path — the whole
@@ -5389,7 +5401,7 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             // screentone — the tone engine's own raster (canvas-continuous
             // screen, ink coverage from the source pixels), so an arbitrary
             // image becomes printable on a mono page.
-            if app.material_tone {
+            if tone {
                 let p = mn_core::ToneParams::default();
                 let dpi = app.tone_dpi();
                 let mut toned = std::collections::HashMap::new();
@@ -5407,7 +5419,7 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             }
             app.material_note_use(&path);
             let n = if tile { " (tiled)" } else { "" };
-            let t = if app.material_tone { " (toned)" } else { "" };
+            let t = if tone { " (toned)" } else { "" };
             let into = target
                 .as_ref()
                 .map(|tg| format!(" into {}", tg.label))
@@ -5416,8 +5428,8 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 app,
                 src,
                 target.as_ref(),
-                app.material_size,
-                app.material_order,
+                size,
+                order,
             );
             app.set_status(format!(
                 "material {} pasted{n}{t}{into} — drag to move, Enter to commit",
@@ -5451,7 +5463,7 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 .file_stem()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            if !app.material_set_tags(&path, &tags) {
+            if !app.material_set_user_tags(&path, &tags) {
                 app.set_status(format!(
                     "could not write {} beside {name} — is the folder read-only?",
                     crate::app::materials::TAGS_FILE
