@@ -200,6 +200,36 @@ pub(crate) fn layer_ink_near(layer: &mn_core::Layer, cx: f32, cy: f32, tol: f32)
     false
 }
 
+/// [`layer_ink_near`] over the tiles the compositor DISPLAYS — for a
+/// live fill layer the derived tone raster lives in `fill_tiles`, not
+/// the layer's own pixel map, so a plain `tile()` read sees nothing.
+pub(crate) fn display_ink_near(layer: &mn_core::Layer, cx: f32, cy: f32, tol: f32) -> bool {
+    let r = tol.clamp(1.0, 64.0);
+    let (x0, x1) = ((cx - r).floor() as i32, (cx + r).ceil() as i32);
+    let (y0, y1) = ((cy - r).floor() as i32, (cy + r).ceil() as i32);
+    let tiles = layer.display_tiles();
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            if x < 0 || y < 0 {
+                continue;
+            }
+            let (dx, dy) = (x as f32 + 0.5 - cx, y as f32 + 0.5 - cy);
+            if dx * dx + dy * dy > r * r {
+                continue;
+            }
+            let idx = mn_core::TileIdx::of_pixel(x, y);
+            let hit = tiles.get(&idx).is_some_and(|t| {
+                let (ox, oy) = idx.origin();
+                t.pixel((x - ox) as usize, (y - oy) as usize)[3] > 0
+            });
+            if hit {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// A speed run's reference anchor: its own, or the canvas centre.
 pub fn gen_anchor(spec: &mn_core::genlines::GenLinesSpec, size: (u32, u32)) -> [f32; 2] {
     spec.anchor
@@ -425,6 +455,15 @@ impl ObjectDrag {
     fn moved(&self) -> bool {
         (self.cur.0 - self.start.0).abs() + (self.cur.1 - self.start.1).abs() > 0.5
     }
+}
+
+/// An in-progress drag of a live TONE layer's lattice (CSP "Move tone
+/// pattern"): the dots shift under the art while the window stays put.
+/// The document keeps the original until release — one SetFillParams.
+pub struct FillLatticeDrag {
+    pub layer: usize,
+    pub start: (f32, f32),
+    pub cur: (f32, f32),
 }
 
 /// What part of a balloon an Object-tool drag grabbed.
@@ -1838,6 +1877,33 @@ impl App {
             self.object_drag = Some(d);
             self.balloon_sel = None;
             self.gen_sel = None;
+        } else if let Some(li) = self
+            .doc
+            .layers
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, l)| {
+                l.visible
+                    && matches!(
+                        l.kind,
+                        mn_core::LayerKind::Fill(mn_core::fill_layer::FillKind::Tone { .. })
+                    )
+                    && display_ink_near(l, cx, cy, tol)
+            })
+            .map(|(i, _)| i)
+        {
+            // Walk #3 (CSP "Move tone pattern"): ink of a live TONE layer
+            // grabs the LATTICE, not the pixels — the raster is derived and
+            // must never lift into a float. One commit on release.
+            self.doc.active = li;
+            self.object_pick = Some((cx, cy));
+            self.fill_lattice_drag = Some(FillLatticeDrag {
+                layer: li,
+                start: (cx, cy),
+                cur: (cx, cy),
+            });
+            self.set_status("tone lattice grabbed — drag moves the dots under the art");
         } else {
             self.object_sel = None;
             self.balloon_sel = None;
@@ -1862,6 +1928,12 @@ impl App {
                     || l.frames().is_some()
                     || l.genlines.is_some()
                     || l.texts().is_some()
+                    // Live fill layers are DERIVED — their ink is a
+                    // rasterized window/param pair, never float material.
+                    // Tones got their lattice grab above; flat/gradient
+                    // keep their Tool Property surface for now (endpoint
+                    // dragging is the open NL v1 cut).
+                    || matches!(l.kind, mn_core::LayerKind::Fill(_))
                 {
                     continue;
                 }
@@ -2214,6 +2286,23 @@ impl App {
         }
         if let Some(d) = &mut self.gen_drag {
             d.cur = (cx, cy);
+            self.needs_redraw = true;
+            return;
+        }
+        // The dots re-rasterize only on release — the status line is the
+        // live readout of where the lattice is going.
+        let lattice_msg = if let Some(d) = &mut self.fill_lattice_drag {
+            d.cur = (cx, cy);
+            Some(format!(
+                "lattice → ({:+.0}, {:+.0}) px",
+                d.cur.0 - d.start.0,
+                d.cur.1 - d.start.1
+            ))
+        } else {
+            None
+        };
+        if let Some(msg) = lattice_msg {
+            self.set_status(msg);
             self.needs_redraw = true;
             return;
         }
@@ -2858,6 +2947,26 @@ impl App {
                     }
                 } else {
                     self.set_status("that edit would break the panel shape — reverted");
+                }
+            }
+            self.needs_redraw = true;
+            return;
+        }
+        if let Some(d) = self.fill_lattice_drag.take() {
+            let (dx, dy) = (d.cur.0 - d.start.0, d.cur.1 - d.start.1);
+            if dx.abs() + dy.abs() >= 1.0 {
+                if let Some(mn_core::LayerKind::Fill(mn_core::fill_layer::FillKind::Tone {
+                    tone,
+                    density,
+                })) = self.doc.layers.get(d.layer).map(|l| l.kind.clone())
+                {
+                    let mut tone = tone;
+                    tone.offset = [tone.offset[0] + dx, tone.offset[1] + dy];
+                    self.push_cmd(AppCmd::SetFillParams(
+                        d.layer,
+                        mn_core::fill_layer::FillKind::Tone { tone, density },
+                    ));
+                    self.set_status("tone lattice moved — the dots slid under the art");
                 }
             }
             self.needs_redraw = true;

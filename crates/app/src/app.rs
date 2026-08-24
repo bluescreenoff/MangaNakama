@@ -388,6 +388,8 @@ pub struct App {
     /// live driver drag (blue reference / shape handles).
     pub gen_sel: Option<usize>,
     pub gen_drag: Option<crate::app::canvas_input::GenLinesDrag>,
+    /// Live drag of a tone layer's lattice (CSP "Move tone pattern").
+    pub fill_lattice_drag: Option<crate::app::canvas_input::FillLatticeDrag>,
     /// Tool Property's draft of the SELECTED run's spec while a bar is
     /// being dragged — the same buffering idiom as `border_edit`, and for
     /// a sharper reason: committing per frame would re-rasterize a
@@ -1322,6 +1324,7 @@ impl App {
             size_drag: None,
             temp_object: false,
             gen_drag: None,
+            fill_lattice_drag: None,
             quick_query: String::new(),
             quick_pins: layout
                 .quick_pins

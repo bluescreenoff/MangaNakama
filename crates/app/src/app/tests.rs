@@ -8454,6 +8454,47 @@ fn object_rotate_snaps_to_45_increments_under_shift() {
     assert_eq!(d.preview().points, free.points, "no Shift → the raw angle");
 }
 
+/// Walk #3 (CSP "Move tone pattern"): the Object tool's press on a live
+/// tone layer's ink grabs the LATTICE — the dots slide under the art as
+/// one undoable SetFillParams, and the derived raster never lifts into
+/// a transform float.
+#[test]
+fn the_object_tool_drags_a_tone_layers_lattice() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (400, 300), 1.0);
+    app.doc = Document::new(400, 300);
+    app.viewport = mn_gpu::Viewport::default();
+    let li = app.doc.add_fill_layer(
+        mn_core::fill_layer::FillKind::Tone {
+            tone: mn_core::ToneParams {
+                lpi: 12.0,
+                ..Default::default()
+            },
+            density: 0.6,
+        },
+        false,
+    );
+    app.refresh_tones();
+
+    app.tool = Tool::Object;
+    app.object_hit(200.0, 150.0);
+    assert!(
+        app.fill_lattice_drag.is_some(),
+        "pressing the tone's ink grabs the lattice, not the pixels"
+    );
+    app.canvas_move(230.0, 150.0, &[]);
+    app.canvas_up(230.0, 150.0, &[]);
+    drain_cmds(&mut app);
+    let mn_core::LayerKind::Fill(mn_core::fill_layer::FillKind::Tone { tone, .. }) =
+        &app.doc.layers[li].kind
+    else {
+        panic!("still a tone layer");
+    };
+    assert_eq!(tone.offset, [30.0, 0.0], "the lattice slid with the drag");
+}
+
 /// Owner repro 2026-08-22: Figure ▸ Saturated line on a PANELED page put a
 /// "Focus lines" row in the palette and NOTHING on the canvas. TWO faults,
 /// each sufficient on its own, which is why this asserts the COMPOSITE and
