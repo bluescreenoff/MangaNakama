@@ -144,6 +144,20 @@ fn auto_gap_block(
         o.gap_close_px = gap as u32;
         changed |= area_scaling_row(ui, salt, o);
     }
+    // Row 40/120: CSP 半透明を透明にする — the antialiased skirt is
+    // fillable, the flat runs under the fringe to the line's dark core,
+    // and the 1 px halo dies.
+    changed |= ui
+        .checkbox(
+            &mut o.semi_transparent_paper,
+            "Semi-transparent is fillable",
+        )
+        .on_hover_text(
+            "treat the antialiased fringe of the lineart as paper — the fill \
+             runs under it to the dark core and no light halo survives \
+             against the flat",
+        )
+        .changed();
     changed
 }
 

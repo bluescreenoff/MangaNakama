@@ -56,6 +56,18 @@ pub struct FillOpts {
     /// Defaults OFF: with it off every field above is honoured verbatim,
     /// so a build that never touches the switch fills pixel-identically.
     pub auto: bool,
+    /// Row 40/120 (CSP 半透明を透明にする, "treat semi-transparent as
+    /// transparent"): the antialiased skirt of a line counts as FILLABLE,
+    /// so the fill runs under the fringe to the dark core and the flat
+    /// shows no light halo against the lineart. Defaults OFF — the wall
+    /// every earlier build built, bit for bit.
+    pub semi_transparent_paper: bool,
+}
+
+/// Rec.709 luma of a composite-over-white source pixel, rounded — the
+/// "mostly paper" test for [`FillOpts::semi_transparent_paper`].
+fn luma_u8(p: [u8; 3]) -> u8 {
+    ((p[0] as u16 * 54 + p[1] as u16 * 183 + p[2] as u16 * 19) >> 8) as u8
 }
 
 /// What [`measure_auto`] read off the artwork, for the status line and the
@@ -114,6 +126,7 @@ impl Default for FillOpts {
             refer_border: false,
             expand_mode: ExpandMode::Rect,
             auto: false,
+            semi_transparent_paper: false,
         }
     }
 }
@@ -219,7 +232,28 @@ fn region_from_src(
     opts: &FillOpts,
 ) -> Vec<bool> {
     let mut barrier = barrier_from(src, src[start], opts.tolerance);
-    let barrier_orig = barrier.clone();
+    let mut barrier_orig = barrier.clone();
+
+    // 2a. Row 40/120 (CSP "treat semi-transparent as transparent"): a
+    // source pixel that is mostly PAPER — composite luma at or past the
+    // midpoint, which is what the antialiased skirt of any line looks
+    // like over white — is FILLABLE. The flood then runs under the
+    // fringe to the line's dark core, and no light halo survives
+    // against the flat. Cleared from BOTH barriers: the flood walls at
+    // the core, and the gap-recovery step agrees. The page rim (2b)
+    // walls after this and stays a wall.
+    if opts.semi_transparent_paper {
+        for (b, px) in barrier.iter_mut().zip(src) {
+            if luma_u8(*px) >= 128 {
+                *b = false;
+            }
+        }
+        for (b, px) in barrier_orig.iter_mut().zip(src) {
+            if luma_u8(*px) >= 128 {
+                *b = false;
+            }
+        }
+    }
 
     // 2b. FI-022: the page's outer perimeter counts as a drawn border line
     // (CSP's own words). Walled in the FLOOD barrier only, never in
@@ -1326,6 +1360,66 @@ mod tests {
         assert!(bucket_fill(&mut doc, (60, 60), [1.0, 0.0, 0.0], &d) > 0);
         assert!(px(&doc, 60, 60)[3] > 0, "inside filled");
         assert_eq!(px(&doc, 5, 5)[3], 0, "outside untouched");
+        // Row 40/120 joins the defaults contract: OFF, exactly as before.
+        assert!(!d.semi_transparent_paper);
+    }
+
+    /// Row 40/120 (CSP 半透明を透明にする): the antialiased skirt of a
+    /// line is PAPER to the flood when the switch is on — the fill runs
+    /// under the fringe to the dark core and the flat shows no halo; OFF,
+    /// the skirt walls the fill exactly as every earlier build did.
+    #[test]
+    fn semi_transparent_paper_runs_the_fill_under_the_skirt() {
+        fn vline(doc: &mut Document, li: usize, x: i32, v: u8) {
+            for y in 0..128i32 {
+                let idx = TileIdx::of_pixel(x, y);
+                let (ox, oy) = idx.origin();
+                let t = doc.layers[li].tile_mut(idx);
+                let d = t.data_mut();
+                let o = ((y - oy) as usize * crate::tile::TILE_SIZE + (x - ox) as usize) * 4;
+                let f = f32_to_fix15(v as f32 / 255.0);
+                d[o] = f;
+                d[o + 1] = f;
+                d[o + 2] = f;
+                d[o + 3] = f32_to_fix15(1.0);
+            }
+        }
+        let fill = |on: bool| {
+            let mut doc = Document::new(128, 128);
+            let li = doc.add_layer("line");
+            // Hand-made AA: light skirt → mid skirt → dark core.
+            for (x, v) in [(62, 210u8), (63, 160), (64, 40), (65, 160), (66, 210)] {
+                vline(&mut doc, li, x, v);
+            }
+            let opts = FillOpts {
+                tolerance: 0.05,
+                gap_close_px: 0,
+                expand_px: 0,
+                semi_transparent_paper: on,
+                ..FillOpts::default()
+            };
+            assert!(bucket_fill(&mut doc, (10, 64), [1.0, 0.0, 0.0], &opts) > 0);
+            doc
+        };
+        let is_red = |doc: &Document, x: i32, y: i32| {
+            let p = px(doc, x, y);
+            p[0] > 30_000 && p[1] < 1_000
+        };
+        let off = fill(false);
+        assert!(is_red(&off, 61, 64), "up to the skirt, as ever");
+        assert!(!is_red(&off, 62, 64), "OFF: the light skirt walls the fill");
+        assert_eq!(
+            px(&off, 64, 64)[0],
+            f32_to_fix15(40.0 / 255.0),
+            "core untouched"
+        );
+        let on = fill(true);
+        assert!(is_red(&on, 61, 64));
+        assert!(is_red(&on, 62, 64), "the skirt is paper now");
+        assert!(is_red(&on, 63, 64), "all the way to the core");
+        assert!(!is_red(&on, 64, 64), "the dark core stays a wall");
+        assert_eq!(px(&on, 64, 64)[0], f32_to_fix15(40.0 / 255.0));
+        assert!(!is_red(&on, 66, 64), "the far side is a separate region");
     }
 
     /// FI-016: area scaling is SIGNED. Negative erodes, so the fill pulls
