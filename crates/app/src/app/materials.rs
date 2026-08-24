@@ -43,6 +43,11 @@ pub struct MaterialItem {
     pub tags: String,
     /// What a click PLACES — a bitmap float, or a live generator layer.
     pub kind: MaterialKind,
+    /// What the material IS (plans/05 item 6): `kind` is how it pastes,
+    /// this is the CSP-style taxonomy the tree, filters and type icons
+    /// speak. Derived at scan: explicit `@type=` tag first, then the
+    /// kind, then cheap name/path inference.
+    pub material_type: MaterialType,
 }
 
 /// A material's three flavours. Bitmaps are the original bank (paste as
@@ -55,6 +60,132 @@ pub enum MaterialKind {
     Image,
     GenLines(GenLinesSpec),
     Tone(ToneSpec),
+}
+
+/// A material's TYPE — plans/05 item 6's taxonomy. Deliberately beside
+/// (not inside) [`MaterialKind`]: kind is how a material PASTES, type is
+/// what it IS; a ripped tone sheet can be an Image-kind (bitmap float)
+/// yet Tone-typed. Stored as an `@type=` SYSTEM tag in the folder's
+/// tags.txt (`@type=tone`) — the 2399-file bank needs no new sidecar
+/// files, and `@`-prefixed tags stay out of the user-tag chips.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MaterialType {
+    Tone,
+    /// Pattern / texture / background images.
+    PatternImage,
+    /// Speed lines, focus lines, stream lines.
+    EffectLines,
+    Balloon,
+    /// CSP 3D-pose thumbnails — LOCKED OWNER DECISION (2026-08-24):
+    /// hidden by default behind a setting, NEVER a "can't use" badge.
+    Pose3d,
+    Other,
+}
+
+impl MaterialType {
+    /// The `@type=` value word.
+    pub fn as_tag(self) -> &'static str {
+        match self {
+            MaterialType::Tone => "tone",
+            MaterialType::PatternImage => "pattern",
+            MaterialType::EffectLines => "effect-lines",
+            MaterialType::Balloon => "balloon",
+            MaterialType::Pose3d => "3d-pose",
+            MaterialType::Other => "other",
+        }
+    }
+
+    /// Case-insensitive; unknown words are not a type (the tag line keeps
+    /// them, the item falls back to inference).
+    pub fn from_tag_word(w: &str) -> Option<Self> {
+        Some(match w.trim().to_ascii_lowercase().as_str() {
+            "tone" | "screentone" => MaterialType::Tone,
+            "pattern" | "texture" => MaterialType::PatternImage,
+            "effect-lines" | "effect" | "lines" => MaterialType::EffectLines,
+            "balloon" | "balloons" => MaterialType::Balloon,
+            "3d-pose" | "pose" | "3d" => MaterialType::Pose3d,
+            "other" => MaterialType::Other,
+            _ => return None,
+        })
+    }
+
+    /// The `@type=` system tag inside a tag line, if present and known.
+    pub fn from_tags(tags: &str) -> Option<Self> {
+        tags.split(',')
+            .filter_map(|t| t.trim().strip_prefix("@type="))
+            .find_map(Self::from_tag_word)
+    }
+
+    /// Everything but `@`-prefixed system tags — what the chips and the
+    /// tag editor show, and what a user's tag edit must preserve beside.
+    pub fn user_tags(tags: &str) -> String {
+        tags.split([',', '\n'])
+            .map(str::trim)
+            .filter(|t| !t.is_empty() && !t.starts_with('@'))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// Re-attach a (possibly changed) system tag to a user tag line.
+    /// `None` drops it.
+    pub fn with_type_tag(user_tags: &str, ty: Option<MaterialType>) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(t) = ty {
+            parts.push(format!("@type={}", t.as_tag()));
+        }
+        let u = normalize_tags(user_tags);
+        if !u.is_empty() {
+            parts.push(u);
+        }
+        parts.join(", ")
+    }
+}
+
+/// Cheap type inference (plans/05 item 6 slice (a)): explicit `@type=` tag
+/// wins, then the material's KIND, then folder-path/filename words. Pixel
+/// inspection is a later, budgeted pass for the genuinely ambiguous —
+/// everything this answers is free.
+pub fn infer_material_type(
+    kind: &MaterialKind,
+    stem: &str,
+    rel: &Path,
+    tags: &str,
+) -> MaterialType {
+    if let Some(t) = MaterialType::from_tags(tags) {
+        return t;
+    }
+    match kind {
+        MaterialKind::GenLines(_) => return MaterialType::EffectLines,
+        MaterialKind::Tone(_) => return MaterialType::Tone,
+        MaterialKind::Image => {}
+    }
+    // Path, name AND user tags as one lowercase haystack: a word anywhere
+    // in the bank's own vocabulary counts (CSP rips name things honestly).
+    let mut hay = rel.to_string_lossy().to_ascii_lowercase();
+    hay.push(' ');
+    hay.push_str(&stem.to_ascii_lowercase());
+    hay.push(' ');
+    hay.push_str(&MaterialType::user_tags(tags).to_ascii_lowercase());
+    let has = |ws: &[&str]| ws.iter().any(|w| hay.contains(w));
+    if has(&["tone", "screentone", "網点", "スクリーン"]) {
+        return MaterialType::Tone;
+    }
+    if has(&[
+        "speed-line", "speedline", "focus-line", "effect-line", "effect",
+        "stream", "集中線", "流線", "スピード線",
+    ]) {
+        return MaterialType::EffectLines;
+    }
+    if has(&["balloon", "bubble", "フキダシ", "吹き出し"]) {
+        return MaterialType::Balloon;
+    }
+    if has(&["3d", "pose", "ポーズ", "figure-"]) {
+        return MaterialType::Pose3d;
+    }
+    if has(&["pattern", "texture", "tex-", "背景", "bg-"]) {
+        return MaterialType::PatternImage;
+    }
+    MaterialType::Other
 }
 
 /// A generator material's file suffix. `focus-lines.gen.json` IS the
@@ -313,7 +444,7 @@ fn scan_dir(dir: &Path, rel: PathBuf, fi: usize, depth: usize, out: &mut Vec<Mat
     // remembering: tags on materials the owner adds by hand survive
     // every rescan, restart and folder re-add. A subfolder carries its
     // own `tags.txt` — the sidecar travels WITH the images it describes.
-    let side = MaterialTags::load(dir);
+    let mut side = MaterialTags::load(dir);
     // `file_type()` comes off the directory entry on both platforms, so
     // splitting here costs nothing; `p.is_dir()` would stat all 2399.
     let (mut dirs, mut paths): (Vec<PathBuf>, Vec<PathBuf>) = (Vec::new(), Vec::new());
@@ -335,6 +466,7 @@ fn scan_dir(dir: &Path, rel: PathBuf, fi: usize, depth: usize, out: &mut Vec<Mat
                 .map(|s| s.to_lowercase())
         })
         .collect();
+    let mut side_dirty = false;
     out.extend(paths.iter().filter_map(|p| {
         let file = p.file_name()?.to_string_lossy().into_owned();
         let mut tags = side.get(&file).to_owned();
@@ -370,6 +502,18 @@ fn scan_dir(dir: &Path, rel: PathBuf, fi: usize, depth: usize, out: &mut Vec<Mat
                 (name, kind)
             }
         };
+        // Type taxonomy (plans/05 item 6): explicit tag → kind → cheap
+        // name/path inference. A CONFIDENT verdict is PERSISTED as an
+        // `@type=` tag so the (later, pixel) passes never re-run over
+        // settled files; `Other` stays unpersisted — re-deriving it is
+        // free, and 2399 "@type=other" lines would be pure bloat.
+        let material_type = infer_material_type(&kind, &name, &rel, &tags);
+        if material_type != MaterialType::Other && MaterialType::from_tags(&tags).is_none() {
+            let with = MaterialType::with_type_tag(&tags, Some(material_type));
+            side.set(&file, &with);
+            tags = with;
+            side_dirty = true;
+        }
         Some(MaterialItem {
             name,
             path: p.clone(),
@@ -377,8 +521,14 @@ fn scan_dir(dir: &Path, rel: PathBuf, fi: usize, depth: usize, out: &mut Vec<Mat
             rel: rel.clone(),
             tags,
             kind,
+            material_type,
         })
     }));
+    // One write per directory, only when a verdict landed. A read-only
+    // bank simply re-infers next scan — the cheap passes cost nothing.
+    if side_dirty {
+        side.save(dir);
+    }
     if depth + 1 >= SCAN_MAX_DEPTH {
         return;
     }
@@ -833,7 +983,12 @@ impl App {
         };
         let file = file.to_string_lossy().into_owned();
         let mut side = MaterialTags::load(folder);
-        side.set(&file, tags);
+        // plans/05 item 6: the user edits USER tags — the `@type` system
+        // tag rides along untouched (the tag editor only ever shows the
+        // user half).
+        let kept_type = MaterialType::from_tags(side.get(&file));
+        let full = MaterialType::with_type_tag(tags, kept_type);
+        side.set(&file, &full);
         if !side.save(folder) {
             return false;
         }
@@ -1053,6 +1208,7 @@ mod tests {
             path: PathBuf::from(format!("C:/m/{name}.png")),
             folder: 0,
             rel: PathBuf::new(),
+            material_type: infer_material_type(&MaterialKind::Image, name, Path::new(""), tags),
             tags: tags.to_owned(),
             kind: MaterialKind::Image,
         }
@@ -1224,7 +1380,9 @@ mod tests {
         );
         assert!(dst.join("tone.png").exists());
         let side = MaterialTags::load(&dst);
-        assert_eq!(side.get("tone.png"), "screentone, dots");
+        // The scan (the assert above ran one over the DST) persisted the
+        // inferred type beside the copied tags (plans/05 item 6).
+        assert_eq!(side.get("tone.png"), "@type=tone, screentone, dots");
         // …which is what the bank would scan, so the search box matches it.
         let scanned = item("tone", side.get("tone.png"));
         assert!(material_matches(&scanned, "screentone"));
@@ -1366,8 +1524,8 @@ mod tests {
         assert!(items.iter().all(|m| m.folder == 2));
         assert_eq!(
             items.iter().find(|m| m.name == "whoosh").unwrap().tags,
-            "effect, air",
-            "a subfolder's sidecar tags its OWN neighbours"
+            "@type=effect-lines, effect, air",
+            "a subfolder's sidecar tags its OWN neighbours (scan persisted the type)"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1519,7 +1677,10 @@ mod tests {
         assert_eq!(g.path, dir.join(format!("focus-lines{GEN_SUFFIX}")));
         assert_eq!(g.thumb_path(), dir.join("focus-lines.png"));
         assert_eq!(g.folder, 3);
-        assert_eq!(g.tags, "effect, action", "tags key on the sidecar's name");
+        assert_eq!(
+            g.tags, "@type=effect-lines, effect, action",
+            "tags key on the sidecar's name; the scan persisted the kind's type"
+        );
         assert_eq!(items[1].kind, MaterialKind::Image);
         assert_eq!(items[1].thumb_path(), items[1].path, "a bitmap is its own thumb");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1580,6 +1741,105 @@ mod tests {
             !dir.join(format!("plain{GEN_SUFFIX}")).exists(),
             "no spec, no sidecar"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// plans/05 item 6 (a): the `@type=` system tag round-trips through
+    /// the tags.txt format (normalize_tags passes `@` and `=` unmangled —
+    /// the plan's precondition, verified here), and the user/tag split
+    /// keeps system tags out of the chips and the editor.
+    #[test]
+    fn type_tags_round_trip_and_split_off_user_tags() {
+        assert_eq!(normalize_tags("  @type=tone , dots "), "@type=tone, dots");
+        assert_eq!(MaterialType::from_tags("@type=tone, dots"), Some(MaterialType::Tone));
+        assert_eq!(MaterialType::from_tags("dots"), None);
+        assert_eq!(MaterialType::from_tags("@type=nonsense"), None);
+        assert_eq!(
+            MaterialType::user_tags("@type=effect-lines, speed, CSP"),
+            "speed, CSP"
+        );
+        assert_eq!(MaterialType::user_tags("@type=tone"), "");
+        assert_eq!(
+            MaterialType::with_type_tag("speed, CSP", Some(MaterialType::EffectLines)),
+            "@type=effect-lines, speed, CSP"
+        );
+        assert_eq!(MaterialType::with_type_tag("speed", None), "speed");
+    }
+
+    /// The cheap inference table: explicit tag > kind > name/path words.
+    /// Everything here is string work — the pixel pass is later, budgeted.
+    #[test]
+    fn cheap_type_inference_names_paths_and_kinds() {
+        let img = MaterialKind::Image;
+        let t = |stem: &str, rel: &str, tags: &str| {
+            infer_material_type(&img, stem, Path::new(rel), tags)
+        };
+        assert_eq!(t("tone-dot-60lpi-30", "", ""), MaterialType::Tone);
+        assert_eq!(t("sheet", "", "screentone, light"), MaterialType::Tone);
+        assert_eq!(t("speed-line-v2", "", ""), MaterialType::EffectLines);
+        assert_eq!(t("集中線-太", "", ""), MaterialType::EffectLines);
+        assert_eq!(t("speech-bubble", "", ""), MaterialType::Balloon);
+        assert_eq!(t("フキダシ丸", "", ""), MaterialType::Balloon);
+        assert_eq!(t("pose", "3D/standing", ""), MaterialType::Pose3d);
+        assert_eq!(t("boy", "3D", ""), MaterialType::Pose3d, "the folder says it");
+        assert_eq!(t("city-pattern", "", ""), MaterialType::PatternImage);
+        assert_eq!(t("cat", "", ""), MaterialType::Other);
+        // Explicit beats everything.
+        assert_eq!(t("cat", "", "@type=balloon"), MaterialType::Balloon);
+        // Kind beats words (a generator IS effect lines whatever its name).
+        assert_eq!(
+            infer_material_type(
+                &MaterialKind::GenLines(GenLinesSpec::default()),
+                "cat",
+                Path::new(""),
+                ""
+            ),
+            MaterialType::EffectLines
+        );
+    }
+
+    /// Scan persistence: CONFIDENT verdicts land in tags.txt once (so the
+    /// later pixel passes never re-run over settled files); `Other` is
+    /// never persisted (re-deriving it is free; 2399 "@type=other" lines
+    /// would be bloat); an explicit tag is never overwritten; a rescan is
+    /// idempotent.
+    #[test]
+    fn scan_persists_confident_types_once_and_idempotently() {
+        let dir = std::env::temp_dir().join(format!("mn-mtype-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("speed-line-a.png"), b"").unwrap();
+        std::fs::write(dir.join("cat.png"), b"").unwrap();
+        std::fs::write(dir.join("misc.png"), b"").unwrap();
+        std::fs::write(dir.join("tags.txt"), "cat.png=pet, @type=balloon\n").unwrap();
+
+        let items = materials_scan_folder(&dir, 0);
+        let by = |n: &str| items.iter().find(|m| m.name == n).unwrap();
+        assert_eq!(by("speed-line-a").material_type, MaterialType::EffectLines);
+        assert_eq!(by("cat").material_type, MaterialType::Balloon, "explicit wins");
+        assert_eq!(by("misc").material_type, MaterialType::Other);
+
+        let body = std::fs::read_to_string(dir.join("tags.txt")).unwrap();
+        assert!(
+            body.contains("speed-line-a.png=@type=effect-lines"),
+            "the verdict persisted: {body}"
+        );
+        assert!(
+            body.contains("cat.png=pet, @type=balloon"),
+            "the explicit line untouched: {body}"
+        );
+        assert!(
+            !body.contains("misc.png"),
+            "Other is never persisted: {body}"
+        );
+
+        // Rescan: idempotent — no duplicated tags, no changed types.
+        let again = materials_scan_folder(&dir, 0);
+        let body2 = std::fs::read_to_string(dir.join("tags.txt")).unwrap();
+        assert_eq!(body, body2, "a rescan writes nothing new");
+        for (a, b) in items.iter().zip(again.iter()) {
+            assert_eq!((a.name.as_str(), a.material_type), (b.name.as_str(), b.material_type));
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

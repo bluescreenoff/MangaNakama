@@ -4731,12 +4731,21 @@ fn material_tags_sidecar_search_and_rescan() {
     };
     let sidecar = tmp.join(crate::app::materials::TAGS_FILE);
 
-    // No sidecar: untagged, and scanning must not create one.
-    assert_eq!(find(&app, "tone-dots").tags, "");
-    assert_eq!(find(&app, "speed-lines").tags, "");
-    assert!(!sidecar.exists(), "a scan must never write the sidecar");
+    // No USER tags — but the scan persists CONFIDENT type verdicts now
+    // (plans/05 item 6): both files name their type, so each gets exactly
+    // an `@type` line and the sidecar exists for that reason alone.
+    assert_eq!(find(&app, "tone-dots").tags, "@type=tone");
+    assert_eq!(find(&app, "speed-lines").tags, "@type=effect-lines");
+    let persisted_once = std::fs::read_to_string(&sidecar).unwrap();
+    app.materials_scan();
+    assert_eq!(
+        std::fs::read_to_string(&sidecar).unwrap(),
+        persisted_once,
+        "a rescan is idempotent"
+    );
 
-    // Tag one material through the command the palette pushes.
+    // Tag one material through the command the palette pushes: user tags
+    // land BESIDE the system tag, never over it.
     crate::cmd::dispatch(
         &mut app,
         crate::cmd::AppCmd::MaterialSetTags {
@@ -4746,14 +4755,18 @@ fn material_tags_sidecar_search_and_rescan() {
     );
     assert_eq!(
         find(&app, "tone-dots").tags,
-        "Screentone, dots",
+        "@type=tone, Screentone, dots",
         "the bank refreshed in place — no restart, no rescan"
     );
     assert_eq!(
         std::fs::read_to_string(&sidecar).unwrap(),
-        "tone-dots.png=Screentone, dots\n"
+        "speed-lines.png=@type=effect-lines\ntone-dots.png=@type=tone, Screentone, dots\n"
     );
-    assert_eq!(find(&app, "speed-lines").tags, "", "only that one changed");
+    assert_eq!(
+        find(&app, "speed-lines").tags,
+        "@type=effect-lines",
+        "only that one changed"
+    );
 
     // The one search box hits the tag, and misses what it should.
     let matches = |needle: &str| {
@@ -4790,7 +4803,8 @@ fn material_tags_sidecar_search_and_rescan() {
     .unwrap();
     app.materials_scan();
     assert_eq!(find(&app, "his-own").tags, "owner, keep me");
-    assert_eq!(find(&app, "tone-dots").tags, "Screentone, dots");
+    // The rescan re-persisted the type the hand-edit dropped.
+    assert_eq!(find(&app, "tone-dots").tags, "@type=tone, Screentone, dots");
 
     crate::cmd::dispatch(
         &mut app,
@@ -4805,7 +4819,10 @@ fn material_tags_sidecar_search_and_rescan() {
         body.contains("his-own.png=owner, keep me\n"),
         "the owner's own tags survive an edit elsewhere: {body}"
     );
-    assert!(body.contains("speed-lines.png=effect\n"), "{body}");
+    assert!(
+        body.contains("speed-lines.png=@type=effect-lines, effect\n"),
+        "{body}"
+    );
 
     // Clearing a material's tags removes the entry, and clearing the LAST
     // one (with nothing else left to say) removes the file, so "cleared"
@@ -4820,11 +4837,19 @@ fn material_tags_sidecar_search_and_rescan() {
         );
     }
     let body = std::fs::read_to_string(&sidecar).unwrap();
-    assert_eq!(body, "# my folder\n", "only the comment is left: {body}");
+    assert_eq!(
+        body,
+        // Clearing USER tags leaves the invisible `@type` lines behind —
+        // they are system bookkeeping (the pixel-pass skip list), and the
+        // palette only ever showed the user half anyway. `his-own` was
+        // never typed, so it is gone whole.
+        "speed-lines.png=@type=effect-lines\ntone-dots.png=@type=tone\n# my folder\n",
+        "only the system tags and the comment are left: {body}"
+    );
     assert!(
-        app.materials
-            .iter()
-            .all(|m| m.path.parent() != Some(tmp.as_path()) || m.tags.is_empty())
+        app.materials.iter().all(|m| m.path.parent() != Some(tmp.as_path())
+            || crate::app::materials::MaterialType::user_tags(&m.tags).is_empty()),
+        "no USER tags remain on anything"
     );
 
     let _ = std::fs::remove_dir_all(&tmp);

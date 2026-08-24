@@ -442,6 +442,9 @@ fn material_cell(ui: &mut egui::Ui, app: &mut App, i: usize, size: egui::Vec2) {
         )
     };
     let selected = app.material_selected == Some(i);
+    // plans/05 item 6: `@`-prefixed SYSTEM tags (@type=…) never reach the
+    // user — the hover, the info strip and the tag editor speak user tags.
+    let user_tags = crate::app::materials::MaterialType::user_tags(&tags);
 
     if ui.is_rect_visible(rect) {
         if selected {
@@ -537,16 +540,16 @@ fn material_cell(ui: &mut egui::Ui, app: &mut App, i: usize, size: egui::Vec2) {
         } else {
             "double-click to paste, or drag onto the canvas to paste there"
         };
-        let hover = if tags.is_empty() {
+        let hover = if user_tags.is_empty() {
             format!("{name} — {what}, right-click to tag")
         } else {
-            format!("{name}\n{tags}\n{what}, right-click to tag")
+            format!("{name}\n{user_tags}\n{what}, right-click to tag")
         };
         resp.on_hover_text(hover)
     } else {
         resp
     };
-    material_tag_menu(&resp, app, path, name, tags);
+    material_tag_menu(&resp, app, path, name, user_tags);
 }
 
 /// A translucent copy of the thumbnail under the pointer while a cell is
@@ -668,10 +671,13 @@ fn info_strip(ui: &mut egui::Ui, app: &mut App) {
                 ui.label(egui::RichText::new(title).strong());
                 ui.label(egui::RichText::new(where_it_lives).small().weak());
                 ui.label(
-                    egui::RichText::new(if tags.is_empty() {
-                        "no tags — right-click the cell to add some".to_owned()
-                    } else {
-                        tags
+                    egui::RichText::new({
+                        let u = crate::app::materials::MaterialType::user_tags(&tags);
+                        if u.is_empty() {
+                            "no tags — right-click the cell to add some".to_owned()
+                        } else {
+                            u
+                        }
                     })
                     .small(),
                 );
