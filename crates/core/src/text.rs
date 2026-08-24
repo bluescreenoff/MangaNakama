@@ -494,11 +494,18 @@ pub fn utf16_to_byte(s: &str, u: u32) -> usize {
     s.len()
 }
 
-/// One scalar forward from `u` (clamped).
+/// One GRAPHEME CLUSTER forward from `u` (clamped). Combining marks and
+/// ZWJ emoji sequences step as one user-perceived character (plans/05
+/// item 5): these power the arrows and Backspace/Delete, and a caret
+/// that splits 👨‍👩‍👧 or e+U+0301 is wrong everywhere a user can see it.
+/// The one audit-note alternative — routing through DirectWrite's
+/// GetClusterMetrics — was rejected for layering: mn-core is
+/// platform-free by contract and this runs on every keypress.
 pub fn next_boundary(s: &str, u: u32) -> u32 {
+    use unicode_segmentation::UnicodeSegmentation;
     let mut units = 0u32;
-    for c in s.chars() {
-        let l = c.len_utf16() as u32;
+    for (_, g) in s.grapheme_indices(true) {
+        let l: u32 = g.chars().map(|c| c.len_utf16() as u32).sum();
         if units + l > u {
             return units + l;
         }
@@ -507,16 +514,19 @@ pub fn next_boundary(s: &str, u: u32) -> u32 {
     units
 }
 
-/// One scalar back from `u` (clamped to 0).
+/// One grapheme cluster back from `u` (clamped to 0) — the cluster
+/// START, so a mid-cluster position (which stepping never produces, but
+/// a drag or an IME commit might) still rounds somewhere sane.
 pub fn prev_boundary(s: &str, u: u32) -> u32 {
+    use unicode_segmentation::UnicodeSegmentation;
     let mut prev = 0u32;
     let mut units = 0u32;
-    for c in s.chars() {
+    for (_, g) in s.grapheme_indices(true) {
         if units >= u {
             break;
         }
         prev = units;
-        units += c.len_utf16() as u32;
+        units += g.chars().map(|c| c.len_utf16() as u32).sum::<u32>();
     }
     prev
 }
@@ -1382,6 +1392,43 @@ mod tests {
         assert_eq!(prev_boundary(s, 3), 1);
         assert_eq!(prev_boundary(s, 4), 3);
         assert_eq!(next_boundary(s, 4), 4, "clamped at end");
+    }
+
+    /// Grapheme-cluster stepping (plans/05 item 5): combining marks, ZWJ
+    /// emoji and flag pairs are ONE step for the arrows, Backspace and
+    /// Delete — a base character never loses its accents, a family emoji
+    /// never loses a member.
+    #[test]
+    fn clusters_step_as_one() {
+        // e + COMBINING ACUTE: one cluster, 2 UTF-16 units.
+        let acc = "e\u{0301}x";
+        assert_eq!(next_boundary(acc, 0), 2, "the accent rides along");
+        assert_eq!(prev_boundary(acc, 2), 0, "and back");
+        assert_eq!(prev_boundary(acc, 1), 0, "mid-cluster rounds to its start");
+        assert_eq!(next_boundary(acc, 1), 2, "mid-cluster rounds to its end");
+        // 説 + grade-1 dakuten (combining): one cluster for the caret even
+        // though it decomposes.
+        let daku = "\u{8AAC}\u{3099}！";
+        assert_eq!(utf16_len(daku), 3);
+        assert_eq!(next_boundary(daku, 0), 2, "the dakuten rides along");
+        assert_eq!(prev_boundary(daku, 2), 0);
+        // ZWJ family: 3 astral + 2 ZWJ = 8 UTF-16 units, ONE cluster.
+        let fam = "👨‍👩‍👧";
+        assert_eq!(utf16_len(fam), 8);
+        assert_eq!(next_boundary(fam, 0), 8, "the family stays together");
+        assert_eq!(prev_boundary(fam, 8), 0);
+        assert_eq!(next_boundary(fam, 4), 8, "mid-sequence snaps to the end");
+        assert_eq!(prev_boundary(fam, 4), 0, "...and back to the start");
+        // Regional-indicator flag pair: one cluster, 4 units.
+        let flag = "🇯🇵";
+        assert_eq!(utf16_len(flag), 4);
+        assert_eq!(next_boundary(flag, 0), 4);
+        assert_eq!(prev_boundary(flag, 4), 0);
+        // Plain text is unchanged.
+        assert_eq!(next_boundary("abc", 1), 2);
+        assert_eq!(prev_boundary("abc", 2), 1);
+        assert_eq!(next_boundary("", 0), 0);
+        assert_eq!(prev_boundary("", 0), 0);
     }
 
     #[test]

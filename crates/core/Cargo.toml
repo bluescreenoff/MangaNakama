@@ -20,3 +20,8 @@ serde_json = "1"
 # zstd, time) is off.
 zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
 quick-xml = "0.41"
+# Grapheme-cluster stepping for the text caret (plans/05 item 5). Pure
+# Rust, no platform deps — the DirectWrite GetClusterMetrics alternative
+# would drag OS calls across this crate's platform-free contract for
+# every keypress. Already in the tree transitively (same locked version).
+unicode-segmentation = "1.13"
