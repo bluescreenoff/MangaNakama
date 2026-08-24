@@ -537,6 +537,14 @@ fn class_of(c: char) -> CharClass {
     match c {
         c if c.is_whitespace() => CharClass::Space,
         c if c.is_ascii_alphanumeric() || c == '_' => CharClass::Word,
+        // Fullwidth latin (plans/05 item 5): ＡＺａｚ and ０-９ are one Word
+        // run, so Ctrl+Right over ＡＢＣ１２３ jumps the whole run like it
+        // does over ABC123. The fullwidth PUNCTUATION around the zone stays
+        // Other, and halfwidth katakana keeps its Katakana arm below — no
+        // double-classify.
+        '\u{FF10}'..='\u{FF19}' | '\u{FF21}'..='\u{FF3A}' | '\u{FF41}'..='\u{FF5A}' => {
+            CharClass::Word
+        }
         '\u{3040}'..='\u{309F}' => CharClass::Hiragana,
         '\u{30A0}'..='\u{30FF}' | '\u{31F0}'..='\u{31FF}' | '\u{FF66}'..='\u{FF9D}' => {
             CharClass::Katakana
@@ -1419,6 +1427,33 @@ mod tests {
 
         // Surrogate pairs count as the 2 UTF-16 units they are.
         assert_eq!(word_range("a𠮷b", 1), (1, 3), "the pair is its own run");
+    }
+
+    /// Fullwidth latin (plans/05 item 5): ＡＢＣ１２３ is one Word run —
+    /// Ctrl+Right over it jumps the whole run, ascii and fullwidth latin
+    /// mix into one run, fullwidth punctuation stays Other, and halfwidth
+    /// katakana remains its own class beside the fullwidth letters.
+    #[test]
+    fn fullwidth_latin_is_a_word_run() {
+        let s = "ＡＢＣ１２３ xyz";
+        assert_eq!(word_range(s, 0), (0, 6), "the whole fullwidth run");
+        assert_eq!(word_range(s, 5), (0, 6));
+        assert_eq!(word_range(s, 7), (7, 10));
+        assert_eq!(next_word_boundary(s, 0), 7, "skips the run AND the space");
+        assert_eq!(prev_word_boundary(s, 10), 7, "...back over the same edge");
+        // Mixed widths are ONE word — the widths are spelling, not a boundary.
+        let mix = "abcＤＥfg";
+        assert_eq!(word_range(mix, 0), (0, 7));
+        assert_eq!(word_range(mix, 4), (0, 7));
+        // Fullwidth punctuation stays Other: ！ is its own run.
+        let punct = "Ａ！Ｂ";
+        assert_eq!(word_range(punct, 0), (0, 1));
+        assert_eq!(word_range(punct, 1), (1, 2), "fullwidth ！ is not Word");
+        assert_eq!(word_range(punct, 2), (2, 3));
+        // Halfwidth katakana beside fullwidth letters: distinct classes.
+        let hw = "ｱｲＡＢ";
+        assert_eq!(word_range(hw, 0), (0, 2), "halfwidth kana run");
+        assert_eq!(word_range(hw, 2), (2, 4), "fullwidth letters run");
     }
 
     #[test]

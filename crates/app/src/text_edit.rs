@@ -660,11 +660,18 @@ impl App {
     /// been telling people to "double-click the text to set furigana" since
     /// the furigana field existed, and until now nothing happened).
     pub fn text_tool_down(&mut self, cx: f32, cy: f32, shift: bool, clicks: u8) {
-        // Click inside the edited box: move the caret (Shift extends).
+        // Click inside the edited box: move the caret (Shift extends). A
+        // NEAR-miss (a few px outside, plans/05 item 5) still aims the
+        // caret — clamped to the box edge, so a click 3 px outside lands
+        // at the nearest end of the line instead of dropping the session.
         if let Some(item) = self.edited_item() {
-            if item.contains([cx, cy], 2.0) {
+            if item.contains([cx, cy], 8.0) {
                 let dpi = self.doc_dpi();
                 let l = item.to_local([cx, cy]);
+                let l = [
+                    l[0].clamp(0.0, item.size[0].max(0.0)),
+                    l[1].clamp(0.0, item.size[1].max(0.0)),
+                ];
                 // Everything the engine has to answer while `item` is still
                 // borrowed, in one go.
                 let hit = self.text_engine.as_ref().and_then(|e| {
@@ -750,6 +757,12 @@ impl App {
                 };
                 let dpi = self.doc_dpi();
                 let l = item.to_local([cx, cy]);
+                // Same near-miss clamp as the press: a drag past the box
+                // edge keeps selecting at the edge (every editor does).
+                let l = [
+                    l[0].clamp(0.0, item.size[0].max(0.0)),
+                    l[1].clamp(0.0, item.size[1].max(0.0)),
+                ];
                 let hit = self.text_engine.as_ref().and_then(|e| {
                     let (pos, trailing) = e.hit_test_point(item, dpi, l).ok()?;
                     // A drag that began as a double/triple click keeps
@@ -963,6 +976,50 @@ impl App {
         if let Some(ed) = self.text_edit.as_mut() {
             ed.goal = Some(g);
             ed.affinity = land;
+        }
+    }
+
+    /// PageUp/PageDown: to the first/last VISUAL line, keeping the goal
+    /// column (the plan's "loop line_move to the boundary"). Unlike
+    /// [`Self::caret_line`] there is NO jump past the boundary — the first
+    /// line's column IS the destination; PageUp on the first line does
+    /// nothing.
+    fn caret_page(&mut self, dir: i32, shift: bool) {
+        let Some(ed) = self.text_edit.as_ref() else {
+            return;
+        };
+        let mut goal = ed.goal;
+        let mut caret = ed.caret;
+        let affinity = ed.affinity;
+        let dpi = self.doc_dpi();
+        let Some(item) = self.edited_item() else {
+            return;
+        };
+        let Some(e) = self.text_engine.as_ref() else {
+            return;
+        };
+        let mut moved = false;
+        let mut land = false;
+        // The cap is pathological-layout insurance; a real box stops in a
+        // handful of hops.
+        for _ in 0..4096 {
+            let Ok((pos, g, trailing)) = e.line_move(item, dpi, caret, affinity, dir, goal) else {
+                break;
+            };
+            if pos == caret {
+                break;
+            }
+            moved = true;
+            goal = Some(g);
+            land = wrap_affinity(&item.text, pos, trailing);
+            caret = pos;
+        }
+        if moved {
+            self.move_caret(caret, shift);
+            if let Some(ed) = self.text_edit.as_mut() {
+                ed.goal = goal;
+                ed.affinity = land;
+            }
         }
     }
 
@@ -1271,6 +1328,14 @@ impl App {
                 if !self.text_undo_step() && self.commit_text_edit() {
                     self.push_cmd(AppCmd::Undo);
                 }
+            }
+            0x21 | 0x22 => {
+                // PageUp/PageDown (plans/05 item 5): caret to the FIRST/LAST
+                // visual line, keeping the cross-axis position — loop the
+                // same line_move the line arrows use until it stops moving.
+                // Balloon-sized boxes: viewport paging is not a thing here.
+                let dir = if vk == 0x21 { -1 } else { 1 };
+                self.caret_page(dir, shift);
             }
             // Swallow anything else that would trigger a tool shortcut while
             // typing; real characters arrive via WM_CHAR.
@@ -1683,6 +1748,75 @@ mod in_editor_undo_tests {
             .and_then(|t| t.texts.first())
             .map(|i| i.text.clone())
             .unwrap_or_default()
+    }
+
+    /// plans/05 item 5: PageUp/PageDown go to the first/last VISUAL line
+    /// keeping the column; on the boundary line they do nothing (no jump
+    /// past it, unlike the line arrows' end-of-text hop).
+    #[test]
+    fn page_keys_reach_the_first_and_last_line() {
+        let Some(mut app) = headless() else {
+            println!("[test] SKIP: no usable adapter");
+            return;
+        };
+        // Pin orientation + size — App::new reads machine prefs (the
+        // recorded gotcha); a test must not move with the owner's prefs.
+        app.start_new_text([300.0, 300.0], None);
+        app.apply_text_prop(|i| {
+            i.vertical = false;
+            i.size_pt = 24.0;
+        });
+        type_str(&mut app, "aaa");
+        assert!(app.text_key(0x0D, false, false), "Enter breaks the line");
+        type_str(&mut app, "bbb");
+        assert!(app.text_key(0x0D, false, false));
+        type_str(&mut app, "ccc");
+        let line_start = |app: &App| -> u32 {
+            let ed = app.text_edit.as_ref().unwrap();
+            let item = app.edited_item().unwrap();
+            app.text_engine
+                .as_ref()
+                .unwrap()
+                .line_bounds(item, app.doc_dpi(), ed.caret)
+                .map(|(s, _)| s)
+                .unwrap_or(u32::MAX)
+        };
+        // Caret starts at the very end (line 3).
+        assert!(app.text_key(0x21, false, false), "PageUp handled");
+        assert_eq!(line_start(&app), 0, "reached the first line");
+        let first = app.text_edit.as_ref().unwrap().caret;
+        // Already there: pressing it again does nothing (no end-of-text hop).
+        assert!(app.text_key(0x21, false, false));
+        assert_eq!(app.text_edit.as_ref().unwrap().caret, first);
+        assert!(app.text_key(0x22, false, false), "PageDown handled");
+        assert_eq!(line_start(&app), 8, "reached the last line");
+    }
+
+    /// plans/05 item 5: a click a few px OUTSIDE the box still aims the
+    /// caret, clamped to the box edge — it must not drop the edit session.
+    #[test]
+    fn a_near_miss_click_lands_the_caret_at_the_edge() {
+        let Some(mut app) = headless() else {
+            println!("[test] SKIP: no usable adapter");
+            return;
+        };
+        app.start_new_text([300.0, 300.0], None);
+        app.apply_text_prop(|i| {
+            i.vertical = false;
+            i.size_pt = 24.0;
+        });
+        type_str(&mut app, "hello");
+        let (x, y) = {
+            let it = app.edited_item().unwrap();
+            (it.pos[0] - 4.0, it.pos[1] + it.size[1] * 0.5)
+        };
+        app.text_tool_down(x, y, false, 1);
+        assert!(app.text_edit.is_some(), "the session survives the near-miss");
+        assert_eq!(
+            app.text_edit.as_ref().unwrap().caret,
+            0,
+            "clamped to the line start, not a miss"
+        );
     }
 
     /// DEFECT 1 (data loss). Ctrl+Z past the last in-editor step used to
