@@ -1464,7 +1464,7 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
             to_pt(r[2] as f32, r[3] as f32),
             to_pt(r[0] as f32, r[3] as f32),
         ];
-        if !drag.is_identity() {
+        if !drag.is_identity() || drag.mesh.is_some() {
             // Dim what is being lifted out — reads as "this region is
             // floating now" without touching the layer pixels.
             painter.add(egui::Shape::convex_polygon(
@@ -1472,6 +1472,70 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
                 egui::Color32::from_white_alpha(110),
                 egui::Stroke::NONE,
             ));
+        }
+        // Row 53 — mesh mode: the preview renders through the DEFORMED
+        // quads (one textured triangle pair per cell), with the lattice
+        // lines and draggable points on top. The affine path is untouched
+        // below.
+        if let Some(m) = &drag.mesh {
+            if let Some(tex) = &drag.preview_tex {
+                let k = (m.n - 1) as f32;
+                let mut mesh = egui::Mesh {
+                    texture_id: tex.id(),
+                    indices: Vec::new(),
+                    vertices: Vec::new(),
+                };
+                for cj in 0..m.n - 1 {
+                    for ci in 0..m.n - 1 {
+                        let corner = |i: usize, j: usize| {
+                            let p = m.pts[j * m.n + i];
+                            let uv = egui::pos2(i as f32 / k, j as f32 / k);
+                            (
+                                egui::epaint::Vertex {
+                                    pos: to_pt(p[0], p[1]),
+                                    uv,
+                                    color: egui::Color32::WHITE,
+                                },
+                                [p[0], p[1]],
+                            )
+                        };
+                        let (v00, p00) = corner(ci, cj);
+                        let (v10, p10) = corner(ci + 1, cj);
+                        let (v01, p01) = corner(ci, cj + 1);
+                        let (v11, p11) = corner(ci + 1, cj + 1);
+                        let b = mesh.vertices.len() as u32;
+                        mesh.vertices.extend_from_slice(&[v00, v10, v01, v11]);
+                        mesh.indices.extend_from_slice(&[b, b + 1, b + 2, b + 1, b + 3, b + 2]);
+                        // The lattice lines, straight from the same corners.
+                        for (a, q) in [(p00, p10), (p00, p01), (p10, p11), (p01, p11)] {
+                            painter.line_segment(
+                                [to_pt(a[0], a[1]), to_pt(q[0], q[1])],
+                                egui::Stroke::new(1.0, theme::c().accent),
+                            );
+                        }
+                    }
+                }
+                painter.add(egui::Shape::Mesh(mesh.into()));
+            }
+            let active = match drag.gesture.as_ref().map(|g| g.grab) {
+                Some(crate::app::TransformGrab::MeshPoint(i)) => Some(i),
+                _ => None,
+            };
+            for (i, p) in m.pts.iter().enumerate() {
+                let half = if active == Some(i) { 4.5 } else { 3.0 };
+                let rect = egui::Rect::from_center_size(
+                    to_pt(p[0], p[1]),
+                    egui::vec2(half * 2.0, half * 2.0),
+                );
+                painter.circle_filled(to_pt(p[0], p[1]), half, theme::c().accent);
+                painter.circle_stroke(
+                    to_pt(p[0], p[1]),
+                    half,
+                    egui::Stroke::new(1.0, egui::Color32::WHITE),
+                );
+                let _ = rect;
+            }
+            return;
         }
         if let Some(tex) = &drag.preview_tex {
             let pts: Vec<egui::Pos2> = drag.bbox.iter().map(|c| to_pt(c[0], c[1])).collect();

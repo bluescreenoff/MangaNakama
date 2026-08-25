@@ -68,6 +68,20 @@ pub struct TransformDrag {
     /// the overlay draws it through `xform` as a textured mesh (egui-wgpu
     /// renders it — the GPU path; only the lift-time readback is CPU).
     pub preview_tex: Option<egui::TextureHandle>,
+    /// Row 53: when Some, this drag is a MESH transform — the lattice
+    /// bends, the affine holds identity, commit resamples through the
+    /// deformed quads.
+    pub mesh: Option<MeshLattice>,
+}
+
+/// Row 53 (mesh transformation): the deformed lattice over the float —
+/// `n × n` points in canvas px, row-major, identity = the grid over
+/// `source.rect`. While present, the drag is a MESH drag: the affine
+/// params stand still and the lattice carries the gesture.
+#[derive(Clone, Debug)]
+pub struct MeshLattice {
+    pub n: usize,
+    pub pts: Vec<[f32; 2]>,
 }
 
 /// How far above the box's top edge the rotate stalk floats, in SCREEN px
@@ -93,6 +107,8 @@ pub enum TransformGrab {
     /// The rotate stalk above the top edge, or anywhere outside the bbox:
     /// rotate around the pivot.
     Rotate,
+    /// Row 53: lattice point `i` of a mesh drag.
+    MeshPoint(usize),
 }
 
 /// Press state for one Transform gesture: the grab target plus the params
@@ -230,6 +246,23 @@ impl TransformDrag {
     /// Priority — rotate stalk, then corners, then edge midpoints, then the
     /// reference-point marker (or any Alt press that missed a handle), then
     /// inside the quad, then everything else rotates.
+    /// Row 53: the nearest lattice point within a 10px SCREEN radius.
+    pub fn mesh_point_at(&self, p: [f32; 2], zoom: f32) -> Option<usize> {
+        let m = self.mesh.as_ref()?;
+        let tol = 10.0 / zoom.max(0.01);
+        m.pts
+            .iter()
+            .enumerate()
+            .min_by(|a, b| {
+                let d = |q: &[f32; 2]| (q[0] - p[0]).hypot(q[1] - p[1]);
+                d(a.1)
+                    .partial_cmp(&d(b.1))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .filter(|(_, q)| (q[0] - p[0]).hypot(q[1] - p[1]) <= tol)
+            .map(|(i, _)| i)
+    }
+
     pub fn hit_test(&self, p: [f32; 2], zoom: f32, alt: bool) -> TransformGrab {
         let tol = (10.0 / zoom.max(0.01)).max(2.0);
         let d = |q: [f32; 2]| (q[0] - p[0]).abs() + (q[1] - p[1]).abs();
@@ -291,6 +324,32 @@ impl TransformDrag {
         if !p[0].is_finite() || !p[1].is_finite() {
             return;
         }
+        // A mesh drag owns the gesture: points bend the lattice, a move
+        // translates it whole, and every affine grab is a no-op (the
+        // affine holds identity so the commit's resample is the truth).
+        if let Some(m) = &mut self.mesh {
+            match g.grab {
+                TransformGrab::MeshPoint(i) => {
+                    if let Some(pt) = m.pts.get_mut(i) {
+                        *pt = p;
+                    }
+                }
+                TransformGrab::Move => {
+                    let d = [p[0] - g.start[0], p[1] - g.start[1]];
+                    let base = mn_core::mesh::identity_lattice(self.source.rect, m.n);
+                    // Translate from the PRESS-TIME lattice, not a
+                    // per-frame delta — the same anti-compounding rule
+                    // the affine gestures use.
+                    if base.len() == m.pts.len() {
+                        for (pt, b) in m.pts.iter_mut().zip(&base) {
+                            *pt = [b[0] + d[0], b[1] + d[1]];
+                        }
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
         let pivot = self.pivot();
         // The transform's centre in canvas space at press time.
         let c = [pivot[0] + g.tx0, pivot[1] + g.ty0];
@@ -314,6 +373,9 @@ impl TransformDrag {
         let mid = |a: [f32; 2], b: [f32; 2]| [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5];
         let src = self.src_corners();
         match g.grab {
+            // Mesh grabs returned at the top of this fn; this arm exists
+            // only for exhaustiveness.
+            TransformGrab::MeshPoint(_) => {}
             TransformGrab::Move => {
                 let (mut dx, mut dy) = (p[0] - g.start[0], p[1] - g.start[1]);
                 if shift {
@@ -503,6 +565,7 @@ mod tests {
             object_lift: false,
             order: crate::app::MaterialLayerOrder::Above,
             preview_tex: None,
+            mesh: None,
         };
         d.set_params(1.0, 1.0, 0.0, 0.0, 0.0);
         d

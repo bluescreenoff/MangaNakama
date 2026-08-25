@@ -3306,8 +3306,17 @@ impl App {
         let Some(drag) = &mut self.transform_drag else {
             return;
         };
+        let grab = if drag.mesh.is_some() {
+            // A mesh drag claims the pointer: lattice points first (10 px
+            // screen), then whole-lattice translate; affine grabs no-op.
+            drag.mesh_point_at([cx, cy], zoom)
+                .map(crate::app::TransformGrab::MeshPoint)
+                .unwrap_or(crate::app::TransformGrab::Move)
+        } else {
+            drag.hit_test([cx, cy], zoom, alt)
+        };
         drag.gesture = Some(TransformGesture {
-            grab: drag.hit_test([cx, cy], zoom, alt),
+            grab,
             start: [cx, cy],
             bbox0: drag.bbox,
             sx0: drag.sx,

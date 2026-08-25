@@ -50,6 +50,7 @@ pub use crate::cmd::RulerKind;
 pub use pages::{CanvasSizeDraft, NewComicDraft, PageEntry, SpreadOp, WorkSettingsDraft};
 pub use session::{DocSession, unsaved_autosave_folder_for, unsaved_autosave_path_for};
 pub use transform::{
+    MeshLattice,
     ROTATE_STALK_SCREEN, TransformDrag, TransformGesture, TransformGrab, transform_preview,
 };
 
@@ -2392,6 +2393,7 @@ impl App {
             (((by - ay).atan2(bx - ax) / step).round() as i32).rem_euclid(n as i32)
         };
         Some(match grab {
+            TransformGrab::MeshPoint(_) => egui::CursorIcon::Grab,
             TransformGrab::Corner(i) => {
                 // Along the diagonal out of the opposite corner.
                 if matches!(

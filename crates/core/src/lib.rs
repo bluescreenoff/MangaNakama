@@ -33,6 +33,7 @@ pub mod frame_order;
 pub mod genlines;
 pub mod gradient;
 pub mod liquify;
+pub mod mesh;
 pub mod magnetic;
 pub mod ora;
 pub mod page;

@@ -331,6 +331,7 @@ fn open_float_drag(app: &mut App, src: mn_core::FloatSource, center_on_view: boo
         object_lift: false,
         order: crate::app::MaterialLayerOrder::Above,
         preview_tex,
+        mesh: None,
     };
     if center_on_view {
         // Centre the float on the current view through the params model, so
@@ -507,14 +508,28 @@ fn commit_transform_drag(app: &mut App, drag: crate::app::TransformDrag) {
         // deselecting or re-lassoing while the float was open must not
         // change what gets erased.
         app.doc.set_op_label("Transform");
+        // Row 53: a mesh drag resamples through the deformed quads and
+        // hands the buffer to the commit's resampled seam; the affine
+        // exists only to widen the destination loop past the source
+        // rect when the lattice stretches outward.
+        let (mesh_xf, mesh_buf) = match &drag.mesh {
+            Some(m) => {
+                let (dst, buf) = mn_core::mesh::warp_buffer(&drag.source, &m.pts, m.n);
+                let xf = mn_core::mesh::cover_affine(drag.source.rect, &m.pts);
+                (xf, Some((buf, dst)))
+            }
+            None => (drag.xform, None),
+        };
         let ok = mn_core::transform::commit_transform(
             &mut app.doc,
             &drag.source,
-            &drag.xform,
+            &mesh_xf,
             drag.lift_selection.as_ref(),
             drag.clear_source,
             clamp,
-            None, // CPU resample; GPU path is a follow-up
+            mesh_buf
+                .as_ref()
+                .map(|(b, r)| (b.as_slice(), *r)),
         );
         // LM-009: a pure translation drags a LINKED mask with the art
         // (the hole stays over the same ink); scale/rotate/skew leave it
@@ -672,6 +687,7 @@ pub(crate) fn open_layer_transform(app: &mut App, li: usize, r: [i32; 4]) -> boo
         object_lift: false,
         order: crate::app::MaterialLayerOrder::Above,
         preview_tex,
+        mesh: None,
     });
     true
 }
@@ -2562,6 +2578,9 @@ pub enum AppCmd {
     /// Begin a transform: lift the selection (or whole layer content) into a
     /// live floating source with a bounding box overlay.
     TransformStart,
+    /// Row 53: Edit ▸ Transform ▸ Mesh — lift like Transform, then bend
+    /// an n×n lattice; commit resamples through the deformed quads.
+    TransformMeshStart,
     /// Commit the pending transform as ONE undo step.
     TransformCommit,
     /// Cancel: drop the floating source, nothing changes.
@@ -5692,10 +5711,42 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 }
             }
         }
+        AppCmd::TransformMeshStart => {
+            let l = app.doc.active_layer();
+            if l.lock {
+                app.set_status("layer is locked");
+            } else if l.is_vector() || l.folder {
+                app.set_status("Mesh transform applies to raster layers");
+            } else {
+                match transform_lift_rect(app) {
+                    Some(r) if r[0] < r[2] && r[1] < r[3] => {
+                        if open_layer_transform(app, app.doc.active, r) {
+                            let drag = app.transform_drag.as_mut().unwrap();
+                            drag.mesh = Some(crate::app::MeshLattice {
+                                n: 5,
+                                pts: mn_core::mesh::identity_lattice(drag.source.rect, 5),
+                            });
+                            app.set_status(
+                                "mesh transform: drag the lattice points, drag between them to move all — Enter commits, Esc cancels",
+                            );
+                            app.mark_dirty();
+                        } else {
+                            app.set_status("nothing to transform");
+                        }
+                    }
+                    _ => app.set_status("nothing to transform"),
+                }
+            }
+        }
         AppCmd::TransformCommit => {
             app.doc.set_op_label("Transform");
             if let Some(drag) = app.transform_drag.take() {
-                if drag.is_identity() && !drag.stamp_on_identity {
+                // A mesh drag's "nothing moved" is the LATTICE's identity,
+                // not the affine's (the affine holds identity throughout).
+                let mesh_moved = drag.mesh.as_ref().is_some_and(|m| {
+                    !mn_core::mesh::lattice_is_identity(drag.source.rect, m.n, &m.pts)
+                });
+                if drag.is_identity() && !mesh_moved && !drag.stamp_on_identity {
                     // Nothing moved — drop the float without an undo step.
                     app.set_status("transform canceled");
                 } else {

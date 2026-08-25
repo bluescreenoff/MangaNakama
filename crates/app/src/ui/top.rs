@@ -207,6 +207,10 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 app.push_cmd(AppCmd::TransformFlip { horizontal: false });
                 ui.close();
             }
+            if item(ui, "Mesh Transform", "") {
+                app.push_cmd(AppCmd::TransformMeshStart);
+                ui.close();
+            }
             ui.separator();
             if item(ui, "Change canvas size…", "") {
                 app.push_cmd(AppCmd::OpenCanvasSize);

@@ -7119,6 +7119,7 @@ fn transform_translation_drags_a_linked_mask_only() {
         object_lift: false,
         order: crate::app::MaterialLayerOrder::Above,
         preview_tex: None,
+        mesh: None,
     };
     let _ = src;
 
@@ -8661,6 +8662,84 @@ fn align_and_distribute_commands() {
     let ts = app.doc.layers[tl].texts().unwrap();
     assert_eq!(ts.texts[0].pos[0], 10.0);
     assert_eq!(ts.texts[1].pos[0], 10.0, "the item moved onto the other");
+}
+
+/// Row 53 — mesh transformation through the real pointer path: lift,
+/// drag a lattice point, commit; the ink follows the bend, one undo
+/// rewinds the whole gesture.
+#[test]
+fn mesh_transform_bends_the_layer_and_undoes_in_one_step() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (400, 300), 1.0);
+    app.doc = Document::new(128, 128);
+    let li = app.doc.add_layer("l");
+    let alpha = |app: &App, x: i32, y: i32| {
+        let idx = TileIdx::of_pixel(x, y);
+        let (ox, oy) = idx.origin();
+        app.doc.layers[li]
+            .tile_arc(idx)
+            .map(|t| t.data()[((y - oy) as usize * 64 + (x - ox) as usize) * 4 + 3])
+            .unwrap_or(0)
+    };
+    for y in 40..60 {
+        for x in 40..60 {
+            let idx = TileIdx::of_pixel(x, y);
+            let (ox, oy) = idx.origin();
+            let t = app.doc.layers[li].tile_mut(idx);
+            let o = ((y - oy) as usize * 64 + (x - ox) as usize) * 4;
+            let f = mn_core::blend::f32_to_fix15(0.0);
+            let d = t.data_mut();
+            d[o] = f;
+            d[o + 1] = f;
+            d[o + 2] = f;
+            d[o + 3] = mn_core::blend::f32_to_fix15(1.0);
+        }
+    }
+    app.viewport = mn_gpu::Viewport::default();
+    crate::cmd::dispatch(&mut app, AppCmd::TransformMeshStart);
+    assert!(app.transform_drag.is_some(), "the float lifted");
+    assert!(app.transform_drag.as_ref().unwrap().mesh.is_some());
+
+    // The lift rect is the populated-TILE bounds, so find the lattice
+    // point nearest the square's centre and drag THAT east.
+    let pts = app.transform_drag.as_ref().unwrap().mesh.as_ref().unwrap().pts.clone();
+    let (idx, centre) = pts
+        .iter()
+        .enumerate()
+        .min_by(|a, b| {
+            let d = |q: &[f32; 2]| (q[0] - 50.0).hypot(q[1] - 50.0);
+            d(a.1).partial_cmp(&d(b.1)).unwrap()
+        })
+        .unwrap();
+    app.canvas_down(centre[0], centre[1], PointerKind::Mouse, &[]);
+    app.canvas_move(centre[0] + 30.0, centre[1], &[]);
+    app.canvas_up(centre[0] + 30.0, centre[1], &[]);
+    let m = app.transform_drag.as_ref().unwrap().mesh.as_ref().unwrap();
+    assert!(
+        (m.pts[idx][0] - (centre[0] + 30.0)).abs() < 0.5,
+        "the pointer drag moved the grabbed point: {:?} (grabbed {centre:?} at {idx})",
+        m.pts[idx]
+    );
+    crate::cmd::dispatch(&mut app, AppCmd::TransformCommit);
+    assert!(app.transform_drag.is_none(), "commit closed the float");
+
+    // The square's ink bent east with the lattice: its content bbox now
+    // reaches past the square's old right edge.
+    let bb = mn_core::align::content_bbox(&app.doc.layers[li]).unwrap();
+    assert!(
+        bb[2] > 62.0,
+        "the bent square reaches further east: {bb:?}"
+    );
+
+    crate::cmd::dispatch(&mut app, AppCmd::Undo);
+    assert_eq!(
+        alpha(&app, 45, 45),
+        mn_core::blend::f32_to_fix15(1.0),
+        "one undo rewound the whole mesh gesture"
+    );
+    assert_eq!(alpha(&app, 65, 50), 0);
 }
 
 /// Row 55 (CSP 液化): the Liquify TOOL through the real pointer path —

@@ -617,6 +617,16 @@ modes, and the falloff is soft: material piles up ahead of the brush
 and feathers out behind it, exactly like a fingertip pushing wet
 ink.</div>
 
+<h2>Mesh transform</h2>
+<div class="quirk"><b>Edit ▸ Transform ▸ Mesh Transform bends the layer
+through a lattice.</b> The content lifts into a float (same rules as
+Ctrl+T) and a 5×5 grid of points lays over it: drag any point to bend
+the grid — the preview shows the deformation live, textured quad by
+quad — and drag BETWEEN the points to slide the whole mesh. Enter
+commits (the bitmap is resampled through the deformed quads), Esc puts
+everything back, and the whole gesture is one undo. Only raster
+layers.</div>
+
 <footer><a href="index.html">← manual</a> · the deep records live in
 the repository's <code>docs/DECISIONS.md</code>.</footer>
 </main>
