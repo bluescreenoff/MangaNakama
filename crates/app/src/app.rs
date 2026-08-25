@@ -397,6 +397,18 @@ pub struct App {
     /// reference set's ink (and frame-border folders) — the barrier is
     /// built per stroke in `begin_stroke`; False paints freely.
     pub anti_overflow: bool,
+    /// The barrier cache (audit small, 2026-08-25): a full reference
+    /// composite per stroke was ~71 MB + a 24 MB mask on the UI thread
+    /// at B4/600dpi. The mask only changes when the reference set's own
+    /// ink does, so it is cached against `(canvas size, reference layer
+    /// indices, the newest tile revision among them)` — tile revisions
+    /// are globally monotonic, so any edit, paste or undo inside a
+    /// reference layer moves the key, and a paint stroke elsewhere
+    /// never does.
+    pub anti_overflow_cache: Option<(
+        ((u32, u32), Vec<usize>, u64),
+        Option<std::sync::Arc<mn_brush::AntiOverflowMask>>,
+    )>,
     /// The pen-pressure wizard (BR-014–016): open flag, the
     /// Stronger/Weaker bend, and the raw pressures of strokes drawn
     /// while it listens.
@@ -1343,7 +1355,7 @@ impl App {
             pen_wizard_open: false,
             pen_wizard_gamma: 1.0,
             pen_wizard_samples: Vec::new(),
-            anti_overflow: false,
+            anti_overflow_cache: None,            anti_overflow: false,
             quick_query: String::new(),
             quick_pins: layout
                 .quick_pins
@@ -2555,6 +2567,36 @@ impl App {
         }
     }
 
+    /// The cached anti-overflow barrier (audit small, 2026-08-25): the
+    /// mask is a full reference-set composite, so it is rebuilt ONLY
+    /// when the reference set's own key moved — `(canvas size,
+    /// reference layer indices, newest tile revision among them)`. Tile
+    /// revisions are globally monotonic, so any edit, paste or undo
+    /// inside a reference layer changes the key and a paint stroke
+    /// anywhere else does not. A cache hit hands back the SAME Arc.
+    pub(crate) fn cached_anti_overflow_mask(
+        &mut self,
+    ) -> Option<std::sync::Arc<mn_brush::AntiOverflowMask>> {
+        let refs = self.doc.reference_layers();
+        let rev = refs
+            .iter()
+            .filter_map(|&li| self.doc.layers.get(li))
+            .flat_map(|l| l.tiles())
+            .map(|(_, t)| t.revision())
+            .max()
+            .unwrap_or(0);
+        let key = (self.doc.size, refs, rev);
+        match &self.anti_overflow_cache {
+            Some((k, m)) if *k == key => m.clone(),
+            _ => {
+                let m = mn_core::fill::anti_overflow_barrier(&self.doc)
+                    .map(|(w, allow)| std::sync::Arc::new(mn_brush::AntiOverflowMask { w, allow }));
+                self.anti_overflow_cache = Some((key, m.clone()));
+                m
+            }
+        }
+    }
+
     /// Open the undo op *and* the brush stroke. Both halves are mandatory:
     /// `begin_op` is what makes the stroke undoable (every `tile_mut` in between
     /// snapshots itself), and `StrokeSink::begin` is what snaps libmypaint's
@@ -2675,13 +2717,15 @@ impl App {
         // Rulers part 2: the sticky lock is stroke-scoped.
         self.ruler_lock = Default::default();
         // Row 42 (A-014, はみ出さない): build the stroke's anti-overflow
-        // barrier ONCE — the REFERENCE SET composite only (owner ruling
+        // barrier — the REFERENCE SET composite only (owner ruling
         // 2026-08-25: frame folders clip their own children themselves
         // and never wall the page) — and hand it to every engine. None
-        // paints freely, exactly as before.
+        // paints freely, exactly as before. The barrier is cached
+        // against the reference set's own tile revisions: a stroke on a
+        // paint layer reuses it, the first stroke after editing the
+        // reference rebuilds it.
         let anti_mask = if self.anti_overflow && !self.mask_edit && !live && !sel_paint {
-            mn_core::fill::anti_overflow_barrier(&self.doc)
-                .map(|(w, allow)| std::sync::Arc::new(mn_brush::AntiOverflowMask { w, allow }))
+            self.cached_anti_overflow_mask()
         } else {
             None
         };

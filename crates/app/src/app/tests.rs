@@ -8522,6 +8522,59 @@ fn the_pen_wizard_applies_a_global_curve() {
     assert!(app.prefs.pressure_curve.is_empty());
 }
 
+/// Audit small (2026-08-25): the anti-overflow barrier — a full
+/// reference-set composite, ~71 MB + a 24 MB mask at B4/600dpi — is
+/// cached against the reference set's OWN key (canvas size, reference
+/// indices, newest tile revision among them). Painting elsewhere
+/// reuses the SAME mask; editing the reference layer rebuilds it.
+#[test]
+fn the_anti_overflow_barrier_is_cached_until_the_reference_moves() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (400, 300), 1.0);
+    app.doc = Document::new(128, 128);
+    let r = app.doc.add_layer("ref");
+    app.doc.layers[r].reference = true;
+    let ink = |doc: &mut Document, x: i32, y: i32| {
+        let idx = TileIdx::of_pixel(x, y);
+        let (ox, oy) = idx.origin();
+        let t = doc.layers[r].tile_mut(idx);
+        let d = t.data_mut();
+        let o = ((y - oy) as usize * 64 + (x - ox) as usize) * 4;
+        let f = mn_core::blend::f32_to_fix15(0.0);
+        d[o] = f;
+        d[o + 1] = f;
+        d[o + 2] = f;
+        d[o + 3] = mn_core::blend::f32_to_fix15(1.0);
+    };
+    ink(&mut app.doc, 10, 10);
+    app.anti_overflow = true;
+
+    let m1 = app.cached_anti_overflow_mask().expect("a reference exists");
+    assert_eq!(m1.blocked(10, 10), true, "the ink is walled");
+    let m2 = app.cached_anti_overflow_mask().expect("still cached");
+    assert!(
+        std::sync::Arc::ptr_eq(&m1, &m2),
+        "no reference edit between calls → the SAME mask, not a re-composite"
+    );
+
+    // New ink inside the reference layer: its fresh tile revision must
+    // invalidate the key and rebuild.
+    ink(&mut app.doc, 80, 80);
+    let m3 = app.cached_anti_overflow_mask().expect("rebuilt");
+    assert!(!std::sync::Arc::ptr_eq(&m1, &m3), "a reference edit rebuilds");
+    assert!(m3.blocked(80, 80), "…and the new ink is walled");
+
+    // Empty again: no reference layers → no mask, and the cache turns
+    // with it.
+    app.doc.layers[r].reference = false;
+    assert!(
+        app.cached_anti_overflow_mask().is_none(),
+        "no references → honestly no mask"
+    );
+}
+
 /// Audit verdict 2 (2026-08-25): the wizard OPENS on the correction in
 /// force — γ recovered from the stored curve at x=0.5, where the only
 /// authorable curve is y = x^γ — instead of a blind ×1.00 whose Apply
