@@ -415,6 +415,11 @@ pub struct App {
     pub pen_wizard_open: bool,
     pub pen_wizard_gamma: f32,
     pub pen_wizard_samples: Vec<f32>,
+    /// The Align/Distribute window (TR-040) and its Alignment base
+    /// choice (TR-044) — the base is window state, not a preference:
+    /// it changes per gesture the way CSP's palette does.
+    pub align_open: bool,
+    pub align_base: mn_core::align::AlignBase,
     /// Tool Property's draft of the SELECTED run's spec while a bar is
     /// being dragged — the same buffering idiom as `border_edit`, and for
     /// a sharper reason: committing per frame would re-rasterize a
@@ -1355,6 +1360,8 @@ impl App {
             pen_wizard_open: false,
             pen_wizard_gamma: 1.0,
             pen_wizard_samples: Vec::new(),
+            align_open: false,
+            align_base: mn_core::align::AlignBase::Object,
             anti_overflow_cache: None,            anti_overflow: false,
             quick_query: String::new(),
             quick_pins: layout

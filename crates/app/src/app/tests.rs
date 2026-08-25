@@ -8575,6 +8575,94 @@ fn the_anti_overflow_barrier_is_cached_until_the_reference_moves() {
     );
 }
 
+/// TR-040..046 (row 152): Align/Distribute through the real dispatch —
+/// two inked layers align to the page centre in ONE undoable step, and
+/// the single-text-layer case aligns its ITEMS against each other
+/// (TR-052, the 285-vote thread).
+#[test]
+fn align_and_distribute_commands() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (400, 300), 1.0);
+    app.doc = Document::new(200, 200);
+    let ink = |app: &mut App, li: usize, x0: i32, y0: i32, x1: i32, y1: i32| {
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let idx = TileIdx::of_pixel(x, y);
+                let (ox, oy) = idx.origin();
+                let t = app.doc.layers[li].tile_mut(idx);
+                let o = ((y - oy) as usize * 64 + (x - ox) as usize) * 4;
+                let f = mn_core::blend::f32_to_fix15(0.0);
+                let d = t.data_mut();
+                d[o] = f;
+                d[o + 1] = f;
+                d[o + 2] = f;
+                d[o + 3] = mn_core::blend::f32_to_fix15(1.0);
+            }
+        }
+    };
+    let a = app.doc.add_layer("a");
+    let b = app.doc.add_layer("b");
+    ink(&mut app, a, 10, 10, 20, 20);
+    ink(&mut app, b, 100, 100, 120, 120);
+    app.doc.toggle_multi(a);
+
+    crate::cmd::dispatch(
+        &mut app,
+        AppCmd::AlignLayers {
+            mode: mn_core::align::AlignMode::VCenter,
+            base: mn_core::align::AlignBase::Canvas,
+        },
+    );
+    assert!(app.status.contains("aligned 2 layers"), "{}", app.status);
+    let bb = |app: &App, li: usize| mn_core::align::content_bbox(&app.doc.layers[li]).unwrap();
+    assert!((bb(&app, a)[1] - 95.0).abs() < 1.0, "{:?}", bb(&app, a));
+    assert!((bb(&app, b)[1] - 90.0).abs() < 1.0, "{:?}", bb(&app, b));
+    // Both centres sit on the page's midline (100): 95..105 and 90..110.
+    assert!(
+        ((bb(&app, a)[1] + bb(&app, a)[3]) - (bb(&app, b)[1] + bb(&app, b)[3])) .abs() < 2.0,
+        "both centres on the page midline"
+    );
+    crate::cmd::dispatch(&mut app, AppCmd::Undo);
+    assert_eq!(
+        bb(&app, a),
+        [10.0, 10.0, 20.0, 20.0],
+        "one undo rewound both layers"
+    );
+
+    // The item mode: one text layer, two items at different x.
+    let mk = |x: f32| {
+        let mut t = mn_core::TextItem::new([x, 10.0], "Gothic".into(), 9.0, [0, 0, 0], true);
+        t.text = "あ".into();
+        t.runs = vec![mn_core::text::StyleRun::plain(1)];
+        t.size = [20.0, 20.0];
+        t
+    };
+    let tl = app.doc.add_text_layer(
+        "lettering",
+        mn_core::TextSet {
+            texts: vec![mk(10.0), mk(150.0)],
+        },
+    );
+    app.doc.set_active(tl);
+    crate::cmd::dispatch(
+        &mut app,
+        AppCmd::AlignLayers {
+            mode: mn_core::align::AlignMode::Left,
+            base: mn_core::align::AlignBase::Object,
+        },
+    );
+    assert!(
+        app.status.contains("aligned 2 text items"),
+        "{}",
+        app.status
+    );
+    let ts = app.doc.layers[tl].texts().unwrap();
+    assert_eq!(ts.texts[0].pos[0], 10.0);
+    assert_eq!(ts.texts[1].pos[0], 10.0, "the item moved onto the other");
+}
+
 /// Audit verdict 2 (2026-08-25): the wizard OPENS on the correction in
 /// force — γ recovered from the stored curve at x=0.5, where the only
 /// authorable curve is y = x^γ — instead of a blind ×1.00 whose Apply

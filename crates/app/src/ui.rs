@@ -7,6 +7,7 @@
 //! mutate app state directly — they push [`AppCmd`]s.
 
 mod actions;
+mod align;
 mod comps;
 mod history;
 pub mod icons;
@@ -137,6 +138,7 @@ pub fn build(ui: &mut egui::Ui, app: &mut App) {
     prefs_window(ui.ctx(), app);
     pattern::pattern_window(ui.ctx(), app);
     batch::batch_window(ui.ctx(), app);
+    align::align_window(ui.ctx(), app);
     adjust_window(ui.ctx(), app);
     goto_page_window(ui.ctx(), app);
     spread_window(ui.ctx(), app);

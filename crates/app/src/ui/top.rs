@@ -265,6 +265,10 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 app.push_cmd(AppCmd::BatchOpsOpen);
                 ui.close();
             }
+            if item(ui, "Align/Distribute…", "") {
+                app.push_cmd(AppCmd::AlignOpen);
+                ui.close();
+            }
             if item(ui, "Generate effect lines…", "") {
                 app.push_cmd(AppCmd::GenLines);
                 ui.close();

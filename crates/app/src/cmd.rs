@@ -1837,6 +1837,23 @@ pub enum AppCmd {
     /// One-gesture tiling-pattern authoring: a square wrap-on canvas in a
     /// new tab + the Pattern Studio window (`app/pattern.rs`).
     NewPattern,
+    /// Open the Align/Distribute window (TR-040).
+    AlignOpen,
+    /// TR-041/044: align the selected layers — or, when the single
+    /// selection is a text layer with 2+ items, its items against each
+    /// other (TR-052).
+    AlignLayers {
+        mode: mn_core::align::AlignMode,
+        base: mn_core::align::AlignBase,
+    },
+    /// TR-042: the chosen edges/centres become equally spaced.
+    DistributeLayers {
+        mode: mn_core::align::DistributeMode,
+    },
+    /// TR-043: equal gaps between the targets.
+    SpaceLayers {
+        mode: mn_core::align::SpacingMode,
+    },
     /// Save the pattern canvas into the material bank under the studio's
     /// name.
     PatternSaveMaterial,
@@ -3883,6 +3900,60 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 ));
             }
         },
+        AppCmd::AlignOpen => {
+            app.align_open = !app.align_open;
+            app.mark_dirty();
+        }
+        AppCmd::AlignLayers { mode, base } => {
+            // TR-052: one text layer selected → align its ITEMS against
+            // each other; anything else aligns layers.
+            let single_text = app.doc.multi_targets().len() == 1
+                && app
+                    .doc
+                    .layers
+                    .get(app.doc.multi_targets()[0])
+                    .and_then(|l| l.texts())
+                    .is_some_and(|ts| ts.texts.len() >= 2);
+            let status = if single_text {
+                app.doc.align_text_items(app.doc.active, mode)
+            } else {
+                app.doc.align_layers(mode, base)
+            };
+            app.set_status(status);
+            app.mark_dirty();
+        }
+        AppCmd::DistributeLayers { mode } => {
+            let single_text = app.doc.multi_targets().len() == 1
+                && app
+                    .doc
+                    .layers
+                    .get(app.doc.multi_targets()[0])
+                    .and_then(|l| l.texts())
+                    .is_some_and(|ts| ts.texts.len() >= 3);
+            let status = if single_text {
+                app.doc.distribute_text_items(app.doc.active, mode)
+            } else {
+                app.doc.distribute_layers(mode)
+            };
+            app.set_status(status);
+            app.mark_dirty();
+        }
+        AppCmd::SpaceLayers { mode } => {
+            let single_text = app.doc.multi_targets().len() == 1
+                && app
+                    .doc
+                    .layers
+                    .get(app.doc.multi_targets()[0])
+                    .and_then(|l| l.texts())
+                    .is_some_and(|ts| ts.texts.len() >= 3);
+            let status = if single_text {
+                app.doc.space_text_items(app.doc.active, mode)
+            } else {
+                app.doc.space_layers(mode)
+            };
+            app.set_status(status);
+            app.mark_dirty();
+        }
         AppCmd::OpenPrefs(section) => {
             app.prefs_open = true;
             app.prefs_focus = section;

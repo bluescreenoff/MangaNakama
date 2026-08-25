@@ -17,6 +17,7 @@
 //! * [`ora`] — OpenRaster save/load.
 
 pub mod adjust;
+pub mod align;
 pub mod balloon;
 pub mod blend;
 pub mod curve;
