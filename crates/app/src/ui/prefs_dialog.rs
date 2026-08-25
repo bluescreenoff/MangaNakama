@@ -163,6 +163,12 @@ pub(crate) const PREF_INDEX: &[PrefMeta] = &[
                history, file list)",
     },
     PrefMeta {
+        id: "new_folder_through",
+        tab: "Drawing",
+        label: "New folders default to Through",
+        desc: "A Through folder does not seal: its children blend against                everything beneath them on the page, exactly as if loose.                Off = the sealed default (CSP's default too). (folder,                through, blend, group, isolate, LF-003)",
+    },
+    PrefMeta {
         id: "undo_depth",
         tab: "History",
         label: "Undo depth",
@@ -428,6 +434,12 @@ fn tab_saving(ui: &mut egui::Ui, app: &mut App, focus: Option<&str>, fx: &mut Fx
             row_label(ui, focus, "autosave_every_op");
             fx.changed |= ui
                 .add_enabled(timer_on, egui::Checkbox::new(&mut p.autosave_every_op, ""))
+                .changed();
+            ui.end_row();
+
+            row_label(ui, focus, "new_folder_through");
+            fx.changed |= ui
+                .add(egui::Checkbox::new(&mut p.new_folder_through, ""))
                 .changed();
             ui.end_row();
 
@@ -824,6 +836,7 @@ mod tests {
         assert_eq!(hit("crash"), Some("autosave_min"));
         assert_eq!(hit("ctrl+z"), Some("undo_depth"));
         assert_eq!(hit("lag"), Some("gpu_inking"));
+        assert_eq!(hit("through"), Some("new_folder_through"), "row 19's words are findable");
     }
 
     /// Focus strings resolve: tab names to themselves, row ids to their

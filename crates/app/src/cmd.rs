@@ -4627,6 +4627,13 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             let n = app.doc.layers.iter().filter(|l| l.folder).count() + 1;
             app.doc
                 .add_folder_above(app.doc.active, format!("Folder {n}"));
+            // LF-003 (row 19): the preference makes Through the default.
+            // Set on the fresh folder directly — presentation state, the
+            // same door the palette's Through checkbox uses.
+            if app.prefs.new_folder_through {
+                let li = app.doc.active;
+                app.doc.set_folder_through(li, true);
+            }
             app.renderer.invalidate();
             app.mark_dirty();
         }

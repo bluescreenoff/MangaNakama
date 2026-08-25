@@ -8664,6 +8664,29 @@ fn align_and_distribute_commands() {
     assert_eq!(ts.texts[1].pos[0], 10.0, "the item moved onto the other");
 }
 
+/// Row 19 (LF-003): the Through-default preference — off = the sealed
+/// CSP default; on = every new folder starts unsealed; prefs.txt
+/// round-trips it; the search index knows the words.
+#[test]
+fn new_folders_default_to_through_when_the_pref_says_so() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (400, 300), 1.0);
+    app.doc = Document::new(128, 128);
+    // Default OFF: the sealed default.
+    assert!(!app.prefs.new_folder_through, "off by default (CSP parity)");
+    crate::cmd::dispatch(&mut app, AppCmd::AddFolder);
+    assert!(
+        !app.doc.active_layer().through,
+        "a new folder is sealed by default"
+    );
+    // ON: new folders start Through.
+    app.prefs.new_folder_through = true;
+    crate::cmd::dispatch(&mut app, AppCmd::AddFolder);
+    assert!(app.doc.active_layer().through, "the pref unseals new folders");
+}
+
 /// Rows 78/76: the Object tool's four-way combine + multi selection —
 /// Add stacks objects, Del removes the whole set in ONE undo, and
 /// Remove/Toggle deselect instead of re-selecting.

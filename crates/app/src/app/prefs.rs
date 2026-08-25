@@ -65,6 +65,10 @@ pub struct Prefs {
     /// It does not replace the timer: with both on you get whichever comes
     /// first, which is what "belt and braces" means and what CSP does.
     pub autosave_every_op: bool,
+    /// LF-003 (row 19): new folders start as THROUGH (children blend
+    /// past the folder seal) instead of the sealed default. Off = the
+    /// CSP default (Normal), which is also ours.
+    pub new_folder_through: bool,
     /// Undo groups kept per document, 50..=5000.
     pub undo_depth: usize,
     /// Mouse smoothing floor, screen px; 0 = off (mouse then behaves like
@@ -136,6 +140,7 @@ impl Default for Prefs {
         Self {
             autosave_min: AUTOSAVE_MIN,
             autosave_every_op: false,
+            new_folder_through: false,
             undo_depth: mn_core::UNDO_LIMIT,
             mouse_smooth_px: MOUSE_SMOOTH_FLOOR_PX,
             new_canvas: mn_core::DEFAULT_SIZE,
@@ -258,7 +263,7 @@ impl Prefs {
     /// wrote that this one does not understand, verbatim.
     fn to_body(&self) -> String {
         let mut body = format!(
-            "autosave_min={}\nautosave_every_op={}\nundo_depth={}\nmouse_smooth_px={}\nnew_canvas_w={}\nnew_canvas_h={}\nfit_margin={}\nwheel_step={}\nrotate_step_deg={}\nrecent_depth={}\ntext_size_pt={}\nnew_preset={}\nexport_reminder={}\npalette_icon_px={}\ntheme={}\nicon_colours={}\nui_scale={}\nshow_pose3d_materials={}\npressure_curve={}\n",
+            "autosave_min={}\nautosave_every_op={}\nundo_depth={}\nmouse_smooth_px={}\nnew_canvas_w={}\nnew_canvas_h={}\nfit_margin={}\nwheel_step={}\nrotate_step_deg={}\nrecent_depth={}\ntext_size_pt={}\nnew_preset={}\nexport_reminder={}\npalette_icon_px={}\ntheme={}\nicon_colours={}\nui_scale={}\nshow_pose3d_materials={}\npressure_curve={}\nnew_folder_through={}\n",
             self.autosave_min,
             u8::from(self.autosave_every_op),
             self.undo_depth,
@@ -278,6 +283,7 @@ impl Prefs {
             self.ui_scale,
             u8::from(self.show_pose3d_materials),
             self.pressure_curve.replace('\n', ""),
+            u8::from(self.new_folder_through),
         );
         for line in &self.unknown {
             body.push_str(line);
@@ -302,6 +308,13 @@ impl Prefs {
                     "1" | "true" => true,
                     "0" | "false" => false,
                     _ => self.autosave_every_op,
+                }
+            }
+            "new_folder_through" => {
+                self.new_folder_through = match v {
+                    "1" | "true" => true,
+                    "0" | "false" => false,
+                    _ => self.new_folder_through,
                 }
             }
             "undo_depth" => self.undo_depth = v.parse().unwrap_or(self.undo_depth),
@@ -427,7 +440,26 @@ pub fn path_hint() -> String {
 }
 
 #[cfg(test)]
-mod tests {
+mod tests {    /// Row 19: the Through-default preference round-trips and takes a
+    /// hand-edited "true" like every bool key.
+    #[test]
+    fn new_folder_through_round_trips() {
+        let mut p = super::Prefs::default();
+        assert!(!p.new_folder_through, "off by default (CSP parity)");
+        p.new_folder_through = true;
+        let body = p.to_body();
+        assert!(body.contains("new_folder_through=1"), "{body}");
+        let back = from_body(&body);
+        assert!(back.new_folder_through);
+        let hand = from_body("new_folder_through=true
+");
+        assert!(hand.new_folder_through, "a hand-edited true counts");
+        let off = from_body("new_folder_through=0
+");
+        assert!(!off.new_folder_through);
+    }
+
+
     use super::*;
 
     fn from_body(body: &str) -> Prefs {
