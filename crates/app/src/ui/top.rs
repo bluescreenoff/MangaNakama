@@ -273,6 +273,10 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 app.push_cmd(AppCmd::BatchOpsOpen);
                 ui.close();
             }
+            if item(ui, "Hide all draft layers", "") {
+                app.push_cmd(AppCmd::HideDraftLayers);
+                ui.close();
+            }
             if item(ui, "Align/Distribute…", "") {
                 app.push_cmd(AppCmd::AlignOpen);
                 ui.close();
@@ -287,6 +291,14 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
             }
             if item(ui, "Convert brightness to opacity", "") {
                 app.push_cmd(AppCmd::BrightnessToOpacity);
+                ui.close();
+            }
+            if item(ui, "Convert to drawing color", "") {
+                app.push_cmd(AppCmd::ConvertToDrawingColor);
+                ui.close();
+            }
+            if item(ui, "Outline selection…", "") {
+                app.push_cmd(AppCmd::OutlineOpen);
                 ui.close();
             }
             ui.menu_button("Layer Mask", |ui| {

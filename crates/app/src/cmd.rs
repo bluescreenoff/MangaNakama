@@ -1860,6 +1860,21 @@ pub enum AppCmd {
     NewPattern,
     /// Open the Align/Distribute window (TR-040).
     AlignOpen,
+    /// Layer ▸ Hide all draft layers (CSP 5.0): a TOGGLE — first press
+    /// hides every visible draft layer and remembers them, second press
+    /// restores exactly those.
+    HideDraftLayers,
+    /// Edit ▸ Convert to drawing color (CSP): recolour the layer's ink
+    /// to the main colour, coverage kept.
+    ConvertToDrawingColor,
+    /// Open the Outline selection window.
+    OutlineOpen,
+    /// Edit ▸ Outline selection… (CSP): stroke a band around the ants.
+    OutlineSelection {
+        width: f32,
+        border: mn_core::filter::OutlineBorder,
+        round: bool,
+    },
     /// TR-041/044: align the selected layers — or, when the single
     /// selection is a text layer with 2+ items, its items against each
     /// other (TR-052).
@@ -3928,6 +3943,58 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 ));
             }
         },
+        AppCmd::HideDraftLayers => {
+            if let Some(saved) = app.draft_visibility.take() {
+                let mut n = 0usize;
+                for li in saved {
+                    if app
+                        .doc
+                        .layers
+                        .get(li)
+                        .is_some_and(|l| l.draft && !l.visible)
+                    {
+                        app.doc.set_layer_visible(li, true);
+                        n += 1;
+                    }
+                }
+                app.set_status(format!(
+                    "restored {n} draft layer{}",
+                    if n == 1 { "" } else { "s" }
+                ));
+            } else {
+                let hidden: Vec<usize> = (0..app.doc.layers.len())
+                    .filter(|&li| {
+                        app.doc.layers[li].draft && app.doc.layers[li].visible
+                    })
+                    .collect();
+                for li in &hidden {
+                    app.doc.set_layer_visible(*li, false);
+                }
+                let n = hidden.len();
+                app.draft_visibility = Some(hidden);
+                app.set_status(format!(
+                    "hid {n} draft layer{} — the command again restores them",
+                    if n == 1 { "" } else { "s" }
+                ));
+            }
+            app.mark_dirty();
+        }
+        AppCmd::ConvertToDrawingColor => {
+            let c = app.main_color;
+            let status = app.doc.convert_to_drawing_colour(c);
+            app.set_status(status);
+            app.mark_dirty();
+        }
+        AppCmd::OutlineOpen => {
+            app.outline_open = !app.outline_open;
+            app.mark_dirty();
+        }
+        AppCmd::OutlineSelection { width, border, round } => {
+            let c = app.main_color;
+            let status = app.doc.outline_selection(width, border, round, c);
+            app.set_status(status);
+            app.mark_dirty();
+        }
         AppCmd::AlignOpen => {
             app.align_open = !app.align_open;
             app.mark_dirty();

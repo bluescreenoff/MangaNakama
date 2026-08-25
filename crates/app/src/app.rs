@@ -421,6 +421,18 @@ pub struct App {
     /// it changes per gesture the way CSP's palette does.
     pub align_open: bool,
     pub align_base: mn_core::align::AlignBase,
+    /// Layer ▸ Hide all draft layers (CSP 5.0): the indices that were
+    /// VISIBLE drafts at hide time — re-running the command restores
+    /// exactly those. Visibility is view state (not undoable), and the
+    /// indices are snapshot-at-hide: a structural op while hidden can
+    /// shift them (the same lifetime every other index-cache lives with).
+    pub draft_visibility: Option<Vec<usize>>,
+    /// Edit ▸ Outline selection… (CSP Other Layer Filters): the window
+    /// and its parameters.
+    pub outline_open: bool,
+    pub outline_width: f32,
+    pub outline_border: mn_core::filter::OutlineBorder,
+    pub outline_round: bool,
     /// The Liquify tool (row 55): mode/strength/radius are tool state
     /// (session-scoped v1); the drag is the live gesture — one op
     /// bracket per drag, so one undo per gesture.
@@ -1370,6 +1382,11 @@ impl App {
             pen_wizard_samples: Vec::new(),
             align_open: false,
             align_base: mn_core::align::AlignBase::Object,
+            draft_visibility: None,
+            outline_open: false,
+            outline_width: 8.0,
+            outline_border: mn_core::filter::OutlineBorder::Outside,
+            outline_round: true,
             liquify_mode: mn_core::liquify::LiquifyMode::Push,
             liquify_strength: 0.5,
             liquify_radius: 40.0,
