@@ -2675,9 +2675,10 @@ impl App {
         // Rulers part 2: the sticky lock is stroke-scoped.
         self.ruler_lock = Default::default();
         // Row 42 (A-014, はみ出さない): build the stroke's anti-overflow
-        // barrier ONCE — reference set composite + frame-border folders
-        // (the owner's widened referent ruling) — and hand it to every
-        // engine. None paints freely, exactly as before.
+        // barrier ONCE — the REFERENCE SET composite only (owner ruling
+        // 2026-08-25: frame folders clip their own children themselves
+        // and never wall the page) — and hand it to every engine. None
+        // paints freely, exactly as before.
         let anti_mask = if self.anti_overflow && !self.mask_edit && !live && !sel_paint {
             mn_core::fill::anti_overflow_barrier(&self.doc)
                 .map(|(w, allow)| std::sync::Arc::new(mn_brush::AntiOverflowMask { w, allow }))

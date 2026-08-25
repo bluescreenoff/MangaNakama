@@ -210,52 +210,33 @@ fn source_pixels(doc: &Document, opts: &FillOpts) -> Vec<[u8; 3]> {
 
 /// Row 42 / A-014 (CSP はみ出さない): the BRUSH anti-overflow barrier —
 /// `(width, allow)` with one byte per canvas pixel: 255 = paint freely,
-/// 0 = the REFERENCE SET's ink plus frame-border folders' border ink
-/// (the owner's widened referent ruling, 2026-08-17). Same mostly-paper
-/// rule as [`FillOpts::semi_transparent_paper`]: composite luma below the
-/// midpoint is ink. `None` when there is nothing to refer to — the toggle
-/// is then honestly a no-op, not an all-paper mask.
+/// 0 = the REFERENCE SET's ink. The reference set is the ONLY referent
+/// (owner ruling 2026-08-25, overturning the earlier widened one): a
+/// frame folder already clips its own children through its panel mask,
+/// and a page-level layer below the folder is covered by the border ink
+/// at composite — so walling every stroke on every layer behind every
+/// panel bought correctness nowhere and cost a border rasterize per
+/// stroke. Same mostly-paper rule as [`FillOpts::semi_transparent_paper`]:
+/// composite luma below the midpoint is ink. `None` when there is
+/// nothing to refer to — the toggle is then honestly a no-op, not an
+/// all-paper mask.
 pub fn anti_overflow_barrier(doc: &Document) -> Option<(usize, Vec<u8>)> {
     let (w, h) = (doc.size.0 as usize, doc.size.1 as usize);
     let refs = doc.reference_layers();
-    let frame_sets: Vec<&crate::frame::FrameSet> = doc
-        .layers
-        .iter()
-        .filter(|l| l.folder && l.frames().is_some())
-        .filter_map(|l| l.frames())
-        .collect();
-    if refs.is_empty() && frame_sets.is_empty() {
+    if refs.is_empty() {
         return None;
     }
     let mut allow = vec![255u8; w * h];
-    if !refs.is_empty() {
-        let src = source_pixels(
-            doc,
-            &FillOpts {
-                refer: FillRefer::Reference,
-                ..FillOpts::default()
-            },
-        );
-        for (a, px) in allow.iter_mut().zip(&src) {
-            if luma_u8(*px) < 128 {
-                *a = 0;
-            }
-        }
-    }
-    for fs in frame_sets {
-        for (idx, t) in fs.rasterize_border(doc.size) {
-            let (ox, oy) = idx.origin();
-            for py in 0..crate::tile::TILE_SIZE {
-                for px in 0..crate::tile::TILE_SIZE {
-                    if t.pixel(px, py)[3] == 0 {
-                        continue;
-                    }
-                    let (x, y) = (ox as usize + px, oy as usize + py);
-                    if x < w && y < h {
-                        allow[y * w + x] = 0;
-                    }
-                }
-            }
+    let src = source_pixels(
+        doc,
+        &FillOpts {
+            refer: FillRefer::Reference,
+            ..FillOpts::default()
+        },
+    );
+    for (a, px) in allow.iter_mut().zip(&src) {
+        if luma_u8(*px) < 128 {
+            *a = 0;
         }
     }
     Some((w, allow))
@@ -2103,16 +2084,27 @@ mod tests {
         assert_eq!(filled, filled2, "reference sampling ignores eye state");
     }
 
-    /// Row 42: the brush anti-overflow barrier — reference-set ink and
-    /// frame BORDER ink block (the owner's widened referent ruling),
-    /// paper everywhere else paints freely, and a document with nothing
-    /// to refer to yields None (the toggle is an honest no-op).
+    /// Row 42: the brush anti-overflow barrier — the REFERENCE SET is the
+    /// only referent (owner ruling 2026-08-25, overturning the widened
+    /// one): reference ink blocks, frame-border ink does NOT (a frame
+    /// folder clips its own children itself; a lower page layer is
+    /// covered at composite), and a document with nothing to refer to
+    /// yields None (the toggle is an honest no-op) — even when frame
+    /// folders exist.
     #[test]
-    fn anti_overflow_barrier_blocks_reference_ink_and_frame_borders() {
+    fn anti_overflow_barrier_blocks_reference_ink_only() {
         let mut doc = Document::new(128, 128);
         assert!(
             anti_overflow_barrier(&doc).is_none(),
             "nothing to refer to — no mask"
+        );
+
+        // A frame folder alone is still nothing to refer to.
+        let fs = crate::frame::FrameSet::single_rect([16.0, 16.0, 112.0, 112.0], 4.0);
+        doc.add_frame_folder("panel", fs);
+        assert!(
+            anti_overflow_barrier(&doc).is_none(),
+            "frame folders are not referents — no mask from them alone"
         );
 
         // A reference layer with a vertical black line at x=10.
@@ -2130,9 +2122,6 @@ mod tests {
             d[o + 2] = f;
             d[o + 3] = f32_to_fix15(1.0);
         }
-        // A frame folder whose border ink runs at the panel edge.
-        let fs = crate::frame::FrameSet::single_rect([16.0, 16.0, 112.0, 112.0], 4.0);
-        doc.add_frame_folder("panel", fs);
 
         let (w, allow) = anti_overflow_barrier(&doc).expect("references exist");
         assert_eq!(w, 128);
@@ -2140,7 +2129,11 @@ mod tests {
         assert_eq!(at(64, 64), 255, "panel paper is paintable");
         assert_eq!(at(0, 0), 255, "gutter paper is paintable");
         assert_eq!(at(10, 64), 0, "the reference line blocks");
-        assert_eq!(at(16, 64), 0, "the frame border ink blocks");
+        assert_eq!(
+            at(16, 64),
+            255,
+            "the frame border no longer walls strokes globally"
+        );
         assert_eq!(at(20, 64), 255, "just inside the border is paintable");
     }
 }
