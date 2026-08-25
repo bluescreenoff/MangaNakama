@@ -481,7 +481,15 @@ fn d2(a: [f32; 2], b: [f32; 2]) -> f32 {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Rulers {
     pub items: Vec<Ruler>,
+    /// Row 149 (CSP ruler layer attachment): per-item layer binding,
+    /// index-paired with `items` (None = page-wide, the historic
+    /// behavior). An attached ruler snaps, draws and grabs only while
+    /// ITS layer is the active one — per-panel guides on a multi-panel
+    /// page without cross-panel snapping. Layer INDEX v1: stable within
+    /// a file, re-attached by hand if the stack is restructured.
+    pub attach: Vec<Option<usize>>,
     /// Part 2: curve rulers live separately (their snap is segment-wise).
+    /// Page-wide in v1 (attachment is the `Ruler` family's cut).
     pub curves: Vec<CurveRuler>,
     /// RL-030: the master snap switch (governs every ruler kind).
     pub on: bool,
@@ -494,6 +502,7 @@ impl Default for Rulers {
     fn default() -> Self {
         Rulers {
             items: Vec::new(),
+            attach: Vec::new(),
             curves: Vec::new(),
             on: false,
             special_on: true,
@@ -514,6 +523,8 @@ struct RulersFile {
     items: Vec<serde_json::Value>,
     #[serde(default)]
     curves: Vec<serde_json::Value>,
+    #[serde(default)]
+    attach: Vec<Option<usize>>,
 }
 
 fn yes() -> bool {
@@ -544,6 +555,7 @@ impl Rulers {
                 .iter()
                 .filter_map(|c| serde_json::to_value(c).ok())
                 .collect(),
+            attach: self.attach.clone(),
         };
         serde_json::to_string(&f).unwrap_or_else(|_| "{}".into())
     }
@@ -554,7 +566,7 @@ impl Rulers {
         let Ok(f) = serde_json::from_str::<RulersFile>(s) else {
             return Rulers::default();
         };
-        Rulers {
+        let mut r = Rulers {
             items: f
                 .items
                 .into_iter()
@@ -567,8 +579,58 @@ impl Rulers {
                 .collect(),
             on: f.on,
             special_on: f.special_on,
-        }
+            attach: f.attach,
+        };
+        r.fix_len();
+        r
     }
+
+    /// Pad/truncate `attach` to `items.len()` — the belt under every
+    /// index-pairing site (old files load with no attach vec; a direct
+    /// `items.push` without a matching attach push degrades to
+    /// page-wide rather than panicking).
+    pub fn fix_len(&mut self) {
+        self.attach.resize(self.items.len(), None);
+        self.attach.truncate(self.items.len());
+    }
+
+    /// The rulers ACTIVE on `active_layer`: page-wide ones plus the
+    /// ones attached to that layer. Snap, draw and grab all consult the
+    /// view, never the raw set.
+    pub fn for_layer(&self, active_layer: usize) -> Rulers {
+        let mut v = self.clone();
+        let mut items = Vec::with_capacity(self.items.len());
+        let mut attach = Vec::with_capacity(self.items.len());
+        // `chain(repeat)` is the belt: a ruler pushed without its attach
+        // entry reads as page-wide here instead of vanishing from views.
+        let page_wide = &None;
+        for (r, a) in self
+            .items
+            .iter()
+            .zip(self.attach.iter().chain(std::iter::repeat(page_wide)))
+        {
+            if a.is_none_or(|l| l == active_layer) {
+                items.push(*r);
+                attach.push(None);
+            }
+        }
+        v.items = items;
+        v.attach = attach;
+        v
+    }
+
+    /// Row 149's menu bulk: bind every ruler to one layer (`None` =
+    /// page-wide again).
+    pub fn set_all_attach(&mut self, layer: Option<usize>) {
+        self.attach.clear();
+        self.attach.resize(self.items.len(), layer);
+    }
+
+    /// The count of rulers bound to a layer (status lines).
+    pub fn attached_count(&self) -> usize {
+        self.attach.iter().flatten().count()
+    }
+
 
     /// Anything worth writing to disk? (`on` alone is not — snap state
     /// with no geometry is not a ruler set.)
@@ -646,12 +708,53 @@ impl Rulers {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+mod tests {    use super::*;
+
+    /// Row 149: an attached ruler snaps ONLY on its layer; page-wide
+    /// ones snap everywhere; the json round-trip keeps the bindings.
+    #[test]
+    fn attached_rulers_snap_only_on_their_layer() {
+        let mut rs = Rulers {
+            items: vec![Ruler::Guide {
+                horizontal: true,
+                pos: 100.0,
+            }],
+            attach: vec![Some(1)],
+            ..Rulers::default()
+        };
+        rs.on = true;
+        // On another layer: the view is empty — no snap.
+        let off = rs.for_layer(0);
+        assert_eq!(off.items.len(), 0, "hidden on other layers");
+        assert_eq!(off.snap([100.0, 400.0])[1], 400.0, "no snap off-layer");
+        // On its own layer: it snaps.
+        let on = rs.for_layer(1);
+        assert_eq!(on.items.len(), 1);
+        assert_eq!(on.snap([100.0, 400.0])[1], 100.0, "snaps on its layer");
+        // Page-wide (None) rulers stay everywhere.
+        rs.attach = vec![None];
+        assert_eq!(rs.for_layer(0).snap([100.0, 400.0])[1], 100.0);
+        assert_eq!(rs.for_layer(9).snap([100.0, 400.0])[1], 100.0);
+
+        // Round-trip: the binding survives to_json/from_json.
+        rs.attach = vec![Some(3)];
+        let back = Rulers::from_json(&rs.to_json());
+        assert_eq!(back.attach, vec![Some(3)], "attachment persisted");
+        // An old file (no attach field) degrades to page-wide.
+        let old = r#"{"on":true,"special_on":true,"items":[],"curves":[]}"#;
+        assert_eq!(Rulers::from_json(old).attach, Vec::<Option<usize>>::new());
+
+        // Bulk + counts.
+        rs.set_all_attach(Some(2));
+        assert_eq!(rs.attached_count(), 1);
+        rs.set_all_attach(None);
+        assert_eq!(rs.attached_count(), 0);
+    }
 
     #[test]
     fn line_ruler_projects_perpendicular() {
         let rs = Rulers {
+            attach: Vec::new(),
             curves: Vec::new(),
             special_on: true,
             items: vec![Ruler::Line {
@@ -671,6 +774,7 @@ mod tests {
     #[test]
     fn diagonal_projection_math() {
         let rs = Rulers {
+            attach: Vec::new(),
             curves: Vec::new(),
             special_on: true,
             items: vec![Ruler::Line {
@@ -687,6 +791,7 @@ mod tests {
     #[test]
     fn vanishing_point_snaps_to_the_nearest_ray() {
         let rs = Rulers {
+            attach: Vec::new(),
             curves: Vec::new(),
             special_on: true,
             items: vec![Ruler::VanishingPoint {
@@ -707,6 +812,7 @@ mod tests {
     #[test]
     fn nearest_of_two_rulers_wins_and_off_means_off() {
         let rs = Rulers {
+            attach: Vec::new(),
             curves: Vec::new(),
             special_on: true,
             items: vec![
@@ -738,6 +844,7 @@ mod move_tests {
     #[test]
     fn body_move_translates_every_anchor_and_the_snap_follows() {
         let mut rs = Rulers {
+            attach: Vec::new(),
             items: vec![Ruler::Line {
                 a: [0.0, 100.0],
                 b: [100.0, 100.0],
@@ -769,6 +876,7 @@ mod move_tests {
     #[test]
     fn anchor_move_re_aims_and_the_snap_direction_follows() {
         let mut rs = Rulers {
+            attach: Vec::new(),
             items: vec![Ruler::Line {
                 a: [0.0, 0.0],
                 b: [100.0, 0.0],
@@ -800,6 +908,7 @@ mod move_tests {
     #[test]
     fn centre_rulers_and_guides_move_without_reshaping() {
         let mut rs = Rulers {
+            attach: Vec::new(),
             items: vec![
                 Ruler::VanishingPoint {
                     c: [0.0, 0.0],
@@ -871,6 +980,7 @@ mod move_tests {
         );
         // The moved fan still snaps to its axes, now through (30, 20).
         let only_vp = Rulers {
+            attach: Vec::new(),
             items: vec![rs.items[0]],
             on: true,
             ..Default::default()
@@ -946,6 +1056,7 @@ mod move_tests {
     fn curve_ruler_vertex_and_body_moves() {
         let mut rs = Rulers {
             items: Vec::new(),
+            attach: Vec::new(),
             curves: vec![CurveRuler {
                 pts: vec![[0.0, 0.0], [100.0, 0.0]],
             }],
@@ -977,6 +1088,7 @@ mod move_tests {
     #[test]
     fn grab_picks_the_topmost_ruler() {
         let rs = Rulers {
+            attach: Vec::new(),
             items: vec![
                 Ruler::Guide {
                     horizontal: true,
@@ -995,6 +1107,7 @@ mod move_tests {
         };
         assert_eq!(rs.grab_near([50.0, 50.0], 10.0), Some((2, RulerGrab::Body)));
         let no_curve = Rulers {
+            attach: Vec::new(),
             curves: Vec::new(),
             ..rs.clone()
         };
@@ -1217,6 +1330,7 @@ mod part2_tests {
     #[test]
     fn sticky_snapping_locks_for_the_stroke() {
         let rs = Rulers {
+            attach: Vec::new(),
             items: vec![
                 Ruler::Line {
                     a: [0.0, 0.0],
@@ -1247,6 +1361,7 @@ mod part2_tests {
         assert!((p[1] - 100.0).abs() < 1e-3);
         // Locked to a curve ruler: stays on the path.
         let rs = Rulers {
+            attach: Vec::new(),
             items: Vec::new(),
             special_on: true,
             curves: vec![CurveRuler {
@@ -1278,6 +1393,7 @@ mod part3_tests {
     #[test]
     fn parallel_ruler_keeps_direction_drops_offset() {
         let rs = Rulers {
+            attach: Vec::new(),
             items: vec![Ruler::Parallel {
                 a: [0.0, 0.0],
                 b: [10.0, 0.0],
@@ -1291,6 +1407,7 @@ mod part3_tests {
         assert!(p[1].abs() < 1e-3, "perpendicular offset dropped: {p:?}");
         // Diagonal family: y = x direction.
         let rs = Rulers {
+            attach: Vec::new(),
             items: vec![Ruler::Parallel {
                 a: [0.0, 0.0],
                 b: [10.0, 10.0],
@@ -1306,6 +1423,7 @@ mod part3_tests {
     #[test]
     fn concentric_ruler_quantizes_radius() {
         let rs = Rulers {
+            attach: Vec::new(),
             items: vec![Ruler::Concentric {
                 c: [0.0, 0.0],
                 dr: 50.0,
@@ -1327,6 +1445,7 @@ mod part3_tests {
     #[test]
     fn guide_snaps_one_coordinate() {
         let rs = Rulers {
+            attach: Vec::new(),
             items: vec![
                 Ruler::Guide {
                     horizontal: true,
@@ -1353,6 +1472,7 @@ mod part3_tests {
     #[test]
     fn special_switch_vetoes_only_special_rulers() {
         let mut rs = Rulers {
+            attach: Vec::new(),
             items: vec![
                 Ruler::Line {
                     a: [0.0, 10.0],
@@ -1385,6 +1505,7 @@ mod part3_tests {
     #[test]
     fn symmetric_ruler_never_snaps() {
         let rs = Rulers {
+            attach: Vec::new(),
             items: vec![Ruler::Symmetric {
                 c: [128.0, 128.0],
                 lines: 4,
@@ -1420,6 +1541,7 @@ mod part3_tests {
     #[test]
     fn perspective_binds_the_ray_by_direction() {
         let rs = Rulers {
+            attach: Vec::new(),
             items: vec![Ruler::Perspective {
                 a: [-600.0, 100.0],
                 b: [700.0, 120.0],
@@ -1469,6 +1591,7 @@ mod part3_tests {
     #[test]
     fn perspective_vertical_family_pins_x() {
         let rs = Rulers {
+            attach: Vec::new(),
             items: vec![Ruler::Perspective {
                 a: [-600.0, 100.0],
                 b: [700.0, 100.0],
@@ -1497,6 +1620,7 @@ mod part3_tests {
     fn perspective_verticals_follow_a_tilted_horizon() {
         let (a, b) = ([0.0f32, 0.0], [100.0f32, 30.0]);
         let rs = Rulers {
+            attach: Vec::new(),
             items: vec![Ruler::Perspective { a, b }],
             on: true,
             ..Default::default()
@@ -1535,6 +1659,7 @@ mod part3_tests {
     #[test]
     fn discrete_rulers_win_near_perspective_claims_far() {
         let rs = Rulers {
+            attach: Vec::new(),
             items: vec![
                 Ruler::Line {
                     a: [0.0, 300.0],
@@ -1572,6 +1697,7 @@ mod part3_tests {
     #[test]
     fn perspective_respects_master_switch_and_rebinds() {
         let mut rs = Rulers {
+            attach: Vec::new(),
             items: vec![Ruler::Perspective {
                 a: [-600.0, 100.0],
                 b: [700.0, 100.0],
@@ -1599,6 +1725,7 @@ mod part3_tests {
     fn one_point_binds_orthogonals_horizontals_and_verticals() {
         let vp = [300.0f32, 100.0];
         let rs = Rulers {
+            attach: Vec::new(),
             items: vec![Ruler::Perspective1 {
                 vp,
                 h: [800.0, 100.0],
@@ -1641,6 +1768,7 @@ mod part3_tests {
     fn one_point_families_follow_the_horizon_handle() {
         let vp = [0.0f32, 0.0];
         let mut rs = Rulers {
+            attach: Vec::new(),
             items: vec![Ruler::Perspective1 {
                 vp,
                 h: [100.0, 0.0],
@@ -1690,6 +1818,7 @@ mod part3_tests {
     fn three_point_binds_each_of_its_three_vps() {
         let (a, b, z) = ([-600.0f32, 100.0], [700.0f32, 100.0], [50.0f32, 900.0]);
         let rs = Rulers {
+            attach: Vec::new(),
             items: vec![Ruler::Perspective3 { a, b, z }],
             on: true,
             ..Default::default()
@@ -1735,6 +1864,7 @@ mod part3_tests {
     #[test]
     fn perspective_variants_anchors_round_trip_through_moves() {
         let mut rs = Rulers {
+            attach: Vec::new(),
             items: vec![
                 Ruler::Perspective1 {
                     vp: [300.0, 100.0],
@@ -1787,6 +1917,7 @@ mod part3_tests {
         // And the strokes follow it — no invalidation step, the geometry
         // IS the ruler.
         let only3 = Rulers {
+            attach: Vec::new(),
             items: vec![rs.items[1]],
             on: true,
             ..Default::default()
@@ -1848,6 +1979,7 @@ mod part3_tests {
         // and an anchor of a lower ruler still wins when nothing above it
         // is in reach.
         let rs = Rulers {
+            attach: Vec::new(),
             items: vec![p3, p1],
             on: true,
             ..Default::default()

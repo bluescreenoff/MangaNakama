@@ -1851,9 +1851,10 @@ impl App {
     /// checkboxes come back when the ruler is deleted or special-snap is
     /// toggled off).
     pub fn rebuild_twins(&mut self) {
-        let sym = self
-            .doc
-            .rulers
+        // Row 149: a symmetric ruler attached to another layer does not
+        // mirror strokes here.
+        let active_rulers = self.doc.rulers.for_layer(self.doc.active);
+        let sym = active_rulers
             .items
             .iter()
             .find(|r| matches!(r, mn_core::Ruler::Symmetric { .. }));
@@ -2977,9 +2978,11 @@ impl App {
                 // so the pen slides along the ruler like Krita/CSP. Sticky
                 // (part 2): the first snapped sample locks the ruler for the
                 // whole stroke; crossing rulers cannot flicker mid-stroke.
+                // Row 149: attached rulers work only on their layer.
                 let snapped = self
                     .doc
                     .rulers
+                    .for_layer(self.doc.active)
                     .snap_sticky([r.x, r.y], &mut self.ruler_lock);
                 let r = PenSample {
                     x: snapped[0],
@@ -3055,6 +3058,7 @@ impl App {
             let snapped = self
                 .doc
                 .rulers
+                .for_layer(self.doc.active)
                 .snap_sticky([r.x, r.y], &mut self.ruler_lock);
             let r = PenSample {
                 x: snapped[0],

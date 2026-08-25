@@ -430,6 +430,20 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                     ui.close();
                 }
                 ui.separator();
+                let attached = app.doc.rulers.attached_count();
+                if item(
+                    ui,
+                    &format!("Attach rulers to this layer ({attached} attached now)"),
+                    "",
+                ) {
+                    app.push_cmd(AppCmd::RulerAttachAll(Some(app.doc.active)));
+                    ui.close();
+                }
+                if item(ui, "Make rulers page-wide", "") {
+                    app.push_cmd(AppCmd::RulerAttachAll(None));
+                    ui.close();
+                }
+                ui.separator();
                 let on = app.doc.rulers.on;
                 if item(ui, if on { "Snap: ON" } else { "Snap: OFF" }, "") {
                     app.push_cmd(AppCmd::RulerSnapToggle);

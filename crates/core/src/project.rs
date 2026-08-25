@@ -583,6 +583,7 @@ mod tests {
             a: [1.0, 2.0],
             b: [3.0, 4.0],
         });
+        d.rulers.fix_len();
         d.rulers.curves.push(crate::ruler::CurveRuler {
             pts: vec![[0.0, 0.0], [5.0, 5.0]],
         });

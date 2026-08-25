@@ -422,7 +422,9 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
                 egui::Stroke::new(1.5, col),
             );
         };
-        for r in &app.doc.rulers.items {
+        // Row 149: attached rulers draw only on their layer.
+        let active_items = app.doc.rulers.for_layer(app.doc.active).items;
+        for r in &active_items {
             match *r {
                 mn_core::Ruler::Line { a, b } => {
                     let d = [b[0] - a[0], b[1] - a[1]];
@@ -590,7 +592,7 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
             // it names — the labels teach the set, they don't compete with
             // the art.
             let font = egui::TextStyle::Small.resolve(ui.style());
-            for r in &app.doc.rulers.items {
+            for r in &active_items {
                 for (p, role) in r.anchors_with_roles() {
                     handle(p, role);
                     painter.text(

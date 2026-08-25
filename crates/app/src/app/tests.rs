@@ -8664,6 +8664,52 @@ fn align_and_distribute_commands() {
     assert_eq!(ts.texts[1].pos[0], 10.0, "the item moved onto the other");
 }
 
+/// Row 149: ruler layer attachment through dispatch — bulk attach to
+/// the active layer, the view gates on it, one undo restores.
+#[test]
+fn ruler_attachment_gates_on_the_active_layer() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (400, 300), 1.0);
+    app.doc = Document::new(256, 256);
+    app.doc.rulers.items.push(mn_core::Ruler::Guide {
+        horizontal: true,
+        pos: 100.0,
+    });
+    app.doc.rulers.fix_len();
+    app.doc.rulers.on = true;
+    let li = app.doc.add_layer("panel A");
+
+    // Un-attached: snaps everywhere.
+    assert_eq!(
+        app.doc.rulers.for_layer(0).snap([50.0, 200.0])[1],
+        100.0,
+        "page-wide snaps"
+    );
+
+    crate::cmd::dispatch(&mut app, AppCmd::RulerAttachAll(Some(li)));
+    assert!(app.status.contains("panel A"), "{}", app.status);
+    // Other layers: the view is empty. The active layer: it snaps.
+    app.doc.set_active(0);
+    assert_eq!(app.doc.rulers.for_layer(0).items.len(), 0);
+    assert_eq!(
+        app.doc.rulers.for_layer(0).snap([50.0, 200.0])[1],
+        200.0,
+        "no snap on other layers"
+    );
+    app.doc.set_active(li);
+    assert_eq!(app.doc.rulers.for_layer(li).snap([50.0, 200.0])[1], 100.0);
+
+    // One undo restores page-wide.
+    crate::cmd::dispatch(&mut app, AppCmd::Undo);
+    assert_eq!(
+        app.doc.rulers.attach,
+        vec![None],
+        "undo restored page-wide rulers"
+    );
+}
+
 /// Row 124: the Advanced fill dialog's command through dispatch — a
 /// half fill blends over the ink, one undo.
 #[test]

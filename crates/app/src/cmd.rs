@@ -2230,6 +2230,9 @@ pub enum AppCmd {
     /// CSP ladder — applies to existing symmetric rulers AND the default
     /// for the next one created.
     RulerSymmetricCount,
+    /// Row 149: bind every ruler to the active layer (Some) or make
+    /// them all page-wide again (None). One undo step.
+    RulerAttachAll(Option<usize>),
     // --- brush + colour ----------------------------------------------------
     SelectBrush(PathBuf),
     /// ROADMAP "brushes without ceremony", organise half: retitle a preset
@@ -6392,6 +6395,27 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 format!("symmetry line count: {next} (creates at this count)")
             });
             app.mark_dirty();
+        }
+        AppCmd::RulerAttachAll(layer) => {
+            let before = app.doc.rulers.clone();
+            let n = app.doc.rulers.items.len();
+            app.doc.rulers.set_all_attach(layer);
+            app.ruler_lock = Default::default();
+            app.ruler_move = None;
+            app.rebuild_twins();
+            app.doc.record_rulers(before, "Attach rulers");
+            match layer {
+                Some(l) => {
+                    let name = app
+                        .doc
+                        .layers
+                        .get(l)
+                        .map(|l| l.name.clone())
+                        .unwrap_or_default();
+                    app.set_status(format!("{n} rulers attached to \"{name}\" — one undo"));
+                }
+                None => app.set_status(format!("{n} rulers page-wide again — one undo")),
+            }
         }
         AppCmd::RulerClear => {
             let before = app.doc.rulers.clone();

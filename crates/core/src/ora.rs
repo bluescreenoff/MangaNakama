@@ -1553,6 +1553,9 @@ mod tests {
         });
         doc.rulers.on = true;
         doc.rulers.special_on = false;
+        // Attachments pad to item count at load (fix_len); normalise the
+        // source side so the whole-set compare is like-for-like.
+        doc.rulers.fix_len();
         let mut buf = Cursor::new(Vec::new());
         save_to(&doc, &mut buf).unwrap();
         let back = load_from(Cursor::new(buf.into_inner())).unwrap();

@@ -1710,7 +1710,13 @@ impl App {
     /// body, so there is no band where a press means something else.
     fn ruler_grab(&mut self, cx: f32, cy: f32) -> bool {
         let tol = (10.0 / self.viewport.zoom.max(0.01)).max(2.0);
-        let Some((ruler, grab)) = self.doc.rulers.grab_near([cx, cy], tol) else {
+        // Row 149: only the active layer's rulers are grabbable.
+        let Some((ruler, grab)) = self
+            .doc
+            .rulers
+            .for_layer(self.doc.active)
+            .grab_near([cx, cy], tol)
+        else {
             return false;
         };
         self.ruler_move = Some(RulerMove {
@@ -2670,6 +2676,7 @@ impl App {
             // (too short a drag, wrong kind) without creating anything.
             let before = self.doc.rulers.clone();
             self.doc.rulers.items.push(ruler);
+            self.doc.rulers.fix_len();
             self.doc.rulers.on = true;
             self.doc.record_rulers(before, "Add ruler");
             if symmetric {
