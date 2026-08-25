@@ -985,6 +985,90 @@ pub(super) fn adjust_window(ctx: &egui::Context, app: &mut App) {
                         ui.add(egui::Slider::new(levels, 2..=20));
                         ui.end_row();
                     }
+                    mn_core::Adjust::ColourBalance {
+                        cyan_red,
+                        magenta_green,
+                        yellow_blue,
+                    } => {
+                        pct_row(ui, "Cyan ↔ Red", cyan_red);
+                        pct_row(ui, "Magenta ↔ Green", magenta_green);
+                        pct_row(ui, "Yellow ↔ Blue", yellow_blue);
+                    }
+                    mn_core::Adjust::GradientMap { stops, n } => {
+                        // The ramp, inline: one row per live stop (colour
+                        // + position), then add/remove. The Gradient
+                        // tool's own ramp is NOT borrowed — a map wants
+                        // its own palette, as CSP's dialog does.
+                        ui.label("Ramp");
+                        let mut preview = Vec::new();
+                        for st in stops.iter().take(*n as usize) {
+                            preview.push(egui::Color32::from_rgb(
+                                (st[1].clamp(0.0, 1.0) * 255.0) as u8,
+                                (st[2].clamp(0.0, 1.0) * 255.0) as u8,
+                                (st[3].clamp(0.0, 1.0) * 255.0) as u8,
+                            ));
+                        }
+                        let (_r, resp) = ui.allocate_exact_size(
+                            egui::vec2(220.0, 14.0),
+                            egui::Sense::hover(),
+                        );
+                        let p = ui.painter_at(resp.rect);
+                        let w = resp.rect.width() / preview.len().max(1) as f32;
+                        for (i, c) in preview.iter().enumerate() {
+                            p.rect_filled(
+                                egui::Rect::from_min_max(
+                                    egui::pos2(resp.rect.left() + w * i as f32, resp.rect.top()),
+                                    egui::pos2(
+                                        resp.rect.left() + w * (i + 1) as f32,
+                                        resp.rect.bottom(),
+                                    ),
+                                ),
+                                0.0,
+                                *c,
+                            );
+                        }
+                        ui.end_row();
+                        for i in 0..(*n as usize).min(mn_core::adjust::GRADIENT_MAP_MAX) {
+                            ui.label(format!("Stop {}", i + 1));
+                            ui.horizontal(|ui| {
+                                let mut c = [
+                                    (stops[i][1].clamp(0.0, 1.0) * 255.0) as u8,
+                                    (stops[i][2].clamp(0.0, 1.0) * 255.0) as u8,
+                                    (stops[i][3].clamp(0.0, 1.0) * 255.0) as u8,
+                                ];
+                                if ui.color_edit_button_srgb(&mut c).changed()
+                                {
+                                    stops[i][1] = c[0] as f32 / 255.0;
+                                    stops[i][2] = c[1] as f32 / 255.0;
+                                    stops[i][3] = c[2] as f32 / 255.0;
+                                }
+                                ui.add(
+                                    egui::Slider::new(&mut stops[i][0], 0.0..=1.0)
+                                        .fixed_decimals(2)
+                                        .text("pos"),
+                                );
+                            });
+                            ui.end_row();
+                        }
+                        ui.label("");
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add_enabled(*n < mn_core::adjust::GRADIENT_MAP_MAX as u8, egui::Button::new("+ stop"))
+                                .clicked()
+                            {
+                                let i = *n as usize;
+                                stops[i] = [0.5, 0.5, 0.5, 0.5, 0.0];
+                                *n += 1;
+                            }
+                            if ui
+                                .add_enabled(*n > 2, egui::Button::new("− stop"))
+                                .clicked()
+                            {
+                                *n -= 1;
+                            }
+                        });
+                        ui.end_row();
+                    }
                     mn_core::Adjust::Binarize { threshold } => {
                         ui.label("Threshold");
                         ui.add(egui::Slider::new(threshold, 0.0..=1.0).fixed_decimals(2));

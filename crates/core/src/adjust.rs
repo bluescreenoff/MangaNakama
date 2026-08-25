@@ -97,7 +97,30 @@ pub enum Adjust {
         pts: [[f32; 2]; TONE_CURVE_MAX],
         n: u8,
     },
+    /// TC-008 (CSP カラーバランス): three channel-pair shifts, −1..=1 —
+    /// cyan↔red, magenta↔green, yellow↔blue. Additive: the named channel
+    /// rises, the other two yield half each. Preserving luminosity is a
+    /// CSP toggle deferred with this row (the additive model is the
+    /// no-preserve default).
+    ColourBalance {
+        cyan_red: f32,
+        magenta_green: f32,
+        yellow_blue: f32,
+    },
+    /// TC-009 (CSP グラデーションマップ): luminance → ramp colour. The
+    /// ramp is inline (not the Gradient tool's): stops sorted by pos,
+    /// sampled piecewise-linear, clamped at both ends. Never identity —
+    /// even a black→white ramp recolours saturated pixels to their luma.
+    GradientMap {
+        stops: [[f32; 5]; TONE_CURVE_MAX],
+        n: u8,
+    },
 }
+
+/// A GradientMap stop as a fixed array: `[pos, r, g, b, _]` — the fifth
+/// slot keeps the shape Copy for the Adjust const table; alpha is not
+/// part of a map stop.
+pub const GRADIENT_MAP_MAX: usize = TONE_CURVE_MAX;
 
 impl Adjust {
     /// Menu defaults, so a menu item stays one line.
@@ -125,6 +148,26 @@ impl Adjust {
         pts: Self::TONE_CURVE_REST,
         n: 2,
     };
+    pub const COLOUR_BALANCE: Self = Self::ColourBalance {
+        cyan_red: 0.0,
+        magenta_green: 0.0,
+        yellow_blue: 0.0,
+    };
+    /// Black → white, the dialog's opening ramp (which still recolours
+    /// saturated ink to its luma — the honest default for a map).
+    pub const GRADIENT_MAP: Self = Self::GradientMap {
+        stops: [
+            [0.0, 0.0, 0.0, 0.0, 0.0],
+            [1.0, 1.0, 1.0, 1.0, 0.0],
+            [0.0; 5],
+            [0.0; 5],
+            [0.0; 5],
+            [0.0; 5],
+            [0.0; 5],
+            [0.0; 5],
+        ],
+        n: 2,
+    };
     /// The default point array. Dead slots are `[0, 0]`, and every editor must
     /// put them back that way — a stale value in `pts[5]` compares unequal and
     /// would make an identity curve push an undo step.
@@ -144,6 +187,8 @@ impl Adjust {
             Adjust::Binarize { .. } => "Binarization",
             Adjust::Levels { .. } => "Levels",
             Adjust::ToneCurve { .. } => "Tone curve",
+            Adjust::ColourBalance { .. } => "Colour balance",
+            Adjust::GradientMap { .. } => "Gradient map",
         }
     }
 
@@ -190,6 +235,13 @@ impl Adjust {
                     && pts[n - 1] == [1.0, 1.0]
                     && pts[..n].iter().all(|p| p[0] == p[1])
             }
+            Adjust::ColourBalance {
+                cyan_red,
+                magenta_green,
+                yellow_blue,
+            } => cyan_red == 0.0 && magenta_green == 0.0 && yellow_blue == 0.0,
+            // A gradient map always recolours (see the variant's doc).
+            Adjust::GradientMap { .. } => false,
             _ => false,
         }
     }
@@ -269,6 +321,57 @@ impl Adjust {
                     curve_eval(p, rgb[1]),
                     curve_eval(p, rgb[2]),
                 ]
+            }
+            Adjust::ColourBalance {
+                cyan_red,
+                magenta_green,
+                yellow_blue,
+            } => {
+                // Additive channel shifts: each slider raises its named
+                // channel by v and lowers the other two by v/2, so the
+                // sum (and roughly the luminance) stays near where it
+                // was — the additive model's own soft preserve.
+                let (r, g, b) = (
+                    rgb[0] + cyan_red - magenta_green * 0.5 - yellow_blue * 0.5,
+                    rgb[1] + magenta_green - cyan_red * 0.5 - yellow_blue * 0.5,
+                    rgb[2] + yellow_blue - cyan_red * 0.5 - magenta_green * 0.5,
+                );
+                [r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0)]
+            }
+            Adjust::GradientMap { stops, n } => {
+                let luma = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+                let mut live: Vec<[f32; 5]> = stops[..(n as usize).min(GRADIENT_MAP_MAX)]
+                    .iter()
+                    .copied()
+                    .collect();
+                if live.is_empty() {
+                    return rgb;
+                }
+                live.sort_by(|a, b| a[0].partial_cmp(&b[0]).unwrap_or(std::cmp::Ordering::Equal));
+                let at = |t: f32| -> [f32; 3] {
+                    if t <= live[0][0] {
+                        return [live[0][1], live[0][2], live[0][3]];
+                    }
+                    for w in live.windows(2) {
+                        let (a, b) = (w[0], w[1]);
+                        if t <= b[0] {
+                            let f = if b[0] - a[0] < 1e-6 {
+                                0.0
+                            } else {
+                                (t - a[0]) / (b[0] - a[0])
+                            };
+                            return [
+                                a[1] + (b[1] - a[1]) * f,
+                                a[2] + (b[2] - a[2]) * f,
+                                a[3] + (b[3] - a[3]) * f,
+                            ];
+                        }
+                    }
+                    let last = live[live.len() - 1];
+                    [last[1], last[2], last[3]]
+                };
+                let c = at(luma);
+                [c[0].clamp(0.0, 1.0), c[1].clamp(0.0, 1.0), c[2].clamp(0.0, 1.0)]
             }
         }
     }
@@ -608,6 +711,61 @@ mod tests {
         let c = [0.2, 0.5, 0.9];
         let back = Adjust::Invert.map(Adjust::Invert.map(c));
         assert!((0..3).all(|i| near(back[i], c[i])), "{back:?}");
+    }
+
+    /// TC-008: the three pair-shifts move their channel and yield half
+    /// from each of the others — the channel SUM is preserved exactly.
+    #[test]
+    fn colour_balance_shifts_pairs_and_keeps_the_sum() {
+        let grey = [0.5f32, 0.5, 0.5];
+        let out = Adjust::ColourBalance {
+            cyan_red: 0.2,
+            magenta_green: 0.0,
+            yellow_blue: 0.0,
+        }
+        .map(grey);
+        assert!((out[0] - 0.7).abs() < 1e-4, "{out:?}");
+        assert!((out[1] - 0.4).abs() < 1e-4 && (out[2] - 0.4).abs() < 1e-4);
+        let sum: f32 = out.iter().sum();
+        assert!((sum - 1.5).abs() < 1e-4, "the additive model keeps the sum");
+        // Clamped at the rails — no wrap.
+        let rail = Adjust::ColourBalance {
+            cyan_red: -1.0,
+            magenta_green: 0.0,
+            yellow_blue: 0.0,
+        }
+        .map(grey);
+        assert_eq!(rail, [0.0, 1.0, 1.0]);
+        assert!(Adjust::COLOUR_BALANCE.is_identity());
+    }
+
+    /// TC-009: luma picks the spot on the ramp; saturated colours lose
+    /// their hue to their luminance (the point of a map).
+    #[test]
+    fn gradient_map_takes_luma_through_the_ramp() {
+        let gm = Adjust::GradientMap {
+            stops: [
+                [0.0, 0.0, 0.0, 0.0, 0.0],
+                [0.5, 1.0, 0.0, 0.0, 0.0],
+                [1.0, 1.0, 1.0, 1.0, 0.0],
+                [0.0; 5],
+                [0.0; 5],
+                [0.0; 5],
+                [0.0; 5],
+                [0.0; 5],
+            ],
+            n: 3,
+        };
+        assert_eq!(gm.map([0.0, 0.0, 0.0]), [0.0, 0.0, 0.0], "black → first stop");
+        assert_eq!(gm.map([1.0, 1.0, 1.0]), [1.0, 1.0, 1.0], "white → last stop");
+        // Green's luma is .7152 → 43% of the way from the red stop to white.
+        let g = gm.map([0.0, 1.0, 0.0]);
+        assert!((g[0] - 1.0).abs() < 1e-4, "{g:?}");
+        assert!((g[1] - 0.4304).abs() < 1e-3 && (g[2] - 0.4304).abs() < 1e-3);
+        // Red's luma is .2126 → 42.5% of the way from black to the red stop.
+        let r = gm.map([1.0, 0.0, 0.0]);
+        assert!((r[0] - 0.4252).abs() < 1e-3 && r[1] == 0.0 && r[2] == 0.0);
+        assert!(!Adjust::GRADIENT_MAP.is_identity(), "a map always recolours");
     }
 
     #[test]

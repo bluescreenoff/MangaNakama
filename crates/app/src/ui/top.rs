@@ -631,6 +631,14 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 app.push_cmd(AppCmd::AdjustOpen(mn_core::Adjust::POSTERIZE));
                 ui.close();
             }
+            if item(ui, "Colour balance…", "") {
+                app.push_cmd(AppCmd::AdjustOpen(mn_core::Adjust::COLOUR_BALANCE));
+                ui.close();
+            }
+            if item(ui, "Gradient map…", "") {
+                app.push_cmd(AppCmd::AdjustOpen(mn_core::Adjust::GRADIENT_MAP));
+                ui.close();
+            }
             if item(ui, "Reverse gradient", "") {
                 app.push_cmd(AppCmd::AdjustNow(mn_core::Adjust::Invert));
                 ui.close();

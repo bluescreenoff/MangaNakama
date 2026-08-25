@@ -8664,6 +8664,81 @@ fn align_and_distribute_commands() {
     assert_eq!(ts.texts[1].pos[0], 10.0, "the item moved onto the other");
 }
 
+/// Rows 104 (TC-008/009): Colour balance and Gradient map through the
+/// real Adjust pipeline — straight-colour map math rides the
+/// unpremultiply→map→re-premultiply path, one undo each.
+#[test]
+fn colour_balance_and_gradient_map_apply_through_dispatch() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (400, 300), 1.0);
+    app.doc = Document::new(128, 128);
+    let li = app.doc.add_layer("l");
+    let put = |app: &mut App, x: i32, y: i32, rgb: [f32; 3]| {
+        let idx = TileIdx::of_pixel(x, y);
+        let (ox, oy) = idx.origin();
+        let t = app.doc.layers[li].tile_mut(idx);
+        let o = ((y - oy) as usize * 64 + (x - ox) as usize) * 4;
+        let d = t.data_mut();
+        d[o] = mn_core::blend::f32_to_fix15(rgb[0]);
+        d[o + 1] = mn_core::blend::f32_to_fix15(rgb[1]);
+        d[o + 2] = mn_core::blend::f32_to_fix15(rgb[2]);
+        d[o + 3] = mn_core::blend::f32_to_fix15(1.0);
+    };
+    let get = |app: &App, x: i32, y: i32| -> [u16; 4] {
+        let idx = TileIdx::of_pixel(x, y);
+        let (ox, oy) = idx.origin();
+        app.doc.layers[li]
+            .tile_arc(idx)
+            .map(|t| {
+                let o = ((y - oy) as usize * 64 + (x - ox) as usize) * 4;
+                let d = t.data();
+                [d[o], d[o + 1], d[o + 2], d[o + 3]]
+            })
+            .unwrap_or([0, 0, 0, 0])
+    };
+    put(&mut app, 10, 10, [0.5, 0.5, 0.5]); // grey
+    put(&mut app, 30, 10, [1.0, 0.0, 0.0]); // saturated red
+
+    // Colour balance: cyan↔red at +20% — grey goes warm.
+    crate::cmd::dispatch(
+        &mut app,
+        AppCmd::AdjustOpen(mn_core::Adjust::ColourBalance {
+            cyan_red: 0.2,
+            magenta_green: 0.0,
+            yellow_blue: 0.0,
+        }),
+    );
+    crate::cmd::dispatch(&mut app, AppCmd::AdjustApply);
+    let f = |v: u16| v as f32 / 32768.0;
+    let g = get(&app, 10, 10);
+    assert!(
+        (f(g[0]) - 0.7).abs() < 0.01,
+        "grey warmed toward red: {:?}",
+        g
+    );
+    crate::cmd::dispatch(&mut app, AppCmd::Undo);
+
+    // Gradient map (default black→white): saturated red loses its hue
+    // to its luma (0.2126) — a grey.
+    crate::cmd::dispatch(&mut app, AppCmd::AdjustOpen(mn_core::Adjust::GRADIENT_MAP));
+    crate::cmd::dispatch(&mut app, AppCmd::AdjustApply);
+    let r = get(&app, 30, 10);
+    let (lr, lg) = (f(r[0]), f(r[1]));
+    assert!(
+        (lr - 0.2126).abs() < 0.01 && (lg - 0.2126).abs() < 0.01,
+        "red became its luma grey: {:?}",
+        r
+    );
+    crate::cmd::dispatch(&mut app, AppCmd::Undo);
+    assert_eq!(
+        get(&app, 30, 10)[0],
+        mn_core::blend::f32_to_fix15(1.0),
+        "undo put the red back"
+    );
+}
+
 /// The cheap crawl candidates (2026-08-25) through dispatch: hide all
 /// drafts + restore them; convert the ink to the drawing colour; outline
 /// a selection — each one undoable where it edits.
