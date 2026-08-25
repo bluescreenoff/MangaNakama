@@ -571,7 +571,184 @@ fn gather(layer: &Layer, gx: i32, gy: i32, gw: usize, gh: usize) -> Raster {
     out
 }
 
+/// CSP "Outline selection" ▸ Border type: which side of the selection
+/// edge the band is drawn on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutlineBorder {
+    Outside,
+    OnBorder,
+    Inside,
+}
+
+impl OutlineBorder {
+    pub fn label(&self) -> &'static str {
+        match self {
+            OutlineBorder::Outside => "Draw outside",
+            OutlineBorder::OnBorder => "Draw on border",
+            OutlineBorder::Inside => "Draw inside",
+        }
+    }
+}
+
 impl Document {
+    /// CSP "Convert to drawing color": recolour the active layer's ink to
+    /// `colour`, keeping every pixel's coverage — premultiplied, so soft
+    /// edges stay exactly as soft. Selection-bounded when ants are up.
+    /// Refuses (with the reason) when the layer is not plain raster, or
+    /// the layer's expression is Grey/Mono and the picked colour is pure
+    /// black or pure white (CSP's rule: that conversion is a no-op that
+    /// would flatten the tone structure).
+    pub fn convert_to_drawing_colour(&mut self, colour: [f32; 3]) -> String {
+        let li = self.active;
+        let Some(l) = self.layers.get(li) else {
+            return String::new();
+        };
+        if l.folder || l.strokes.is_some() || !matches!(l.kind, crate::doc::LayerKind::Raster) {
+            return "convert to drawing colour applies to raster layers".into();
+        }
+        let pure_bw = {
+            let (mx, mn) = (
+                colour.iter().cloned().fold(f32::MIN, f32::max),
+                colour.iter().cloned().fold(f32::MAX, f32::min),
+            );
+            mx - mn < 1.0 / 255.0 && (mx <= 1.0 / 255.0 || mx >= 254.0 / 255.0)
+        };
+        if pure_bw && !matches!(l.expression, crate::doc::LayerExpression::Colour) {
+            return "pick a colour first — black or white on a grey/mono layer has nothing to convert".into();
+        }
+        let sel = self.selection.clone();
+        let (li_w, li_h) = (self.size.0 as i32, self.size.1 as i32);
+        let mut touched = 0usize;
+        self.begin_op();
+        for idx in self.layers[li].tiles().map(|(i, _)| i).collect::<Vec<_>>() {
+            let (ox, oy) = idx.origin();
+            for py in 0..crate::tile::TILE_SIZE {
+                for px in 0..crate::tile::TILE_SIZE {
+                    let (x, y) = (ox + px as i32, oy + py as i32);
+                    if x < 0 || y < 0 || x >= li_w || y >= li_h {
+                        continue;
+                    }
+                    let t = self.layers[li].tile_mut(idx);
+                    let o = (py * crate::tile::TILE_SIZE + px) * 4;
+                    let d = t.data_mut();
+                    let a = d[o + 3];
+                    if a == 0 {
+                        continue;
+                    }
+                    if sel
+                        .as_ref()
+                        .is_some_and(|s| s.coverage(x, y) < 128)
+                    {
+                        continue;
+                    }
+                    let af = a as f32 / crate::blend::FIX15_ONE_F;
+                    d[o] = crate::blend::f32_to_fix15(colour[0].clamp(0.0, 1.0) * af);
+                    d[o + 1] = crate::blend::f32_to_fix15(colour[1].clamp(0.0, 1.0) * af);
+                    d[o + 2] = crate::blend::f32_to_fix15(colour[2].clamp(0.0, 1.0) * af);
+                    touched += 1;
+                }
+            }
+        }
+        self.end_op();
+        if touched == 0 {
+            return "nothing to convert — the layer has no ink".into();
+        }
+        self.set_op_label("Convert colour");
+        format!("recoloured {touched} px to the drawing colour")
+    }
+
+    /// CSP "Outline selection": stroke a border around the selection on
+    /// the active raster layer, in `colour`. `border` picks which side of
+    /// the ants the band sits (outside / centred / inside); `round`
+    /// swaps the square structuring element for a disc. Anti-aliasing is
+    /// vector-only in CSP and absent here on purpose.
+    pub fn outline_selection(
+        &mut self,
+        width_px: f32,
+        border: OutlineBorder,
+        round: bool,
+        colour: [f32; 3],
+    ) -> String {
+        let Some(sel) = self.selection.clone() else {
+            return "outline needs a selection first".into();
+        };
+        let li = self.active;
+        let Some(l) = self.layers.get(li) else {
+            return String::new();
+        };
+        if l.lock {
+            return "layer is locked".into();
+        }
+        if l.folder || l.strokes.is_some() || !matches!(l.kind, crate::doc::LayerKind::Raster) {
+            return "outline applies to raster layers".into();
+        }
+        let (w, h) = (self.size.0 as i32, self.size.1 as i32);
+        let inside = |x: i32, y: i32| -> bool {
+            x >= 0 && y >= 0 && x < w && y < h && sel.coverage(x, y) >= 128
+        };
+        // The half-window the border type needs: outside/inside = the
+        // full width from the boundary; on-border = half either way.
+        let r_full = (width_px.max(0.5) as i32).max(1);
+        let r_half = (r_full + 1) / 2;
+        let near = |x: i32, y: i32, r: i32, want_inside: bool| -> bool {
+            for dy in -r..=r {
+                for dx in -r..=r {
+                    if round && dx * dx + dy * dy > r * r {
+                        continue;
+                    }
+                    if inside(x + dx, y + dy) == want_inside {
+                        return true;
+                    }
+                }
+            }
+            false
+        };
+        let is_ring = |x: i32, y: i32| -> bool {
+            match border {
+                OutlineBorder::Outside => !inside(x, y) && near(x, y, r_full, true),
+                OutlineBorder::OnBorder => {
+                    near(x, y, r_half, true) && near(x, y, r_half, false)
+                }
+                OutlineBorder::Inside => inside(x, y) && near(x, y, r_full, false),
+            }
+        };
+        // Only scan the selection's bounds grown by the width.
+        let Some(b) = sel.bounds() else {
+            return "outline needs a selection with area".into();
+        };
+        let (x0, y0) = ((b[0] - r_full - 1).max(0), (b[1] - r_full - 1).max(0));
+        let (x1, y1) = ((b[2] + r_full + 2).min(w), (b[3] + r_full + 2).min(h));
+        let mut painted = 0usize;
+        self.begin_op();
+        for y in y0..y1 {
+            for x in x0..x1 {
+                if !is_ring(x, y) {
+                    continue;
+                }
+                let idx = crate::tile::TileIdx::of_pixel(x, y);
+                let (ox, oy) = idx.origin();
+                let t = self.layers[li].tile_mut(idx);
+                t.set_pixel(
+                    (x - ox) as usize,
+                    (y - oy) as usize,
+                    [
+                        crate::blend::f32_to_fix15(colour[0].clamp(0.0, 1.0)),
+                        crate::blend::f32_to_fix15(colour[1].clamp(0.0, 1.0)),
+                        crate::blend::f32_to_fix15(colour[2].clamp(0.0, 1.0)),
+                        crate::blend::f32_to_fix15(1.0),
+                    ],
+                );
+                painted += 1;
+            }
+        }
+        self.end_op();
+        if painted == 0 {
+            return "nothing to outline".into();
+        }
+        self.set_op_label("Outline");
+        format!("outlined the selection — {painted} px")
+    }
+
     /// FL-010/011/013/015/033: run `f` over the active layer as ONE undo step,
     /// clipped to the selection when there is one.
     ///
@@ -711,6 +888,94 @@ impl Document {
 
 #[cfg(test)]
 mod tests {
+    use crate::doc::{Document, LayerExpression};
+    use crate::selection::Selection;
+    use crate::tile::{TILE_SIZE, TileIdx};
+
+    fn ink(doc: &mut Document, li: usize, x0: i32, y0: i32, x1: i32, y1: i32, rgb: [f32; 3], a: f32) {
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let idx = TileIdx::of_pixel(x, y);
+                let (ox, oy) = idx.origin();
+                let t = doc.layers[li].tile_mut(idx);
+                let o = ((y - oy) as usize * TILE_SIZE + (x - ox) as usize) * 4;
+                let d = t.data_mut();
+                d[o] = crate::blend::f32_to_fix15(rgb[0] * a);
+                d[o + 1] = crate::blend::f32_to_fix15(rgb[1] * a);
+                d[o + 2] = crate::blend::f32_to_fix15(rgb[2] * a);
+                d[o + 3] = crate::blend::f32_to_fix15(a);
+            }
+        }
+    }
+
+    fn px(doc: &Document, li: usize, x: i32, y: i32) -> [u16; 4] {
+        let idx = TileIdx::of_pixel(x, y);
+        let (ox, oy) = idx.origin();
+        doc.layers[li]
+            .tile_arc(idx)
+            .map(|t| {
+                let o = ((y - oy) as usize * TILE_SIZE + (x - ox) as usize) * 4;
+                let d = t.data();
+                [d[o], d[o + 1], d[o + 2], d[o + 3]]
+            })
+            .unwrap_or([0, 0, 0, 0])
+    }
+
+    /// CSP Convert to drawing colour: rgb swaps, coverage survives; the
+    /// grey/mono + pure-B/W refusal; the selection bound.
+    #[test]
+    fn convert_to_drawing_colour_keeps_coverage() {
+        let mut doc = Document::new(128, 128);
+        let li = doc.add_layer("l");
+        ink(&mut doc, li, 10, 10, 20, 20, [1.0, 0.0, 0.0], 0.5);
+        let status = doc.convert_to_drawing_colour([0.0, 0.0, 1.0]);
+        assert!(status.contains("recoloured"), "{status}");
+        let p = px(&doc, li, 15, 15);
+        assert_eq!(p[3], crate::blend::f32_to_fix15(0.5), "alpha kept");
+        assert_eq!(p[0], 0, "red gone");
+        assert_eq!(p[2], crate::blend::f32_to_fix15(0.5), "blue at half (premul)");
+        assert!(doc.undo(), "one undo");
+        assert_eq!(px(&doc, li, 15, 15)[0], crate::blend::f32_to_fix15(0.5));
+
+        // Grey layer + pure black pick → refused, nothing touched.
+        doc.layers[li].expression = LayerExpression::Grey;
+        let before = px(&doc, li, 15, 15);
+        let status = doc.convert_to_drawing_colour([0.0, 0.0, 0.0]);
+        assert!(status.contains("pick a colour"), "{status}");
+        assert_eq!(px(&doc, li, 15, 15), before);
+    }
+
+    /// CSP Outline selection: the band lands on the right side of the
+    /// ants for all three border types.
+    #[test]
+    fn outline_selection_draws_the_band_on_the_chosen_side() {
+        let mut doc = Document::new(128, 128);
+        let li = doc.add_layer("l");
+        doc.selection = Some(Selection::from_rect(&doc, 40.0, 40.0, 60.0, 60.0));
+        let status = doc.outline_selection(4.0, OutlineBorder::Outside, false, [0.0, 0.0, 0.0]);
+        assert!(status.contains("outlined"), "{status}");
+        let a = |x: i32, y: i32| px(&doc, li, x, y)[3];
+        assert!(a(37, 50) > 0, "outside band, 3px from the edge");
+        assert_eq!(a(50, 50), 0, "the selection's interior untouched");
+        assert_eq!(a(35, 50), 0, "beyond the width, untouched");
+        assert!(a(63, 50) > 0, "3px outside the far edge is inked");
+        assert_eq!(a(64, 50), 0, "4+1 outside the far edge is not");
+        assert!(doc.undo());
+
+        // Inside: the band sits within the ants.
+        doc.outline_selection(4.0, OutlineBorder::Inside, false, [0.0, 0.0, 0.0]);
+        assert!(px(&doc, li, 42, 50)[3] > 0, "inside band near the edge");
+        assert_eq!(px(&doc, li, 50, 50)[3], 0, "deep interior untouched");
+        assert_eq!(px(&doc, li, 37, 50)[3], 0, "outside untouched");
+        assert!(doc.undo());
+
+        // On border: centred — both sides get half.
+        doc.outline_selection(6.0, OutlineBorder::OnBorder, false, [0.0, 0.0, 0.0]);
+        assert!(px(&doc, li, 40, 50)[3] > 0, "just outside inked");
+        assert!(px(&doc, li, 41, 50)[3] > 0, "just inside inked");
+        assert_eq!(px(&doc, li, 50, 50)[3], 0, "deep interior untouched");
+    }
+
     use super::*;
 
     /// Solid opaque black over a canvas-pixel rect, as one undo step.
