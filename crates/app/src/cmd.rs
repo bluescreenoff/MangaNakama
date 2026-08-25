@@ -1879,6 +1879,12 @@ pub enum AppCmd {
         keep_original: bool,
         name: Option<String>,
     },
+    /// Edit ▸ Advanced fill… (row 124): fill the selection (or layer)
+    /// at an opacity, from the menu.
+    AdvancedFillOpen,
+    AdvancedFill {
+        opacity: f32,
+    },
     /// Layer ▸ Extract lines… (row 31): dark pixels → a fresh line
     /// layer above.
     ExtractOpen,
@@ -4024,6 +4030,24 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 app.mark_dirty();
             } else {
                 app.set_status("nothing to convert");
+            }
+        }
+        AppCmd::AdvancedFillOpen => {
+            app.advfill_open = !app.advfill_open;
+            app.mark_dirty();
+        }
+        AppCmd::AdvancedFill { opacity } => {
+            app.doc.set_op_label("Advanced fill");
+            let color = app.active_color();
+            if app.doc.fill_selection_opacity(color, opacity) {
+                app.set_status(if app.doc.selection.is_some() {
+                    "selection filled"
+                } else {
+                    "layer filled"
+                });
+                app.mark_dirty();
+            } else {
+                app.set_status("this layer cannot be filled (vector/folder/locked)");
             }
         }
         AppCmd::ExtractOpen => {

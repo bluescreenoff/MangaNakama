@@ -107,3 +107,37 @@ pub(super) fn extract_window(ctx: &egui::Context, app: &mut App) {
         app.extract_open = false;
     }
 }
+
+pub(super) fn advfill_window(ctx: &egui::Context, app: &mut App) {
+    if !app.advfill_open {
+        return;
+    }
+    let mut open = true;
+    egui::Window::new("Advanced Fill")
+        .open(&mut open)
+        .resizable(false)
+        .default_pos(egui::pos2(320.0, 120.0))
+        .show(ctx, |ui| {
+            let target = if app.doc.selection.is_some() {
+                "the selection"
+            } else {
+                "the whole layer"
+            };
+            ui.label(format!("Fills {target} with the main colour."));
+            ui.add(
+                egui::Slider::new(&mut app.advfill_opacity, 0.01..=1.0)
+                    .text("opacity")
+                    .fixed_decimals(2),
+            )
+            .on_hover_text("a src-over — the ink under the fill blends through");
+            if ui.button("Fill").clicked() {
+                app.push_cmd(AppCmd::AdvancedFill {
+                    opacity: app.advfill_opacity,
+                });
+            }
+            ui.small("one undo step");
+        });
+    if !open {
+        app.advfill_open = false;
+    }
+}

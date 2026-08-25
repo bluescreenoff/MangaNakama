@@ -435,6 +435,9 @@ pub struct App {
     pub convert_name: String,
     pub extract_open: bool,
     pub extract_detection: f32,
+    /// Edit ▸ Advanced fill… (row 124): the window and its opacity.
+    pub advfill_open: bool,
+    pub advfill_opacity: f32,
     /// Edit ▸ Outline selection… (CSP Other Layer Filters): the window
     /// and its parameters.
     pub outline_open: bool,
@@ -1397,6 +1400,8 @@ impl App {
             convert_name: String::new(),
             extract_open: false,
             extract_detection: 0.8,
+            advfill_open: false,
+            advfill_opacity: 1.0,
             outline_open: false,
             outline_width: 8.0,
             outline_border: mn_core::filter::OutlineBorder::Outside,

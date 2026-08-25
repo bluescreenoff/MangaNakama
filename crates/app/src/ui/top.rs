@@ -305,6 +305,10 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 app.push_cmd(AppCmd::OutlineOpen);
                 ui.close();
             }
+            if item(ui, "Advanced fill…", "") {
+                app.push_cmd(AppCmd::AdvancedFillOpen);
+                ui.close();
+            }
             if item(ui, "Extract lines…", "") {
                 app.push_cmd(AppCmd::ExtractOpen);
                 ui.close();

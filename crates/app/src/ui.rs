@@ -144,6 +144,7 @@ pub fn build(ui: &mut egui::Ui, app: &mut App) {
     outline::outline_window(ui.ctx(), app);
     convert::convert_window(ui.ctx(), app);
     convert::extract_window(ui.ctx(), app);
+    convert::advfill_window(ui.ctx(), app);
     adjust_window(ui.ctx(), app);
     goto_page_window(ui.ctx(), app);
     spread_window(ui.ctx(), app);

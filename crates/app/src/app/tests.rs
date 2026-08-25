@@ -8664,6 +8664,39 @@ fn align_and_distribute_commands() {
     assert_eq!(ts.texts[1].pos[0], 10.0, "the item moved onto the other");
 }
 
+/// Row 124: the Advanced fill dialog's command through dispatch — a
+/// half fill blends over the ink, one undo.
+#[test]
+fn advanced_fill_blends_through_dispatch() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (400, 300), 1.0);
+    app.doc = Document::new(128, 128);
+    let li = app.doc.add_layer("l");
+    let idx = TileIdx::of_pixel(10, 10);
+    let (ox, oy) = idx.origin();
+    {
+        let t = app.doc.layers[li].tile_mut(idx);
+        let f = mn_core::blend::f32_to_fix15(0.5);
+        t.set_pixel((10 - ox) as usize, (10 - oy) as usize, [f, f, f, 32768]);
+    }
+    app.main_color = [1.0, 1.0, 1.0];
+    crate::cmd::dispatch(&mut app, AppCmd::AdvancedFill { opacity: 0.5 });
+    assert!(app.status.contains("filled"), "{}", app.status);
+    let p = app.doc.layers[li]
+        .tile_arc(idx)
+        .map(|t| t.pixel((10 - ox) as usize, (10 - oy) as usize))
+        .unwrap();
+    assert_eq!(p[0], mn_core::blend::f32_to_fix15(0.75), "{p:?}");
+    crate::cmd::dispatch(&mut app, AppCmd::Undo);
+    let back = app.doc.layers[li]
+        .tile_arc(idx)
+        .map(|t| t.pixel((10 - ox) as usize, (10 - oy) as usize))
+        .unwrap();
+    assert_eq!(back[0], mn_core::blend::f32_to_fix15(0.5));
+}
+
 /// Rows 33/31 through dispatch: convert a text layer to raster (keep
 /// original), then extract lines from an inked layer — each one undo.
 #[test]

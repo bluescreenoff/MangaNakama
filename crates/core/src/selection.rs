@@ -644,16 +644,28 @@ impl Document {
     /// colour on the active layer, as one undo step (CSP Alt+Delete). Returns
     /// false when the active layer refuses (vector/folder/locked).
     pub fn fill_selection(&mut self, color: [f32; 3]) -> bool {
+        self.fill_selection_opacity(color, 1.0)
+    }
+
+    /// Row 124 (CSP 高度な塗り, the menu-driven half): fill the selection
+    /// (or the whole layer, without ants) at `opacity` — a src-over of
+    /// the premultiplied colour against whatever the layer holds, so a
+    /// half-strength flat blocks colour in without erasing the sketch
+    /// under it. The selection's partial coverage blends after, exactly
+    /// as the opaque fill's does.
+    pub fn fill_selection_opacity(&mut self, color: [f32; 3], opacity: f32) -> bool {
         let l = self.active_layer();
         if !l.paintable() || l.lock {
             return false;
         }
-        let px: [u16; 4] = [
-            crate::blend::f32_to_fix15(color[0]),
-            crate::blend::f32_to_fix15(color[1]),
-            crate::blend::f32_to_fix15(color[2]),
-            crate::blend::f32_to_fix15(1.0),
-        ];
+        let a = opacity.clamp(0.0, 1.0);
+        let fill = [
+            color[0].clamp(0.0, 1.0) * a,
+            color[1].clamp(0.0, 1.0) * a,
+            color[2].clamp(0.0, 1.0) * a,
+            a,
+        ]
+        .map(crate::blend::f32_to_fix15);
         let (w, h) = (self.size.0 as i32, self.size.1 as i32);
         let sel = self.selection.clone();
         self.begin_op();
@@ -676,7 +688,15 @@ impl Document {
                     if x >= w || y >= h {
                         continue;
                     }
-                    data[p * 4..p * 4 + 4].copy_from_slice(&px);
+                    // Src-over in premultiplied fix15.
+                    let sa = fill[3] as f32 / 32768.0;
+                    for c in 0..4 {
+                        let nv = (fill[c] as f32
+                            + data[p * 4 + c] as f32 * (1.0 - sa))
+                            .round()
+                            .min(32768.0) as u16;
+                        data[p * 4 + c] = nv;
+                    }
                 }
             }
         }
@@ -1168,6 +1188,45 @@ mod tests {
         assert_eq!(m.coverage(15, 15), 255);
         assert_eq!(m.coverage(50, 15), 0);
         assert_eq!(m.outline.len(), 4, "a rectangle collapses to 4 corners");
+    }
+
+    /// Row 124: the half-strength flat src-overs the ink under it —
+    /// the sketch survives a blocking pass — and one undo rewinds.
+    #[test]
+    fn fill_selection_opacity_blends_over_the_ink() {
+        let mut doc = crate::doc::Document::new(128, 128);
+        let li = doc.add_layer("l");
+        // Half-black ink at (10,10).
+        let idx = TileIdx::of_pixel(10, 10);
+        let (ox, oy) = idx.origin();
+        {
+            let t = doc.layers[li].tile_mut(idx);
+            let f = crate::blend::f32_to_fix15(0.5);
+            t.set_pixel((10 - ox) as usize, (10 - oy) as usize, [f, f, f, 32768]);
+        }
+        assert!(doc.fill_selection_opacity([1.0, 1.0, 1.0], 0.5));
+        let p = doc.layers[li]
+            .tile_arc(idx)
+            .map(|t| t.pixel((10 - ox) as usize, (10 - oy) as usize))
+            .unwrap();
+        // src-over white 0.5 over black 0.5 = 0.75 everywhere premul:
+        let want = crate::blend::f32_to_fix15(0.75);
+        assert_eq!(p[0], want, "the sketch blended through: {p:?}");
+        assert_eq!(p[3], 32768, "full coverage after an opaque-ish fill");
+        // Empty paper at (60,60) takes the half fill.
+        let idx2 = TileIdx::of_pixel(60, 60);
+        let (ox2, oy2) = idx2.origin();
+        let q = doc.layers[li]
+            .tile_arc(idx2)
+            .map(|t| t.pixel((60 - ox2) as usize, (60 - oy2) as usize))
+            .unwrap();
+        assert_eq!(q[0], crate::blend::f32_to_fix15(0.5), "{q:?}");
+        assert!(doc.undo());
+        let back = doc.layers[li]
+            .tile_arc(idx)
+            .map(|t| t.pixel((10 - ox) as usize, (10 - oy) as usize))
+            .unwrap();
+        assert_eq!(back[0], crate::blend::f32_to_fix15(0.5), "undo rewound it");
     }
 
     #[test]
