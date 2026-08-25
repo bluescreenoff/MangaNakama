@@ -895,6 +895,68 @@ impl App {
                     self.needs_redraw = true;
                     return;
                 }
+                // Row 78: the four-way click combine runs BEFORE the
+                // kind-specific grabs — Remove/Toggle on an already-
+                // selected object never re-selects (and never arms a drag).
+                let combine = if m.shift {
+                    crate::cmd::SelectCombine::Add
+                } else {
+                    self.object_combine
+                };
+                if combine != crate::cmd::SelectCombine::New {
+                    let cands = self.object_candidates_at(cx, cy);
+                    if let Some(top) = cands.first().copied() {
+                        let primary = self.object_selection();
+                        let in_multi = self.object_multi.iter().any(|r| *r == top);
+                        let is_primary = primary == Some(top);
+                        match combine {
+                            crate::cmd::SelectCombine::Remove => {
+                                if in_multi {
+                                    self.object_multi.retain(|r| *r != top);
+                                    self.set_status("removed from the selection");
+                                    if is_primary {
+                                        self.clear_object_selection();
+                                    }
+                                    self.needs_redraw = true;
+                                    return;
+                                }
+                                if is_primary {
+                                    self.clear_object_selection();
+                                    self.set_status("deselected");
+                                    self.needs_redraw = true;
+                                    return;
+                                }
+                                // Remove on an unselected object: nothing.
+                                self.needs_redraw = true;
+                                return;
+                            }
+                            crate::cmd::SelectCombine::Toggle => {
+                                if in_multi || is_primary {
+                                    self.object_multi.retain(|r| *r != top);
+                                    if is_primary {
+                                        self.clear_object_selection();
+                                    }
+                                    self.set_status("toggled off");
+                                    self.needs_redraw = true;
+                                    return;
+                                }
+                                self.object_multi.push(top);
+                                // Falls through: the normal path makes it
+                                // the primary too, so its handles appear.
+                            }
+                            crate::cmd::SelectCombine::Add => {
+                                if !in_multi && !is_primary {
+                                    self.object_multi.push(top);
+                                }
+                                // Falls through to select/drag as usual.
+                            }
+                            crate::cmd::SelectCombine::New => unreachable!(),
+                        }
+                    }
+                } else {
+                    // New: the fresh selection replaces the set.
+                    self.object_multi.clear();
+                }
                 if !self.text_object_press(cx, cy, clicks) {
                     self.object_hit(cx, cy);
                 }
@@ -2145,7 +2207,7 @@ impl App {
     }
 
     /// The current Object-tool selection as one referent.
-    fn object_selection(&self) -> Option<ObjRef> {
+    pub(crate) fn object_selection(&self) -> Option<ObjRef> {
         if let Some((li, ti)) = self.text_sel {
             return Some(ObjRef::Text(li, ti));
         }
@@ -2159,6 +2221,17 @@ impl App {
             return Some(ObjRef::Frame(li, fi));
         }
         None
+    }
+
+    /// Rows 78/76: deselect every object (primary + set) without
+    /// touching the layers.
+    pub(crate) fn clear_object_selection(&mut self) {
+        self.text_sel = None;
+        self.gen_sel = None;
+        self.balloon_sel = None;
+        self.object_sel = None;
+        self.object_multi.clear();
+        self.object_pick = None;
     }
 
     fn object_select_ref(&mut self, r: ObjRef) {

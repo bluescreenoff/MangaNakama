@@ -8664,6 +8664,70 @@ fn align_and_distribute_commands() {
     assert_eq!(ts.texts[1].pos[0], 10.0, "the item moved onto the other");
 }
 
+/// Rows 78/76: the Object tool's four-way combine + multi selection —
+/// Add stacks objects, Del removes the whole set in ONE undo, and
+/// Remove/Toggle deselect instead of re-selecting.
+#[test]
+fn object_multi_select_combine_and_group_delete() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (400, 300), 1.0);
+    app.doc = Document::new(256, 256);
+    let mk = |cx: f32, cy: f32| mn_core::Balloon {
+        shape: mn_core::BalloonShape::Ellipse {
+            center: [cx, cy],
+            radii: [20.0, 14.0],
+        },
+        ..Default::default()
+    };
+    let bl = app.doc.add_balloon_layer(
+        "bubbles",
+        mn_core::BalloonSet {
+            balloons: vec![mk(60.0, 60.0), mk(160.0, 60.0)],
+            border_px: 4.0,
+            pressure_width: false,
+        },
+    );
+    app.viewport = mn_gpu::Viewport::default();
+    app.tool = crate::cmd::Tool::Object;
+
+    // Add mode: every click stacks (the primary is in the set too).
+    app.object_combine = crate::cmd::SelectCombine::Add;
+    app.canvas_down(60.0, 60.0, PointerKind::Mouse, &[]);
+    assert_eq!(app.object_multi.len(), 1, "first click stacks");
+    app.canvas_down(160.0, 60.0, PointerKind::Mouse, &[]);
+    assert_eq!(app.object_multi.len(), 2, "second click stacked");
+    assert_eq!(app.balloon_sel, Some((bl, 1)), "the newest is primary");
+
+    // Group delete: BOTH gone, one undo.
+    crate::cmd::dispatch(&mut app, AppCmd::ObjectMultiDelete);
+    let bs = app.doc.layers[bl].balloons().unwrap();
+    assert_eq!(bs.balloons.len(), 0, "both deleted");
+    assert!(app.status.contains("2 objects deleted"), "{}", app.status);
+    crate::cmd::dispatch(&mut app, AppCmd::Undo);
+    let bs = app.doc.layers[bl].balloons().unwrap();
+    assert_eq!(bs.balloons.len(), 2, "one undo restored both");
+
+    // Remove mode: clicking a selected member DROPS it, never reselects.
+    // (Re-stack two first: Add #0, then Add #1.)
+    app.object_combine = crate::cmd::SelectCombine::Add;
+    app.canvas_down(60.0, 60.0, PointerKind::Mouse, &[]);
+    app.canvas_down(160.0, 60.0, PointerKind::Mouse, &[]);
+    assert_eq!(app.object_multi.len(), 2);
+    app.object_combine = crate::cmd::SelectCombine::Remove;
+    let before_primary = app.balloon_sel;
+    app.canvas_down(60.0, 60.0, PointerKind::Mouse, &[]);
+    assert_eq!(app.object_multi.len(), 1, "removed from the set");
+    assert_eq!(app.balloon_sel, before_primary, "the primary kept");
+
+    // Toggle on the primary deselects it (and drops it from the set).
+    app.object_combine = crate::cmd::SelectCombine::Toggle;
+    app.canvas_down(160.0, 60.0, PointerKind::Mouse, &[]);
+    assert!(app.balloon_sel.is_none(), "toggle deselected the primary");
+    assert_eq!(app.object_multi.len(), 0);
+}
+
 /// Row 149: ruler layer attachment through dispatch — bulk attach to
 /// the active layer, the view gates on it, one undo restores.
 #[test]

@@ -845,7 +845,43 @@ pub(crate) fn sec_obj_genlines_density(ui: &mut egui::Ui, app: &mut App) {
     gen_commit(app, li, s, changed, done);
 }
 
-pub(crate) fn sec_obj_guide(ui: &mut egui::Ui, _app: &mut App) {
+pub(crate) fn sec_obj_guide(ui: &mut egui::Ui, app: &mut App) {
+    // Row 78 (CSP Operation ▸ Object ▸ Select): the four-way combine.
+    ui.label("Select");
+    ui.horizontal(|ui| {
+        for m in [
+            crate::cmd::SelectCombine::New,
+            crate::cmd::SelectCombine::Add,
+            crate::cmd::SelectCombine::Remove,
+            crate::cmd::SelectCombine::Toggle,
+        ] {
+            if ui
+                .selectable_label(app.object_combine == m, m.label())
+                .on_hover_text(match m {
+                    crate::cmd::SelectCombine::New => {
+                        "each click starts a fresh selection (Shift-click adds anyway)"
+                    }
+                    crate::cmd::SelectCombine::Add => {
+                        "clicks stack objects into a multi selection"
+                    }
+                    crate::cmd::SelectCombine::Remove => {
+                        "clicking a selected object drops it from the selection"
+                    }
+                    crate::cmd::SelectCombine::Toggle => {
+                        "clicking flips membership — selected objects deselect"
+                    }
+                })
+                .clicked()
+            {
+                app.object_combine = m;
+            }
+        }
+    });
+    let n = app.object_multi.len();
+    if n > 0 {
+        ui.weak(format!("{n} more object{} in the selection — Del removes all",
+            if n == 1 { "" } else { "s" }));
+    }
     ui.weak("click a text box, balloon, panel or effect-line set");
     ui.weak("drag moves; handles reshape; the blue box scales/rotates");
     ui.weak("Del removes the selected one");

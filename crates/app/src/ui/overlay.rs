@@ -1170,6 +1170,39 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
     let text_shown: Option<(mn_core::TextItem, bool)> = if let Some(d) = &app.text_obj_drag {
         Some((d.preview(), true))
     } else if app.tool == Tool::Object {
+        // Rows 78/76: the multi-selection set — a thin accent box on
+        // every member (the primary keeps its full affordances below).
+        for r in &app.object_multi {
+            let bb: Option<[f32; 4]> = match *r {
+                crate::app::ObjRef::Text(li, ti) => app
+                    .doc
+                    .layers
+                    .get(li)
+                    .and_then(|l| l.texts())
+                    .and_then(|ts| ts.texts.get(ti))
+                    .map(|t| {
+                        let c = t.center();
+                        [c[0] - t.size[0] * 0.5, c[1] - t.size[1] * 0.5,
+                         c[0] + t.size[0] * 0.5, c[1] + t.size[1] * 0.5]
+                    }),
+                crate::app::ObjRef::Balloon(li, bi) => app
+                    .doc
+                    .layers
+                    .get(li)
+                    .and_then(|l| l.balloons())
+                    .and_then(|bs| bs.balloons.get(bi))
+                    .map(|b| b.bbox()),
+                _ => None,
+            };
+            if let Some(b) = bb {
+                painter.rect_stroke(
+                    egui::Rect::from_min_max(to_pt(b[0], b[1]), to_pt(b[2], b[3])),
+                    2.0,
+                    egui::Stroke::new(1.5, theme::c().accent),
+                    egui::StrokeKind::Middle,
+                );
+            }
+        }
         app.text_sel.and_then(|(li, ti)| {
             Some((
                 app.doc.layers.get(li)?.texts()?.texts.get(ti)?.clone(),

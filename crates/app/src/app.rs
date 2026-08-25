@@ -54,6 +54,7 @@ pub use transform::{
     ROTATE_STALK_SCREEN, TransformDrag, TransformGesture, TransformGrab, transform_preview,
 };
 
+pub use canvas_input::ObjRef;
 use canvas_input::{BalloonObjDrag, ObjectDrag};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -933,6 +934,13 @@ pub struct App {
     pub text_gesture: Option<TextGesture>,
     /// Object tool: selected text as (layer, item) indices.
     pub text_sel: Option<(usize, usize)>,
+    /// Rows 78/76: the Object tool's MULTI-selection set (beside the
+    /// primary single selection, so every existing drag/property path
+    /// keeps working). Entries are validated lazily — a member whose
+    /// layer/object no longer exists is skipped, never panics.
+    pub object_multi: Vec<ObjRef>,
+    /// Row 78: the click-combine mode (Shift-click overrides to Add).
+    pub object_combine: crate::cmd::SelectCombine,
     /// Object tool: live text move/resize/rotate drag.
     pub text_obj_drag: Option<TextObjDrag>,
     /// Object tool: Tool-Property value-bar drag on the selected text item
@@ -1604,6 +1612,8 @@ impl App {
             text_edit: None,
             text_gesture: None,
             text_sel: None,
+            object_multi: Vec::new(),
+            object_combine: crate::cmd::SelectCombine::default(),
             text_obj_drag: None,
             text_bar_drag: None,
             transform_drag: None,

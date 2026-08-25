@@ -1343,6 +1343,28 @@ impl Default for EyedropOpts {
     }
 }
 
+/// Row 78 (CSP Operation ▸ Object ▸ Select): how a plain object CLICK
+/// combines with the current selection. Shift-click is always Add.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SelectCombine {
+    #[default]
+    New,
+    Add,
+    Remove,
+    Toggle,
+}
+
+impl SelectCombine {
+    pub fn label(&self) -> &'static str {
+        match self {
+            SelectCombine::New => "New",
+            SelectCombine::Add => "Add",
+            SelectCombine::Remove => "Remove",
+            SelectCombine::Toggle => "Toggle",
+        }
+    }
+}
+
 /// Operation-tool sub tools (CSP 操作: Object / Select layer).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum ObjectMode {
@@ -2500,6 +2522,9 @@ pub enum AppCmd {
         layer: usize,
         balloon: usize,
     },
+    /// Rows 78/76: delete the Object tool's whole selection (the set
+    /// plus the primary), texts and balloons, ONE undo step.
+    ObjectMultiDelete,
     // --- text ---------------------------------------------------------------
     /// Commit a text layer's items (Object-tool move/resize/rotate, or an
     /// editing session's single undo step).
@@ -5193,6 +5218,66 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             if app.doc.set_balloons(layer, balloons) {
                 app.mark_dirty();
             }
+        }
+        AppCmd::ObjectMultiDelete => {
+            app.cancel_text_edit();
+            let mut members: Vec<crate::app::ObjRef> = app.object_multi.clone();
+            if let Some(p) = app.object_selection() {
+                if !members.contains(&p) {
+                    members.push(p);
+                }
+            }
+            // Group by kind+layer so per-layer removals apply largest-
+            // index-first (removing balloon 0 must not shift balloon 1's
+            // index before it goes).
+            let mut balloons: Vec<(usize, usize)> = members
+                .iter()
+                .filter_map(|r| match r {
+                    crate::app::ObjRef::Balloon(l, b) => Some((*l, *b)),
+                    _ => None,
+                })
+                .collect();
+            balloons.sort_by(|a, b| (b.0, b.1).cmp(&(a.0, a.1)));
+            let mut texts: Vec<(usize, usize)> = members
+                .iter()
+                .filter_map(|r| match r {
+                    crate::app::ObjRef::Text(l, t) => Some((*l, *t)),
+                    _ => None,
+                })
+                .collect();
+            texts.sort_by(|a, b| (b.0, b.1).cmp(&(a.0, a.1)));
+            let mut pushed = 0usize;
+            for (l, b) in balloons {
+                if let Some(bs) = app.doc.layers.get(l).and_then(|ly| ly.balloons()).cloned() {
+                    if b < bs.balloons.len() {
+                        let mut bs = bs;
+                        bs.balloons.remove(b);
+                        app.doc.set_balloons(l, bs);
+                        pushed += 1;
+                    }
+                }
+            }
+            for (l, t) in texts {
+                if let Some(ts) = app.doc.layers.get(l).and_then(|ly| ly.texts()).cloned() {
+                    if t < ts.texts.len() {
+                        let mut ts = ts;
+                        ts.texts.remove(t);
+                        app.warm_texts(l);
+                        app.doc.set_texts(l, ts);
+                        pushed += 1;
+                    }
+                }
+            }
+            if pushed > 1 {
+                app.doc.wrap_recent("Delete objects", pushed);
+            }
+            let n = pushed;
+            app.clear_object_selection();
+            app.set_status(format!(
+                "{n} object{} deleted — one undo",
+                if n == 1 { "" } else { "s" }
+            ));
+            app.mark_dirty();
         }
         AppCmd::BalloonDelete { layer, balloon } => {
             if let Some(bs) = app.doc.layers.get(layer).and_then(|l| l.balloons()) {

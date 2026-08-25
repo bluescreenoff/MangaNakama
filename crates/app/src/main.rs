@@ -1545,6 +1545,9 @@ fn shortcut(app: &mut App, vk: u16, repeat: bool) -> bool {
         // Del family: Alt fills, Shift clears outside, plain deletes/clears.
         (false, 0x2E) if alt => Some(AppCmd::FillSelection),
         (false, 0x2E) if shift => Some(AppCmd::ClearOutside),
+        (false, 0x2E) if app.tool == Tool::Object && !app.object_multi.is_empty() => {
+            Some(AppCmd::ObjectMultiDelete)
+        }
         (false, 0x2E) if app.tool == Tool::Object => app
             .text_sel
             .map(|(layer, text)| AppCmd::TextDelete { layer, text })
