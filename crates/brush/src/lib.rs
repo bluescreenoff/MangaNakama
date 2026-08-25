@@ -47,9 +47,9 @@ pub use surface::{TileOracle, set_tile_oracle};
 
 /// Row 42 / A-014 (CSP はみ出さない, "do not cross lines of the reference
 /// layer"): a per-pixel paint barrier shared by every engine, built once
-/// per stroke from the reference set's ink plus frame-border folders
-/// (the owner's widened referent ruling). `allow` is canvas-wide, one byte
-/// per pixel: 255 = paint freely, 0 = the reference's ink — a blocked
+/// per stroke from the REFERENCE SET's ink (the only referent, per the
+/// 2026-08-25 owner ruling). `allow` is canvas-wide, one byte per
+/// pixel: 255 = paint freely, 0 = the reference's ink — a blocked
 /// pixel is never painted, so a scribble stays inside the lines.
 #[derive(Clone, Debug)]
 pub struct AntiOverflowMask {
@@ -62,12 +62,18 @@ pub struct AntiOverflowMask {
 impl AntiOverflowMask {
     /// True when `(x, y)` is the reference's ink and must stay unpainted.
     /// Off-canvas coordinates read as blocked — safer than painting past
-    /// an edge the barrier was meant to close.
+    /// an edge the barrier was meant to close. That includes `x >= w`:
+    /// without the bound, an off-right column folded into the NEXT
+    /// row's bytes and read its mask instead of the edge.
     pub fn blocked(&self, x: i32, y: i32) -> bool {
         if x < 0 || y < 0 {
             return true;
         }
-        let i = y as usize * self.w + x as usize;
+        let (xu, yu) = (x as usize, y as usize);
+        if xu >= self.w {
+            return true;
+        }
+        let i = yu * self.w + xu;
         self.allow.get(i).is_none_or(|a| *a == 0)
     }
 }
@@ -95,6 +101,36 @@ mod tests {
     use mn_core::{Document, PenSample, StrokeSink, TILE_LEN, TILE_SIZE, TileIdx};
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
+
+    /// Audit small (2026-08-25): `x >= w` is OFF-CANVAS — blocked — and
+    /// never a wrap-around read of the next row's mask. Old code indexed
+    /// `y*w + x` with x past the stride, so (4,0) read row 1's byte 0:
+    /// paintable when that byte was 255, falsely blocked when it was 0.
+    #[test]
+    fn off_right_columns_block_instead_of_wrapping_to_the_next_row() {
+        // 4×3 canvas, everything paintable EXCEPT (0, 1).
+        let m = AntiOverflowMask {
+            w: 4,
+            allow: vec![255, 255, 255, 255, 0, 255, 255, 255, 255, 255, 255, 255],
+        };
+        assert!(!m.blocked(0, 0) && !m.blocked(3, 2), "in-bounds paints");
+        assert!(m.blocked(0, 1), "(0,1) is reference ink");
+        assert!(
+            m.blocked(4, 0) && m.blocked(7, 2) && m.blocked(100, 0),
+            "x >= w is off-canvas: blocked, not the next row's byte"
+        );
+        assert!(
+            m.blocked(4, 0),
+            "the wrap trap: old code read allow[4]=0 here and 'blocked' by accident — the bound must not depend on the next row's ink"
+        );
+        // …and the opposite trap: an all-paintable canvas must not become
+        // paintable PAST its right edge.
+        let open = AntiOverflowMask {
+            w: 4,
+            allow: vec![255; 12],
+        };
+        assert!(open.blocked(4, 0), "off the right edge of an open canvas");
+    }
 
     fn sample(x: f32, y: f32, p: f32, t: f64) -> PenSample {
         PenSample {
