@@ -1181,6 +1181,40 @@ impl App {
         }
     }
 
+    /// The resize's half of the lettering carry (owner, 2026-08-25): a
+    /// resized bubble keeps its lettering at the same relative position —
+    /// centre-fraction of the old box, same fraction of the new one — by
+    /// the same geometric pairing as the turn and the move. No stored
+    /// link, hidden and locked layers untouched, type size untouched.
+    pub(crate) fn scale_texts_with_balloon(&mut self, orig: &Balloon, new_bbox: [f32; 4]) {
+        let mut carried = 0usize;
+        for li in 0..self.doc.layers.len() {
+            let Some(layer) = self.doc.layers.get(li) else {
+                continue;
+            };
+            if !layer.visible || layer.lock {
+                continue;
+            }
+            let Some(ts) = layer.texts() else { continue };
+            let mut ts = ts.clone();
+            let moved = mn_core::balloon::scale_texts_in(orig, &mut ts, new_bbox);
+            if moved.is_empty() {
+                continue;
+            }
+            carried += moved.len();
+            self.push_cmd(AppCmd::TextCommit {
+                layer: li,
+                texts: ts,
+            });
+        }
+        if carried > 0 {
+            self.set_status(format!(
+                "balloon resized — {carried} text{} kept its place in it (still editable; undo takes two steps)",
+                if carried == 1 { "" } else { "s" }
+            ));
+        }
+    }
+
     /// ROADMAP good-first-issue #1 — **fit a balloon to its text**.
     ///
     /// Which text? The same geometric pairing the rest of the app uses: there
@@ -3005,6 +3039,17 @@ impl App {
                                     (b1[1] + b1[3]) * 0.5 - (b0[1] + b0[3]) * 0.5,
                                 ],
                             );
+                        } else if matches!(
+                            d.mode,
+                            BalloonDragMode::Handle(_)
+                                | BalloonDragMode::BoxCorner(_)
+                                | BalloonDragMode::BoxEdge(_)
+                        ) {
+                            // …and RESIZING it keeps the lettering at its
+                            // same relative position (owner, 2026-08-25):
+                            // centre-fraction of the old box, same fraction
+                            // of the committed one.
+                            self.scale_texts_with_balloon(&d.orig, b1);
                         }
                     }
                 } else {

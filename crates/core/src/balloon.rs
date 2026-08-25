@@ -1540,6 +1540,42 @@ pub fn translate_texts_in(
     moved
 }
 
+/// The resize's half of [`rotate_texts_in`]: lettering inside a RESIZED
+/// bubble keeps its same relative position — the centre's fraction of the
+/// old bbox lands at that fraction of the new one, so centred lettering
+/// stays centred and a deliberately off-centre shout stays off-centre.
+/// A text is carried when its centre was inside the ORIGINAL body.
+///
+/// The type size is deliberately NOT scaled: the letterer's font is his
+/// call, and a bubble stretched to fit a line does not get to change the
+/// line. No reshaping means the shaped cache stays valid, as with the move.
+pub fn scale_texts_in(
+    body: &Balloon,
+    texts: &mut crate::text::TextSet,
+    new_bbox: [f32; 4],
+) -> Vec<usize> {
+    let b0 = body.bbox();
+    let (w0, h0) = (b0[2] - b0[0], b0[3] - b0[1]);
+    let (w1, h1) = (new_bbox[2] - new_bbox[0], new_bbox[3] - new_bbox[1]);
+    if w0 < 1e-3 || h0 < 1e-3 || w1 < 1e-3 || h1 < 1e-3 {
+        return Vec::new();
+    }
+    let mut moved = Vec::new();
+    for (i, t) in texts.texts.iter_mut().enumerate() {
+        let c = t.center();
+        if !body.contains(c) {
+            continue;
+        }
+        let to = [
+            new_bbox[0] + (c[0] - b0[0]) / w0 * w1,
+            new_bbox[1] + (c[1] - b0[1]) / h0 * h1,
+        ];
+        t.pos = [t.pos[0] + to[0] - c[0], t.pos[1] + to[1] - c[1]];
+        moved.push(i);
+    }
+    moved
+}
+
 // --- fit a balloon to its lettering (ROADMAP good-first-issue #1) ----------
 
 /// Breathing room left around the lettering, in **ems of the text's own type
@@ -3015,6 +3051,58 @@ mod tests {
         assert!(
             translate_texts_in(&body, &mut ts, [0.0, 0.0]).is_empty(),
             "a zero delta is a no-op"
+        );
+    }
+
+    /// The resize's half of the carry (owner, 2026-08-25): lettering inside
+    /// a resized bubble keeps its same RELATIVE position — centre-fraction
+    /// of the old bbox, same fraction of the new one — while the type size,
+    /// rotation and shaped cache stay untouched, and texts outside the
+    /// original body stay put.
+    #[test]
+    fn texts_keep_their_relative_place_in_a_resized_balloon() {
+        use crate::text::{StyleRun, TextItem, TextSet};
+        let body = ellipse(100.0, 100.0, 60.0, 40.0); // bbox 40..160 × 60..140
+        let mut mid = TextItem::new([80.0, 85.0], "Gothic".into(), 9.0, [0, 0, 0], true);
+        mid.text = "オイ".into();
+        mid.runs = vec![StyleRun::plain(2)];
+        mid.size = [40.0, 30.0]; // centre 100,100 = the 50%/50% point
+        let mut off = TextItem::new([65.0, 95.0], "Gothic".into(), 9.0, [0, 0, 0], true);
+        off.text = "エッ".into();
+        off.runs = vec![StyleRun::plain(2)];
+        off.size = [10.0, 10.0]; // centre 70,100 = the 25%/50% point
+        let mut outside = TextItem::new([400.0, 400.0], "Gothic".into(), 9.0, [0, 0, 0], true);
+        outside.text = "SFX".into();
+        outside.size = [40.0, 20.0];
+        let (mid_size, off_size, out_pos) = (mid.size, off.size, outside.pos);
+        let had_cache = mid.cache.is_some();
+
+        let mut ts = TextSet {
+            texts: vec![mid, off, outside],
+        };
+        // Widen to 40..280 × 60..140: x doubles, y unchanged.
+        let moved = scale_texts_in(&body, &mut ts, [40.0, 60.0, 280.0, 140.0]);
+        assert_eq!(moved, vec![0, 1], "only the lettering in the bubble moves");
+        let c = ts.texts[0].center();
+        assert!(
+            (c[0] - 160.0).abs() < 1e-3 && (c[1] - 100.0).abs() < 1e-3,
+            "the centre keeps its 50%/50% fraction: {c:?}"
+        );
+        let c = ts.texts[1].center();
+        assert!(
+            (c[0] - 100.0).abs() < 1e-3 && (c[1] - 100.0).abs() < 1e-3,
+            "the quarter-in shout stays a quarter in: {c:?}"
+        );
+        assert_eq!(
+            ts.texts[0].size, mid_size,
+            "the type size is the letterer's, not the drag's"
+        );
+        assert_eq!(ts.texts[1].size, off_size);
+        assert_eq!(ts.texts[0].cache.is_some(), had_cache, "cache untouched");
+        assert_eq!(ts.texts[2].pos, out_pos, "outside texts stay put");
+        assert!(
+            scale_texts_in(&body, &mut ts, [40.0, 60.0, 40.0, 140.0]).is_empty(),
+            "a degenerate new box carries nothing"
         );
     }
 

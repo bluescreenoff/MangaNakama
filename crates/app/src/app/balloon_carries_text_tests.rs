@@ -298,3 +298,94 @@ fn moving_a_balloon_carries_its_lettering() {
     let h = &app.doc.layers[hidden].texts().unwrap().texts[0];
     assert_eq!(h.pos, [180.0, 170.0], "hidden layers are left alone");
 }
+
+/// The owner's resize half (2026-08-25): STRETCHING a bubble keeps its
+/// lettering at the same relative position — centred stays centred, a
+/// quarter-in shout stays a quarter in — through the real release path.
+/// The type size is untouched and hidden layers stay put.
+#[test]
+fn resizing_a_balloon_keeps_its_letterings_relative_place() {
+    use crate::app::canvas_input::{BalloonDragMode, BalloonObjDrag};
+    let Some(mut app) = super::new_document_tests::headless() else {
+        return;
+    };
+    let b = drawn_bubble(); // bbox 100..300 × 100..300
+    let ob = b.bbox();
+    let bl = app.doc.add_balloon_layer(
+        "bubbles",
+        mn_core::BalloonSet {
+            balloons: vec![b.clone()],
+            border_px: 4.0,
+            pressure_width: false,
+        },
+    );
+    // Centre lettering (centre 200,200 = 50%/50%) and a quarter-in shout
+    // (centre 150,150 = 25%/25%), both inside the square bubble.
+    let live = app.doc.add_text_layer(
+        "lettering",
+        mn_core::TextSet {
+            texts: vec![lettering([180.0, 170.0], "オイ")],
+        },
+    );
+    let shout = app.doc.add_text_layer(
+        "shout",
+        mn_core::TextSet {
+            texts: vec![lettering([130.0, 120.0], "!?")],
+        },
+    );
+    let hidden = app.doc.add_text_layer(
+        "draft",
+        mn_core::TextSet {
+            texts: vec![lettering([180.0, 170.0], "draft")],
+        },
+    );
+    app.doc.layers[hidden].visible = false;
+    app.viewport = mn_gpu::Viewport::default();
+
+    // Right-edge stretch 300 → 500: the box grows by the drag, y untouched.
+    // (A polygon bbox carries a 16 px pad, so the assertions are the
+    // RULE — fractions preserved — not hand-computed absolute points.)
+    app.balloon_obj_drag = Some(BalloonObjDrag {
+        layer: bl,
+        balloon: 0,
+        mode: BalloonDragMode::BoxEdge(1),
+        start: (300.0, 200.0),
+        cur: (500.0, 200.0),
+        orig: b,
+        shift_snap: false,
+    });
+    app.canvas_up(500.0, 200.0, &[]);
+    while let Some(c) = app.cmds.pop_front() {
+        dispatch(&mut app, c);
+    }
+
+    let bb = app.doc.layers[bl].balloons().unwrap().balloons[0].bbox();
+    assert_eq!([bb[2] - ob[2], bb[3] - ob[3]], [200.0, 0.0]);
+    let t = &app.doc.layers[live].texts().unwrap().texts[0];
+    let tc = t.center();
+    assert!(
+        (tc[0] - (bb[0] + bb[2]) * 0.5).abs() < 1e-3 && (tc[1] - (bb[1] + bb[3]) * 0.5).abs() < 1e-3,
+        "the centred lettering is still centred: {tc:?} in {bb:?}"
+    );
+    assert_eq!(t.size, [40.0, 60.0], "the type size is untouched");
+    let s = &app.doc.layers[shout].texts().unwrap().texts[0];
+    let sc = s.center();
+    let frac = |c: [f32; 2], b: [f32; 4]| {
+        [
+            (c[0] - b[0]) / (b[2] - b[0]),
+            (c[1] - b[1]) / (b[3] - b[1]),
+        ]
+    };
+    let (before, after) = (frac([150.0, 150.0], ob), frac(sc, bb));
+    assert!(
+        (before[0] - after[0]).abs() < 1e-4 && (before[1] - after[1]).abs() < 1e-4,
+        "the shout keeps its exact fraction: {before:?} → {after:?}"
+    );
+    let h = &app.doc.layers[hidden].texts().unwrap().texts[0];
+    assert_eq!(h.pos, [180.0, 170.0], "hidden layers are left alone");
+    assert!(
+        app.status.contains("kept its place"),
+        "the carry is announced: {}",
+        app.status
+    );
+}
