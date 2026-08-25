@@ -8664,6 +8664,48 @@ fn align_and_distribute_commands() {
     assert_eq!(ts.texts[1].pos[0], 10.0, "the item moved onto the other");
 }
 
+/// Row 102 (FL-016/017): radial and spin blur through the filter
+/// dialog flow — the smear applies, one undo takes it off.
+#[test]
+fn radial_and_spin_blur_apply_through_dispatch() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (400, 300), 1.0);
+    app.doc = Document::new(64, 64);
+    let li = app.doc.add_layer("l");
+    let put = |app: &mut App, x: i32, y: i32| {
+        let idx = TileIdx::of_pixel(x, y);
+        let (ox, oy) = idx.origin();
+        let t = app.doc.layers[li].tile_mut(idx);
+        t.set_pixel(
+            (x - ox) as usize,
+            (y - oy) as usize,
+            [0, 0, 0, 32768],
+        );
+    };
+    for y in 30..34 {
+        for x in 38..42 {
+            put(&mut app, x, y);
+        }
+    }
+    crate::cmd::dispatch(
+        &mut app,
+        AppCmd::FilterOpen(Some(mn_core::Filter::SpinBlur { angle_deg: 30.0 })),
+    );
+    crate::cmd::dispatch(&mut app, AppCmd::FilterApply(mn_core::Filter::SpinBlur { angle_deg: 30.0 }));
+    assert!(app.status.contains("Spin blur applied"), "{}", app.status);
+    crate::cmd::dispatch(&mut app, AppCmd::Undo);
+    // The exact block is back after one undo.
+    let idx = TileIdx::of_pixel(40, 32);
+    let (ox, oy) = idx.origin();
+    let a = app.doc.layers[li]
+        .tile_arc(idx)
+        .map(|t| t.data()[((32 - oy) as usize * 64 + (40 - ox) as usize) * 4 + 3])
+        .unwrap_or(0);
+    assert_eq!(a, 32768, "undo restored the block");
+}
+
 /// Rows 104 (TC-008/009): Colour balance and Gradient map through the
 /// real Adjust pipeline — straight-colour map math rides the
 /// unpremultiply→map→re-premultiply path, one undo each.

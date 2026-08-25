@@ -586,6 +586,18 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                     })));
                     ui.close();
                 }
+                if item(ui, "Radial blur…", "") {
+                    app.push_cmd(AppCmd::FilterOpen(Some(mn_core::Filter::RadialBlur {
+                        strength: 0.3,
+                    })));
+                    ui.close();
+                }
+                if item(ui, "Spin blur…", "") {
+                    app.push_cmd(AppCmd::FilterOpen(Some(mn_core::Filter::SpinBlur {
+                        angle_deg: 20.0,
+                    })));
+                    ui.close();
+                }
                 ui.separator();
                 // FL-013.
                 if item(ui, "Smoothing", "") {

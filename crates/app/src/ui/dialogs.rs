@@ -2261,6 +2261,26 @@ pub(super) fn filter_window(ctx: &egui::Context, app: &mut App) {
                         });
                         ui.end_row();
                     }
+                    mn_core::Filter::RadialBlur { strength } => {
+                        ui.label("Strength");
+                        ui.add(
+                            egui::Slider::new(strength, 0.02..=0.95)
+                                .fixed_decimals(2)
+                                .text("zoom"),
+                        )
+                        .on_hover_text("each pixel smears inward along its ray from the centre");
+                        ui.end_row();
+                    }
+                    mn_core::Filter::SpinBlur { angle_deg } => {
+                        ui.label("Angle");
+                        ui.add(
+                            egui::Slider::new(angle_deg, 1.0..=180.0)
+                                .fixed_decimals(0)
+                                .text("°"),
+                        )
+                        .on_hover_text("each pixel smears along its arc, both directions");
+                        ui.end_row();
+                    }
                     mn_core::Filter::Mosaic { cell } => {
                         ui.label("Cell size");
                         ui.add(

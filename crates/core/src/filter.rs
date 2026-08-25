@@ -131,6 +131,16 @@ pub enum Filter {
     /// FL-033 Mosaic: pixelate to `cell`-px squares, anchored to the CANVAS
     /// origin so the grid does not shift with the selection.
     Mosaic { cell: u32 },
+    /// FL-016 Radial (zoom) blur: each pixel averages samples along its
+    /// ray from the buffer's centre, pulled inward by `strength` of the
+    /// way (0..=0.95) — the classic zoom smear. The centre is the
+    /// buffer's own centre (the selection's bounds centre on every
+    /// caller today); a pickable centre waits on a filter preview pane.
+    RadialBlur { strength: f32 },
+    /// FL-017 Spin blur: each pixel averages samples along the arc of
+    /// ±`angle_deg` about the buffer's centre — the rotational smear of
+    /// a spinning subject.
+    SpinBlur { angle_deg: f32 },
 }
 
 impl Filter {
@@ -143,6 +153,8 @@ impl Filter {
             Filter::Gaussian { .. } => "Gaussian blur",
             Filter::Motion { .. } => "Motion blur",
             Filter::Mosaic { .. } => "Mosaic",
+            Filter::RadialBlur { .. } => "Radial blur",
+            Filter::SpinBlur { .. } => "Spin blur",
         }
     }
 
@@ -169,6 +181,10 @@ impl Filter {
             // A cell straddling the region edge must be whole inside the
             // buffer, and a cell is at most `cell` wide.
             Filter::Mosaic { cell } => cell.clamp(1, 4096) as i32 - 1,
+            // Both smears sample only WITHIN the lifted region (the inward
+            // ray and the arc stay inside its bounds), so the region needs
+            // no padding for them.
+            Filter::RadialBlur { .. } | Filter::SpinBlur { .. } => 0,
         }
     }
 
@@ -188,6 +204,8 @@ impl Filter {
                 mode,
             } => motion(buf, angle, length, dir, mode),
             Filter::Mosaic { cell } => mosaic(buf, cell.clamp(1, 4096) as i32, ox, oy),
+            Filter::RadialBlur { strength } => radial_blur(buf, strength),
+            Filter::SpinBlur { angle_deg } => spin_blur(buf, angle_deg),
         }
     }
 
@@ -198,6 +216,8 @@ impl Filter {
             Filter::Gaussian { sigma } => box_radii(sigma).iter().all(|&r| r == 0),
             Filter::Motion { length, .. } => !(length > 0.5),
             Filter::Mosaic { cell } => cell <= 1,
+            Filter::RadialBlur { strength } => !(strength > 0.02),
+            Filter::SpinBlur { angle_deg } => !(angle_deg >= 0.5),
             _ => false,
         }
     }
@@ -442,6 +462,73 @@ fn motion(buf: &mut Raster, angle_deg: f32, length: f32, dir: MotionDir, mode: M
             let mut out = [0u16; TILE_CHANNELS];
             for c in 0..TILE_CHANNELS {
                 out[c] = (acc[c] / wsum + 0.5).clamp(0.0, u16::MAX as f32) as u16;
+            }
+            buf.set_pixel(x, y, out);
+        }
+    }
+}
+
+/// FL-016: the zoom smear — dest pixel p averages the segment of its own
+/// ray from `p · (1−k)` to `p` (k = strength), uniformly weighted over
+/// taps that scale with the smear. Premultiplied averaging, exactly the
+/// motion blur's arithmetic walked radially instead of linearly.
+fn radial_blur(buf: &mut Raster, strength: f32) {
+    let k = strength.clamp(0.0, 0.95);
+    if k <= 0.02 {
+        return;
+    }
+    let n = ((k * buf.w.min(buf.h) as f32).ceil() as usize).clamp(8, 48);
+    let c = [(buf.w as f32 - 1.0) * 0.5, (buf.h as f32 - 1.0) * 0.5];
+    let mut src = Raster::new(buf.w, buf.h);
+    std::mem::swap(buf, &mut src);
+    for y in 0..src.h {
+        for x in 0..src.w {
+            let (ux, uy) = (x as f32 - c[0], y as f32 - c[1]);
+            let mut acc = [0f32; TILE_CHANNELS];
+            for i in 0..n {
+                let t = 1.0 - k * (i as f32) / ((n - 1) as f32);
+                let p = sample_bilinear(&src, c[0] + ux * t, c[1] + uy * t);
+                for (a, v) in acc.iter_mut().zip(p) {
+                    *a += v;
+                }
+            }
+            let mut out = [0u16; TILE_CHANNELS];
+            for (o, a) in out.iter_mut().zip(acc) {
+                *o = (a / n as f32 + 0.5).clamp(0.0, u16::MAX as f32) as u16;
+            }
+            buf.set_pixel(x, y, out);
+        }
+    }
+}
+
+/// FL-017: the rotational smear — dest pixel p averages the arc of ±a
+/// about the centre at its own radius. Near the centre the arc is short
+/// (the samples collapse onto p), which is physically right: a spin
+/// blurs the rim far more than the axle.
+fn spin_blur(buf: &mut Raster, angle_deg: f32) {
+    let a = angle_deg.clamp(0.5, 180.0).to_radians();
+    let c = [(buf.w as f32 - 1.0) * 0.5, (buf.h as f32 - 1.0) * 0.5];
+    let max_r = (c[0].max(c[1])) as f32;
+    let n = ((a * max_r).ceil() as usize).clamp(8, 48);
+    let mut src = Raster::new(buf.w, buf.h);
+    std::mem::swap(buf, &mut src);
+    for y in 0..src.h {
+        for x in 0..src.w {
+            let (ux, uy) = (x as f32 - c[0], y as f32 - c[1]);
+            let r = ux.hypot(uy);
+            let th0 = uy.atan2(ux);
+            let mut acc = [0f32; TILE_CHANNELS];
+            for i in 0..n {
+                let t = (i as f32) / ((n - 1) as f32) * 2.0 - 1.0;
+                let th = th0 + a * t;
+                let p = sample_bilinear(&src, c[0] + r * th.cos(), c[1] + r * th.sin());
+                for (acc_v, v) in acc.iter_mut().zip(p) {
+                    *acc_v += v;
+                }
+            }
+            let mut out = [0u16; TILE_CHANNELS];
+            for (o, av) in out.iter_mut().zip(acc) {
+                *o = (av / n as f32 + 0.5).clamp(0.0, u16::MAX as f32) as u16;
             }
             buf.set_pixel(x, y, out);
         }
@@ -919,6 +1006,59 @@ mod tests {
                 [d[o], d[o + 1], d[o + 2], d[o + 3]]
             })
             .unwrap_or([0, 0, 0, 0])
+    }
+
+    /// FL-016: the zoom smear reads each pixel's own INWARD ray — a dot
+    /// west of centre smears further west (outward), never east, never
+    /// sideways.
+    #[test]
+    fn radial_blur_smears_along_the_ray() {
+        let mut doc = Document::new(64, 64);
+        let li = 0; // paint_rect writes layer 0 — the fresh doc's base layer
+        let _ = li;
+        paint_rect(&mut doc, 24, 32, 25, 33); // dot 8px west of centre
+        assert!(doc.apply_filter(Filter::RadialBlur { strength: 0.5 }));
+        // k = 0.5: a dest pixel at radius R samples its ray from 0.5R to
+        // R, so the dot (radius 8) lands on dest pixels with R in ~[8, 16]
+        // on the WEST ray — and only there.
+        let west = alpha_at(&doc, 20, 32); // radius 12, on the ray
+        assert!(west > 4000, "the smear reached outward along the ray ({west})");
+        assert_eq!(
+            alpha_at(&doc, 20, 24),
+            0,
+            "the same radius OFF the ray is untouched"
+        );
+        assert_eq!(alpha_at(&doc, 44, 32), 0, "the east ray never samples west");
+        // The dot's own spot faded (its ink was averaged with the empty
+        // inward half of its ray).
+        assert!(alpha_at(&doc, 24, 32) < 32768 / 2, "the dot itself faded");
+    }
+
+    /// FL-017: the rotational smear follows the arc — a dot at angle 0
+    /// bleeds to nearby angles at its own radius, not to the far side.
+    #[test]
+    fn spin_blur_follows_the_arc() {
+        let mut doc = Document::new(64, 64);
+        paint_rect(&mut doc, 40, 32, 42, 34); // a 2×2 dot 8px EAST of centre
+        assert!(doc.apply_filter(Filter::SpinBlur { angle_deg: 45.0 }));
+        // The dot bleeds along the arc of ±45° at radius 8: (say) 15°
+        // above east gains; 60° does not; the opposite side never does.
+        // The smear stays AT the dot's radius (each pixel averages its own
+        // arc), so probe the strongest pixel in the arc's neighbourhood:
+        // angles ~5-40° at radius 7-9.
+        let mut near_arc = 0u16;
+        for (dx, dy) in [(8, 1), (8, 2), (7, 2), (8, 3), (7, 3), (8, 4), (7, 4)] {
+            near_arc = near_arc.max(alpha_at(&doc, 32 + dx, 32 + dy));
+        }
+        assert!(near_arc > 4000, "the smear followed the arc ({near_arc})");
+        assert_eq!(
+            alpha_at(&doc, 44, 26),
+            0,
+            "a different radius at a nearby angle is clean"
+        );
+        assert_eq!(alpha_at(&doc, 24, 32), 0, "the opposite side is clean");
+        // The dot's own spot faded into the average.
+        assert!(alpha_at(&doc, 40, 32) < 32768 / 2, "the dot itself faded");
     }
 
     /// CSP Convert to drawing colour: rgb swaps, coverage survives; the
