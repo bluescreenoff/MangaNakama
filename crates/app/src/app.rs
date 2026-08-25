@@ -2393,7 +2393,7 @@ impl App {
             (((by - ay).atan2(bx - ax) / step).round() as i32).rem_euclid(n as i32)
         };
         Some(match grab {
-            TransformGrab::MeshPoint(_) => egui::CursorIcon::Grab,
+            TransformGrab::MeshPoint(_) | TransformGrab::PuppetPin(_) => egui::CursorIcon::Grab,
             TransformGrab::Corner(i) => {
                 // Along the diagonal out of the opposite corner.
                 if matches!(

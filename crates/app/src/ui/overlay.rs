@@ -1535,6 +1535,27 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
                 );
                 let _ = rect;
             }
+            // PUPPET (row 54): pearls at the pins' current spots, a thin
+            // line from where each was dropped.
+            let active_pin = match drag.gesture.as_ref().map(|g| g.grab) {
+                Some(crate::app::TransformGrab::PuppetPin(i)) => Some(i),
+                _ => None,
+            };
+            for (i, pin) in m.pins.iter().enumerate() {
+                if pin.orig != pin.cur {
+                    painter.line_segment(
+                        [to_pt(pin.orig[0], pin.orig[1]), to_pt(pin.cur[0], pin.cur[1])],
+                        egui::Stroke::new(1.0, egui::Color32::from_white_alpha(140)),
+                    );
+                }
+                let r = if active_pin == Some(i) { 5.0 } else { 4.0 };
+                painter.circle_filled(to_pt(pin.cur[0], pin.cur[1]), r, egui::Color32::WHITE);
+                painter.circle_stroke(
+                    to_pt(pin.cur[0], pin.cur[1]),
+                    r,
+                    egui::Stroke::new(2.0, theme::c().accent),
+                );
+            }
             return;
         }
         if let Some(tex) = &drag.preview_tex {

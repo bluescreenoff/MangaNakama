@@ -3309,9 +3309,37 @@ impl App {
         let grab = if drag.mesh.is_some() {
             // A mesh drag claims the pointer: lattice points first (10 px
             // screen), then whole-lattice translate; affine grabs no-op.
-            drag.mesh_point_at([cx, cy], zoom)
-                .map(crate::app::TransformGrab::MeshPoint)
-                .unwrap_or(crate::app::TransformGrab::Move)
+            if drag.mesh.as_ref().is_some_and(|m| m.puppet) {
+                // PUPPET (row 54): Alt+click a pin removes it; a press on
+                // a pin drags it; a press anywhere else DROPS a new pin
+                // and drags it immediately (CSP's drop-and-pull).
+                let tol = 10.0 / zoom.max(0.01);
+                let hit = drag.mesh.as_ref().unwrap().pin_at([cx, cy], tol);
+                if alt {
+                    if let Some(i) = hit {
+                        let m = drag.mesh.as_mut().unwrap();
+                        m.pins.remove(i);
+                        m.sync(drag.source.rect);
+                    }
+                    return;
+                }
+                match hit {
+                    Some(i) => crate::app::TransformGrab::PuppetPin(i),
+                    None => {
+                        let m = drag.mesh.as_mut().unwrap();
+                        m.pins.push(mn_core::mesh::PuppetPin {
+                            orig: [cx, cy],
+                            cur: [cx, cy],
+                        });
+                        m.sync(drag.source.rect);
+                        crate::app::TransformGrab::PuppetPin(m.pins.len() - 1)
+                    }
+                }
+            } else {
+                drag.mesh_point_at([cx, cy], zoom)
+                    .map(crate::app::TransformGrab::MeshPoint)
+                    .unwrap_or(crate::app::TransformGrab::Move)
+            }
         } else {
             drag.hit_test([cx, cy], zoom, alt)
         };

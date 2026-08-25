@@ -82,6 +82,37 @@ pub struct TransformDrag {
 pub struct MeshLattice {
     pub n: usize,
     pub pts: Vec<[f32; 2]>,
+    /// Row 54 — puppet warp: when `puppet`, the lattice is driven by
+    /// PINS (`pts` derived via `sync`, direct point drags refused,
+    /// presses drop/drag/remove pins). Plain mesh mode keeps the
+    /// hand-bent `pts` of row 53.
+    pub pins: Vec<mn_core::mesh::PuppetPin>,
+    pub puppet: bool,
+}
+
+impl MeshLattice {
+    /// Recompute the lattice from the pins (puppet mode). Plain mesh
+    /// mode never calls this.
+    pub fn sync(&mut self, rect: [i32; 4]) {
+        self.pts = mn_core::mesh::puppet_lattice(rect, self.n, &self.pins);
+    }
+
+    /// The nearest pin within `tol` canvas px of `p`.
+    pub fn pin_at(&self, p: [f32; 2], tol: f32) -> Option<usize> {
+        self.pins
+            .iter()
+            .enumerate()
+            .min_by(|a, b| {
+                let d = |q: &mn_core::mesh::PuppetPin| {
+                    (q.cur[0] - p[0]).hypot(q.cur[1] - p[1])
+                };
+                d(a.1)
+                    .partial_cmp(&d(b.1))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .filter(|(_, q)| (q.cur[0] - p[0]).hypot(q.cur[1] - p[1]) <= tol)
+            .map(|(i, _)| i)
+    }
 }
 
 /// How far above the box's top edge the rotate stalk floats, in SCREEN px
@@ -109,6 +140,8 @@ pub enum TransformGrab {
     Rotate,
     /// Row 53: lattice point `i` of a mesh drag.
     MeshPoint(usize),
+    /// Row 54: puppet pin `i` (drag moves it; the lattice re-solves).
+    PuppetPin(usize),
 }
 
 /// Press state for one Transform gesture: the grab target plus the params
@@ -329,9 +362,20 @@ impl TransformDrag {
         // affine holds identity so the commit's resample is the truth).
         if let Some(m) = &mut self.mesh {
             match g.grab {
+                TransformGrab::PuppetPin(i) => {
+                    if let Some(pin) = m.pins.get_mut(i) {
+                        pin.cur = p;
+                    }
+                    m.sync(self.source.rect);
+                }
                 TransformGrab::MeshPoint(i) => {
-                    if let Some(pt) = m.pts.get_mut(i) {
-                        *pt = p;
+                    // Plain mesh mode only: a puppet lattice is derived,
+                    // and hand-bending it would be undone by the next
+                    // pin drag's sync.
+                    if !m.puppet {
+                        if let Some(pt) = m.pts.get_mut(i) {
+                            *pt = p;
+                        }
                     }
                 }
                 TransformGrab::Move => {
@@ -375,7 +419,7 @@ impl TransformDrag {
         match g.grab {
             // Mesh grabs returned at the top of this fn; this arm exists
             // only for exhaustiveness.
-            TransformGrab::MeshPoint(_) => {}
+            TransformGrab::MeshPoint(_) | TransformGrab::PuppetPin(_) => {}
             TransformGrab::Move => {
                 let (mut dx, mut dy) = (p[0] - g.start[0], p[1] - g.start[1]);
                 if shift {

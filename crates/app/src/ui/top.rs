@@ -211,6 +211,10 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 app.push_cmd(AppCmd::TransformMeshStart);
                 ui.close();
             }
+            if item(ui, "Puppet Warp", "") {
+                app.push_cmd(AppCmd::TransformPuppetStart);
+                ui.close();
+            }
             ui.separator();
             if item(ui, "Change canvas size…", "") {
                 app.push_cmd(AppCmd::OpenCanvasSize);

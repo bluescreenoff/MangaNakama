@@ -8664,6 +8664,98 @@ fn align_and_distribute_commands() {
     assert_eq!(ts.texts[1].pos[0], 10.0, "the item moved onto the other");
 }
 
+/// Row 54 — puppet warp through the real pointer path: drop two pins,
+/// pull one east; the pulled pin's neighbourhood follows, the other pin
+/// HOLDS its neighbourhood, and one undo rewinds everything.
+#[test]
+fn puppet_warp_pulls_one_pin_and_holds_the_other() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (400, 300), 1.0);
+    app.doc = Document::new(128, 128);
+    let li = app.doc.add_layer("l");
+    let alpha = |app: &App, x: i32, y: i32| {
+        let idx = TileIdx::of_pixel(x, y);
+        let (ox, oy) = idx.origin();
+        app.doc.layers[li]
+            .tile_arc(idx)
+            .map(|t| t.data()[((y - oy) as usize * 64 + (x - ox) as usize) * 4 + 3])
+            .unwrap_or(0)
+    };
+    // Two ink patches: west (held by pin A) and east (pulled by pin B).
+    for (x0, y0) in [(30, 50), (85, 50)] {
+        for y in y0..y0 + 10 {
+            for x in x0..x0 + 10 {
+                let idx = TileIdx::of_pixel(x, y);
+                let (ox, oy) = idx.origin();
+                let t = app.doc.layers[li].tile_mut(idx);
+                let o = ((y - oy) as usize * 64 + (x - ox) as usize) * 4;
+                let f = mn_core::blend::f32_to_fix15(0.0);
+                let d = t.data_mut();
+                d[o] = f;
+                d[o + 1] = f;
+                d[o + 2] = f;
+                d[o + 3] = mn_core::blend::f32_to_fix15(1.0);
+            }
+        }
+    }
+    app.viewport = mn_gpu::Viewport::default();
+    crate::cmd::dispatch(&mut app, AppCmd::TransformPuppetStart);
+    assert!(app
+        .transform_drag
+        .as_ref()
+        .unwrap()
+        .mesh
+        .as_ref()
+        .unwrap()
+        .pins
+        .is_empty());
+
+    // Drop pin A on the west patch (press + release, no pull)…
+    app.canvas_down(35.0, 55.0, PointerKind::Mouse, &[]);
+    app.canvas_up(35.0, 55.0, &[]);
+    // …and pin B on the east patch, pulled 25 west (toward A — the
+    // classic "bring the shoulder closer" puppet pull).
+    app.canvas_down(90.0, 55.0, PointerKind::Mouse, &[]);
+    app.canvas_move(65.0, 55.0, &[]);
+    app.canvas_up(65.0, 55.0, &[]);
+    let m = app.transform_drag.as_ref().unwrap().mesh.as_ref().unwrap();
+    assert_eq!(m.pins.len(), 2, "two pins on the lattice");
+    assert!(
+        (m.pins[1].cur[0] - 65.0).abs() < 0.5,
+        "pin B sits where the drag left it"
+    );
+    crate::cmd::dispatch(&mut app, AppCmd::TransformCommit);
+
+    // The east patch vacated its old spot following pin B; the west
+    // patch stayed essentially put. A hold pin is SOFT — the gaussian
+    // falloff (σ = one lattice cell) lets a distant pull bleed a few
+    // px into it — so the pin is "held", not welded.
+    let east_followed = (55..75).any(|x| alpha(&app, x, 55) > 8000);
+    assert!(east_followed, "the east patch followed the pulled pin");
+    assert!(
+        alpha(&app, 90, 55) < 8000,
+        "the east patch vacated its old spot"
+    );
+    // ~6px of bleed on a 25px pull: the hold is soft, not welded —
+    // the patch's own ground is still fully inked.
+    assert!(
+        alpha(&app, 30, 55) > 20000,
+        "pin A held its patch essentially in place ({})",
+        alpha(&app, 30, 55)
+    );
+
+    crate::cmd::dispatch(&mut app, AppCmd::Undo);
+    assert_eq!(
+        alpha(&app, 35, 55),
+        mn_core::blend::f32_to_fix15(1.0),
+        "one undo rewound the whole puppet gesture"
+    );
+    assert_eq!(alpha(&app, 90, 55), mn_core::blend::f32_to_fix15(1.0));
+    assert_eq!(alpha(&app, 62, 55), 0, "the pulled-over ground is empty again");
+}
+
 /// Row 53 — mesh transformation through the real pointer path: lift,
 /// drag a lattice point, commit; the ink follows the bend, one undo
 /// rewinds the whole gesture.

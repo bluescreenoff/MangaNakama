@@ -2581,6 +2581,10 @@ pub enum AppCmd {
     /// Row 53: Edit ▸ Transform ▸ Mesh — lift like Transform, then bend
     /// an n×n lattice; commit resamples through the deformed quads.
     TransformMeshStart,
+    /// Row 54: Edit ▸ Transform ▸ Puppet Warp — the same lattice, but
+    /// driven by PINS: click to drop one, drag to pull, Alt+click to
+    /// remove; the lattice follows the pins and commit resamples.
+    TransformPuppetStart,
     /// Commit the pending transform as ONE undo step.
     TransformCommit,
     /// Cancel: drop the floating source, nothing changes.
@@ -5725,6 +5729,8 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                             drag.mesh = Some(crate::app::MeshLattice {
                                 n: 5,
                                 pts: mn_core::mesh::identity_lattice(drag.source.rect, 5),
+                                pins: Vec::new(),
+                                puppet: false,
                             });
                             app.set_status(
                                 "mesh transform: drag the lattice points, drag between them to move all — Enter commits, Esc cancels",
@@ -5735,6 +5741,35 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                         }
                     }
                     _ => app.set_status("nothing to transform"),
+                }
+            }
+        }
+        AppCmd::TransformPuppetStart => {
+            let l = app.doc.active_layer();
+            if l.lock {
+                app.set_status("layer is locked");
+            } else if l.is_vector() || l.folder {
+                app.set_status("Puppet warp applies to raster layers");
+            } else {
+                match transform_lift_rect(app) {
+                    Some(r) if r[0] < r[2] && r[1] < r[3] => {
+                        if open_layer_transform(app, app.doc.active, r) {
+                            let drag = app.transform_drag.as_mut().unwrap();
+                            drag.mesh = Some(crate::app::MeshLattice {
+                                n: 5,
+                                pts: mn_core::mesh::identity_lattice(drag.source.rect, 5),
+                                pins: Vec::new(),
+                                puppet: true,
+                            });
+                            app.set_status(
+                                "puppet warp: click to drop a pin, drag to pull, Alt+click a pin to remove — Enter commits, Esc cancels",
+                            );
+                            app.mark_dirty();
+                        } else {
+                            app.set_status("nothing to warp");
+                        }
+                    }
+                    _ => app.set_status("nothing to warp"),
                 }
             }
         }

@@ -180,6 +180,50 @@ fn sample_frac(src: &FloatSource, fx: f32, fy: f32) -> [f32; 4] {
     out
 }
 
+/// Row 54 — one puppet-warp pin: anchored at `orig` (where it grips the
+/// unwarped image), currently at `cur`. A pin whose `cur` has left its
+/// `orig` drags its neighbourhood with it; every other pin holds.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PuppetPin {
+    pub orig: [f32; 2],
+    pub cur: [f32; 2],
+}
+
+/// The puppet-warp lattice: every node takes the UNNORMALIZED
+/// Gaussian-weighted sum of the pins' deltas, measured against each
+/// pin's ORIGINAL position. σ = one lattice cell: a pin holds its own
+/// node EXACTLY (weight 1 at distance 0), the neighbours follow
+/// smoothly, and the far corner of the mesh barely moves (a normalized
+/// field was tried first and is wrong — with a single pin it drags the
+/// whole mesh by the full delta, corners included). Overlapping pins
+/// superpose; no pins, or none moved, = the identity lattice.
+pub fn puppet_lattice(rect: [i32; 4], n: usize, pins: &[PuppetPin]) -> Vec<[f32; 2]> {
+    let mut pts = identity_lattice(rect, n);
+    let cell = ((rect[2] - rect[0]).max(rect[3] - rect[1]) as f32) / (n - 1) as f32;
+    let s2 = 2.0 * cell * cell;
+    for pt in pts.iter_mut() {
+        // Distances are measured against the node's IDENTITY position —
+        // mutating pt inside the pin loop made later pins see the
+        // already-moved node and skewed their weights (the probe that
+        // found it is in the git history of this round's notes).
+        let base = *pt;
+        for pin in pins {
+            let d2 = {
+                let dx = pin.orig[0] - base[0];
+                let dy = pin.orig[1] - base[1];
+                dx * dx + dy * dy
+            };
+            if d2 > 9.0 * s2 {
+                continue; // beyond 3σ the weight is noise; skip the exp
+            }
+            let w = (-d2 / s2).exp();
+            pt[0] += w * (pin.cur[0] - pin.orig[0]);
+            pt[1] += w * (pin.cur[1] - pin.orig[1]);
+        }
+    }
+    pts
+}
+
 /// The affine whose `map_rect(src_rect)` covers the DEFORMED bounds —
 /// the commit's destination loop is driven by the affine's rect, and
 /// the resampled buffer may reach past the source rect when the mesh
@@ -305,6 +349,49 @@ mod tests {
         let m = xf.map_rect([r[0] as f32, r[1] as f32, r[2] as f32, r[3] as f32]);
         assert!(m[0] <= 29.0 && m[2] >= 69.0, "covers the shifted mesh: {m:?}");
         assert!(m[1] <= 10.0 && m[3] >= 50.0);
+    }
+
+    /// Row 54 — the puppet field: a pin drags its neighbourhood with it,
+    /// holds nearly exactly at its own position, and leaves far corners
+    /// alone; two pins pulling apart tear between themselves.
+    #[test]
+    fn puppet_pins_drag_their_neighbourhood_and_hold() {
+        let r = [0, 0, 80, 80];
+        let pin = |o: [f32; 2], c: [f32; 2]| PuppetPin { orig: o, cur: c };
+        // One pin at the centre node (40,40), dragged 20 east.
+        let pts = puppet_lattice(r, 5, &[pin([40.0, 40.0], [60.0, 40.0])]);
+        let at = |i: usize, j: usize| pts[j * 5 + i];
+        assert!(
+            (at(2, 2)[0] - 60.0).abs() < 1.5,
+            "the node under the pin follows it: {:?}",
+            at(2, 2)
+        );
+        let corner = at(0, 0);
+        assert!(
+            (corner[0] - 0.0).abs() < 3.0,
+            "the far corner barely moves: {corner:?}"
+        );
+        // No pins / no moved pins = identity.
+        assert!(lattice_is_identity(r, 5, &puppet_lattice(r, 5, &[])));
+        let idle = puppet_lattice(r, 5, &[pin([40.0, 40.0], [40.0, 40.0])]);
+        assert!(lattice_is_identity(r, 5, &idle), "an unmoved pin bends nothing");
+        // Two pins pulling apart: the midpoint between them splits the
+        // difference instead of following either.
+        let pts = puppet_lattice(
+            r,
+            5,
+            &[pin([20.0, 40.0], [0.0, 40.0]), pin([60.0, 40.0], [80.0, 40.0])],
+        );
+        let mid = pts[2 * 5 + 2];
+        assert!(
+            (mid[0] - 40.0).abs() < 2.0,
+            "the middle node splits the two pulls: {mid:?}"
+        );
+        let right_node = pts[2 * 5 + 3];
+        assert!(
+            (right_node[0] - 77.0).abs() < 2.0,
+            "the node ON the right pin follows it: {right_node:?}"
+        );
     }
 
     #[test]

@@ -627,6 +627,18 @@ commits (the bitmap is resampled through the deformed quads), Esc puts
 everything back, and the whole gesture is one undo. Only raster
 layers.</div>
 
+<h2>Puppet warp</h2>
+<div class="quirk"><b>Edit ▸ Transform ▸ Puppet Warp pins the content and
+lets you pull it around.</b> Click to drop a pin, drag to pull, Alt+click
+a pin to remove it. The lattice bends smoothly under the pins &mdash; the
+preview shows it live &mdash; and Enter commits through the same resample
+as the mesh transform. One undo per gesture, raster layers only.</div>
+<div class="quirk"><b>A pin holds softly, not welded.</b> The pull of one
+pin falls off over about a lattice cell, so a pin sitting still on the
+shoulder keeps its neighbourhood essentially in place &mdash; a few pixels
+of bleed at most &mdash; while the pulled side travels the full drag. If
+you need a hard anchor, drop pins tightly around what must not move.</div>
+
 <footer><a href="index.html">← manual</a> · the deep records live in
 the repository's <code>docs/DECISIONS.md</code>.</footer>
 </main>
