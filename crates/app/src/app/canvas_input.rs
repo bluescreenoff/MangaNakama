@@ -1101,12 +1101,18 @@ impl App {
     /// is the whole point of the row: no glyph is ever flattened into pixels,
     /// so the text is still a text box afterwards — click it and keep typing.
     /// A hidden text layer is left alone rather than silently edited.
-    pub(crate) fn carry_texts_with_balloon(&mut self, orig: &Balloon, pivot: [f32; 2], rad: f32) {
+    pub(crate) fn carry_texts_with_balloon(
+        &mut self,
+        orig: &Balloon,
+        pivot: [f32; 2],
+        rad: f32,
+    ) -> usize {
         if rad == 0.0 {
-            return;
+            return 0;
         }
         let dpi = self.doc_dpi();
         let mut carried = 0usize;
+        let mut layers = 0usize;
         for li in 0..self.doc.layers.len() {
             let Some(layer) = self.doc.layers.get(li) else {
                 continue;
@@ -1128,19 +1134,21 @@ impl App {
                 ts.texts[i].cache = shaped;
             }
             carried += moved.len();
+            layers += 1;
             self.push_cmd(AppCmd::TextCommit {
                 layer: li,
                 texts: ts,
             });
         }
         if carried > 0 {
-            // Two named history steps, not one: the bubble and the lettering
-            // live on different layers and the undo stack is per layer.
+            // One gesture, one undo: the HistoryWrapLast the caller queues
+            // right behind these commits bundles them with the balloon's.
             self.set_status(format!(
-                "balloon turned — {carried} text{} came with it (still editable; undo takes two steps)",
+                "balloon turned — {carried} text{} came with it (still editable; one undo takes the turn and its lettering together)",
                 if carried == 1 { "" } else { "s" }
             ));
         }
+        layers
     }
 
     /// The move's half of the lettering carry (CSP manual, moving
@@ -1149,11 +1157,12 @@ impl App {
     /// locked layers untouched. Translation never reshapes a glyph, so
     /// unlike the turn the shaped caches stay valid and no re-render is
     /// needed.
-    pub(crate) fn translate_texts_with_balloon(&mut self, orig: &Balloon, d: [f32; 2]) {
+    pub(crate) fn translate_texts_with_balloon(&mut self, orig: &Balloon, d: [f32; 2]) -> usize {
         if d[0] == 0.0 && d[1] == 0.0 {
-            return;
+            return 0;
         }
         let mut carried = 0usize;
+        let mut layers = 0usize;
         for li in 0..self.doc.layers.len() {
             let Some(layer) = self.doc.layers.get(li) else {
                 continue;
@@ -1168,6 +1177,7 @@ impl App {
                 continue;
             }
             carried += moved.len();
+            layers += 1;
             self.push_cmd(AppCmd::TextCommit {
                 layer: li,
                 texts: ts,
@@ -1175,10 +1185,11 @@ impl App {
         }
         if carried > 0 {
             self.set_status(format!(
-                "balloon moved — {carried} text{} came with it (still editable; undo takes two steps)",
+                "balloon moved — {carried} text{} came with it (still editable; one undo takes the move and its lettering together)",
                 if carried == 1 { "" } else { "s" }
             ));
         }
+        layers
     }
 
     /// The resize's half of the lettering carry (owner, 2026-08-25): a
@@ -1186,8 +1197,9 @@ impl App {
     /// centre-fraction of the old box, same fraction of the new one — by
     /// the same geometric pairing as the turn and the move. No stored
     /// link, hidden and locked layers untouched, type size untouched.
-    pub(crate) fn scale_texts_with_balloon(&mut self, orig: &Balloon, new_bbox: [f32; 4]) {
+    pub(crate) fn scale_texts_with_balloon(&mut self, orig: &Balloon, new_bbox: [f32; 4]) -> usize {
         let mut carried = 0usize;
+        let mut layers = 0usize;
         for li in 0..self.doc.layers.len() {
             let Some(layer) = self.doc.layers.get(li) else {
                 continue;
@@ -1202,6 +1214,7 @@ impl App {
                 continue;
             }
             carried += moved.len();
+            layers += 1;
             self.push_cmd(AppCmd::TextCommit {
                 layer: li,
                 texts: ts,
@@ -1209,10 +1222,11 @@ impl App {
         }
         if carried > 0 {
             self.set_status(format!(
-                "balloon resized — {carried} text{} kept its place in it (still editable; undo takes two steps)",
+                "balloon resized — {carried} text{} kept its place in it (still editable; one undo takes the resize and its lettering together)",
                 if carried == 1 { "" } else { "s" }
             ));
         }
+        layers
     }
 
     /// ROADMAP good-first-issue #1 — **fit a balloon to its text**.
@@ -3022,14 +3036,17 @@ impl App {
                             layer: d.layer,
                             balloons: bs,
                         });
-                        // TRIAGE 134: turning the bubble turns its lettering.
-                        if let Some((pivot, rad)) = d.rotation() {
-                            self.carry_texts_with_balloon(&d.orig, pivot, rad);
+                        // TRIAGE 134 + the carry: turning MOVES, MOVING
+                        // translates, RESIZING re-fractions — and whatever
+                        // lettering came along is bundled with the
+                        // balloon's own commit into ONE undo step (audit
+                        // small, 2026-08-25: the status used to promise
+                        // "two steps"; now it's true that it's one).
+                        let carried_layers = if let Some((pivot, rad)) = d.rotation() {
+                            self.carry_texts_with_balloon(&d.orig, pivot, rad)
                         } else if let BalloonDragMode::MoveWhole = d.mode {
-                            // …and MOVING it takes the lettering along
-                            // (CSP manual, moving balloons). The delta is
-                            // read off the committed shapes, so a
-                            // Shift-constrained move carries the same
+                            // The delta is read off the committed shapes,
+                            // so a Shift-constrained move carries the same
                             // constrained distance it showed.
                             let b0 = d.orig.bbox();
                             self.translate_texts_with_balloon(
@@ -3038,18 +3055,22 @@ impl App {
                                     (b1[0] + b1[2]) * 0.5 - (b0[0] + b0[2]) * 0.5,
                                     (b1[1] + b1[3]) * 0.5 - (b0[1] + b0[3]) * 0.5,
                                 ],
-                            );
+                            )
                         } else if matches!(
                             d.mode,
                             BalloonDragMode::Handle(_)
                                 | BalloonDragMode::BoxCorner(_)
                                 | BalloonDragMode::BoxEdge(_)
                         ) {
-                            // …and RESIZING it keeps the lettering at its
-                            // same relative position (owner, 2026-08-25):
-                            // centre-fraction of the old box, same fraction
-                            // of the committed one.
-                            self.scale_texts_with_balloon(&d.orig, b1);
+                            self.scale_texts_with_balloon(&d.orig, b1)
+                        } else {
+                            0
+                        };
+                        if carried_layers > 0 {
+                            self.push_cmd(AppCmd::HistoryWrapLast {
+                                label: "Balloon".into(),
+                                count: 1 + carried_layers,
+                            });
                         }
                     }
                 } else {

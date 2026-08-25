@@ -297,6 +297,15 @@ fn moving_a_balloon_carries_its_lettering() {
     );
     let h = &app.doc.layers[hidden].texts().unwrap().texts[0];
     assert_eq!(h.pos, [180.0, 170.0], "hidden layers are left alone");
+
+    // One undo takes the move AND its lettering back together (audit
+    // small, 2026-08-25): old code left the bubble moved after the
+    // first Ctrl+Z because the commits were separate history steps.
+    dispatch(&mut app, AppCmd::Undo);
+    let bb = app.doc.layers[bl].balloons().unwrap().balloons[0].bbox();
+    assert_eq!([bb[0], bb[1]], [ob[0], ob[1]], "one undo un-moves the bubble");
+    let t = &app.doc.layers[live].texts().unwrap().texts[0];
+    assert_eq!(t.pos, [180.0, 170.0], "…and its lettering with it");
 }
 
 /// The owner's resize half (2026-08-25): STRETCHING a bubble keeps its
@@ -388,4 +397,11 @@ fn resizing_a_balloon_keeps_its_letterings_relative_place() {
         "the carry is announced: {}",
         app.status
     );
+
+    // One undo unwinds the resize and its lettering together.
+    dispatch(&mut app, AppCmd::Undo);
+    let bb = app.doc.layers[bl].balloons().unwrap().balloons[0].bbox();
+    assert_eq!([bb[2], bb[3]], [ob[2], ob[3]], "one undo un-stretches the bubble");
+    let t = &app.doc.layers[live].texts().unwrap().texts[0];
+    assert_eq!(t.pos, [180.0, 170.0], "…and its lettering with it");
 }

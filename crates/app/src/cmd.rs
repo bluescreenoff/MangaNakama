@@ -1822,6 +1822,16 @@ impl CurveSensor {
 pub enum AppCmd {
     Undo,
     Redo,
+    /// Bundle the newest `count` history steps into ONE labelled step
+    /// (`Document::wrap_recent`) — the balloon-carry pairing's grouping:
+    /// the bubble's commit and the lettering commits it carried land as
+    /// one gesture, so one Ctrl+Z takes them back together. A command
+    /// (not an inline call) because the commits it wraps ride this same
+    /// FIFO queue ahead of it.
+    HistoryWrapLast {
+        label: String,
+        count: usize,
+    },
     /// Open the New Manga dialog (an egui window, not a native dialog).
     NewDoc,
     /// One-gesture tiling-pattern authoring: a square wrap-on canvas in a
@@ -2822,6 +2832,12 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
         // --- history ------------------------------------------------------
         // No `renderer.invalidate()`: undo stamps a fresh revision on every
         // tile it restores, and the tile cache evicts on revision.
+        AppCmd::HistoryWrapLast { label, count } => {
+            // No-op when the stack is shorter than promised (a count
+            // mismatch would be a bug elsewhere; undo never breaks).
+            app.doc.wrap_recent(label.as_str(), count);
+            app.mark_dirty();
+        }
         AppCmd::Undo => {
             app.commit_text_edit();
             // Ctrl+Z with a floating paste/material still live: the float

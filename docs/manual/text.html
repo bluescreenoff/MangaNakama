@@ -52,11 +52,12 @@ engine. Nothing is flattened into pixels: click it afterwards and keep typing,
 restyle it, change its furigana. (This is the thing you cannot do in Clip
 Studio, where a text layer has to be rasterised before it can be turned and
 the lettering then can never be edited again.)</div>
-<div class="quirk warn"><b>Undoing that takes two steps, and only a
-<em>drawn</em> bubble does it at all.</b> The bubble and the lettering live on
-different layers and history is kept per layer, so <kbd>Ctrl</kbd>+<kbd>Z</kbd>
-takes back the text first and the balloon second &mdash; the status line says
-how many texts came along. An ellipse or rounded-rectangle balloon cannot be
+<div class="quirk warn"><b>One undo takes the turn, the bubble and
+all.</b> The bubble and the lettering live on different layers, so the
+turn records as several history commits &mdash; but they are bundled
+into one step: a single <kbd>Ctrl</kbd>+<kbd>Z</kbd> rewinds the bubble
+and every text it carried together, and the status line says how many
+came along. An ellipse or rounded-rectangle balloon cannot be
 tilted at all (see <a href="comic.html">Comic</a>), so turning one moves no
 lettering either. Text on a hidden or locked layer is left where it is.</div>
 <div class="quirk"><b>Resizing keeps the lettering at its same relative
@@ -65,8 +66,8 @@ edge &mdash; and every text box inside it lands at the same fraction of the
 new box it occupied in the old one: centred lettering stays centred, an
 off-centre shout stays off-centre. The type size is deliberately not scaled;
 the font you set is yours, not the drag's. Same rules as the turn: hidden
-and locked layers stay put, and undo takes the text first, the balloon
-second.</div>
+and locked layers stay put, and one undo rewinds the resize and its
+lettering together.</div>
 
 <h2>Undo while you are typing</h2>
 <div class="quirk"><b>The IME follows your caret.</b> While composing
