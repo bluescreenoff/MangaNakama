@@ -59,6 +59,14 @@ takes back the text first and the balloon second &mdash; the status line says
 how many texts came along. An ellipse or rounded-rectangle balloon cannot be
 tilted at all (see <a href="comic.html">Comic</a>), so turning one moves no
 lettering either. Text on a hidden or locked layer is left where it is.</div>
+<div class="quirk"><b>Resizing keeps the lettering at its same relative
+place.</b> Stretch or shrink a bubble &mdash; a body handle, a box corner, an
+edge &mdash; and every text box inside it lands at the same fraction of the
+new box it occupied in the old one: centred lettering stays centred, an
+off-centre shout stays off-centre. The type size is deliberately not scaled;
+the font you set is yours, not the drag's. Same rules as the turn: hidden
+and locked layers stay put, and undo takes the text first, the balloon
+second.</div>
 
 <h2>Undo while you are typing</h2>
 <div class="quirk"><b>The IME follows your caret.</b> While composing
