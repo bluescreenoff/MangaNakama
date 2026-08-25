@@ -3748,6 +3748,121 @@ impl Document {
         true
     }
 
+    /// Row 33 (CSP Convert layer): convert `li` — v1 rasterizes Text /
+    /// Balloon / vector layers (the rendered tiles are kept as-is, the
+    /// vector state dropped), optionally changes the expression colour
+    /// and blend mode, renames, and either keeps or replaces the
+    /// original. ONE structural undo step.
+    pub fn convert_layer(
+        &mut self,
+        li: usize,
+        rasterize: bool,
+        expression: Option<LayerExpression>,
+        blend: Option<Blend>,
+        keep_original: bool,
+        name: Option<String>,
+    ) -> bool {
+        let Some(src) = self.layers.get(li) else {
+            return false;
+        };
+        if src.folder {
+            return false;
+        }
+        let before = self.stack_snapshot();
+        let active_before = self.active;
+        let mut l = src.clone();
+        if rasterize {
+            // Bake: the tiles already hold the rendered vectors — the
+            // conversion is dropping the vector state that regenerates
+            // them.
+            l.kind = LayerKind::Raster;
+            l.strokes = None;
+        }
+        if let Some(e) = expression {
+            l.expression = e;
+        }
+        if let Some(b) = blend {
+            l.blend = b;
+        }
+        if let Some(n) = name {
+            if !n.trim().is_empty() {
+                l.name = n.trim().to_owned();
+            }
+        }
+        if keep_original {
+            self.layers.insert(li + 1, l);
+            self.active = li + 1;
+        } else {
+            self.layers[li] = l;
+            self.active = li;
+        }
+        self.record_structure("Convert layer", before, active_before);
+        self.touch();
+        true
+    }
+
+    /// Row 31 (CSP 画像から線画を抽出, Extract lines): lift the active
+    /// layer's DARK pixels as lineart onto a fresh layer above — per
+    /// pixel, alpha scales with how far below the threshold the luma
+    /// sits (a black line is a full-opacity line; a mid grey is a faint
+    /// one), colour straight black. Returns the new layer's index.
+    pub fn extract_lines(&mut self, li: usize, detection: f32) -> Option<usize> {
+        let (w, h) = (self.size.0 as i32, self.size.1 as i32);
+        let thr = detection.clamp(0.02, 1.0);
+        let src: Vec<(TileIdx, std::sync::Arc<Tile>)> =
+            self.layers.get(li)?.tiles().map(|(i, t)| (i, t.clone())).collect();
+        if src.is_empty() {
+            return None;
+        }
+        let mut out = Layer::new("Extracted lines");
+        out.name = "Extracted lines".into();
+        for (idx, t) in &src {
+            let (ox, oy) = idx.origin();
+            let d = t.data();
+            let nt = out.tile_mut(*idx);
+            let nd = nt.data_mut();
+            for py in 0..crate::tile::TILE_SIZE {
+                for px in 0..crate::tile::TILE_SIZE {
+                    let o = (py * crate::tile::TILE_SIZE + px) * 4;
+                    let a = d[o + 3] as f32;
+                    if a == 0.0 {
+                        continue;
+                    }
+                    let (x, y) = (ox + px as i32, oy + py as i32);
+                    if x < 0 || y < 0 || x >= w || y >= h {
+                        continue;
+                    }
+                    // Straight luma over the alpha (the pixel's real
+                    // coverage is carried by its own alpha below).
+                    let inv = 1.0 / a;
+                    let luma = (d[o] as f32 * inv).min(1.0) * 0.2126
+                        + (d[o + 1] as f32 * inv).min(1.0) * 0.7152
+                        + (d[o + 2] as f32 * inv).min(1.0) * 0.0722;
+                    if luma >= thr {
+                        continue;
+                    }
+                    // How much darker than the threshold = the line's
+                    // strength, times the pixel's own alpha.
+                    let strength = (thr - luma) / thr;
+                    let alpha = (strength * a / crate::blend::FIX15_ONE_F)
+                        .clamp(0.0, 1.0);
+                    let f15 = crate::blend::f32_to_fix15(alpha);
+                    nd[o] = 0;
+                    nd[o + 1] = 0;
+                    nd[o + 2] = 0;
+                    nd[o + 3] = f15;
+                }
+            }
+        }
+        let before = self.stack_snapshot();
+        let active_before = self.active;
+        self.layers.insert(li + 1, out);
+        self.active = li + 1;
+        self.record_structure("Extract lines", before, active_before);
+        self.touch();
+        Some(self.active)
+    }
+
     pub fn set_layer_blend(&mut self, index: usize, blend: Blend) -> bool {
         let Some(l) = self.layers.get_mut(index) else {
             return false;
@@ -4804,8 +4919,86 @@ mod mask_tests {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+mod tests {    use super::*;
+
+    /// Row 33: rasterizing a text layer keeps its RENDERED tiles and
+    /// drops the vector state; keep-original leaves the source beside
+    /// it; ONE structural undo restores the stack.
+    #[test]
+    fn convert_layer_rasterizes_and_undoes_in_one_step() {
+        let mut doc = Document::new(128, 128);
+        let t = crate::text::TextItem::new([10.0, 10.0], "Gothic".into(), 9.0, [0, 0, 0], true);
+        let li = doc.add_text_layer("lettering", crate::text::TextSet { texts: vec![t] });
+        assert!(matches!(doc.layers[li].kind, crate::doc::LayerKind::Text(_)));
+        let had_tiles = doc.layers[li].tiles().count() > 0;
+
+        let ok = doc.convert_layer(
+            li,
+            true,
+            Some(crate::doc::LayerExpression::Grey),
+            None,
+            true,
+            Some("baked lettering".into()),
+        );
+        assert!(ok);
+        assert!(matches!(doc.layers[li + 1].kind, crate::doc::LayerKind::Raster), "the copy is raster");
+        assert!(matches!(doc.layers[li].kind, crate::doc::LayerKind::Text(_)), "the original stays text");
+        assert_eq!(doc.layers[li + 1].name, "baked lettering");
+        assert_eq!(doc.layers[li + 1].expression, crate::doc::LayerExpression::Grey);
+        assert_eq!(doc.layers[li + 1].tiles().count() > 0, had_tiles, "the rendered tiles came along");
+
+        assert!(doc.undo(), "one undo");
+        // A fresh document carries a base layer: the stack is back to
+        // base + the original text layer.
+        assert_eq!(doc.layers.len(), 2, "the copy is gone");
+        assert!(matches!(doc.layers[1].kind, crate::doc::LayerKind::Text(_)));
+
+        // Replace mode: no new layer, the layer itself converts.
+        let ok = doc.convert_layer(li, true, None, None, false, None);
+        assert!(ok);
+        assert!(matches!(doc.layers[li].kind, crate::doc::LayerKind::Raster));
+    }
+
+    /// Row 31: extraction keeps the DARK pixels as scaled-black lines
+    /// and drops the light ones; a fresh layer above; one undo.
+    #[test]
+    fn extract_lines_lifts_the_dark_ink() {
+        let mut doc = Document::new(128, 128);
+        let li = doc.add_layer("scan");
+        let put = |doc: &mut Document, x: i32, y: i32, v: f32| {
+            let idx = crate::tile::TileIdx::of_pixel(x, y);
+            let (ox, oy) = idx.origin();
+            let t = doc.layers[li].tile_mut(idx);
+            let f = crate::blend::f32_to_fix15(v);
+            t.set_pixel((x - ox) as usize, (y - oy) as usize, [f, f, f, crate::blend::f32_to_fix15(1.0)]);
+        };
+        put(&mut doc, 10, 10, 0.0); // a black line pixel
+        put(&mut doc, 12, 10, 0.5); // mid grey
+        put(&mut doc, 14, 10, 0.95); // paper
+        let out = doc.extract_lines(li, 0.8).expect("lines extracted");
+        assert_eq!(out, li + 1, "the new layer sits above");
+        let get = |doc: &Document, x: i32, y: i32| -> u16 {
+            let idx = crate::tile::TileIdx::of_pixel(x, y);
+            let (ox, oy) = idx.origin();
+            doc.layers[out]
+                .tile_arc(idx)
+                .map(|t| t.pixel((x - ox) as usize, (y - oy) as usize)[3])
+                .unwrap_or(0)
+        };
+        let black = get(&doc, 10, 10);
+        let grey = get(&doc, 12, 10);
+        assert_eq!(black, crate::blend::f32_to_fix15(1.0), "black is a full line");
+        assert!(
+            grey > crate::blend::f32_to_fix15(0.3) && grey < crate::blend::f32_to_fix15(0.4),
+            "mid grey is a ~0.375 line: {grey}"
+        );
+        assert_eq!(get(&doc, 14, 10), 0, "paper dropped");
+        assert!(doc.undo(), "one undo");
+        assert_eq!(doc.layers.len(), 2, "the extraction layer is gone");
+        assert_ne!(doc.layers[1].name, "Extracted lines");
+    }
+
+
     use crate::tile::FIX15_ONE;
 
     /// The ruler set is document state with ONE undo history: a recorded

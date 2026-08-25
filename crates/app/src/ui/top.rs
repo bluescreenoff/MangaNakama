@@ -281,6 +281,10 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 app.push_cmd(AppCmd::AlignOpen);
                 ui.close();
             }
+            if item(ui, "Convert layer…", "") {
+                app.push_cmd(AppCmd::ConvertOpen);
+                ui.close();
+            }
             if item(ui, "Generate effect lines…", "") {
                 app.push_cmd(AppCmd::GenLines);
                 ui.close();
@@ -299,6 +303,10 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
             }
             if item(ui, "Outline selection…", "") {
                 app.push_cmd(AppCmd::OutlineOpen);
+                ui.close();
+            }
+            if item(ui, "Extract lines…", "") {
+                app.push_cmd(AppCmd::ExtractOpen);
                 ui.close();
             }
             ui.menu_button("Layer Mask", |ui| {

@@ -8,6 +8,7 @@
 
 mod actions;
 mod align;
+mod convert;
 mod outline;
 mod comps;
 mod history;
@@ -141,6 +142,8 @@ pub fn build(ui: &mut egui::Ui, app: &mut App) {
     batch::batch_window(ui.ctx(), app);
     align::align_window(ui.ctx(), app);
     outline::outline_window(ui.ctx(), app);
+    convert::convert_window(ui.ctx(), app);
+    convert::extract_window(ui.ctx(), app);
     adjust_window(ui.ctx(), app);
     goto_page_window(ui.ctx(), app);
     spread_window(ui.ctx(), app);

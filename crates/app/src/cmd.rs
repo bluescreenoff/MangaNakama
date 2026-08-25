@@ -1869,6 +1869,22 @@ pub enum AppCmd {
     ConvertToDrawingColor,
     /// Open the Outline selection window.
     OutlineOpen,
+    /// Layer ▸ Convert layer… (row 33): rasterize / re-expression /
+    /// re-blend / rename, keep-or-replace.
+    ConvertOpen,
+    ConvertLayer {
+        rasterize: bool,
+        expression: Option<mn_core::doc::LayerExpression>,
+        blend: Option<mn_core::Blend>,
+        keep_original: bool,
+        name: Option<String>,
+    },
+    /// Layer ▸ Extract lines… (row 31): dark pixels → a fresh line
+    /// layer above.
+    ExtractOpen,
+    ExtractLines {
+        detection: f32,
+    },
     /// Edit ▸ Outline selection… (CSP): stroke a band around the ants.
     OutlineSelection {
         width: f32,
@@ -3984,6 +4000,46 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             let status = app.doc.convert_to_drawing_colour(c);
             app.set_status(status);
             app.mark_dirty();
+        }
+        AppCmd::ConvertOpen => {
+            app.convert_name = app.doc.active_layer().name.clone();
+            app.convert_expr = None;
+            app.convert_open = !app.convert_open;
+            app.mark_dirty();
+        }
+        AppCmd::ConvertLayer {
+            rasterize,
+            expression,
+            blend,
+            keep_original,
+            name,
+        } => {
+            let li = app.doc.active;
+            let refused = app.doc.layers.get(li).is_some_and(|l| l.folder);
+            if refused {
+                app.set_status("convert layer: pick a layer, not a folder");
+            } else if app.doc.convert_layer(li, rasterize, expression, blend, keep_original, name) {
+                app.set_status("layer converted — one undo");
+                app.renderer.invalidate();
+                app.mark_dirty();
+            } else {
+                app.set_status("nothing to convert");
+            }
+        }
+        AppCmd::ExtractOpen => {
+            app.extract_open = !app.extract_open;
+            app.mark_dirty();
+        }
+        AppCmd::ExtractLines { detection } => {
+            let li = app.doc.active;
+            match app.doc.extract_lines(li, detection) {
+                Some(_) => {
+                    app.set_status("lines extracted to a new layer — one undo");
+                    app.renderer.invalidate();
+                    app.mark_dirty();
+                }
+                None => app.set_status("nothing to extract — the layer has no ink"),
+            }
         }
         AppCmd::OutlineOpen => {
             app.outline_open = !app.outline_open;

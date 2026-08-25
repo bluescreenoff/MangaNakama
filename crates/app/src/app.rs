@@ -427,6 +427,14 @@ pub struct App {
     /// indices are snapshot-at-hide: a structural op while hidden can
     /// shift them (the same lifetime every other index-cache lives with).
     pub draft_visibility: Option<Vec<usize>>,
+    /// Layer ▸ Convert layer… (row 33) and Layer ▸ Extract lines…
+    /// (row 31): the windows and their parameters.
+    pub convert_open: bool,
+    pub convert_keep: bool,
+    pub convert_expr: Option<mn_core::doc::LayerExpression>,
+    pub convert_name: String,
+    pub extract_open: bool,
+    pub extract_detection: f32,
     /// Edit ▸ Outline selection… (CSP Other Layer Filters): the window
     /// and its parameters.
     pub outline_open: bool,
@@ -1383,6 +1391,12 @@ impl App {
             align_open: false,
             align_base: mn_core::align::AlignBase::Object,
             draft_visibility: None,
+            convert_open: false,
+            convert_keep: true,
+            convert_expr: None,
+            convert_name: String::new(),
+            extract_open: false,
+            extract_detection: 0.8,
             outline_open: false,
             outline_width: 8.0,
             outline_border: mn_core::filter::OutlineBorder::Outside,

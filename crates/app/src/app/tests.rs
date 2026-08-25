@@ -8664,6 +8664,62 @@ fn align_and_distribute_commands() {
     assert_eq!(ts.texts[1].pos[0], 10.0, "the item moved onto the other");
 }
 
+/// Rows 33/31 through dispatch: convert a text layer to raster (keep
+/// original), then extract lines from an inked layer — each one undo.
+#[test]
+fn convert_and_extract_commands() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (400, 300), 1.0);
+    app.doc = Document::new(128, 128);
+    let t = mn_core::TextItem::new([10.0, 10.0], "Gothic".into(), 9.0, [0, 0, 0], true);
+    let tl = app.doc.add_text_layer("lettering", mn_core::TextSet { texts: vec![t] });
+    let n0 = app.doc.layers.len();
+
+    crate::cmd::dispatch(
+        &mut app,
+        AppCmd::ConvertLayer {
+            rasterize: true,
+            expression: Some(mn_core::doc::LayerExpression::Grey),
+            blend: None,
+            keep_original: true,
+            name: Some("baked".into()),
+        },
+    );
+    assert!(app.status.contains("converted"), "{}", app.status);
+    assert_eq!(app.doc.layers.len(), n0 + 1, "the copy landed above");
+    assert!(matches!(
+        app.doc.layers[tl + 1].kind,
+        mn_core::doc::LayerKind::Raster
+    ));
+    crate::cmd::dispatch(&mut app, AppCmd::Undo);
+    assert_eq!(app.doc.layers.len(), n0, "one undo took the copy away");
+
+    // Extract: a black pixel and a paper pixel on a raster layer.
+    let li = app.doc.add_layer("scan");
+    let idx = TileIdx::of_pixel(20, 20);
+    let (ox, oy) = idx.origin();
+    app.doc.layers[li].tile_mut(idx).set_pixel(
+        (20 - ox) as usize,
+        (20 - oy) as usize,
+        [0, 0, 0, 32768],
+    );
+    crate::cmd::dispatch(
+        &mut app,
+        AppCmd::ExtractLines { detection: 0.8 },
+    );
+    assert!(app.status.contains("extracted"), "{}", app.status);
+    let out = li + 1;
+    let a = app.doc.layers[out]
+        .tile_arc(idx)
+        .map(|t| t.pixel((20 - ox) as usize, (20 - oy) as usize)[3])
+        .unwrap_or(0);
+    assert_eq!(a, 32768, "the black pixel became a full line");
+    crate::cmd::dispatch(&mut app, AppCmd::Undo);
+    assert_eq!(app.doc.layers.len(), n0 + 1, "the extraction layer is gone");
+}
+
 /// Row 102 (FL-016/017): radial and spin blur through the filter
 /// dialog flow — the smear applies, one undo takes it off.
 #[test]
