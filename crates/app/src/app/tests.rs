@@ -8522,6 +8522,44 @@ fn the_pen_wizard_applies_a_global_curve() {
     assert!(app.prefs.pressure_curve.is_empty());
 }
 
+/// Audit verdict 2 (2026-08-25): the wizard OPENS on the correction in
+/// force — γ recovered from the stored curve at x=0.5, where the only
+/// authorable curve is y = x^γ — instead of a blind ×1.00 whose Apply
+/// would silently wipe the stored correction. Reopening with no curve
+/// still opens at ×1.00.
+#[test]
+fn the_pen_wizard_opens_on_the_correction_in_force() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (400, 300), 1.0);
+    // No correction stored → ×1.00, as ever.
+    crate::cmd::dispatch(&mut app, AppCmd::PenPressureWizardOpen);
+    assert!((app.pen_wizard_gamma - 1.0).abs() < 1e-4);
+    app.pen_wizard_open = false;
+
+    // A stored Weaker correction (γ = 2) survives a close and reopen.
+    let weaker = mn_core::stroke::gamma_pressure_curve(2.0);
+    crate::cmd::dispatch(&mut app, AppCmd::PenPressureCurveSet(weaker));
+    crate::cmd::dispatch(&mut app, AppCmd::PenPressureWizardOpen);
+    assert!(
+        (app.pen_wizard_gamma - 2.0).abs() < 1e-3,
+        "opened on the stored γ, not ×1.00: {}",
+        app.pen_wizard_gamma
+    );
+    app.pen_wizard_open = false;
+
+    // …and a Stronger one (γ = 0.5) too.
+    let stronger = mn_core::stroke::gamma_pressure_curve(0.5);
+    crate::cmd::dispatch(&mut app, AppCmd::PenPressureCurveSet(stronger));
+    crate::cmd::dispatch(&mut app, AppCmd::PenPressureWizardOpen);
+    assert!(
+        (app.pen_wizard_gamma - 0.5).abs() < 1e-3,
+        "opened on the stored γ: {}",
+        app.pen_wizard_gamma
+    );
+}
+
 /// Owner repro 2026-08-22: Figure ▸ Saturated line on a PANELED page put a
 /// "Focus lines" row in the palette and NOTHING on the canvas. TWO faults,
 /// each sufficient on its own, which is why this asserts the COMPOSITE and

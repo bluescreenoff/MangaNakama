@@ -3874,7 +3874,17 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
         }
         AppCmd::PenPressureWizardOpen => {
             app.pen_wizard_open = true;
-            app.pen_wizard_gamma = 1.0;
+            // Open on the correction that is IN FORCE, not on ×1.00: the
+            // only authorable curve is y = x^γ, so reading the stored
+            // curve at x = 0.5 recovers its γ exactly (ln y / ln 0.5).
+            // Opening blind invited an Apply that silently wiped the
+            // stored correction (audit verdict 2, 2026-08-25).
+            let y = mn_core::stroke::eval_pressure_curve(&app.global_pressure, 0.5);
+            app.pen_wizard_gamma = if app.global_pressure.is_empty() {
+                1.0
+            } else {
+                (-y.clamp(1e-4, 1.0 - 1e-4).ln() / std::f32::consts::LN_2).clamp(0.25, 4.0)
+            };
             app.pen_wizard_samples.clear();
             app.set_status("draw a few strokes, then Stronger/Weaker until the line feels right");
         }
