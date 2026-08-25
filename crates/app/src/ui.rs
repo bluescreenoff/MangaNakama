@@ -8,6 +8,7 @@
 
 mod actions;
 mod align;
+mod outline;
 mod comps;
 mod history;
 pub mod icons;
@@ -139,6 +140,7 @@ pub fn build(ui: &mut egui::Ui, app: &mut App) {
     pattern::pattern_window(ui.ctx(), app);
     batch::batch_window(ui.ctx(), app);
     align::align_window(ui.ctx(), app);
+    outline::outline_window(ui.ctx(), app);
     adjust_window(ui.ctx(), app);
     goto_page_window(ui.ctx(), app);
     spread_window(ui.ctx(), app);

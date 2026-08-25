@@ -8664,6 +8664,94 @@ fn align_and_distribute_commands() {
     assert_eq!(ts.texts[1].pos[0], 10.0, "the item moved onto the other");
 }
 
+/// The cheap crawl candidates (2026-08-25) through dispatch: hide all
+/// drafts + restore them; convert the ink to the drawing colour; outline
+/// a selection — each one undoable where it edits.
+#[test]
+fn drafts_convert_and_outline_commands() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (400, 300), 1.0);
+    app.doc = Document::new(128, 128);
+    let li = app.doc.add_layer("l");
+    // Ink: a red square at half alpha.
+    for y in 10..20 {
+        for x in 10..20 {
+            let idx = TileIdx::of_pixel(x, y);
+            let (ox, oy) = idx.origin();
+            let t = app.doc.layers[li].tile_mut(idx);
+            let o = ((y - oy) as usize * 64 + (x - ox) as usize) * 4;
+            let d = t.data_mut();
+            d[o] = mn_core::blend::f32_to_fix15(1.0 * 0.5);
+            d[o + 3] = mn_core::blend::f32_to_fix15(0.5);
+        }
+    }
+    let draft = app.doc.add_layer("rough");
+    app.doc.layers[draft].draft = true;
+
+    // 1. Hide all drafts, restore them.
+    crate::cmd::dispatch(&mut app, AppCmd::HideDraftLayers);
+    assert!(!app.doc.layers[draft].visible, "the draft hid");
+    assert!(app.doc.layers[li].visible, "the ink layer never touched");
+    crate::cmd::dispatch(&mut app, AppCmd::HideDraftLayers);
+    assert!(app.doc.layers[draft].visible, "…and came back");
+
+    // 2. Convert to the drawing colour (main = blue). The draft layer
+    // took the active slot when it was added — put the ink layer back.
+    app.doc.set_active(li);
+    app.main_color = [0.0, 0.0, 1.0];
+    crate::cmd::dispatch(&mut app, AppCmd::ConvertToDrawingColor);
+    assert!(app.status.contains("recoloured"), "{}", app.status);
+    crate::cmd::dispatch(&mut app, AppCmd::Undo);
+    let idx = TileIdx::of_pixel(15, 15);
+    let (ox, oy) = idx.origin();
+    let t = app.doc.layers[li].tile_arc(idx).unwrap();
+    let o = ((15 - oy) as usize * 64 + (15 - ox) as usize) * 4;
+    assert_eq!(
+        t.data()[o],
+        mn_core::blend::f32_to_fix15(0.5),
+        "undo put the red back"
+    );
+
+    // 3. Outline a rect selection, 4px outside, square corners.
+    app.doc.selection =
+        Some(mn_core::Selection::from_rect(&app.doc, 40.0, 40.0, 60.0, 60.0));
+    crate::cmd::dispatch(
+        &mut app,
+        AppCmd::OutlineSelection {
+            width: 4.0,
+            border: mn_core::filter::OutlineBorder::Outside,
+            round: false,
+        },
+    );
+    assert!(app.status.contains("outlined"), "{}", app.status);
+    let a = |x: i32, y: i32| -> u16 {
+        let idx = TileIdx::of_pixel(x, y);
+        let (ox, oy) = idx.origin();
+        app.doc.layers[li]
+            .tile_arc(idx)
+            .map(|t| {
+                t.data()[((y - oy) as usize * 64 + (x - ox) as usize) * 4 + 3]
+            })
+            .unwrap_or(0)
+    };
+    assert!(a(37, 50) > 0, "the outside band inked");
+    assert_eq!(a(50, 50), 0, "the interior untouched");
+    let band = a(37, 50);
+    crate::cmd::dispatch(&mut app, AppCmd::Undo);
+    let after = {
+        let idx = TileIdx::of_pixel(37, 50);
+        let (ox, oy) = idx.origin();
+        app.doc.layers[li]
+            .tile_arc(idx)
+            .map(|t| t.data()[((50 - oy) as usize * 64 + (37 - ox) as usize) * 4 + 3])
+            .unwrap_or(0)
+    };
+    assert_eq!(after, 0, "one undo took the outline off");
+    assert!(band > 0);
+}
+
 /// Row 54 — puppet warp through the real pointer path: drop two pins,
 /// pull one east; the pulled pin's neighbourhood follows, the other pin
 /// HOLDS its neighbourhood, and one undo rewinds everything.
