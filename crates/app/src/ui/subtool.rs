@@ -553,6 +553,10 @@ fn mode_sub_tools(ui: &mut egui::Ui, app: &mut App) {
                 }
             }
         }
+        Tool::Liquify => {
+            // The seven modes live in Tool Property, one flat radio list
+            // — no sub-tool shapes to mirror here.
+        }
         Tool::Pan => {
             group_caption(ui, "Move");
             if mode_row(ui, app.pan_mode == PanMode::Hand, Icon::Pan, "Hand").clicked() {

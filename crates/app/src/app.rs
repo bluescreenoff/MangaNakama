@@ -420,6 +420,13 @@ pub struct App {
     /// it changes per gesture the way CSP's palette does.
     pub align_open: bool,
     pub align_base: mn_core::align::AlignBase,
+    /// The Liquify tool (row 55): mode/strength/radius are tool state
+    /// (session-scoped v1); the drag is the live gesture — one op
+    /// bracket per drag, so one undo per gesture.
+    pub liquify_mode: mn_core::liquify::LiquifyMode,
+    pub liquify_strength: f32,
+    pub liquify_radius: f32,
+    pub liquify_drag: Option<crate::app::canvas_input::LiquifyDrag>,
     /// Tool Property's draft of the SELECTED run's spec while a bar is
     /// being dragged — the same buffering idiom as `border_edit`, and for
     /// a sharper reason: committing per frame would re-rasterize a
@@ -1362,6 +1369,10 @@ impl App {
             pen_wizard_samples: Vec::new(),
             align_open: false,
             align_base: mn_core::align::AlignBase::Object,
+            liquify_mode: mn_core::liquify::LiquifyMode::Push,
+            liquify_strength: 0.5,
+            liquify_radius: 40.0,
+            liquify_drag: None,
             anti_overflow_cache: None,            anti_overflow: false,
             quick_query: String::new(),
             quick_pins: layout
@@ -2438,6 +2449,46 @@ impl App {
                 self.startup_fit_last = sz;
                 self.fit_to_view();
             }
+        }
+
+        // Liquify hold-accumulation (row 55): Expand/Pinch/Twirl keep
+        // working while the pen stands still — a per-frame step scaled
+        // by elapsed time, and a repaint request so there IS a next
+        // frame while the drag is live.
+        if self
+            .liquify_drag
+            .as_ref()
+            .is_some_and(|_| self.liquify_mode.accumulates())
+        {
+            let now = std::time::Instant::now();
+            let Some(d) = self.liquify_drag.as_mut() else {
+                unreachable!("checked above");
+            };
+            let dt = d.last_step.elapsed().as_secs_f32().min(0.1);
+            if dt >= 1.0 / 120.0 {
+                d.last_step = now;
+                let li = self.doc.active;
+                // Full strength moves the brush radius ~2× per second;
+                // the frame rate never changes the speed, only dt does.
+                let amount = self.liquify_strength * dt * 2.0;
+                mn_core::liquify::step(
+                    &mut self.doc,
+                    li,
+                    self.liquify_mode,
+                    d.last.0,
+                    d.last.1,
+                    0.0,
+                    0.0,
+                    self.liquify_radius,
+                    1.0,
+                    amount,
+                    self.shell.sync_modifiers().alt,
+                );
+                self.needs_redraw = true;
+            }
+            self.shell
+                .ctx
+                .request_repaint_after(std::time::Duration::from_millis(8));
         }
 
         // The undo-depth preference, applied at the frame head rather than
@@ -3586,6 +3637,8 @@ impl App {
         let cycle =
             |cur: usize, n: usize| -> usize { ((cur as i32 + dir).rem_euclid(n as i32)) as usize };
         match self.tool {
+            // No sub tools of its own; `,`/`.` must not crash on it.
+            Tool::Liquify => {}
             Tool::Pen | Tool::Eraser => {
                 if self.presets.is_empty() {
                     return;

@@ -808,6 +808,10 @@ pub enum Tool {
     Text,
     /// Eyedropper: click picks the colour under the cursor (I).
     Eyedrop,
+    /// CSP 液化 Liquify: warp the raster layer directly with the pen —
+    /// push/expand/pinch/push-sideways/twirl, Alt inverts, hold
+    /// accumulates (`core::liquify`).
+    Liquify,
     Pan,
 }
 
@@ -829,6 +833,7 @@ impl Tool {
             Tool::Balloon => "Balloon",
             Tool::Text => "Text",
             Tool::Eyedrop => "Eyedropper",
+            Tool::Liquify => "Liquify",
             Tool::Pan => "Move view",
         }
     }

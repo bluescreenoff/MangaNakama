@@ -602,6 +602,21 @@ deselect first (<kbd>Ctrl+D</kbd>) if you want the paste unmasked. The
 status line says "masked" when it happened, so a paste that vanished
 into a small selection tells you why.</div>
 
+<h2>Liquify</h2>
+<div class="quirk"><b>The Liquify tool warps the layer directly, as you
+drag.</b> Not a filter, not a transform float: push moves ink with the
+pen, expand and pinch bulge and scrunch (hold the pen still and they
+keep working), push left/right shifts ink perpendicular to your stroke,
+and the two twirls rotate about the cursor. <b>Alt inverts any
+mode</b> &mdash; expand becomes pinch, push reverses, twirl turns the
+other way.</div>
+<div class="quirk"><b>One gesture, one undo.</b> However long you drag
+and however many modes' worth of smearing that took, the whole drag is
+a single Ctrl+Z. Strength also sets the hold speed for the accumulating
+modes, and the falloff is soft: material piles up ahead of the brush
+and feathers out behind it, exactly like a fingertip pushing wet
+ink.</div>
+
 <footer><a href="index.html">← manual</a> · the deep records live in
 the repository's <code>docs/DECISIONS.md</code>.</footer>
 </main>

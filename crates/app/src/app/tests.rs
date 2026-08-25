@@ -8663,6 +8663,70 @@ fn align_and_distribute_commands() {
     assert_eq!(ts.texts[1].pos[0], 10.0, "the item moved onto the other");
 }
 
+/// Row 55 (CSP 液化): the Liquify TOOL through the real pointer path —
+/// drag Pushes ink along the stroke, the whole gesture is ONE undo,
+/// and the status line says so.
+#[test]
+fn the_liquify_tool_pushes_ink_in_one_undoable_gesture() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (400, 300), 1.0);
+    app.doc = Document::new(128, 128);
+    let li = app.doc.add_layer("l");
+    for y in 60..68 {
+        for x in 30..46 {
+            let idx = TileIdx::of_pixel(x, y);
+            let (ox, oy) = idx.origin();
+            let t = app.doc.layers[li].tile_mut(idx);
+            let o = ((y - oy) as usize * 64 + (x - ox) as usize) * 4;
+            let f = mn_core::blend::f32_to_fix15(0.0);
+            let d = t.data_mut();
+            d[o] = f;
+            d[o + 1] = f;
+            d[o + 2] = f;
+            d[o + 3] = mn_core::blend::f32_to_fix15(1.0);
+        }
+    }
+    app.viewport = mn_gpu::Viewport::default();
+    app.tool = crate::cmd::Tool::Liquify;
+    app.liquify_radius = 16.0;
+    app.liquify_strength = 1.0;
+
+    let alpha = |app: &App, x: i32, y: i32| {
+        let idx = TileIdx::of_pixel(x, y);
+        let (ox, oy) = idx.origin();
+        app.doc.layers[li]
+            .tile_arc(idx)
+            .map(|t| t.data()[((y - oy) as usize * 64 + (x - ox) as usize) * 4 + 3])
+            .unwrap_or(0)
+    };
+
+    app.canvas_down(38.0, 64.0, PointerKind::Mouse, &[]);
+    for k in 0..10 {
+        app.canvas_move(40.0 + k as f32 * 2.0, 64.0, &[]);
+    }
+    app.canvas_up(60.0, 64.0, &[]);
+    assert!(app.status.contains("liquified"), "{}", app.status);
+    assert!(alpha(&app, 48, 64) > 30000, "the ink piled up well past the old edge");
+    assert!(
+        alpha(&app, 56, 64) > 30000,
+        "the smear reached the drag's end"
+    );
+    assert!(
+        alpha(&app, 30, 64) < 30000,
+        "the trailing edge feathered as the material followed the brush"
+    );
+
+    crate::cmd::dispatch(&mut app, AppCmd::Undo);
+    assert_eq!(
+        alpha(&app, 30, 64),
+        mn_core::blend::f32_to_fix15(1.0),
+        "one undo restored the whole gesture"
+    );
+    assert_eq!(alpha(&app, 48, 64), 0);
+}
+
 /// Audit verdict 2 (2026-08-25): the wizard OPENS on the correction in
 /// force — γ recovered from the stored curve at x=0.5, where the only
 /// authorable curve is y = x^γ — instead of a blind ×1.00 whose Apply

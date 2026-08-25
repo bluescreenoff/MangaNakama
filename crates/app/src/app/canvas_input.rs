@@ -466,6 +466,14 @@ pub struct FillLatticeDrag {
     pub cur: (f32, f32),
 }
 
+/// An in-progress Liquify drag (row 55): the whole gesture is one op
+/// bracket, so one undo. `last_step` drives the hold-accumulation
+/// frame tick for Expand/Pinch/Twirl.
+pub struct LiquifyDrag {
+    pub last: (f32, f32),
+    pub last_step: std::time::Instant,
+}
+
 /// What part of a balloon an Object-tool drag grabbed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BalloonDragMode {
@@ -802,6 +810,22 @@ impl App {
                 }
                 let (cx, cy) = self.viewport.to_canvas(x, y);
                 self.grad_drag = Some(((cx, cy), (cx, cy)));
+                self.needs_redraw = true;
+            }
+            Tool::Liquify => {
+                if self.guard_frame_layer() {
+                    return;
+                }
+                let (cx, cy) = self.viewport.to_canvas(x, y);
+                self.doc.begin_op();
+                self.liquify_drag = Some(LiquifyDrag {
+                    last: (cx, cy),
+                    last_step: std::time::Instant::now(),
+                });
+                self.set_status(format!(
+                    "{} — drag to warp; hold to keep working (Alt inverts)",
+                    self.liquify_mode.label()
+                ));
                 self.needs_redraw = true;
             }
             Tool::Frame => {
@@ -2262,6 +2286,21 @@ impl App {
     }
 
     pub fn canvas_move(&mut self, x: f32, y: f32, batch: &[PenSample]) {
+        if let Some(d) = self.liquify_drag.as_mut() {
+            let (cx, cy) = self.viewport.to_canvas(x, y);
+            let (dx, dy) = (cx - d.last.0, cy - d.last.1);
+            d.last = (cx, cy);
+            d.last_step = std::time::Instant::now();
+            let li = self.doc.active;
+            let (mode, radius, strength) =
+                (self.liquify_mode, self.liquify_radius, self.liquify_strength);
+            let invert = self.shell.sync_modifiers().alt;
+            mn_core::liquify::step(
+                &mut self.doc, li, mode, cx, cy, dx, dy, radius, strength, 0.0, invert,
+            );
+            self.needs_redraw = true;
+            return;
+        }
         if self.rotating() {
             self.update_rotate(x, y);
             return;
@@ -3017,6 +3056,12 @@ impl App {
                     self.set_status("tone lattice moved — the dots slid under the art");
                 }
             }
+            self.needs_redraw = true;
+            return;
+        }
+        if self.liquify_drag.take().is_some() {
+            self.doc.end_op();
+            self.set_status("liquified — one undo takes the whole gesture back");
             self.needs_redraw = true;
             return;
         }

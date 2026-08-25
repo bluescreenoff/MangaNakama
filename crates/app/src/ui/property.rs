@@ -303,6 +303,54 @@ const SEC_TEXT_GUIDE: Section = Section {
     title: "Guide",
     body: sec_text_guide,
 };
+/// Row 55 (CSP 液化): the seven modes, strength and radius. Descriptions
+/// carry the Alt-invert and hold-accumulate rules — the two things a
+/// CSP user expects and a new user would never find.
+fn sec_liquify(ui: &mut egui::Ui, app: &mut App) {
+    ui.vertical(|ui| {
+        for m in mn_core::liquify::LiquifyMode::ALL {
+            if ui
+                .radio(app.liquify_mode == m, m.label())
+                .on_hover_text(match m {
+                    mn_core::liquify::LiquifyMode::Push => {
+                        "the ink follows the pen. Alt reverses the direction"
+                    }
+                    mn_core::liquify::LiquifyMode::Expand => {
+                        "bulge outward from the stroke; HOLD to keep growing. Alt = pinch"
+                    }
+                    mn_core::liquify::LiquifyMode::Pinch => {
+                        "scrunch inward; HOLD to keep shrinking. Alt = expand"
+                    }
+                    mn_core::liquify::LiquifyMode::PushLeft => {
+                        "shift the ink to the left of your stroke's direction"
+                    }
+                    mn_core::liquify::LiquifyMode::PushRight => {
+                        "shift the ink to the right of your stroke's direction"
+                    }
+                    mn_core::liquify::LiquifyMode::TwirlCw => {
+                        "rotate about the pen; HOLD to keep turning. Alt reverses"
+                    }
+                    mn_core::liquify::LiquifyMode::TwirlCcw => {
+                        "rotate the other way; HOLD to keep turning. Alt reverses"
+                    }
+                })
+                .clicked()
+            {
+                app.liquify_mode = m;
+            }
+        }
+        let sr = ui.add(
+            egui::Slider::new(&mut app.liquify_strength, 0.0..=1.0).text("strength"),
+        );
+        sr.on_hover_text(
+            "how far one touch moves the ink; for expand/pinch/twirl this is also the hold speed — Alt inverts any mode",
+        );
+        ui.add(egui::Slider::new(&mut app.liquify_radius, 4.0..=300.0).text("radius px"))
+            .on_hover_text("the brush disc's radius in canvas pixels");
+        ui.weak("drag to warp · hold to accumulate (expand/pinch/twirl) · Alt inverts · one undo per gesture");
+    });
+}
+
 const SEC_OBJ_GUIDE: Section = Section {
     id: "obj.guide",
     title: "Guide",
@@ -499,6 +547,11 @@ fn prop_sections_for_tool(app: &App) -> Vec<Section> {
             id: "eyedrop.guide",
             title: "Guide",
             body: sec_eyedrop,
+        }],
+        Tool::Liquify => vec![Section {
+            id: "liquify.opts",
+            title: "Liquify",
+            body: sec_liquify,
         }],
         Tool::Pan => vec![Section {
             id: "pan.guide",

@@ -16,11 +16,12 @@ use super::widgets::icon_btn;
 /// icon"): CSP files 選択ペン / 選択消し as SUB tools of the Selection tool
 /// with a fixed create-type, and so do we — they live in `ui/subtool.rs`'s
 /// Selection list, reachable there, from Ctrl+K, and from the `,`/`.` cycle.
-const STRIP_TOOLS: [(Tool, Icon); 14] = [
+const STRIP_TOOLS: [(Tool, Icon); 15] = [
     (Tool::Pen, Icon::Pen),
     (Tool::Eraser, Icon::Eraser),
     (Tool::Figure, Icon::Figure),
     (Tool::Gradient, Icon::Gradient),
+    (Tool::Liquify, Icon::Liquify),
     (Tool::Fill, Icon::Fill),
     (Tool::Tone, Icon::Tone),
     (Tool::Select, Icon::Select),
@@ -40,6 +41,7 @@ fn tool_key(t: Tool) -> &'static str {
         Tool::Eraser => "E",
         Tool::Figure => "F",
         Tool::Gradient => "V",
+        Tool::Liquify => "",
         Tool::Fill => "G",
         // No key: the owner's CSP set has no spare letter, and main.rs's
         // table is where one would go.
@@ -60,7 +62,7 @@ fn tool_key(t: Tool) -> &'static str {
 /// Tool families, in `STRIP_TOOLS` order: draw+erase+fill, selection,
 /// objects+utility. CSP separates its tool palette into exactly three such
 /// blocks (`csp/150_tools_0002.png`, the numbered orange boxes).
-const GROUPS: [usize; 3] = [6, 2, 6];
+const GROUPS: [usize; 3] = [7, 2, 6];
 
 /// Icon cell. CSP's cell metric is ~34 px including its padding; ours is the
 /// icon square plus [`GAP`], which lands in the same place.

@@ -33,6 +33,9 @@ pub enum Icon {
     Wand,
     /// Eyedropper: a pipette at 45°.
     Eyedrop,
+    /// Liquify (CSP 液化): two straight rails with a warped line
+    /// between them — the grid-bend read of a warp tool.
+    Liquify,
     Pan,
     Undo,
     Redo,
@@ -217,6 +220,7 @@ impl Icon {
             | Self::Ellipse
             | Self::Poly
             | Self::Gradient
+            | Self::Liquify
             | Self::Tone
             | Self::StreamLines
             | Self::FocusLines
@@ -503,6 +507,15 @@ pub fn paint_role(p: &Painter, r: Rect, icon: Icon, base: Color32, accent: Optio
                 a,
                 Stroke::NONE,
             ));
+        }
+        Icon::Liquify => {
+            // Two straight rails, one warped traveller between them.
+            p.line(poly(r, &[(0.22, 0.12), (0.22, 0.88)]), line);
+            p.line(poly(r, &[(0.78, 0.12), (0.78, 0.88)]), line);
+            p.line(
+                poly(r, &[(0.50, 0.12), (0.38, 0.32), (0.62, 0.56), (0.50, 0.88)]),
+                line,
+            );
         }
         Icon::Pan => {
             // Palm + three fingers + thumb: CSP's grab tool, minus the
