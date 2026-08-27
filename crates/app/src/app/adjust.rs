@@ -122,12 +122,20 @@ impl App {
         // The layers the preview snapshotted are the layers to commit to —
         // the palette selection cannot have moved while the dialog was open
         // (dispatch's head guard), but taking them from the preview makes
-        // the commit correct even if that ever stopped being true.
-        let layers: Vec<usize> = self
-            .adjust_preview
-            .as_ref()
-            .map(|p| p.targets.iter().map(|(li, _)| *li).collect())
-            .unwrap_or_default();
+        // the commit correct even if that ever stopped being true. With no
+        // dialog open (AdjustNow from the menu — "Reverse gradient") there
+        // is no preview and no targets, which used to make the item a
+        // silent no-op; the same selection rule `adjust_begin` uses picks
+        // them instead.
+        let layers: Vec<usize> = match &self.adjust_preview {
+            Some(p) => p.targets.iter().map(|(li, _)| *li).collect(),
+            None => self
+                .doc
+                .multi_targets()
+                .into_iter()
+                .filter(|&li| !self.doc.adjust_snapshot(li).is_empty())
+                .collect(),
+        };
         self.adjust_preview_revert();
         match self.doc.apply_adjust_many(&adj, &layers) {
             0 if adj.is_identity() => {
@@ -301,6 +309,35 @@ mod tests {
         assert!(app.doc.undo());
         assert!((read(&app, 0) - 0.6).abs() < 0.002, "undo restores 0");
         assert!((read(&app, 1) - 0.2).abs() < 0.002, "undo restores 1");
+    }
+
+    #[test]
+    fn adjust_now_without_a_dialog_applies_to_the_selection() {
+        // The menu's "Reverse gradient" (AdjustNow(Invert)) with no dialog
+        // open used to commit to the preview's targets — of which there
+        // were none — a silent no-op recorded as DECISIONS 9.2's open
+        // question. It must apply to the selected layers like any other
+        // correction, as ONE undo step.
+        let Some(mut app) = headless() else {
+            println!("[test] SKIP: no usable adapter");
+            return;
+        };
+        let li = app.doc.active;
+        seed(&mut app, 0.6);
+        dispatch(&mut app, AppCmd::AdjustNow(Adjust::Invert));
+        assert!(
+            (read(&app, li) - 0.4).abs() < 0.002,
+            "the menu item inverts: {}",
+            read(&app, li)
+        );
+        assert_eq!(app.doc.undo_labels().len(), 1, "exactly one undo step");
+        assert!(app.doc.undo());
+        assert!(
+            (read(&app, li) - 0.6).abs() < 0.002,
+            "undo restores the original: {}",
+            read(&app, li)
+        );
+        assert!(app.adjust_draft.is_none() && app.adjust_preview.is_none());
     }
 
     #[test]
