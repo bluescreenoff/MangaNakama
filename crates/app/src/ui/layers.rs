@@ -480,13 +480,44 @@ pub(super) fn layer_property(ui: &mut egui::Ui, app: &mut App) {
                 .decimals(1)
                 .suffix(" px")
                 .show(ui, &mut p.width_px);
-            if resp.changed() {
+            // LP-004: the solid keyline, or a pale stain rim whose colour
+            // comes from the layer's own ink.
+            let mut style_pick = None;
+            ui.horizontal(|ui| {
+                ui.weak("Style");
+                egui::ComboBox::from_id_salt("mn.edge.style")
+                    .selected_text(match p.style {
+                        mn_core::edge::EdgeStyle::Solid => "Outline",
+                        mn_core::edge::EdgeStyle::Watercolour => "Watercolour",
+                    })
+                    .width(110.0)
+                    .show_ui(ui, |ui| {
+                        for (v, l) in [
+                            (mn_core::edge::EdgeStyle::Solid, "Outline"),
+                            (mn_core::edge::EdgeStyle::Watercolour, "Watercolour"),
+                        ] {
+                            if ui.selectable_label(p.style == v, l).clicked() && p.style != v {
+                                style_pick = Some(v);
+                            }
+                        }
+                    })
+                    .response
+                    .on_hover_text(
+                        "watercolour: a paler rim whose colour is sampled from the \
+                         layer's own ink — a stain, not a line",
+                    );
+            });
+            if let Some(v) = style_pick {
+                p.style = v;
+            }
+            if resp.changed() || style_pick.is_some() {
                 app.edge_edit = Some(p);
             }
             // Commit once, when the interaction ends. Every change re-derives
             // the whole layer's outline, so a per-frame commit would be both
             // an undo-stack spill and a visible stutter.
-            if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
+            if resp.drag_stopped() || (resp.changed() && !resp.dragged()) || style_pick.is_some()
+            {
                 if let Some(p) = app.edge_edit.take() {
                     app.push_cmd(AppCmd::SetEdge(i, Some(p)));
                 }

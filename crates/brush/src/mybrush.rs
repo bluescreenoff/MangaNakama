@@ -110,6 +110,70 @@ pub fn load_texture(brushes_root: &Path, name: &str) -> Option<Arc<TextureMask>>
     }))
 }
 
+/// CSP's brush-only ink output (Advanced Tool Settings ▸ Ink, the
+/// BM-029..035 family): compositing behaviours that only make sense for
+/// paint landing on a canvas, applied at the wash commit BESIDE the
+/// layer blend mode. `Normal` = the plain blend, every build before
+/// this. (BM-031 Erase is the existing eraser; BM-032 Erase (Compare)
+/// is deliberately absent — our corpus's one-line definition is
+/// ambiguous about which side wins, and a guessed erase is worse than
+/// a documented hole.)
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum BrushDraw {
+    #[default]
+    Normal,
+    /// 黒焼き込み: black ink darkens the base; no effect where the base
+    /// pixel is transparent.
+    BlackBurn,
+    /// 白焼き込み: white ink lightens the base; same transparency rule.
+    WhiteBurn,
+    /// 濃度比較: the stroke lands only where it is MORE opaque than what
+    /// is already there.
+    CompareDensity,
+    /// 背景描画: the stroke lands UNDERNEATH existing pixels.
+    Background,
+    /// アルファ値を置き換える: over-composite the colour, but the
+    /// stroke's own opacity REPLACES the destination's.
+    ReplaceAlpha,
+}
+
+impl BrushDraw {
+    /// The `mn-brush-draw` preset key's value.
+    pub fn key_name(self) -> Option<&'static str> {
+        match self {
+            BrushDraw::Normal => None,
+            BrushDraw::BlackBurn => Some("black-burn"),
+            BrushDraw::WhiteBurn => Some("white-burn"),
+            BrushDraw::CompareDensity => Some("compare-density"),
+            BrushDraw::Background => Some("background"),
+            BrushDraw::ReplaceAlpha => Some("replace-alpha"),
+        }
+    }
+
+    pub fn from_key_name(s: &str) -> BrushDraw {
+        match s {
+            "black-burn" => BrushDraw::BlackBurn,
+            "white-burn" => BrushDraw::WhiteBurn,
+            "compare-density" => BrushDraw::CompareDensity,
+            "background" => BrushDraw::Background,
+            "replace-alpha" => BrushDraw::ReplaceAlpha,
+            _ => BrushDraw::Normal,
+        }
+    }
+}
+
+/// What a stamped tip's rotation follows (B-031/032). `Direction` is the
+/// `.abr` rail's "rotating with the stroke" (`mn-texture-rotate:
+/// "direction"`); `Tilt` is the pen's physical bearing (B-032) — the
+/// C hook hands both per dab, the setting picks one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TextureRotate {
+    #[default]
+    Fixed,
+    Direction,
+    Tilt,
+}
+
 /// A libmypaint brush bound to a MangaNakama document.
 ///
 /// Not `Send`/`Sync` (raw pointers): libmypaint keeps mutable stroke state and
@@ -148,6 +212,12 @@ pub struct MyBrush {
     wash_opacity: f32,
     /// Blend mode of the wash commit (Krita: per-brush blending mode).
     wash_blend: Blend,
+    /// CSP's brush-only ink output (Advanced Tool Settings ▸ Ink,
+    /// BM-029..035): darkening/lightening burns gated on existing ink,
+    /// density-compare, under-paint, alpha-replace. Applied at the wash
+    /// commit beside `wash_blend`; `Normal` keeps the plain blend. The
+    /// key is `mn-brush-draw`.
+    wash_draw: BrushDraw,
     /// The stroke buffer, live between `begin` and `end` of a wash stroke.
     wash_buf: Option<Box<Document>>,
     /// Eraser mode captured at `begin` of a wash stroke: dabs must LAY PAINT
@@ -179,9 +249,10 @@ pub struct MyBrush {
     /// covering the dab's bounding square. Off = canvas-anchored grain, the
     /// mn default.
     texture_anchor_dab: bool,
-    /// Stamp rotation follows the stroke direction (on top of the base).
-    /// UNFOLDED per dab — the elliptical angle cannot do this (mod 180).
-    texture_rotate_direction: bool,
+    /// Stamp rotation source (B-031/032): fixed base, the UNFOLDED stroke
+    /// direction (the elliptical angle cannot do this — mod 180), or the
+    /// pen's tilt bearing. `mn-texture-rotate`: fixed / direction / tilt.
+    texture_rotate: TextureRotate,
     /// Stamp base angle, degrees.
     texture_angle_deg: f32,
     /// Live crawl offset (mask px). Owned here, advanced by the C-side
@@ -567,11 +638,19 @@ impl MyBrush {
             .map(|v| v as f32)
             .unwrap_or(1.0)
             .clamp(0.0, 1.0);
-        let wash_blend = match json.get("mn-brush-blend").and_then(Value::as_str) {
-            Some("multiply") => Blend::Multiply,
-            Some("screen") => Blend::Screen,
-            _ => Blend::Normal,
-        };
+        // The blend key carries the ORA name minus its prefix, so every
+        // layer mode round-trips (the old parser knew multiply/screen
+        // only — a preset saved as e.g. linear-burn loaded as Normal).
+        let wash_blend = json
+            .get("mn-brush-blend")
+            .and_then(Value::as_str)
+            .map(Blend::from_short_name)
+            .unwrap_or(Blend::Normal);
+        let wash_draw = json
+            .get("mn-brush-draw")
+            .and_then(Value::as_str)
+            .map(BrushDraw::from_key_name)
+            .unwrap_or_default();
 
         // Krita texture tip: a grayscale PNG under `textures/` beside the
         // preset groups, multiplied into every dab (vendor/PATCHES.md #10).
@@ -598,10 +677,11 @@ impl MyBrush {
             .get("mn-texture-anchor")
             .and_then(Value::as_str)
             .is_some_and(|s| s == "dab");
-        let texture_rotate_direction = json
-            .get("mn-texture-rotate")
-            .and_then(Value::as_str)
-            .is_some_and(|s| s == "direction");
+        let texture_rotate = match json.get("mn-texture-rotate").and_then(Value::as_str) {
+            Some("direction") => TextureRotate::Direction,
+            Some("tilt") => TextureRotate::Tilt,
+            _ => TextureRotate::Fixed,
+        };
         let texture_angle_deg = json
             .get("mn-texture-angle")
             .and_then(Value::as_f64)
@@ -683,6 +763,7 @@ impl MyBrush {
             wash,
             wash_opacity,
             wash_blend,
+            wash_draw,
             wash_buf: None,
             wash_erase: false,
             texture,
@@ -692,7 +773,7 @@ impl MyBrush {
             _variant_masks: variant_masks,
             texture_scroll_px,
             texture_anchor_dab,
-            texture_rotate_direction,
+            texture_rotate,
             texture_angle_deg,
             tex_accum: (0.0, 0.0),
             sketch,
@@ -1205,6 +1286,15 @@ impl MyBrush {
         self.wash_blend
     }
 
+    /// CSP Ink output (BM-029..035), applied at the wash commit.
+    pub fn set_wash_draw(&mut self, draw: BrushDraw) {
+        self.wash_draw = draw;
+    }
+
+    pub fn wash_draw(&self) -> BrushDraw {
+        self.wash_draw
+    }
+
     /// Per-dab alpha inside a wash stroke (Krita: Flow). In wash mode this is
     /// what the Flow slider drives; it is the same knob as
     /// [`set_base_opacity`](Self::set_base_opacity), named for the UI that
@@ -1236,9 +1326,13 @@ impl MyBrush {
         self.texture_anchor_dab = on;
     }
 
-    /// Stamp rotation follows the stroke direction (dab-anchored mode).
-    pub fn set_texture_rotate_direction(&mut self, on: bool) {
-        self.texture_rotate_direction = on;
+    /// Stamp rotation source (B-031/032, dab-anchored mode).
+    pub fn set_texture_rotate(&mut self, r: TextureRotate) {
+        self.texture_rotate = r;
+    }
+
+    pub fn texture_rotate(&self) -> TextureRotate {
+        self.texture_rotate
     }
 
     /// Stamp base angle, degrees (dab-anchored mode).
@@ -1330,8 +1424,8 @@ impl MyBrush {
     }
 
     /// (stroke opacity, blend, erase-arm) for the stroke-end wash commit.
-    pub fn wash_commit_params(&self) -> (f32, Blend, bool) {
-        (self.wash_opacity, self.wash_blend, self.wash_erase)
+    pub fn wash_commit_params(&self) -> (f32, Blend, BrushDraw, bool) {
+        (self.wash_opacity, self.wash_blend, self.wash_draw, self.wash_erase)
     }
 
     /// Take the recorded dabs and touched tiles of the strokes so far.
@@ -1455,7 +1549,7 @@ impl MyBrush {
             &mut self.tex_accum,
             self.texture_scroll_px,
             self.texture_anchor_dab,
-            self.texture_rotate_direction,
+            self.texture_rotate,
             self.texture_angle_deg,
         );
         // M4: a tip list overrides the single mask's pointer at the first
@@ -1468,7 +1562,7 @@ impl MyBrush {
                 self.tip_variants.len(),
                 self.variation,
                 self.texture_angle_deg,
-                self.texture_anchor_dab && !self.texture_rotate_direction,
+                self.texture_anchor_dab && self.texture_rotate == TextureRotate::Fixed,
             );
         } else {
             set_tip_set_hook(std::ptr::null(), 0, 0.0, 0.0, false);
@@ -1640,6 +1734,7 @@ impl StrokeSink for MyBrush {
                 doc,
                 self.wash_opacity,
                 self.wash_blend,
+                self.wash_draw,
                 self.wash_erase,
             );
         }
@@ -1665,6 +1760,7 @@ pub fn commit_wash(
     doc: &mut Document,
     stroke_opacity: f32,
     blend: Blend,
+    draw: BrushDraw,
     erase: bool,
 ) {
     let op = stroke_opacity.clamp(0.0, 1.0);
@@ -1697,11 +1793,61 @@ pub fn commit_wash(
                     dpx[3] * (1.0 - k),
                 ]
             } else {
-                blend_premul(
-                    blend,
-                    scale_opacity(px_to_f32([sp[0], sp[1], sp[2], sp[3]]), op),
-                    px_to_f32([dst[0], dst[1], dst[2], dst[3]]),
-                )
+                let s = scale_opacity(px_to_f32([sp[0], sp[1], sp[2], sp[3]]), op);
+                let dpx = px_to_f32([dst[0], dst[1], dst[2], dst[3]]);
+                match draw {
+                    BrushDraw::Normal => blend_premul(blend, s, dpx),
+                    // The burns are ink REPLACEMENTS (black/white paint) that
+                    // skip transparent base pixels — CSP's "no effect where
+                    // the existing pixel is transparent". Premultiplied, a
+                    // black over is a plain scale-down and a white over a
+                    // scale-up of what is there.
+                    BrushDraw::BlackBurn => {
+                        if dpx[3] <= 0.0 {
+                            dpx
+                        } else {
+                            [dpx[0] * (1.0 - s[3]), dpx[1] * (1.0 - s[3]), dpx[2] * (1.0 - s[3]), dpx[3]]
+                        }
+                    }
+                    BrushDraw::WhiteBurn => {
+                        if dpx[3] <= 0.0 {
+                            dpx
+                        } else {
+                            let k = s[3];
+                            [
+                                dpx[0] + (dpx[3] - dpx[0]) * k,
+                                dpx[1] + (dpx[3] - dpx[1]) * k,
+                                dpx[2] + (dpx[3] - dpx[2]) * k,
+                                dpx[3],
+                            ]
+                        }
+                    }
+                    // Densier wins: the stroke lands only where its coverage
+                    // exceeds what is already on the canvas.
+                    BrushDraw::CompareDensity => {
+                        if s[3] > dpx[3] {
+                            s
+                        } else {
+                            dpx
+                        }
+                    }
+                    // Under-paint: the DESTINATION composites over the
+                    // stroke — over with the roles swapped.
+                    BrushDraw::Background => [
+                        dpx[0] + s[0] * (1.0 - dpx[3]),
+                        dpx[1] + s[1] * (1.0 - dpx[3]),
+                        dpx[2] + s[2] * (1.0 - dpx[3]),
+                        dpx[3] + s[3] * (1.0 - dpx[3]),
+                    ],
+                    // Over-composite the colour, then let the stroke's own
+                    // opacity REPLACE the destination's.
+                    BrushDraw::ReplaceAlpha => [
+                        s[0] + dpx[0] * (1.0 - s[3]),
+                        s[1] + dpx[1] * (1.0 - s[3]),
+                        s[2] + dpx[2] * (1.0 - s[3]),
+                        s[3],
+                    ],
+                }
             };
             for c in 0..4 {
                 dst[c] = f32_to_fix15(out[c]);
@@ -1792,11 +1938,13 @@ thread_local! {
     /// #10 amendment 2: 1 = the mask is DAB-anchored (a stamped tip), 0 =
     /// canvas-anchored grain.
     static TEXTURE_ANCHOR_DAB: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
-    /// Stamp rotation: 0 = fixed base only, 1 = base + stroke direction.
-    /// The C hands the UNFOLDED direction per dab (`mnc_brush_texture_stamp`)
-    /// because the elliptical angle folds mod 180 — right for an ellipse,
-    /// wrong for a stamp; the published angle is what the dab renders with.
+    /// Stamp rotation sources, set from the preset's TextureRotate: the C
+    /// hands the UNFOLDED direction AND the pen's tilt bearing per dab
+    /// (`mnc_brush_texture_stamp`) because the elliptical angle folds mod
+    /// 180 — right for an ellipse, wrong for a stamp; the published angle
+    /// is what the dab renders with.
     static TEXTURE_STAMP_DIRECTION: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+    static TEXTURE_STAMP_TILT: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
     static TEXTURE_STAMP_BASE: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     static TEXTURE_STAMP_ANGLE: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     /// GPU-dabs record mode (round 27, PATCHES.md #11): the pointer is set
@@ -1985,11 +2133,12 @@ fn set_texture_hook(
     accum: *mut (f32, f32),
     step_px: f32,
     anchor_dab: bool,
-    rotate_direction: bool,
+    rotate: TextureRotate,
     angle_deg: f32,
 ) {
     TEXTURE_ANCHOR_DAB.with(|c| c.set(anchor_dab as i32));
-    TEXTURE_STAMP_DIRECTION.with(|c| c.set(rotate_direction as i32));
+    TEXTURE_STAMP_DIRECTION.with(|c| c.set((rotate == TextureRotate::Direction) as i32));
+    TEXTURE_STAMP_TILT.with(|c| c.set((rotate == TextureRotate::Tilt) as i32));
     TEXTURE_STAMP_BASE.with(|c| c.set(angle_deg.to_bits()));
     // Publish the base so the stroke's FIRST dab (before any direction
     // exists) renders at it.
@@ -2046,13 +2195,16 @@ pub extern "C" fn mnc_brush_texture_anchor_dab() -> c_int {
 }
 
 /// Called from the patched `mypaint-brush.c` once per dab (#10 amendment
-/// 2), with the dab's UNFOLDED stroke direction in degrees: compute and
-/// publish the stamp angle this dab renders with.
+/// 2), with the dab's UNFOLDED stroke direction AND the pen's tilt
+/// bearing in degrees: compute and publish the stamp angle this dab
+/// renders with, per the preset's rotation source (B-031/032).
 #[unsafe(no_mangle)]
-pub extern "C" fn mnc_brush_texture_stamp(direction_deg: f32) {
+pub extern "C" fn mnc_brush_texture_stamp(direction_deg: f32, tilt_deg: f32) {
     let base = f32::from_bits(TEXTURE_STAMP_BASE.with(|c| c.get()));
     let angle = if TEXTURE_STAMP_DIRECTION.with(|c| c.get()) != 0 && direction_deg.is_finite() {
         base + direction_deg
+    } else if TEXTURE_STAMP_TILT.with(|c| c.get()) != 0 && tilt_deg.is_finite() {
+        base + tilt_deg
     } else {
         base
     };

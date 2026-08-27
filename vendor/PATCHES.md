@@ -609,3 +609,13 @@ any binary split tree.
 **Tests:** `leaf_edge_zones_are_interior_only` (interior edges hit,
 body/outside don't, the rim belongs to #18); run via
 `cargo test --manifest-path vendor/egui_dock/Cargo.toml --lib`.
+
+### 20. Texture stamp hook carries the tilt bearing too (`mypaint-brush.c`, 2026-08-27)
+
+`mnc_brush_texture_stamp` (the #10 amendment 2 hook) grows a second
+parameter: the pen's smoothed tilt bearing, `STATE(self, ASCENSION)` —
+device space, uncompensated, the same raw rule the UNFOLDED direction
+angle follows. The Rust side picks per the preset's
+`mn-texture-rotate` (`fixed` / `direction` / `tilt`); a preset that
+says nothing renders bit-identically, and `direction` behaves exactly
+as before.

@@ -41,7 +41,7 @@ void mnc_brush_texture_advance(void);
  * direction (degrees) so it can publish the stamp angle for dab-anchored
  * texture tips — the elliptical angle folds mod 180 and cannot orient a
  * stamp. Called once per dab, right beside the crawl advance. */
-void mnc_brush_texture_stamp(float direction_deg);
+void mnc_brush_texture_stamp(float direction_deg, float tilt_ascension_deg);
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -1074,10 +1074,12 @@ gboolean prepare_and_draw_dab (MyPaintBrush *self, MyPaintSurface * surface, gbo
      * the pattern cannot seam across the tiles one dab spans). */
     if (mnc_brush_texture_size() > 0) {
         mnc_brush_texture_advance();
-        /* #10 amendment 2: the stamp angle's direction source, UNFOLDED
-         * (atan2, full circle) — INPUT(DIRECTION) folds mod 180. */
+        /* #10 amendment 2: the stamp angle's sources, both UNFOLDED —
+         * atan2 full circle for the direction (INPUT(DIRECTION) folds
+         * mod 180), and the smoothed pen-tilt bearing for B-032. */
         mnc_brush_texture_stamp(DEGREES(atan2f(
-            STATE(self, DIRECTION_DY), STATE(self, DIRECTION_DX))));
+            STATE(self, DIRECTION_DY), STATE(self, DIRECTION_DX))),
+            STATE(self, ASCENSION));
     }
 
     float radius = STATE(self, ACTUAL_RADIUS);

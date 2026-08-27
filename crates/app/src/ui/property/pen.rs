@@ -589,6 +589,34 @@ hatching web instead of a clean line. Distance = how far back it connects.",
             if blend != app.props_current.brush_blend {
                 app.push_cmd(AppCmd::SetBrushBlend(blend));
             }
+            // CSP's Ink output (Advanced Tool Settings ▸ Ink): the
+            // brush-only commit behaviours layered over the blend.
+            let mut draw = app.props_current.brush_draw;
+            egui::ComboBox::from_id_salt("brush-draw")
+                .selected_text(draw_label(draw))
+                .width(110.0)
+                .show_ui(ui, |ui| {
+                    for d in [
+                        mn_brush::BrushDraw::Normal,
+                        mn_brush::BrushDraw::BlackBurn,
+                        mn_brush::BrushDraw::WhiteBurn,
+                        mn_brush::BrushDraw::CompareDensity,
+                        mn_brush::BrushDraw::Background,
+                        mn_brush::BrushDraw::ReplaceAlpha,
+                    ] {
+                        ui.selectable_value(&mut draw, d, draw_label(d));
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "black/white burn darken or lighten only existing ink · \
+                     compare density paints only where the stroke is denser · \
+                     background paints underneath · replace alpha overlays and \
+                     takes over the coverage",
+                );
+            if draw != app.props_current.brush_draw {
+                app.push_cmd(AppCmd::SetBrushDraw(draw));
+            }
         }
     })
     .response
@@ -666,6 +694,34 @@ texture — reads as paper tooth, not noise.",
         t_resp.on_hover_text(
             "Texture crawl per dab (Krita: offset per dab). 0 = the \
 pattern is fixed; higher = the grain drifts as you draw, spray-like.",
+        );
+        // B-031/032: what a stamped tip's rotation follows. The label says
+        // "ink" nowhere near it — this is the flat-nib question: a chisel
+        // tip that never turns reads wrong in every direction but one.
+        ui.horizontal(|ui| {
+            ui.weak("Tip angle");
+            let mut r = app.props_current.texture_rotate;
+            for (v, l) in [
+                (mn_brush::TextureRotate::Fixed, "Fixed"),
+                (mn_brush::TextureRotate::Direction, "Stroke"),
+                (mn_brush::TextureRotate::Tilt, "Pen tilt"),
+            ] {
+                if ui
+                    .selectable_label(r == v, l)
+                    .clicked()
+                    && r != v
+                {
+                    r = v;
+                }
+            }
+            if r != app.props_current.texture_rotate {
+                app.push_cmd(AppCmd::SetTextureRotate(r));
+            }
+        })
+        .response
+        .on_hover_text(
+            "what the stamped tip rotates with: a fixed base angle, the \
+             stroke's direction, or the pen's physical tilt bearing",
         );
     }
 }
@@ -836,5 +892,19 @@ pub(crate) fn interval_label(iv: mn_brush::Interval) -> String {
         Interval::Percent(p) if (p - Interval::WIDE_PCT).abs() < 0.01 => "Wide".to_owned(),
         Interval::Percent(p) => format!("{p:.0} % of tip"),
         Interval::FixedPx(_) => "Fixed".to_owned(),
+    }
+}
+
+/// CSP Ink output names (BM-029..035). "Ink" instead of "blend" in the
+/// labels because that is the question the row answers — what the ink
+/// DOES when it lands, not how two layers mix.
+pub(crate) fn draw_label(d: mn_brush::BrushDraw) -> &'static str {
+    match d {
+        mn_brush::BrushDraw::Normal => "Over",
+        mn_brush::BrushDraw::BlackBurn => "Black burn",
+        mn_brush::BrushDraw::WhiteBurn => "White burn",
+        mn_brush::BrushDraw::CompareDensity => "Compare density",
+        mn_brush::BrushDraw::Background => "Background (under)",
+        mn_brush::BrushDraw::ReplaceAlpha => "Replace alpha",
     }
 }

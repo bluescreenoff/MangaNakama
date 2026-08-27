@@ -510,7 +510,7 @@ fn gpu_dab_parity_dab_anchored_stamps() {
     let arm = |b: &mut MyBrush| {
         b.set_texture(Some(mask.clone()));
         b.set_texture_anchor_dab(true);
-        b.set_texture_rotate_direction(true);
+        b.set_texture_rotate(mn_brush::TextureRotate::Direction);
         b.set_texture_angle_deg(30.0);
     };
 

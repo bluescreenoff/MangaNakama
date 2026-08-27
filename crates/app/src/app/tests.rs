@@ -8751,6 +8751,77 @@ fn object_multi_select_combine_and_group_delete() {
     assert_eq!(app.object_multi.len(), 0);
 }
 
+/// Rows 76/78's open half: dragging a member of the multi-selection
+/// moves the WHOLE set — every member, one undo press — while pressing
+/// into a solo selection (or outside the set) still arms the ordinary
+/// single-object drag.
+#[test]
+fn object_multi_group_move_translates_the_set() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (400, 300), 1.0);
+    app.doc = Document::new(256, 256);
+    let mk = |cx: f32, cy: f32| mn_core::Balloon {
+        shape: mn_core::BalloonShape::Ellipse {
+            center: [cx, cy],
+            radii: [20.0, 14.0],
+        },
+        ..Default::default()
+    };
+    let bl = app.doc.add_balloon_layer(
+        "bubbles",
+        mn_core::BalloonSet {
+            balloons: vec![mk(60.0, 60.0), mk(160.0, 60.0)],
+            border_px: 4.0,
+            pressure_width: false,
+        },
+    );
+    app.viewport = mn_gpu::Viewport::default();
+    app.tool = crate::cmd::Tool::Object;
+    let centre = |app: &App, i: usize| {
+        match &app.doc.layers[bl].balloons().unwrap().balloons[i].shape {
+            mn_core::BalloonShape::Ellipse { center, .. } => *center,
+            _ => [f32::NAN; 2],
+        }
+    };
+
+    // Stack both, then drag FROM on the first member.
+    app.object_combine = crate::cmd::SelectCombine::Add;
+    app.canvas_down(60.0, 60.0, PointerKind::Mouse, &[]);
+    app.canvas_down(160.0, 60.0, PointerKind::Mouse, &[]);
+    assert_eq!(app.object_multi.len(), 2);
+    app.canvas_move(90.0, 100.0, &[]);
+    assert!(app.group_drag.is_some(), "the set took the press");
+    app.canvas_up(90.0, 100.0, &[]);
+
+    // BOTH moved by the whole-pixel delta (+30, +40) — under the old
+    // single-object path only the primary would have.
+    let (c0, c1) = (centre(&app, 0), centre(&app, 1));
+    assert!((c0[0] - 90.0).abs() < 0.01 && (c0[1] - 100.0).abs() < 0.01, "member 0 moved");
+    assert!((c1[0] - 190.0).abs() < 0.01 && (c1[1] - 100.0).abs() < 0.01, "member 1 moved");
+    assert!(app.status.contains("moved 2 objects"), "{}", app.status);
+
+    // One undo press restores the whole set.
+    let before_undo = app.doc.undo_labels().len();
+    crate::cmd::dispatch(&mut app, AppCmd::Undo);
+    let (c0, c1) = (centre(&app, 0), centre(&app, 1));
+    assert!((c0[0] - 60.0).abs() < 0.01 && (c0[1] - 60.0).abs() < 0.01, "undo member 0");
+    assert!((c1[0] - 160.0).abs() < 0.01 && (c1[1] - 60.0).abs() < 0.01, "undo member 1");
+    assert_eq!(
+        app.doc.undo_labels().len(),
+        before_undo - 1,
+        "the whole set was ONE undo step"
+    );
+
+    // A solo press (New mode, fresh set) still arms the single-object
+    // drag — the group path needs more than one member.
+    app.object_combine = crate::cmd::SelectCombine::New;
+    app.canvas_down(60.0, 60.0, PointerKind::Mouse, &[]);
+    assert!(app.group_drag.is_none(), "solo press = single-object drag");
+    assert!(app.balloon_sel.is_some(), "and it selected the balloon");
+}
+
 /// Row 149: ruler layer attachment through dispatch — bulk attach to
 /// the active layer, the view gates on it, one undo restores.
 #[test]

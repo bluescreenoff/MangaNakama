@@ -1172,6 +1172,12 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
     } else if app.tool == Tool::Object {
         // Rows 78/76: the multi-selection set — a thin accent box on
         // every member (the primary keeps its full affordances below).
+        // While a group drag is live the boxes ride the delta, so the
+        // whole set visibly moves together before anything commits.
+        let gd = app
+            .group_drag
+            .as_ref()
+            .map(|d| (d.cur.0 - d.start.0, d.cur.1 - d.start.1));
         for r in &app.object_multi {
             let bb: Option<[f32; 4]> = match *r {
                 crate::app::ObjRef::Text(li, ti) => app
@@ -1192,9 +1198,32 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
                     .and_then(|l| l.balloons())
                     .and_then(|bs| bs.balloons.get(bi))
                     .map(|b| b.bbox()),
-                _ => None,
+                crate::app::ObjRef::Frame(li, fi) => {
+                    // Whole-panel box — the folder's own frame polygon.
+                    app.doc
+                        .layers
+                        .get(li)
+                        .and_then(|l| l.frames())
+                        .and_then(|fs| fs.frames.get(fi))
+                        .map(|f| f.bbox())
+                }
+                crate::app::ObjRef::Gen(li) => {
+                    // Focus runs carry a centre and an outer radius.
+                    app.doc
+                        .layers
+                        .get(li)
+                        .and_then(|l| l.genlines.clone())
+                        .and_then(|s| {
+                            (s.focus && s.d > 0.0).then(|| {
+                                [s.a - s.d, s.b - s.d, s.a + s.d, s.b + s.d]
+                            })
+                        })
+                }
             };
-            if let Some(b) = bb {
+            if let Some(mut b) = bb {
+                if let Some((dx, dy)) = gd {
+                    b = [b[0] + dx, b[1] + dy, b[2] + dx, b[3] + dy];
+                }
                 painter.rect_stroke(
                     egui::Rect::from_min_max(to_pt(b[0], b[1]), to_pt(b[2], b[3])),
                     2.0,

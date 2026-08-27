@@ -679,6 +679,24 @@ fn organise_menu(resp: &egui::Response, app: &mut App, name: &str, path: &PathBu
             return;
         }
         ui.separator();
+        // Only on the SELECTED row: the folded state belongs to the brush
+        // Tool Property is currently editing.
+        let is_selected = app
+            .selected_preset
+            .and_then(|i| app.presets.get(i))
+            .is_some_and(|(_, p)| p == path);
+        if is_selected
+            && ui
+                .button("Save current settings as brush")
+                .on_hover_text(
+                    "the brush as TUNED right now — size, wash, ink, texture — \
+                     becomes a new sub tool in Mine",
+                )
+                .clicked()
+        {
+            app.push_cmd(AppCmd::BrushSaveCurrent);
+            ui.close();
+        }
         if ui
             .button("Duplicate")
             .on_hover_text("a copy beside it to retune — the original stays as it is")

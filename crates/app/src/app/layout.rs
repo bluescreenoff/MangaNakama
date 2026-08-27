@@ -63,6 +63,10 @@ pub struct UiLayout {
     /// AND a benchmark number exists on the owner's hardware. The View-menu
     /// toggle remains the manual path meanwhile.
     pub gpu_dabs: bool,
+    /// LP-022 page half (`mono_preview=1`): display the whole canvas as
+    /// monochrome — display only, never a composite or export. Unlike
+    /// gpu_dabs there is no hardware gate, so a plain bool writes plainly.
+    pub mono_preview: bool,
     /// Whether ui.txt actually CARRIED a `gpu_dabs=` line (session-only,
     /// never written): the DECISIONS 8.9 re-flip runs as a per-adapter
     /// measured auto-default (`bench::resolve_auto`), and an auto verdict
@@ -176,6 +180,7 @@ impl Default for UiLayout {
             prop_hidden: String::new(),
             win: String::new(),
             gpu_dabs: false,
+            mono_preview: false,
             gpu_dabs_explicit: false,
             recent_fonts: Vec::new(),
             material_folders: Vec::new(),
@@ -412,7 +417,7 @@ impl UiLayout {
     /// `from_body` completes.
     pub(super) fn to_body(&self) -> String {
         format!(
-            "left_w={:.0}\nright_w={:.0}\nleft_collapsed={}\nright_collapsed={}\ndock_left={}\ndock_right={}\ndock_tree={}\nprop_hidden={}\nwin={}\n{}recent_fonts={}\nmaterial_folders={}\nmaterial_uses={}\nquick_pins={}\nworkspaces={}\nworkspace_current={}\ntouch_gestures={}\ncolor_history={}\nauto_swatch={}\nreader_page={}\nguides_hidden={}\ntest_stroke_hidden={}\ngradients={}\nsub_tool_size_px={}\nreferences={}\n",
+            "left_w={:.0}\nright_w={:.0}\nleft_collapsed={}\nright_collapsed={}\ndock_left={}\ndock_right={}\ndock_tree={}\nprop_hidden={}\nwin={}\n{}mono_preview={}\nrecent_fonts={}\nmaterial_folders={}\nmaterial_uses={}\nquick_pins={}\nworkspaces={}\nworkspace_current={}\ntouch_gestures={}\ncolor_history={}\nauto_swatch={}\nreader_page={}\nguides_hidden={}\ntest_stroke_hidden={}\ngradients={}\nsub_tool_size_px={}\nreferences={}\n",
             self.left_w,
             self.right_w,
             self.left_collapsed as u8,
@@ -434,6 +439,7 @@ impl UiLayout {
             } else {
                 String::new()
             },
+            format!("mono_preview={}\n", self.mono_preview as u8),
             serde_json::to_string(&self.recent_fonts).unwrap_or_default(),
             serde_json::to_string(&self.material_folders).unwrap_or_default(),
             self.material_uses,
@@ -506,6 +512,8 @@ impl UiLayout {
                 self.gpu_dabs = v.trim() == "1";
                 self.gpu_dabs_explicit = true;
             }
+            // LP-022 page half: `1` previews the page as monochrome.
+            "mono_preview" => self.mono_preview = v.trim() == "1",
             // JSON string array, one line (like the dock columns).
             "recent_fonts" if !line.contains('\n') => {
                 if let Ok(f) = serde_json::from_str::<Vec<String>>(v) {
@@ -927,6 +935,13 @@ mod tests {
         assert!(chose_off.gpu_dabs_explicit);
         assert!(chose_off.dirty, "the choice must reach the disk");
         assert!(chose_off.to_body().contains("\ngpu_dabs=0\n"));
+
+        // LP-022 page half: the mono preview persists as a plain bool.
+        let mut mono = UiLayout::default();
+        assert!(mono.to_body().contains("\nmono_preview=0\n"));
+        mono.apply_kv("mono_preview=1");
+        assert!(mono.mono_preview);
+        assert!(mono.to_body().contains("\nmono_preview=1\n"));
     }
 
     /// Round 34: the font list's recently-used row persists as a one-line

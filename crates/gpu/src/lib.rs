@@ -825,6 +825,10 @@ pub struct Renderer {
     canvas_dirty_all: bool,
     /// Layer presentation state as of the last composite.
     layer_sig: Vec<LayerSig>,
+    /// LP-022 page half: display EVERY layer as monochrome (1-bit look)
+    /// on the canvas — display only, never a composite/export. Set by
+    /// the app; entering the sig path so toggling it re-draws.
+    pub mono_preview: bool,
     /// PA-001: the paper as of the last composite — changing it re-clears
     /// the whole canvas (it is the bottom of every region, not a layer).
     paper_sig: Paper,
@@ -1635,6 +1639,7 @@ impl Renderer {
             tile_pool: Vec::new(),
             canvas_dirty_all: true,
             layer_sig: Vec::new(),
+            mono_preview: false,
             paper_sig: Paper::default(),
             paper_override: None,
             tile_pipeline_reset,
@@ -2107,6 +2112,8 @@ impl Renderer {
         // opacity applies once, at its group blit.
         let vis = doc.effective_visibility();
         let bases = doc.clip_bases();
+        // LP-022 page half: the mono preview forces every layer's expression.
+        let mono = self.mono_preview;
         let sig: Vec<LayerSig> = doc
             .layers
             .iter()
@@ -2121,7 +2128,14 @@ impl Renderer {
                 tone: l.tone.map(|t| t.sig()),
                 edge: l.edge.map(|e| e.sig()),
                 tint: l.layer_colour.map_or(crate::TINT_NONE, crate::tint_pack),
-                fx: crate::fx_pack(l.layer_sub_colour, l.expression),
+                fx: crate::fx_pack(
+                    l.layer_sub_colour,
+                    if mono {
+                        mn_core::LayerExpression::Mono
+                    } else {
+                        l.expression
+                    },
+                ),
             })
             .collect();
         if sig != self.layer_sig {
@@ -2854,7 +2868,14 @@ impl Renderer {
                     tint: layer
                         .layer_colour
                         .map_or(crate::TINT_NONE, crate::tint_pack),
-                    fx: crate::fx_pack(layer.layer_sub_colour, layer.expression),
+                    fx: crate::fx_pack(
+                        layer.layer_sub_colour,
+                        if self.mono_preview {
+                            mn_core::LayerExpression::Mono
+                        } else {
+                            layer.expression
+                        },
+                    ),
                     rect: rect_of(idx),
                     mode: 1,
                     opacity: layer.opacity.clamp(0.0, 1.0),

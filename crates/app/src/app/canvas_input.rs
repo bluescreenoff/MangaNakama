@@ -383,6 +383,26 @@ pub struct ObjectDrag {
     pub shift_snap: bool,
 }
 
+/// Rows 76/78's group half: a drag armed by pressing an object that is
+/// already a member of a multi-selection of more than one — the whole
+/// set translates together on release. Translation only, by design:
+/// handles, lattice and edge drags edit ONE object, so they stay on the
+/// single-object paths (press a solo object, or one outside the set).
+pub struct GroupObjDrag {
+    pub start: (f32, f32),
+    pub cur: (f32, f32),
+}
+
+impl GroupObjDrag {
+    /// The whole-pixel delta the release will commit.
+    pub fn delta(&self) -> (i32, i32) {
+        (
+            (self.cur.0 - self.start.0).round() as i32,
+            (self.cur.1 - self.start.1).round() as i32,
+        )
+    }
+}
+
 impl ObjectDrag {
     /// The dragged frame as it would land right now.
     pub fn preview(&self) -> Frame {
@@ -956,6 +976,23 @@ impl App {
                 } else {
                     // New: the fresh selection replaces the set.
                     self.object_multi.clear();
+                }
+                // Group-move: pressing a member of a multi-selection of
+                // more than one arms a WHOLE-SET translate. After the
+                // combine block so Remove/Toggle keep their early
+                // returns; before the kind grabs so the set takes the
+                // press. A set of one (or a press outside the set) falls
+                // through to the ordinary single-object behaviour.
+                if let Some(top) = self.object_candidates_at(cx, cy).first().copied()
+                    && self.object_multi.len() > 1
+                    && self.object_multi.iter().any(|r| *r == top)
+                {
+                    self.group_drag = Some(GroupObjDrag {
+                        start: (cx, cy),
+                        cur: (cx, cy),
+                    });
+                    self.needs_redraw = true;
+                    return;
                 }
                 if !self.text_object_press(cx, cy, clicks) {
                     self.object_hit(cx, cy);
@@ -2422,6 +2459,11 @@ impl App {
             self.needs_redraw = true;
             return;
         }
+        if let Some(d) = &mut self.group_drag {
+            d.cur = (cx, cy);
+            self.needs_redraw = true;
+            return;
+        }
         // A ruler move edits the ruler LIVE: the next snap reads the new
         // geometry with no invalidation step, because the geometry IS the
         // ruler. (The symmetric ruler's mirror twins are a derived cache —
@@ -2841,6 +2883,14 @@ impl App {
         }
         if self.text_obj_drag.is_some() {
             self.finish_text_obj_drag(cx, cy);
+            return;
+        }
+        if let Some(d) = self.group_drag.take() {
+            let (dx, dy) = d.delta();
+            if dx != 0 || dy != 0 {
+                self.push_cmd(AppCmd::ObjectMultiMove { dx, dy });
+            }
+            self.needs_redraw = true;
             return;
         }
         if let Some(d) = self.gen_drag.take() {

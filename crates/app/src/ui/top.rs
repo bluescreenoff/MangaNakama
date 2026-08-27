@@ -285,6 +285,10 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 app.push_cmd(AppCmd::ConvertOpen);
                 ui.close();
             }
+            if item(ui, "Rasterize frame folder", "") {
+                app.push_cmd(AppCmd::FrameFolderRasterize);
+                ui.close();
+            }
             if item(ui, "Generate effect lines…", "") {
                 app.push_cmd(AppCmd::GenLines);
                 ui.close();
@@ -1067,6 +1071,20 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 .changed()
             {
                 app.push_cmd(AppCmd::SetGpuDabs(gd));
+                ui.close();
+            }
+            // LP-022 page half: the whole canvas as 1-bit, display only —
+            // "does this page hold up in mono?" without converting a thing.
+            let mut mp = app.renderer.mono_preview;
+            if ui
+                .checkbox(&mut mp, "Monochrome preview")
+                .on_hover_text(
+                    "display only — nothing is converted, exports and the \
+                     eyedropper keep seeing colour",
+                )
+                .changed()
+            {
+                app.push_cmd(AppCmd::SetMonoPreview(mp));
                 ui.close();
             }
             ui.separator();

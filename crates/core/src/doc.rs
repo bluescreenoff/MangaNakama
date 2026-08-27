@@ -158,6 +158,32 @@ impl Blend {
         }
     }
 
+    /// The brush-preset key name: the ORA name without its `svg:`/`mn:`
+    /// prefix (`"multiply"`, `"linear-burn"`, …). The `.myb` rail used to
+    /// hardcode `"multiply"`/`"screen"` as the only spellings it understood;
+    /// this is the shared spelling so every mode round-trips through a
+    /// preset file.
+    pub fn short_name(self) -> &'static str {
+        let full = self.ora_name();
+        &full[full.find(':').map(|i| i + 1).unwrap_or(0)..]
+    }
+
+    /// [`Blend::short_name`]'s inverse, for the brush-preset key. Tries
+    /// both ORA prefixes (the name no longer says which it came from);
+    /// unknown strings fall back to `Normal` (a preset from a newer
+    /// build must not fail to load).
+    pub fn from_short_name(s: &str) -> Self {
+        let a = Self::from_ora_name(&format!("svg:{s}"));
+        if a.short_name() == s {
+            return a;
+        }
+        let b = Self::from_ora_name(&format!("mn:{s}"));
+        if b.short_name() == s {
+            return b;
+        }
+        Blend::Normal
+    }
+
     /// Every variant, declaration order. Exhaustive by construction: the
     /// round-trip test asserts the length matches the enum's own arm count
     /// via `ora_name`, so a variant added without a row here shows up as a
@@ -602,6 +628,12 @@ impl Layer {
             }
             let side = TILE_SIZE + 2 * r;
             let mut seed = vec![crate::edge::INF; side * side];
+            // LP-004: the watercolour rim samples the window's own ink
+            // colours — premultiplied fix15, zero where nothing inked.
+            // Filled beside the seed below; empty for the solid style,
+            // which never reads it.
+            let want_cwin = p.style == crate::edge::EdgeStyle::Watercolour;
+            let mut cwin = vec![0u16; side * side * 4];
             for idx in cands {
                 let neighbours = || {
                     (-span..=span).flat_map(move |dy| {
@@ -623,6 +655,9 @@ impl Layer {
                     continue;
                 }
                 seed.fill(crate::edge::INF);
+                if want_cwin {
+                    cwin.fill(0);
+                }
                 let (ox, oy) = idx.origin();
                 let (px0, py0) = (ox - r as i32, oy - r as i32);
                 for n in neighbours() {
@@ -637,12 +672,23 @@ impl Layer {
                         for x in x0..x1 {
                             let o = Tile::offset((x - nx) as usize, (y - ny) as usize);
                             if d[o + 3] >= crate::edge::INK_ALPHA {
-                                seed[(y - py0) as usize * side + (x - px0) as usize] = 0.0;
+                                let w = (y - py0) as usize * side + (x - px0) as usize;
+                                seed[w] = 0.0;
+                                if want_cwin {
+                                    let cw = &mut cwin[w * 4..w * 4 + 4];
+                                    cw.copy_from_slice(&d[o..o + 4]);
+                                }
                             }
                         }
                     }
                 }
-                let t = crate::edge::derive_tile(&mut seed, r, base.get(&idx).map(|a| &**a), p);
+                let t = crate::edge::derive_tile(
+                    &mut seed,
+                    r,
+                    base.get(&idx).map(|a| &**a),
+                    p,
+                    &cwin,
+                );
                 out.insert(idx, Arc::new(t));
             }
         }
@@ -3428,7 +3474,10 @@ impl Document {
                     }
                 }
             }
-            let t = crate::edge::derive_tile(&mut seed, r, None, p);
+            // No colour window: the knockout mat is a solid backing — a
+            // watercolour style on a folder header would fall back to the
+            // picked colour (nearest_ink_colour's empty-window rule).
+            let t = crate::edge::derive_tile(&mut seed, r, None, p, &[]);
             out.insert(idx, Arc::new(t));
         }
         self.layers[fi].edge_stamp = Some(stamp);
@@ -3800,6 +3849,49 @@ impl Document {
         self.touch();
         true
     }
+    /// Row 32 (CSP Rasterize on a FRAME folder — "do it their way"): the
+    /// border is just ink, so the header becomes a plain raster layer
+    /// holding it; the panel clipping is expressible as a layer mask, so
+    /// every child gains the folder's interior-coverage mask (children
+    /// that already carry their own keep it — the two combine visually);
+    /// the children STAY separate layers, hoisted loose at the folder's
+    /// depth. What you give up is the frame object — no more dragging
+    /// panel edges. ONE structural undo step.
+    pub fn rasterize_frame_folder(&mut self, li: usize) -> bool {
+        let Some(h) = self.layers.get(li) else {
+            return false;
+        };
+        if !(h.folder && h.is_frame()) {
+            return false;
+        }
+        let (before, active_before) = (self.stack_snapshot(), self.active);
+        let depth = h.depth;
+        let mask_tiles = h.mask_tiles().cloned();
+        let mut header = h.clone();
+        let kids: Vec<usize> = self.children_range(li).collect();
+        for k in kids {
+            if let Some(c) = self.layers.get_mut(k) {
+                // Loose at the folder's own depth — the folder is gone.
+                c.depth = depth;
+                if c.mask.is_none()
+                    && let Some(tiles) = mask_tiles.clone()
+                {
+                    c.mask = Some(LayerMask {
+                        tiles,
+                        enabled: true,
+                        revision: crate::tile::next_revision(),
+                    });
+                }
+            }
+        }
+        header.folder = false;
+        header.kind = LayerKind::Raster;
+        self.layers[li] = header;
+        self.record_structure("Rasterize frame folder", before, active_before);
+        self.touch();
+        true
+    }
+
 
     /// Row 31 (CSP 画像から線画を抽出, Extract lines): lift the active
     /// layer's DARK pixels as lineart onto a fresh layer above — per
@@ -5070,6 +5162,19 @@ mod tests {    use super::*;
         assert_eq!(seen.len(), Blend::ALL.len());
     }
 
+    /// The brush-preset key spelling round-trips every mode too (the
+    /// `.myb` parser used to accept multiply/screen only), and keeps the
+    /// two legacy spellings plus the unknown-string fallback.
+    #[test]
+    fn every_blend_mode_round_trips_through_its_short_name() {
+        for b in Blend::ALL {
+            assert_eq!(Blend::from_short_name(b.short_name()), b, "{b:?}");
+        }
+        assert_eq!(Blend::from_short_name("multiply"), Blend::Multiply);
+        assert_eq!(Blend::from_short_name("screen"), Blend::Screen);
+        assert_eq!(Blend::from_short_name("from-a-newer-build"), Blend::Normal);
+    }
+
     /// **Old files must load pixel-identically.** These fifteen names were
     /// written into every .ora the owner saved before the part-3 modes
     /// existed; they are a file format, not an implementation detail. A new
@@ -5878,6 +5983,59 @@ mod tests {    use super::*;
             !doc.set_frames(0, one_frame),
             "raster layers have no frames"
         );
+    }
+
+    /// Row 32: rasterizing a frame folder keeps what is losable-for-free
+    /// and gives up only the frame OBJECT — the header's border ink
+    /// becomes a plain raster layer, the panel clip becomes the
+    /// children's layer masks, the children stay separate, and ONE undo
+    /// restores the folder.
+    #[test]
+    fn rasterize_frame_folder_keeps_children_and_clips_by_mask() {
+        let mut doc = Document::new(256, 256);
+        let fs = FrameSet {
+            frames: vec![Frame::rect(32.0, 32.0, 224.0, 224.0)],
+            border_px: 4.0,
+            slot: None,
+            reading_pin: None,
+            border_ruler: false,
+            color: [0, 0, 0],
+        };
+        let hi = doc.add_frame_folder("Frame 1", fs);
+        // add_frame_folder lands [White, Layer 1, header] with the draw
+        // layer active; children sit BELOW the header index.
+        let kids: Vec<usize> = doc.children_range(hi).collect();
+        assert_eq!(kids.len(), 2, "white + draw layer");
+        assert!(doc.layers[hi].folder && doc.layers[hi].is_frame());
+        assert!(doc.layers[hi].mask_tiles().is_some_and(|m| !m.is_empty()));
+
+        assert!(doc.rasterize_frame_folder(hi));
+        let h = &doc.layers[hi];
+        assert!(!h.folder, "the folder is gone");
+        assert!(matches!(h.kind, LayerKind::Raster), "the header is plain ink now");
+        assert!(h.tile_count() > 0, "the border ink raster survives");
+        for k in kids {
+            let c = &doc.layers[k];
+            assert_eq!(c.depth, h.depth, "child hoisted loose beside the ink");
+            assert!(
+                c.mask.as_ref().is_some_and(|m| !m.tiles.is_empty()),
+                "the panel clip rides as a layer mask"
+            );
+        }
+        assert_eq!(doc.undo_labels().len(), 1, "one structural undo step");
+        assert!(doc.undo());
+        let h = &doc.layers[hi];
+        assert!(h.folder && h.is_frame(), "undo restores the frame folder");
+        for k in kids {
+            assert!(
+                doc.layers[k].mask.is_none(),
+                "undo takes the clip back into the folder"
+            );
+        }
+
+        // Only frame folders: a plain layer is refused untouched.
+        let plain = doc.add_layer("plain");
+        assert!(!doc.rasterize_frame_folder(plain));
     }
 
     #[test]
@@ -6861,6 +7019,7 @@ mod group_tests {
             Some(EdgeParams {
                 width_px: 6.0,
                 colour: [255, 255, 255],
+                ..EdgeParams::default()
             })
         ));
         doc.refresh_derived(600);

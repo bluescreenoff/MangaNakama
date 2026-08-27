@@ -1668,10 +1668,17 @@ pub struct ToolProps {
     pub flow: f32,
     /// Compositing mode of the wash commit (Krita: per-brush blending).
     pub brush_blend: Blend,
+    /// CSP Ink output (BM-029..035): the brush-only commit behaviours
+    /// (black/white burn, compare density, background, replace alpha).
+    /// Applies beside `brush_blend` at the wash commit; wash turns itself
+    /// on with the choice, exactly as the blend picker does.
+    pub brush_draw: mn_brush::BrushDraw,
     /// Texture-tip mask: 0 = none, else 1.. into `App::texture_names`.
     pub texture: u16,
     /// Texture crawl per dab in mask px (0 = static pattern).
     pub texture_scroll: f32,
+    /// B-031/032: what a stamped tip's rotation follows.
+    pub texture_rotate: mn_brush::TextureRotate,
     /// Krita SKETCH engine: link strokes back to their recent history.
     pub sketch: bool,
     /// Max link distance in canvas px.
@@ -1725,7 +1732,9 @@ impl Default for ToolProps {
             wash: false,
             flow: 1.0,
             brush_blend: Blend::Normal,
+            brush_draw: mn_brush::BrushDraw::Normal,
             texture: 0,
+            texture_rotate: mn_brush::TextureRotate::Fixed,
             texture_scroll: 0.0,
             sketch: false,
             sketch_dist: 40.0,
@@ -1894,6 +1903,10 @@ pub enum AppCmd {
     /// Layer ▸ Convert layer… (row 33): rasterize / re-expression /
     /// re-blend / rename, keep-or-replace.
     ConvertOpen,
+    /// Layer ▸ Rasterize frame folder (row 32): the frame folder owning
+    /// the active layer — border becomes ink, the panel clip becomes
+    /// child layer masks, children stay separate. One undo.
+    FrameFolderRasterize,
     ConvertLayer {
         rasterize: bool,
         expression: Option<mn_core::doc::LayerExpression>,
@@ -2268,6 +2281,9 @@ pub enum AppCmd {
     /// Copy a preset to the next free `<prefix>-N.myb` beside it, sharing
     /// the original's tip texture — the "start from this brush" gesture.
     DuplicateBrush(PathBuf),
+    /// Brush shape presets (B-009..013) v1: save the SELECTED brush with
+    /// its current Tool Property state as a new sub tool in `mine/`.
+    BrushSaveCurrent,
     /// Remove a preset's .myb. The texture PNG stays (it can be shared) and
     /// there is no undo, which is why the status line names what went.
     DeleteBrush(PathBuf),
@@ -2309,10 +2325,16 @@ pub enum AppCmd {
     SetFlow(f32),
     /// Compositing mode of the wash commit (Krita: per-brush blending).
     SetBrushBlend(Blend),
+    /// CSP Ink output row (BM-029..035) - the brush-only commit
+    /// behaviours (black/white burn, compare density, background,
+    /// replace alpha).
+    SetBrushDraw(mn_brush::BrushDraw),
     /// Texture-tip mask by `texture_names` index (0 = none).
     SetTexture(u16),
     /// Texture crawl per dab, mask px.
     SetTextureScroll(f32),
+    /// B-031/032: stamped-tip rotation source (fixed / stroke / pen tilt).
+    SetTextureRotate(mn_brush::TextureRotate),
     /// Krita SKETCH engine on/off (history-linking filaments).
     SetSketch(bool),
     SetSketchDistance(f32),
@@ -2337,6 +2359,9 @@ pub enum AppCmd {
     /// brush and adapter allow. Replaces `--gpu-dabs` as the user-facing
     /// switch; the flag stays a startup override for the test bat/harness.
     SetGpuDabs(bool),
+    /// LP-022 page half: display the whole canvas as monochrome — view
+    /// state, never a composite or export.
+    SetMonoPreview(bool),
     /// Set the colour of the active (non-transparent) slot, and record it
     /// in the Recent strip. This is the choke point every colour change
     /// should use — a new colour path gets the history for free.
@@ -2525,6 +2550,13 @@ pub enum AppCmd {
     /// Rows 78/76: delete the Object tool's whole selection (the set
     /// plus the primary), texts and balloons, ONE undo step.
     ObjectMultiDelete,
+    /// Rows 76/78's open half: translate every member of the Object
+    /// tool's multi-selection (texts, balloons, effect-line runs, whole
+    /// frame folders) by whole pixels — ONE undo step for the set.
+    ObjectMultiMove {
+        dx: i32,
+        dy: i32,
+    },
     // --- text ---------------------------------------------------------------
     /// Commit a text layer's items (Object-tool move/resize/rotate, or an
     /// editing session's single undo step).
@@ -4041,6 +4073,36 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             app.convert_open = !app.convert_open;
             app.mark_dirty();
         }
+        AppCmd::FrameFolderRasterize => {
+            // Target: the active layer when it IS a frame folder, else the
+            // frame folder owning it (the same walk FrameFoldersCombine
+            // uses — pasting into a panel targets the folder, so does
+            // this).
+            let target = if app.doc.active_layer().folder && app.doc.active_layer().is_frame() {
+                Some(app.doc.active)
+            } else {
+                let mut f = enclosing_folder(&app.doc, app.doc.active);
+                while let Some(i) = f
+                    && !(app.doc.layers[i].folder && app.doc.layers[i].is_frame())
+                {
+                    f = enclosing_folder(&app.doc, i);
+                }
+                f
+            };
+            let Some(li) = target else {
+                app.set_status("no frame folder to rasterize");
+                return;
+            };
+            if app.doc.rasterize_frame_folder(li) {
+                app.set_status(
+                    "frame rasterized — the border is ink, the panel is a mask, \
+                     the layers stayed separate (one undo)",
+                );
+                app.mark_dirty();
+            } else {
+                app.set_status("that layer is not a frame folder");
+            }
+        }
         AppCmd::ConvertLayer {
             rasterize,
             expression,
@@ -5285,6 +5347,144 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 if n == 1 { "" } else { "s" }
             ));
             app.mark_dirty();
+        }
+        AppCmd::ObjectMultiMove { dx, dy } => {
+            app.cancel_text_edit();
+            let mut members: Vec<crate::app::ObjRef> = app.object_multi.clone();
+            if let Some(p) = app.object_selection()
+                && !members.contains(&p)
+            {
+                members.push(p);
+            }
+            let (fdx, fdy) = (dx as f32, dy as f32);
+            let mut pushed = 0usize;
+            let mut moved = 0usize;
+            // Texts and balloons batch per layer — one undo group per
+            // layer, not per item. A move never removes anything, so
+            // member indices stay valid in any order.
+            let mut text_layers: Vec<(usize, Vec<usize>)> = Vec::new();
+            let mut balloon_layers: Vec<(usize, Vec<usize>)> = Vec::new();
+            for r in &members {
+                match r {
+                    crate::app::ObjRef::Text(l, t) => {
+                        if let Some(e) = text_layers.iter_mut().find(|(L, _)| L == l) {
+                            e.1.push(*t);
+                        } else {
+                            text_layers.push((*l, vec![*t]));
+                        }
+                    }
+                    crate::app::ObjRef::Balloon(l, b) => {
+                        if let Some(e) = balloon_layers.iter_mut().find(|(L, _)| L == l) {
+                            e.1.push(*b);
+                        } else {
+                            balloon_layers.push((*l, vec![*b]));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            for (l, tis) in text_layers {
+                let Some(mut ts) = app.doc.layers.get(l).and_then(|ly| ly.texts()).cloned()
+                else {
+                    continue;
+                };
+                let mut n = 0;
+                for t in tis {
+                    if t < ts.texts.len() {
+                        // A translate keeps the rendered sprite valid —
+                        // the same rule the single-text MoveWhole drag
+                        // commits under (no re-render, no cache miss).
+                        ts.texts[t].translate(fdx, fdy);
+                        n += 1;
+                    }
+                }
+                if n > 0 {
+                    app.doc.set_texts(l, ts);
+                    pushed += 1;
+                    moved += n;
+                }
+            }
+            for (l, bis) in balloon_layers {
+                let Some(mut bs) = app.doc.layers.get(l).and_then(|ly| ly.balloons()).cloned()
+                else {
+                    continue;
+                };
+                let mut n = 0;
+                for b in bis {
+                    if b < bs.balloons.len() {
+                        bs.balloons[b].translate(fdx, fdy);
+                        n += 1;
+                    }
+                }
+                if n > 0 {
+                    app.doc.set_balloons(l, bs);
+                    pushed += 1;
+                    moved += n;
+                }
+            }
+            // Effect-line runs: focus kinds carry their centre in a/b,
+            // speed lines only their convergence point — translate what
+            // is positional, regen, and count only successful regens.
+            for r in &members {
+                if let crate::app::ObjRef::Gen(l) = r
+                    && let Some(mut spec) = app.doc.layers.get(*l).and_then(|ly| ly.genlines.clone())
+                {
+                    if spec.focus {
+                        spec.a += fdx;
+                        spec.b += fdy;
+                    }
+                    if let Some(c) = spec.converge.as_mut() {
+                        c[0] += fdx;
+                        c[1] += fdy;
+                    }
+                    if app.doc.regen_genlines(*l, spec) {
+                        pushed += 1;
+                        moved += 1;
+                    }
+                }
+            }
+            // Frame folders: the panel geometry moves, the folder's
+            // children's pixels move with it — the single-folder
+            // MoveWhole semantics, per member.
+            for r in &members {
+                if let crate::app::ObjRef::Frame(l, f) = r {
+                    let Some(mut fs) = app.doc.layers.get(*l).and_then(|ly| ly.frames()).cloned()
+                    else {
+                        continue;
+                    };
+                    if *f >= fs.frames.len() {
+                        continue;
+                    }
+                    fs.frames[*f].translate(fdx, fdy);
+                    for k in app.doc.children_range(*l) {
+                        let mask_before = app.doc.layers[k].mask.clone();
+                        let rev0 = mask_before.as_ref().map(|m| m.revision);
+                        app.doc.begin_op_on(k);
+                        app.doc.set_op_label("Move panel");
+                        app.doc.layers[k].translate_content(dx, dy);
+                        app.doc.end_op();
+                        let rev1 = app.doc.layers[k].mask.as_ref().map(|m| m.revision);
+                        if rev1 != rev0 {
+                            app.doc.record_mask_change(k, mask_before, "Move panel");
+                        }
+                        pushed += 1;
+                    }
+                    app.doc.set_frames(*l, fs);
+                    pushed += 1;
+                    moved += 1;
+                }
+            }
+            if pushed > 1 {
+                app.doc.wrap_recent("Move objects", pushed);
+            }
+            if moved > 0 {
+                app.set_status(format!(
+                    "moved {moved} object{} — one undo",
+                    if moved == 1 { "" } else { "s" }
+                ));
+                app.mark_dirty();
+            }
+            app.needs_redraw = true;
         }
         AppCmd::BalloonDelete { layer, balloon } => {
             if let Some(bs) = app.doc.layers.get(layer).and_then(|l| l.balloons()) {
@@ -6648,6 +6848,7 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
         // path is a preset the artist owns before touching the disk.
         AppCmd::RenameBrush { path, name } => app.rename_brush(path, name),
         AppCmd::DuplicateBrush(p) => app.duplicate_brush(p),
+        AppCmd::BrushSaveCurrent => app.save_current_brush(),
         AppCmd::DeleteBrush(p) => app.delete_brush(p),
         AppCmd::SetBrushSizePx(px) => {
             let px = if px.is_finite() { px } else { DEFAULT_SIZE_PX };
@@ -6782,6 +6983,25 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             e.set_wash(on, op, b);
             app.mark_dirty();
         }
+        AppCmd::SetBrushDraw(d) => {
+            // The ink output is a wash-COMMIT behaviour: choosing one
+            // turns the buffer on (and Normal turns no such trick — it
+            // just restores the plain blend), the same contract the
+            // blend picker applies to itself.
+            app.props_current.brush_draw = d;
+            let wants_wash = d != mn_brush::BrushDraw::Normal;
+            if wants_wash {
+                app.props_current.wash = true;
+            }
+            let p = app.props_current;
+            let e = app.engine_mut();
+            e.set_wash_draw(d);
+            if wants_wash {
+                e.set_flow(p.flow);
+                e.set_wash(true, p.opacity, p.brush_blend);
+            }
+            app.mark_dirty();
+        }
         AppCmd::SetTexture(idx) => {
             app.props_current.texture = idx.min(app.texture_names.len() as u16);
             let p = app.props_current;
@@ -6801,6 +7021,11 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             app.props_current.texture_scroll = v.clamp(0.0, 64.0);
             let s = app.props_current.texture_scroll;
             app.engine_mut().set_texture_scroll(s);
+            app.mark_dirty();
+        }
+        AppCmd::SetTextureRotate(r) => {
+            app.props_current.texture_rotate = r;
+            app.engine_mut().set_texture_rotate(r);
             app.mark_dirty();
         }
         AppCmd::SetSketch(on) => {
@@ -6909,6 +7134,20 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 "gpu dabs: on — strokes rasterize on the gpu"
             } else {
                 "gpu dabs: off — cpu dab path"
+            });
+        }
+        AppCmd::SetMonoPreview(on) => {
+            // View state, not document state: the canvas re-composites with
+            // every layer forced to the 1-bit look, and nothing else — no
+            // pixel changes, no export change, no dirty flag.
+            app.renderer.mono_preview = on;
+            app.layout.mono_preview = on;
+            app.layout.dirty = true;
+            app.needs_redraw = true;
+            app.set_status(if on {
+                "monochrome preview on — display only, exports stay in colour"
+            } else {
+                "monochrome preview off"
             });
         }
         // --- colour slots ---------------------------------------------------

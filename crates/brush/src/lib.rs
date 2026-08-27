@@ -40,7 +40,7 @@ pub use kpp::{KppPreset, parse_kpp, parse_kpp_file};
 pub use dab::{CurveDab, DynaDab, GridDab, HairyDab, SimpleDab};
 pub use mn_core::dab::{DabParams, DabRecord};
 pub use mybrush::{
-    AntiAlias, BrushError, BrushLibrary, DENSITY_BY_GAP_DEFAULT, Interval, MyBrush, RecordMode,
+    AntiAlias, BrushDraw, BrushError, BrushLibrary, TextureRotate, DENSITY_BY_GAP_DEFAULT, Interval, MyBrush, RecordMode,
     SketchParams, TextureMask, commit_wash, load_texture,
 };
 pub use surface::{TileOracle, set_tile_oracle};
@@ -1154,6 +1154,123 @@ mod tests {
         assert!(!pen.wash() && pen.wash_blend() == mn_core::Blend::Normal);
     }
 
+    /// The blend key round-trips EVERY layer mode (the old parser knew
+    /// multiply/screen only — anything else loaded as Normal), and the
+    /// ink-output key carries the CSP drawing modes.
+    #[test]
+    fn brush_blend_and_ink_keys_round_trip() {
+        let dir = std::env::temp_dir().join("mn-brush-tests");
+        std::fs::create_dir_all(&dir).unwrap();
+        for b in mn_core::Blend::ALL {
+            let p = dir.join("blend-rt.myb");
+            std::fs::write(
+                &p,
+                format!(
+                    r#"{{"version": 3, "settings": {{}}, "mn-wash": true,
+                        "mn-brush-blend": "{}"}}"#,
+                    b.short_name()
+                ),
+            )
+            .unwrap();
+            assert_eq!(
+                MyBrush::load(&p).unwrap().wash_blend(),
+                b,
+                "short name {} round-trips",
+                b.short_name()
+            );
+        }
+        for (key, want) in [
+            ("black-burn", BrushDraw::BlackBurn),
+            ("white-burn", BrushDraw::WhiteBurn),
+            ("compare-density", BrushDraw::CompareDensity),
+            ("background", BrushDraw::Background),
+            ("replace-alpha", BrushDraw::ReplaceAlpha),
+            ("nonsense-stays-normal", BrushDraw::Normal),
+        ] {
+            let p = dir.join("draw-rt.myb");
+            std::fs::write(
+                &p,
+                format!(r#"{{"version": 3, "settings": {{}}, "mn-brush-draw": "{key}"}}"#),
+            )
+            .unwrap();
+            assert_eq!(MyBrush::load(&p).unwrap().wash_draw(), want, "{key}");
+        }
+    }
+
+    /// CSP's ink output (BM-029..035) at the wash commit, one table row
+    /// per behaviour. Base: half-opaque red [0.5, 0, 0, 0.5]; stroke:
+    /// fully opaque blue at stroke opacity 1. Premultiplied throughout.
+    #[test]
+    fn brush_draw_modes_commit_as_csp_ink_output() {
+        use mn_core::blend::f32_to_fix15;
+        let put = |doc: &mut Document, v: [f32; 4]| {
+            let t = doc.active_layer_mut().tile_mut(mn_core::TileIdx::new(0, 0));
+            let d = t.data_mut();
+            let o = (10 * 64 + 10) * 4;
+            for c in 0..4 {
+                d[o + c] = f32_to_fix15(v[c]);
+            }
+        };
+        let read = |doc: &Document| -> [f32; 4] {
+            let o = (10 * 64 + 10) * 4;
+            doc.active_layer()
+                .tile_arc(mn_core::TileIdx::new(0, 0))
+                .map(|t| {
+                    let d = t.data();
+                    [
+                        d[o] as f32 / 32768.0,
+                        d[o + 1] as f32 / 32768.0,
+                        d[o + 2] as f32 / 32768.0,
+                        d[o + 3] as f32 / 32768.0,
+                    ]
+                })
+                .unwrap_or([0.0; 4])
+        };
+        let run = |draw: BrushDraw, dst: [f32; 4]| {
+            let mut buf = Document::new(64, 64);
+            put(&mut buf, [0.0, 0.0, 1.0, 1.0]);
+            let mut doc = Document::new(64, 64);
+            put(&mut doc, dst);
+            commit_wash(
+                &buf,
+                &mut doc,
+                1.0,
+                mn_core::Blend::Normal,
+                draw,
+                false,
+            );
+            read(&doc)
+        };
+        let near = |a: [f32; 4], b: [f32; 4]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 0.01);
+        // Over: plain blue.
+        assert!(near(run(BrushDraw::Normal, [0.5, 0.0, 0.0, 0.5]), [0.0, 0.0, 1.0, 1.0]));
+        // Black burn: darkens existing ink only — transparent base untouched.
+        assert!(near(run(BrushDraw::BlackBurn, [0.5, 0.0, 0.0, 0.5]), [0.0, 0.0, 0.0, 0.5]));
+        assert!(near(run(BrushDraw::BlackBurn, [0.0; 4]), [0.0; 4]));
+        // White burn: lightens toward the ink's own coverage, alpha kept.
+        assert!(near(run(BrushDraw::WhiteBurn, [0.5, 0.0, 0.0, 0.5]), [0.5, 0.5, 0.5, 0.5]));
+        assert!(near(run(BrushDraw::WhiteBurn, [0.0; 4]), [0.0; 4]));
+        // Compare density: the denser pixel wins.
+        assert!(near(run(BrushDraw::CompareDensity, [0.5, 0.0, 0.0, 0.5]), [0.0, 0.0, 1.0, 1.0]));
+        let mut thin = Document::new(64, 64);
+        put(&mut thin, [0.0, 0.0, 1.0, 1.0]);
+        let mut doc = Document::new(64, 64);
+        put(&mut doc, [0.0, 0.0, 0.0, 1.0]); // dst denser (fully opaque black)
+        commit_wash(&thin, &mut doc, 0.25, mn_core::Blend::Normal, BrushDraw::CompareDensity, false);
+        assert!(near(read(&doc), [0.0, 0.0, 0.0, 1.0]), "denser base kept");
+        // Background: lands UNDER — dst over stroke.
+        assert!(near(run(BrushDraw::Background, [0.5, 0.0, 0.0, 0.5]), [0.5, 0.0, 0.5, 1.0]));
+        // Replace alpha: colour over-composites, alpha becomes the stroke's.
+        assert!(near(run(BrushDraw::ReplaceAlpha, [0.5, 0.0, 0.0, 0.5]), [0.0, 0.0, 1.0, 1.0]));
+        let mut buf = Document::new(64, 64);
+        put(&mut buf, [0.0, 0.0, 1.0, 1.0]);
+        let mut doc = Document::new(64, 64);
+        put(&mut doc, [0.5, 0.0, 0.0, 0.5]);
+        commit_wash(&buf, &mut doc, 0.5, mn_core::Blend::Normal, BrushDraw::ReplaceAlpha, false);
+        // s_a = 0.5: colour = 0.5·blue + 0.5·red-premul = [0.25, 0, 0.5], a = 0.5.
+        assert!(near(read(&doc), [0.25, 0.0, 0.5, 0.5]));
+    }
+
     /// The curve editor's engine contract: mapping points round-trip through
     /// the C setters for ANY setting x input, and an edited pressure→size
     /// curve visibly changes the stroke.
@@ -1295,7 +1412,7 @@ mod tests {
             b.set_hard_dab(true);
             b.set_texture(Some(half_ink()));
             b.set_texture_anchor_dab(true);
-            b.set_texture_rotate_direction(true);
+            b.set_texture_rotate(TextureRotate::Direction);
             b.set_base_value(
                 settings::setting_id("radius_logarithmic").unwrap(),
                 16f32.ln(),
@@ -1316,6 +1433,81 @@ mod tests {
         let left = directional(true); // direction ≈ 180°: trailing = right
         assert!(window(&right, 86, 98) > 0 && window(&right, 403, 415) == 0);
         assert!(window(&left, 86, 98) == 0 && window(&left, 403, 415) > 0);
+    }
+
+    /// B-032: Tilt mode — the same straight stroke, opposite pen tilt
+    /// bearings, mirrored ink (top/bottom bands at the stroke's end).
+    /// Fixed mode ignores tilt entirely: the control pair must match.
+    #[test]
+    fn dab_anchored_stamps_can_follow_pen_tilt() {
+        let half_ink = || {
+            let size = 64usize;
+            let mut data = vec![0u8; size * size];
+            for y in 0..size {
+                for x in 0..size / 2 {
+                    data[y * size + x] = 255;
+                }
+            }
+            Arc::new(TextureMask {
+                name: "half".into(),
+                size: size as u32,
+                data: Arc::new(data),
+            })
+        };
+        let tilted = |mode: TextureRotate, tilt_x: f32| -> Document {
+            let mut doc = Document::new(512, 512);
+            let mut b = MyBrush::load(&preset("pen.myb")).unwrap();
+            b.set_hard_dab(true);
+            b.set_texture(Some(half_ink()));
+            b.set_texture_anchor_dab(true);
+            b.set_texture_rotate(mode);
+            b.set_base_value(
+                settings::setting_id("radius_logarithmic").unwrap(),
+                16f32.ln(),
+            );
+            b.begin(&mut doc);
+            for i in 0..=60 {
+                let mut s = sample(100.0 + i as f32 * 5.0, 256.0, 1.0, i as f64 * 8.0);
+                s.tilt_x = tilt_x;
+                b.sample(&mut doc, s);
+            }
+            b.end(&mut doc);
+            doc
+        };
+        // Above vs below the stroke's LAST stretch (centres end at x=400,
+        // radius 16): at ascension ±90° the half-ink stamp's dry half sits
+        // on one side only — and the side flips with the tilt's sign.
+        let band = |doc: &Document, above: bool| -> u64 {
+            let (y0, y1) = if above { (234, 246) } else { (266, 278) };
+            let mut sum = 0u64;
+            for x in 370..400 {
+                for y in y0..y1 {
+                    let idx = TileIdx::of_pixel(x, y);
+                    if let Some(t) = doc.active_layer().tile(idx) {
+                        sum += u64::from(
+                            t.pixel((x - idx.origin().0) as usize, (y - idx.origin().1) as usize)[3],
+                        );
+                    }
+                }
+            }
+            sum
+        };
+        let up = tilted(TextureRotate::Tilt, 50.0);
+        let down = tilted(TextureRotate::Tilt, -50.0);
+        assert_ne!(
+            band(&up, true) + band(&up, false),
+            0,
+            "the tilted stroke inked something"
+        );
+        assert!(
+            band(&up, true) != band(&down, true) || band(&up, false) != band(&down, false),
+            "opposite tilt bearings orient the stamp differently"
+        );
+        // Fixed ignores tilt: matching documents.
+        let f1 = tilted(TextureRotate::Fixed, 50.0);
+        let f2 = tilted(TextureRotate::Fixed, -50.0);
+        assert_eq!(band(&f1, true), band(&f2, true));
+        assert_eq!(band(&f1, false), band(&f2, false));
     }
 
     /// Krita texture tips (vendor/PATCHES.md #10): the mask multiplies the

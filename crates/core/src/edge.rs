@@ -43,6 +43,20 @@ pub struct EdgeParams {
     pub width_px: f32,
     /// Outline colour, straight RGB. Drawn at full alpha under the art.
     pub colour: [u8; 3],
+    /// LP-004 (CSP 水彩境界): `Solid` = the keyline above; `Watercolour`
+    /// = a pale stain rim whose colour is DERIVED from the layer's own
+    /// nearest ink (the picked colour is ignored). Absent on every file
+    /// written before the field existed = Solid, byte-for-byte.
+    #[serde(default)]
+    pub style: EdgeStyle,
+}
+
+/// What the border effect draws (see [`EdgeParams::style`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum EdgeStyle {
+    #[default]
+    Solid,
+    Watercolour,
 }
 
 impl Default for EdgeParams {
@@ -76,7 +90,10 @@ impl EdgeParams {
     pub fn sig(self) -> [u32; 2] {
         [
             self.width_px.to_bits(),
-            (self.colour[0] as u32) << 16 | (self.colour[1] as u32) << 8 | self.colour[2] as u32,
+            (self.colour[0] as u32) << 16
+                | (self.colour[1] as u32) << 8
+                | self.colour[2] as u32
+                | ((self.style as u32) << 28),
         ]
     }
 }
@@ -163,7 +180,17 @@ pub const INK_ALPHA: u16 = 16384;
 /// row-major, `0.0` where the source is inked and [`INF`] elsewhere — and is
 /// consumed (turned into squared distances). Passing the scratch buffer in
 /// lets the caller reuse one allocation across a whole layer.
-pub fn derive_tile(seed: &mut [f32], r: usize, src: Option<&Tile>, p: EdgeParams) -> Tile {
+///
+/// `cwin` is the same window's PREMULTIPLIED fix15 pixels (side²×4, zero
+/// where nothing inked), required only by [`EdgeStyle::Watercolour`]'s
+/// colour sampling — pass an empty slice for the solid style.
+pub fn derive_tile(
+    seed: &mut [f32],
+    r: usize,
+    src: Option<&Tile>,
+    p: EdgeParams,
+    cwin: &[u16],
+) -> Tile {
     let side = TILE_SIZE + 2 * r;
     let w = p.width();
     // Zero width is a real OFF, not a hairline. Without this the half-pixel
@@ -202,13 +229,24 @@ pub fn derive_tile(seed: &mut [f32], r: usize, src: Option<&Tile>, p: EdgeParams
                 }
                 continue;
             }
+            // Watercolour (LP-004): the rim's colour comes from the layer's
+            // OWN nearest ink (gradient descent on the distance field — the
+            // EDT already knows the way) and lands paler than the solid
+            // keyline, a stain rather than a line. The picked `colour` is
+            // ignored entirely.
+            let (rim_colour, rim_a) = if p.style == EdgeStyle::Watercolour {
+                let stain = nearest_ink_colour(seed, cwin, side, x + r, y + r, colour);
+                (stain, oa * 0.75)
+            } else {
+                (colour, oa)
+            };
             // Source OVER outline, premultiplied — the same three lines the
             // text engine's フチ runs, in fix15 instead of 8-bit.
             let fa = s[3] as f32 / 32768.0;
-            let blend = oa * (1.0 - fa);
+            let blend = rim_a * (1.0 - fa);
             let o = Tile::offset(x, y);
             for c in 0..3 {
-                d[o + c] = (s[c] as f32 + colour[c] * blend * 32768.0)
+                d[o + c] = (s[c] as f32 + rim_colour[c] * blend * 32768.0)
                     .round()
                     .clamp(0.0, 32768.0) as u16;
             }
@@ -216,6 +254,60 @@ pub fn derive_tile(seed: &mut [f32], r: usize, src: Option<&Tile>, p: EdgeParams
         }
     }
     out
+}
+
+/// The watercolour rim's colour at one ring pixel: unpremultiplied colour
+/// of the nearest inked window pixel, falling back to the picked colour
+/// when the descent finds nothing (cannot happen on a real ring — the
+/// field has ink somewhere within `reach` — but a derived tile must never
+/// guess garbage).
+fn nearest_ink_colour(
+    seed: &[f32],
+    cwin: &[u16],
+    side: usize,
+    mut x: usize,
+    mut y: usize,
+    fallback: [f32; 3],
+) -> [f32; 3] {
+    if cwin.len() < side * side * 4 {
+        return fallback;
+    }
+    // Descend the squared-distance field: some 8-neighbour is strictly
+    // smaller until we stand on ink. Bounded by the window's diagonal.
+    for _ in 0..(side * side) {
+        if seed[y * side + x] == 0.0 {
+            break;
+        }
+        let mut best = seed[y * side + x];
+        let (mut bx, mut by) = (x, y);
+        for dy in -1i32..=1 {
+            for dx in -1i32..=1 {
+                let (nx, ny) = (x as i32 + dx, y as i32 + dy);
+                if nx < 0 || ny < 0 || nx >= side as i32 || ny >= side as i32 {
+                    continue;
+                }
+                let v = seed[ny as usize * side + nx as usize];
+                if v < best {
+                    best = v;
+                    (bx, by) = (nx as usize, ny as usize);
+                }
+            }
+        }
+        if (bx, by) == (x, y) {
+            break; // local minimum that is not ink: give up, fall back
+        }
+        (x, y) = (bx, by);
+    }
+    let o = (y * side + x) * 4;
+    let a = cwin[o + 3] as f32 / 32768.0;
+    if a <= 0.0 {
+        return fallback;
+    }
+    [
+        cwin[o] as f32 / 32768.0 / a,
+        cwin[o + 1] as f32 / 32768.0 / a,
+        cwin[o + 2] as f32 / 32768.0 / a,
+    ]
 }
 
 #[cfg(test)]
@@ -262,12 +354,13 @@ mod tests {
         let p = EdgeParams {
             width_px: 2.0,
             colour: [255, 255, 255],
+            ..EdgeParams::default()
         };
         let r = p.reach();
         let side = TILE_SIZE + 2 * r;
         let mut seed = vec![INF; side * side];
         seed[(32 + r) * side + (32 + r)] = 0.0;
-        let out = derive_tile(&mut seed, r, Some(&src), p);
+        let out = derive_tile(&mut seed, r, Some(&src), p, &[]);
 
         assert_eq!(out.pixel(32, 32), [0, 0, 0, 32768], "the ink is untouched");
         let ring = out.pixel(33, 32);
@@ -294,11 +387,12 @@ mod tests {
         let p = EdgeParams {
             width_px: 0.0,
             colour: [255, 0, 0],
+            ..EdgeParams::default()
         };
         let side = TILE_SIZE;
         let mut seed = vec![INF; side * side];
         seed[10 * side + 10] = 0.0;
-        let out = derive_tile(&mut seed, 0, Some(&src), p);
+        let out = derive_tile(&mut seed, 0, Some(&src), p, &[]);
         assert_eq!(out.pixel(10, 10), [1000, 2000, 3000, 20000]);
         assert_eq!(out.pixel(11, 10), [0; 4]);
     }
@@ -317,8 +411,62 @@ mod tests {
                 colour: [1, 2, 3],
                 ..base
             },
+            EdgeParams {
+                style: EdgeStyle::Watercolour,
+                ..base
+            },
         ] {
             assert_ne!(v.sig(), base.sig(), "{v:?} hashes the same as the default");
         }
+    }
+
+    /// LP-004 watercolour edge: the rim's colour comes from the layer's
+    /// OWN nearest ink (the picked colour is ignored), and it lands
+    /// paler than the solid keyline at the same width.
+    #[test]
+    fn watercolour_derives_a_pale_rim_from_the_ink() {
+        let mut src = Tile::new_transparent();
+        // A solid RED ink pixel (premul fix15: full red at full alpha).
+        src.set_pixel(32, 32, [32768, 0, 0, 32768]);
+        let p = EdgeParams {
+            width_px: 2.0,
+            // Blue on purpose: a watercolour rim that used it would fail
+            // every assertion below.
+            colour: [0, 0, 255],
+            style: EdgeStyle::Watercolour,
+        };
+        let r = p.reach();
+        let side = TILE_SIZE + 2 * r;
+        let mut seed = vec![INF; side * side];
+        let mut cwin = vec![0u16; side * side * 4];
+        let w = (32 + r) * side + (32 + r);
+        seed[w] = 0.0;
+        cwin[w * 4..w * 4 + 4].copy_from_slice(&[32768, 0, 0, 32768]);
+        let out = derive_tile(&mut seed, r, Some(&src), p, &cwin);
+
+        let ring = out.pixel(33, 32);
+        assert!(ring[3] > 20000, "the stain is there: {}", ring[3]);
+        assert!(
+            ring[3] < 32768,
+            "and paler than the solid ring's full coverage"
+        );
+        assert!(
+            ring[0] > ring[2],
+            "the rim is RED (derived), not blue (picked): {ring:?}"
+        );
+        assert_eq!(out.pixel(32, 32), [32768, 0, 0, 32768], "ink untouched");
+        assert_eq!(out.pixel(35, 32), [0; 4], "over by 3 px out, as ever");
+    }
+
+    /// Old files load as Solid: the style field is serde-defaulted, so a
+    /// JSON blob written before it existed deserializes to the keyline.
+    #[test]
+    fn edge_params_without_a_style_load_solid() {
+        let v: EdgeParams = serde_json::from_str(
+            r#"{"width_px": 3.0, "colour": [12, 34, 56]}"#,
+        )
+        .unwrap();
+        assert_eq!(v.style, EdgeStyle::Solid);
+        assert_eq!(v.width_px, 3.0);
     }
 }

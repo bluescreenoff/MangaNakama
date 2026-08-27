@@ -553,6 +553,9 @@ fn main() {
             "inking runs on the GPU: measured faster on this machine (View menu to change)",
         );
     }
+    // LP-022 page half: restore the saved monochrome preview. Display-only,
+    // so applying it here is just one renderer flag.
+    app.renderer.mono_preview = app.layout.mono_preview;
     // Whether the measurement child started, in words, for the log block
     // below — a user whose GPU was never measured has to be able to see
     // that the attempt happened (or why it could not).

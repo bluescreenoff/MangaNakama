@@ -117,6 +117,118 @@ impl App {
         Some(name)
     }
 
+    /// Brush shape presets (B-009..013), our v1: "Save current settings
+    /// as brush" — the selected preset cloned into `mine/` with the
+    /// CURRENT Tool Property state folded back into the file, so the
+    /// brush as tuned becomes a named sub tool of its own. Applying a
+    /// shape = picking the saved preset (CSP separates shape from
+    /// colour; our preset is the whole brush — the recorded v1
+    /// deviation). The source may be a SHIPPED preset: tuning a stock
+    /// brush and keeping the tuned copy is the whole point, and the copy
+    /// always lands in owned territory.
+    pub fn save_current_brush(&mut self) {
+        let Some(root) = self.brushes_root.clone() else {
+            return self.set_error("save brush: no brushes folder found");
+        };
+        let Some(src) = self
+            .selected_preset
+            .and_then(|i| self.presets.get(i))
+            .map(|(_, p)| p.clone())
+        else {
+            return self.set_error("save brush: no sub tool selected");
+        };
+        let props = self.props_current;
+        let textures = self.texture_names.clone();
+        let Some((path, name)) = self.save_current_into(root, &src, &props, &textures) else {
+            return self.set_error("save brush: the preset could not be read");
+        };
+        self.rescan_keeping_selection();
+        if let Some((_, p)) = self.presets.iter().find(|(_, p)| *p == path) {
+            let p = p.clone();
+            self.push_cmd(AppCmd::SelectBrush(p));
+        }
+        self.set_status(format!(
+            "saved as \"{name}\" in Mine — the tuned brush is a sub tool of its own now"
+        ));
+    }
+
+    /// The write half, root injected like its siblings. Returns the new
+    /// file and its display name.
+    pub(crate) fn save_current_into(
+        &self,
+        root: PathBuf,
+        src: &Path,
+        props: &crate::cmd::ToolProps,
+        texture_names: &[String],
+    ) -> Option<(PathBuf, String)> {
+        let mut json = read_preset(src)?;
+        let mine = root.join("mine");
+        std::fs::create_dir_all(&mine).ok()?;
+        let stem = src.file_stem()?.to_str()?;
+        let dst = free_copy_path(&mine, stem);
+        let name = format!("{} copy", display_name(src));
+        json["name"] = serde_json::json!(name);
+        json["group"] = serde_json::json!("mine");
+        if !json.get("settings").is_some_and(|s| s.is_object()) {
+            json["settings"] = serde_json::json!({});
+        }
+        let settings = json.get_mut("settings")?.as_object_mut()?;
+        let set = |s: &mut serde_json::Map<String, serde_json::Value>, k: &str, v: f64| {
+            s.insert(k.into(), serde_json::json!({ "base_value": v }));
+        };
+        // Size: the px rail inverted through the same ln the imports use.
+        set(settings, "radius_logarithmic", super::abr::rlog(props.size_px as f64));
+        // Wash pair: the sliders' current split, or the plain per-dab
+        // opacity in build-up.
+        json["mn-wash"] = serde_json::json!(props.wash);
+        if props.wash {
+            json["mn-wash-opacity"] = serde_json::json!(props.opacity);
+            set(settings, "opaque", props.flow as f64);
+        } else {
+            set(settings, "opaque", props.opacity as f64);
+        }
+        json["mn-hard-dab"] = serde_json::json!(props.hard_dab);
+        json["mn-scatter"] = serde_json::json!(props.scatter);
+        if props.brush_blend != mn_core::Blend::Normal {
+            json["mn-brush-blend"] = serde_json::json!(props.brush_blend.short_name());
+        } else {
+            json.as_object_mut()?.remove("mn-brush-blend");
+        }
+        match props.brush_draw.key_name() {
+            Some(k) => {
+                json["mn-brush-draw"] = serde_json::json!(k);
+            }
+            None => {
+                json.as_object_mut()?.remove("mn-brush-draw");
+            }
+        }
+        match props.texture {
+            0 => {
+                let o = json.as_object_mut()?;
+                o.remove("mn-texture");
+                o.remove("mn-texture-scroll");
+                o.remove("mn-texture-rotate");
+            }
+            n => {
+                if let Some(t) = texture_names.get(n as usize - 1) {
+                    json["mn-texture"] = serde_json::json!(t);
+                    json["mn-texture-scroll"] = serde_json::json!(props.texture_scroll);
+                    let r = match props.texture_rotate {
+                        mn_brush::TextureRotate::Fixed => "fixed",
+                        mn_brush::TextureRotate::Direction => "direction",
+                        mn_brush::TextureRotate::Tilt => "tilt",
+                    };
+                    json["mn-texture-rotate"] = serde_json::json!(r);
+                }
+            }
+        }
+        serde_json::to_string_pretty(&json)
+            .ok()
+            .and_then(|text| std::fs::write(&dst, text).ok())
+            .is_some()
+            .then_some((dst, name))
+    }
+
     /// Rescan and keep the selection on the same PRESET: every index above a
     /// created or deleted file moves, and `selected_preset` is an index.
     fn rescan_keeping_selection(&mut self) {
@@ -359,5 +471,77 @@ mod tests {
         assert!(!owned(&root, &root.join("mine/deep/x.myb")));
         assert!(!owned(&root, &root.join("mine/../csp/kabura.myb")));
         assert!(owned(&root, &root.join("imported/set-1.myb")));
+    }
+
+    /// Brush shape presets v1: the tuned state lands in `mine/` as a
+    /// preset that loads back with exactly those settings — from a
+    /// SHIPPED source too (tune a stock brush, keep the tuned copy).
+    #[test]
+    fn save_current_folds_the_tuned_state_into_a_new_preset() {
+        let Some(renderer) = headless_renderer() else {
+            return;
+        };
+        let app = App::new(renderer, (600, 400), 1.0);
+        let root = tmp_root("savecur");
+        // A SHIPPED source with its own texture reference.
+        let src = preset(&root, "csp", "kabura", "カブラペン");
+        let mut props = crate::cmd::ToolProps::default();
+        props.size_px = 42.0;
+        props.wash = true;
+        props.opacity = 0.7;
+        props.flow = 0.35;
+        props.brush_blend = mn_core::Blend::LinearBurn;
+        props.brush_draw = mn_brush::BrushDraw::Background;
+        props.texture = 1;
+        props.texture_scroll = 3.0;
+        props.texture_rotate = mn_brush::TextureRotate::Tilt;
+        let names = vec!["grain-7".to_owned()];
+        let (path, name) = app
+            .save_current_into(root.clone(), &src, &props, &names)
+            .expect("the shipped preset saves into mine/");
+        assert_eq!(path, root.join("mine/kabura-1.myb"));
+        assert_eq!(name, "カブラペン copy");
+        assert!(src.exists(), "the shipped original is untouched");
+
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(json["group"], "mine");
+        assert_eq!(json["mn-wash"], true);
+        assert_eq!(json["mn-wash-opacity"], 0.7);
+        assert_eq!(json["mn-brush-blend"], "linear-burn");
+        assert_eq!(json["mn-brush-draw"], "background");
+        assert_eq!(json["mn-texture"], "grain-7");
+        assert_eq!(json["mn-texture-scroll"], 3.0);
+        assert_eq!(json["mn-texture-rotate"], "tilt");
+        let rl = json["settings"]["radius_logarithmic"]["base_value"]
+            .as_f64()
+            .unwrap();
+        assert!((rl - (42.0 / 2.0).ln()).abs() < 1e-6, "size inverted: {rl}");
+
+        // The saved preset LOADS with the tuned state (texture absent on
+        // disk is fine — an unresolvable name keeps the brush usable).
+        let b = mn_brush::MyBrush::load(&path).expect("loads");
+        assert!(b.wash());
+        assert!((b.wash_opacity() - 0.7).abs() < 1e-6);
+        assert_eq!(b.wash_blend(), mn_core::Blend::LinearBurn);
+        assert_eq!(b.wash_draw(), mn_brush::BrushDraw::Background);
+
+        // Texture OFF drops the keys: the saved brush draws untextured.
+        props.texture = 0;
+        let (path2, _) = app
+            .save_current_into(root.clone(), &src, &props, &names)
+            .unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path2).unwrap()).unwrap();
+        assert!(json.get("mn-texture").is_none());
+        assert!(json.get("mn-texture-rotate").is_none());
+        // Normal blend leaves no stale key behind.
+        props.brush_blend = mn_core::Blend::Normal;
+        let (path3, _) = app
+            .save_current_into(root.clone(), &src, &props, &names)
+            .unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path3).unwrap()).unwrap();
+        assert!(json.get("mn-brush-blend").is_none());
     }
 }

@@ -311,15 +311,15 @@ impl Engine {
         }
     }
 
-    /// Wash commit parameters (stroke opacity, blend, erase arm).
-    pub fn wash_commit_params(&self) -> (f32, Blend, bool) {
+    /// Wash commit parameters (stroke opacity, blend, ink output, erase arm).
+    pub fn wash_commit_params(&self) -> (f32, Blend, mn_brush::BrushDraw, bool) {
         match &self.main {
             EngineKind::My(b) => b.wash_commit_params(),
             EngineKind::Dab(_)
             | EngineKind::Grid(_)
             | EngineKind::Hairy(_)
             | EngineKind::Curve(_)
-            | EngineKind::Dyna(_) => (1.0, Default::default(), false),
+            | EngineKind::Dyna(_) => (1.0, Default::default(), Default::default(), false),
         }
     }
 
@@ -651,6 +651,27 @@ impl Engine {
         }
     }
 
+    /// CSP Ink output (BM-029..035), wash-commit arm. Procedural engines
+    /// have no commit step — always Normal there.
+    pub fn set_wash_draw(&mut self, draw: mn_brush::BrushDraw) {
+        self.each_kind(|k| {
+            if let EngineKind::My(b) = k {
+                b.set_wash_draw(draw);
+            }
+        });
+    }
+
+    pub fn wash_draw(&self) -> mn_brush::BrushDraw {
+        match &self.main {
+            EngineKind::My(b) => b.wash_draw(),
+            EngineKind::Dab(_)
+            | EngineKind::Grid(_)
+            | EngineKind::Hairy(_)
+            | EngineKind::Curve(_)
+            | EngineKind::Dyna(_) => mn_brush::BrushDraw::Normal,
+        }
+    }
+
     /// Per-dab alpha inside a wash stroke (Krita: Flow). Same knob as
     /// `set_base_opacity`; this alias exists so call sites read honestly.
     pub fn set_flow(&mut self, flow: f32) {
@@ -695,6 +716,27 @@ impl Engine {
             | EngineKind::Hairy(_)
             | EngineKind::Curve(_)
             | EngineKind::Dyna(_) => 0.0,
+        }
+    }
+
+    /// B-031/032: stamped-tip rotation source. Procedural engines have no
+    /// tip image to rotate.
+    pub fn set_texture_rotate(&mut self, r: mn_brush::TextureRotate) {
+        self.each_kind(|k| {
+            if let EngineKind::My(b) = k {
+                b.set_texture_rotate(r);
+            }
+        });
+    }
+
+    pub fn texture_rotate(&self) -> mn_brush::TextureRotate {
+        match &self.main {
+            EngineKind::My(b) => b.texture_rotate(),
+            EngineKind::Dab(_)
+            | EngineKind::Grid(_)
+            | EngineKind::Hairy(_)
+            | EngineKind::Curve(_)
+            | EngineKind::Dyna(_) => mn_brush::TextureRotate::Fixed,
         }
     }
 
@@ -816,8 +858,10 @@ impl EngineKind {
         } else {
             b.set_wash(false, 1.0, Blend::Normal);
         }
+        b.set_wash_draw(p.brush_draw);
         b.set_texture(texture_mask.cloned());
         b.set_texture_scroll(p.texture_scroll);
+        b.set_texture_rotate(p.texture_rotate);
         b.set_sketch(p.sketch.then_some(mn_brush::SketchParams {
             distance: p.sketch_dist,
             density: p.sketch_density,

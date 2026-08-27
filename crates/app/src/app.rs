@@ -54,7 +54,7 @@ pub use transform::{
     ROTATE_STALK_SCREEN, TransformDrag, TransformGesture, TransformGrab, transform_preview,
 };
 
-pub use canvas_input::ObjRef;
+pub use canvas_input::{GroupObjDrag, ObjRef};
 use canvas_input::{BalloonObjDrag, ObjectDrag};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -943,6 +943,8 @@ pub struct App {
     pub object_combine: crate::cmd::SelectCombine,
     /// Object tool: live text move/resize/rotate drag.
     pub text_obj_drag: Option<TextObjDrag>,
+    /// Rows 76/78: live whole-set drag of the Object multi-selection.
+    pub group_drag: Option<GroupObjDrag>,
     /// Object tool: Tool-Property value-bar drag on the selected text item
     /// (size/char-space/line/edge) — live preview, ONE undo step on release
     /// (auditor round 34). None while a text edit session is up.
@@ -1614,6 +1616,7 @@ impl App {
             text_sel: None,
             object_multi: Vec::new(),
             object_combine: crate::cmd::SelectCombine::default(),
+            group_drag: None,
             text_obj_drag: None,
             text_bar_drag: None,
             transform_drag: None,
@@ -2093,8 +2096,10 @@ impl App {
                 wash,
                 flow: e.base_opacity(),
                 brush_blend: e.wash_blend(),
+                brush_draw: e.wash_draw(),
                 texture,
                 texture_scroll: e.texture_scroll(),
+                texture_rotate: e.texture_rotate(),
                 sketch: e.sketch().is_some(),
                 sketch_dist: e.sketch().map_or(40.0, |s| s.distance),
                 // 0.6, not the pre-M1-fix 0.3: the halved rng doubled the
@@ -3368,8 +3373,8 @@ impl App {
                     let tile = scratch.active_layer_mut().tile_mut(*idx);
                     tile.data_mut()[..data.len()].copy_from_slice(data);
                 }
-                let (opacity, blend, erase) = self.brush.inner().inner().wash_commit_params();
-                mn_brush::commit_wash(&scratch, &mut self.doc, opacity, blend, erase);
+                let (opacity, blend, draw, erase) = self.brush.inner().inner().wash_commit_params();
+                mn_brush::commit_wash(&scratch, &mut self.doc, opacity, blend, draw, erase);
             } else {
                 // Canary repair for wash: replay the dabs into a scratch
                 // buffer with the Rust rasterizer, then the same commit.
@@ -3381,8 +3386,8 @@ impl App {
                 let mut scratch = mn_core::Document::new(self.doc.size.0, self.doc.size.1);
                 let tex = self.brush.inner().inner().texture_flush();
                 mn_brush::rasterize_dabs(&mut scratch, 0, &st.all_dabs, st.hard, tex);
-                let (opacity, blend, erase) = self.brush.inner().inner().wash_commit_params();
-                mn_brush::commit_wash(&scratch, &mut self.doc, opacity, blend, erase);
+                let (opacity, blend, draw, erase) = self.brush.inner().inner().wash_commit_params();
+                mn_brush::commit_wash(&scratch, &mut self.doc, opacity, blend, draw, erase);
                 self.dab_path_last = "gpu → cpu repair!".into();
             }
             self.renderer.drop_wash_tiles();
