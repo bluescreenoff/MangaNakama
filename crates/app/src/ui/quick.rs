@@ -65,6 +65,14 @@ pub fn command_index() -> Vec<(&'static str, &'static str, AppCmd)> {
         ("New layer", "Layer", AddLayer),
         ("New folder", "Layer (Ctrl+G)", AddFolder),
         ("Duplicate layer", "Layer", DuplicateLayer),
+        // TRIAGE 109's "Apply to all (create merged layer)": flatten a copy on
+        // top, originals untouched. Named for both things people call it, so
+        // "flatten" finds it as well as "merge".
+        (
+            "Merge visible to new layer (flatten a copy)",
+            "Layer (Ctrl+Shift+E)",
+            StampVisible,
+        ),
         (
             "Straight line ruler",
             "Layer ▸ Ruler",
@@ -109,6 +117,95 @@ pub fn command_index() -> Vec<(&'static str, &'static str, AppCmd)> {
             "Symmetrical ruler",
             "Layer ▸ Ruler",
             RulerArm(crate::cmd::RulerKind::Symmetric),
+        ),
+        // TRIAGE 109 — the Filter menu, whole. The seeds match the menu's own
+        // (`ui::top`); a filter with parameters opens its dialog seeded the
+        // same way from either door, and the no-dialog pair runs on the spot.
+        ("Blur", "Filter ▸ Blur", FilterApply(mn_core::Filter::Blur)),
+        (
+            "Blur (strong)",
+            "Filter ▸ Blur",
+            FilterApply(mn_core::Filter::BlurStrong),
+        ),
+        (
+            "Smoothing",
+            "Filter ▸ Blur",
+            FilterApply(mn_core::Filter::Smoothing),
+        ),
+        (
+            "Gaussian blur…",
+            "Filter ▸ Blur",
+            FilterOpen(Some(mn_core::Filter::Gaussian { sigma: 4.0 })),
+        ),
+        (
+            "Motion blur…",
+            "Filter ▸ Blur",
+            FilterOpen(Some(mn_core::Filter::Motion {
+                angle: 0.0,
+                length: 20.0,
+                dir: mn_core::MotionDir::Both,
+                mode: mn_core::MotionMode::Uniform,
+            })),
+        ),
+        (
+            "Radial blur…",
+            "Filter ▸ Blur",
+            FilterOpen(Some(mn_core::Filter::RadialBlur { strength: 0.3 })),
+        ),
+        (
+            "Spin blur…",
+            "Filter ▸ Blur",
+            FilterOpen(Some(mn_core::Filter::SpinBlur { angle_deg: 20.0 })),
+        ),
+        (
+            "Unsharp mask…",
+            "Filter ▸ Sharpen",
+            FilterOpen(Some(mn_core::Filter::Unsharp {
+                radius: 2.0,
+                amount: 1.0,
+            })),
+        ),
+        (
+            "Pinch…",
+            "Filter ▸ Distort",
+            FilterOpen(Some(mn_core::Filter::Pinch { amount: 0.4 })),
+        ),
+        (
+            "Ripple…",
+            "Filter ▸ Distort",
+            FilterOpen(Some(mn_core::Filter::Ripple {
+                amplitude: 8.0,
+                wavelength: 48.0,
+            })),
+        ),
+        (
+            "Wave…",
+            "Filter ▸ Distort",
+            FilterOpen(Some(mn_core::Filter::Wave {
+                amplitude: 8.0,
+                wavelength: 48.0,
+                dir: mn_core::WaveDir::Horizontal,
+            })),
+        ),
+        (
+            "Twirl…",
+            "Filter ▸ Distort",
+            FilterOpen(Some(mn_core::Filter::Twirl { angle_deg: 90.0 })),
+        ),
+        (
+            "Adjust line width…",
+            "Filter ▸ Line correction",
+            FilterOpen(Some(mn_core::Filter::LineWidth { delta: 1 })),
+        ),
+        (
+            "Remove dust…",
+            "Filter ▸ Line correction",
+            FilterOpen(Some(mn_core::Filter::RemoveDust { max_px: 5 })),
+        ),
+        (
+            "Mosaic…",
+            "Filter ▸ Effect",
+            FilterOpen(Some(mn_core::Filter::Mosaic { cell: 8 })),
         ),
         ("First page", "Page (Ctrl+Home)", PageFirst),
         ("Previous page", "Page (Ctrl+PageUp)", PagePrev),
@@ -851,6 +948,122 @@ mod tests {
         }
     }
 
+    /// TRIAGE 109: the Filter menu was reachable by mouse only — not one of
+    /// its fifteen rows had a palette entry, so "gaussian" found nothing. Each
+    /// one-shot runs on the spot, each parameterised one opens its dialog
+    /// seeded exactly as the menu seeds it.
+    #[test]
+    fn the_filter_menu_is_in_the_palette() {
+        use mn_core::Filter as F;
+        let idx = command_index();
+        let row = |label: &str| {
+            idx.iter()
+                .find(|(l, _, _)| *l == label)
+                .unwrap_or_else(|| panic!("no palette row for {label}"))
+                .clone()
+        };
+        // The no-dialog ones apply immediately — a dialog here would be a
+        // second click the menu does not ask for.
+        for (label, want) in [
+            ("Blur", F::Blur),
+            ("Blur (strong)", F::BlurStrong),
+            ("Smoothing", F::Smoothing),
+        ] {
+            let (_, wher, cmd) = row(label);
+            assert_eq!(wher, "Filter ▸ Blur");
+            assert!(
+                matches!(cmd, AppCmd::FilterApply(f) if f == want),
+                "{label} must apply at once, not {cmd:?}"
+            );
+        }
+        // The parameterised ones open the shared dialog on the menu's seed.
+        for (label, wher, want) in [
+            ("Gaussian blur…", "Filter ▸ Blur", F::Gaussian { sigma: 4.0 }),
+            (
+                "Motion blur…",
+                "Filter ▸ Blur",
+                F::Motion {
+                    angle: 0.0,
+                    length: 20.0,
+                    dir: mn_core::MotionDir::Both,
+                    mode: mn_core::MotionMode::Uniform,
+                },
+            ),
+            (
+                "Radial blur…",
+                "Filter ▸ Blur",
+                F::RadialBlur { strength: 0.3 },
+            ),
+            ("Spin blur…", "Filter ▸ Blur", F::SpinBlur { angle_deg: 20.0 }),
+            (
+                "Unsharp mask…",
+                "Filter ▸ Sharpen",
+                F::Unsharp {
+                    radius: 2.0,
+                    amount: 1.0,
+                },
+            ),
+            ("Pinch…", "Filter ▸ Distort", F::Pinch { amount: 0.4 }),
+            (
+                "Ripple…",
+                "Filter ▸ Distort",
+                F::Ripple {
+                    amplitude: 8.0,
+                    wavelength: 48.0,
+                },
+            ),
+            (
+                "Wave…",
+                "Filter ▸ Distort",
+                F::Wave {
+                    amplitude: 8.0,
+                    wavelength: 48.0,
+                    dir: mn_core::WaveDir::Horizontal,
+                },
+            ),
+            ("Twirl…", "Filter ▸ Distort", F::Twirl { angle_deg: 90.0 }),
+            (
+                "Adjust line width…",
+                "Filter ▸ Line correction",
+                F::LineWidth { delta: 1 },
+            ),
+            (
+                "Remove dust…",
+                "Filter ▸ Line correction",
+                F::RemoveDust { max_px: 5 },
+            ),
+            ("Mosaic…", "Filter ▸ Effect", F::Mosaic { cell: 8 }),
+        ] {
+            let (_, w, cmd) = row(label);
+            assert_eq!(w, wher, "{label} keeps its submenu");
+            assert!(
+                matches!(cmd, AppCmd::FilterOpen(Some(f)) if f == want),
+                "{label} must open seeded, not {cmd:?}"
+            );
+        }
+        // …and the family answers its own name in the search.
+        let entries = all_entries();
+        let blurs = labels(&entries, &palette_filter(&entries, "blur", &[], 20));
+        assert!(blurs.len() >= 6, "the blur family is findable {blurs:?}");
+    }
+
+    /// TRIAGE 109's "Apply to all (create merged layer)" — flatten a copy on
+    /// top. The command existed with a chord and a menu row; the palette is
+    /// where anyone who knows neither goes looking, and "flatten" is the word
+    /// half of them will type.
+    #[test]
+    fn merge_visible_is_reachable_by_name() {
+        let label = "Merge visible to new layer (flatten a copy)";
+        let (_, wher, cmd) = find_entry(label).expect("the stamp-visible row");
+        assert!(wher.contains("Ctrl+Shift+E"), "the chord rides along ({wher})");
+        assert!(matches!(cmd, AppCmd::StampVisible), "{cmd:?}");
+        let entries = all_entries();
+        for q in ["flatten", "merge visible"] {
+            let hits = labels(&entries, &palette_filter(&entries, q, &[], 5));
+            assert_eq!(hits.first().map(String::as_str), Some(label), "{q}: {hits:?}");
+        }
+    }
+
     /// Two fake presets, enough to prove the brush half without an App.
     fn fake_presets() -> Vec<(String, PathBuf)> {
         vec![
@@ -992,7 +1205,11 @@ mod tests {
     fn palette_entries_carry_the_auto_actions() {
         let entries = all_entries();
         let hits = palette_filter(&entries, "tone a flat", &[], PALETTE_ROWS);
-        assert_eq!(labels(&entries, &hits), vec!["Tone a flat".to_owned()]);
+        // The action's own name wins the top row; a long command label whose
+        // letters happen to spell the query is a fuzzy straggler below it,
+        // which is the ladder working rather than a competitor.
+        let named = labels(&entries, &hits);
+        assert_eq!(named.first().map(String::as_str), Some("Tone a flat"));
         let row = &entries[hits[0]];
         assert_eq!(row.path, "Auto Action");
         assert!(matches!(row.cmd, AppCmd::ActionRun(0)), "{:?}", row.cmd);
