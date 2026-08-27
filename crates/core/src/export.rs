@@ -97,6 +97,27 @@ pub fn composite_for_fill(
     )
 }
 
+/// The fill's OPACITY canvas (row 40/120, owner verdict 2026-08-27): the
+/// same layer walk as [`composite_for_fill`] — drafts per the flag, the
+/// reference set forced in — composited over TRANSPARENT so the alpha
+/// channel carries the art's true merged coverage instead of the white
+/// paper's 255. RGB channels are premultiplied-then-unpremultiplied and
+/// carry no meaning here; callers read alpha only.
+pub fn composite_alpha_for_fill(doc: &Document, refer_drafts: bool) -> Vec<u8> {
+    composite_size(
+        doc,
+        Background::Transparent,
+        doc.size.0.max(1),
+        doc.size.1.max(1),
+        0,
+        0,
+        CompOpts::Fill { refer_drafts },
+    )
+    .pixels()
+    .map(|p| p.0[3])
+    .collect()
+}
+
 /// Which layers a composite walks.
 #[derive(Clone, Copy)]
 enum CompOpts {

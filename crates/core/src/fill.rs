@@ -57,15 +57,23 @@ pub struct FillOpts {
     /// so a build that never touches the switch fills pixel-identically.
     pub auto: bool,
     /// Row 40/120 (CSP 半透明を透明にする, "treat semi-transparent as
-    /// transparent"): the antialiased skirt of a line counts as FILLABLE,
-    /// so the fill runs under the fringe to the dark core and the flat
-    /// shows no light halo against the lineart. Defaults OFF — the wall
-    /// every earlier build built, bit for bit.
+    /// transparent"): a source pixel whose OPACITY is below the midpoint
+    /// counts as FILLABLE — the antialiased skirt of a line is
+    /// semi-transparent ink, so the fill runs under the fringe to the dark
+    /// core and the flat shows no light halo against the lineart. Tests
+    /// opacity, not brightness (owner verdict 2026-08-27, matching CSP):
+    /// identical to the old luma rule on black lineart over white paper,
+    /// and correct on colour work, where the luma rule let a pale-but-
+    /// OPAQUE tone read as paper and the fill leak across it. Defaults
+    /// OFF — the wall every earlier build built, bit for bit.
     pub semi_transparent_paper: bool,
 }
 
 /// Rec.709 luma of a composite-over-white source pixel, rounded — the
-/// "mostly paper" test for [`FillOpts::semi_transparent_paper`].
+/// "mostly paper" test for the BRUSH anti-overflow barrier (which keeps
+/// the luma rule deliberately: it asks "how dark is the reference ink",
+/// not "how opaque"). The fill's semi-transparent switch left this rule
+/// for the opacity test above (owner verdict 2026-08-27).
 fn luma_u8(p: [u8; 3]) -> u8 {
     ((p[0] as u16 * 54 + p[1] as u16 * 183 + p[2] as u16 * 19) >> 8) as u8
 }
@@ -154,9 +162,17 @@ pub fn flood_region_measured(
     }
     let src = source_pixels(doc, opts);
     debug_assert_eq!(src.len(), w * h);
+    // The opacity walk runs only when the semi-transparent switch needs
+    // it — one extra composite pass, opted into, never a tax on the
+    // default fill.
+    let alpha = if opts.semi_transparent_paper {
+        source_alpha(doc, opts)
+    } else {
+        Vec::new()
+    };
     let start = sy as usize * w + sx as usize;
     let (opts, auto) = resolve_with_src(&src, w, h, start, opts);
-    Some((region_from_src(&src, w, h, start, &opts), auto))
+    Some((region_from_src(&src, &alpha, w, h, start, &opts), auto))
 }
 
 /// Resolve `opts.auto` into concrete numbers without flooding for real —
@@ -184,8 +200,7 @@ pub fn resolve_auto(
 }
 
 /// 1. Source pixels, straight RGB over white paper.
-fn source_pixels(doc: &Document, opts: &FillOpts) -> Vec<[u8; 3]> {
-    match opts.refer {
+fn source_pixels(doc: &Document, opts: &FillOpts) -> Vec<[u8; 3]> {    match opts.refer {
         FillRefer::Active => active_over_white(doc),
         FillRefer::Reference => {
             // The reference SET (RF-001), composited bottom→top — the
@@ -208,6 +223,27 @@ fn source_pixels(doc: &Document, opts: &FillOpts) -> Vec<[u8; 3]> {
     }
 }
 
+/// The opacity canvas for [`FillOpts::semi_transparent_paper`] — the same
+/// source walk [`source_pixels`] samples, reduced to one coverage byte per
+/// pixel. Over-transparent composites so the art's own alpha survives:
+/// a pale-but-opaque tone reads 255 (a wall), the antialiased skirt of any
+/// line reads low (fillable), whatever the colour (owner verdict
+/// 2026-08-27: CSP's 半透明を透明にする tests opacity, not brightness).
+fn source_alpha(doc: &Document, opts: &FillOpts) -> Vec<u8> {
+    match opts.refer {
+        FillRefer::Active => layer_alpha(doc.active_layer(), doc.size),
+        FillRefer::Reference => {
+            let refs = doc.reference_layers();
+            if refs.is_empty() {
+                export::composite_alpha_for_fill(doc, opts.refer_drafts)
+            } else {
+                layers_alpha(doc, &refs)
+            }
+        }
+        FillRefer::All => export::composite_alpha_for_fill(doc, opts.refer_drafts),
+    }
+}
+
 /// Row 42 / A-014 (CSP はみ出さない): the BRUSH anti-overflow barrier —
 /// `(width, allow)` with one byte per canvas pixel: 255 = paint freely,
 /// 0 = the REFERENCE SET's ink. The reference set is the ONLY referent
@@ -216,8 +252,10 @@ fn source_pixels(doc: &Document, opts: &FillOpts) -> Vec<[u8; 3]> {
 /// and a page-level layer below the folder is covered by the border ink
 /// at composite — so walling every stroke on every layer behind every
 /// panel bought correctness nowhere and cost a border rasterize per
-/// stroke. Same mostly-paper rule as [`FillOpts::semi_transparent_paper`]:
-/// composite luma below the midpoint is ink. `None` when there is
+/// stroke. Deliberately still the LUMA rule (composite darkness of the
+/// reference ink — "how dark", not "how opaque"); only the FILL's
+/// semi-transparent switch moved to the opacity test (owner verdict
+/// 2026-08-27). `None` when there is
 /// nothing to refer to — the toggle is then honestly a no-op, not an
 /// all-paper mask.
 pub fn anti_overflow_barrier(doc: &Document) -> Option<(usize, Vec<u8>)> {
@@ -257,9 +295,12 @@ fn barrier_from(src: &[[u8; 3]], seed_px: [u8; 3], tolerance: f32) -> Vec<bool> 
 }
 
 /// Steps 2–5 against an already-sampled source. `opts.auto` is ignored here:
-/// resolution happens once, above.
+/// resolution happens once, above. `alpha` is [`source_alpha`]'s canvas —
+/// empty when the semi-transparent switch is off, which is the only rule
+/// that reads it.
 fn region_from_src(
     src: &[[u8; 3]],
+    alpha: &[u8],
     w: usize,
     h: usize,
     start: usize,
@@ -269,21 +310,23 @@ fn region_from_src(
     let mut barrier_orig = barrier.clone();
 
     // 2a. Row 40/120 (CSP "treat semi-transparent as transparent"): a
-    // source pixel that is mostly PAPER — composite luma at or past the
-    // midpoint, which is what the antialiased skirt of any line looks
-    // like over white — is FILLABLE. The flood then runs under the
-    // fringe to the line's dark core, and no light halo survives
-    // against the flat. Cleared from BOTH barriers: the flood walls at
-    // the core, and the gap-recovery step agrees. The page rim (2b)
-    // walls after this and stays a wall.
+    // source pixel that is mostly TRANSPARENT — composite opacity below
+    // the midpoint, which is what the antialiased skirt of any line is —
+    // is FILLABLE. The flood then runs under the fringe to the line's
+    // dark core, and no light halo survives against the flat. Opacity,
+    // not brightness (owner verdict 2026-08-27, matching CSP): on colour
+    // work a pale-but-opaque tone keeps its wall, where the old luma
+    // rule read it as paper and let the fill leak. Cleared from BOTH
+    // barriers: the flood walls at the core, and the gap-recovery step
+    // agrees. The page rim (2b) walls after this and stays a wall.
     if opts.semi_transparent_paper {
-        for (b, px) in barrier.iter_mut().zip(src) {
-            if luma_u8(*px) >= 128 {
+        for (b, a) in barrier.iter_mut().zip(alpha) {
+            if *a < 128 {
                 *b = false;
             }
         }
-        for (b, px) in barrier_orig.iter_mut().zip(src) {
-            if luma_u8(*px) >= 128 {
+        for (b, a) in barrier_orig.iter_mut().zip(alpha) {
+            if *a < 128 {
                 *b = false;
             }
         }
@@ -908,6 +951,63 @@ fn layers_over_white(doc: &Document, indices: &[usize]) -> Vec<[u8; 3]> {
         .collect()
 }
 
+/// One layer's own coverage, canvas-sized — [`layer_over_white`]'s alpha
+/// twin (raw tiles, no folders, no blend, no opacity: the same source the
+/// Active-refer RGB walk shows).
+fn layer_alpha(layer: &crate::doc::Layer, size: (u32, u32)) -> Vec<u8> {
+    let (w, h) = (size.0 as usize, size.1 as usize);
+    let mut out = vec![0u8; w * h];
+    for (idx, tile) in layer.display_tiles() {
+        let (ox, oy) = idx.origin();
+        for py in 0..TILE_SIZE {
+            let y = oy as i64 + py as i64;
+            if y < 0 || y >= h as i64 {
+                continue;
+            }
+            for px in 0..TILE_SIZE {
+                let x = ox as i64 + px as i64;
+                if x < 0 || x >= w as i64 {
+                    continue;
+                }
+                let p = tile.pixel(px, py);
+                out[y as usize * w + x as usize] = (p[3] as u32 * 255 / 32768) as u8;
+            }
+        }
+    }
+    out
+}
+
+/// The reference SET's merged coverage — [`layers_over_white`]'s alpha
+/// twin: standard over-accumulation in fix15, quantized once at the end.
+fn layers_alpha(doc: &Document, indices: &[usize]) -> Vec<u8> {
+    let (w, h) = (doc.size.0 as usize, doc.size.1 as usize);
+    let mut acc = vec![0u32; w * h];
+    for &li in indices {
+        let Some(layer) = doc.layers.get(li) else {
+            continue;
+        };
+        for (idx, tile) in layer.display_tiles() {
+            let (ox, oy) = idx.origin();
+            for py in 0..TILE_SIZE {
+                let y = oy as i64 + py as i64;
+                if y < 0 || y >= h as i64 {
+                    continue;
+                }
+                for px in 0..TILE_SIZE {
+                    let x = ox as i64 + px as i64;
+                    if x < 0 || x >= w as i64 {
+                        continue;
+                    }
+                    let a = tile.pixel(px, py)[3] as u32;
+                    let o = &mut acc[y as usize * w + x as usize];
+                    *o = a + *o * (32768 - a) / 32768;
+                }
+            }
+        }
+    }
+    acc.iter().map(|a| ((a * 255 + 16384) / 32768) as u8).collect()
+}
+
 /// One layer unpremultiplied over white, straight RGB, canvas-sized.
 fn layer_over_white(layer: &crate::doc::Layer, size: (u32, u32)) -> Vec<[u8; 3]> {
     let (w, h) = (size.0 as usize, size.1 as usize);
@@ -1401,29 +1501,31 @@ mod tests {
     /// Row 40/120 (CSP 半透明を透明にする): the antialiased skirt of a
     /// line is PAPER to the flood when the switch is on — the fill runs
     /// under the fringe to the dark core and the flat shows no halo; OFF,
-    /// the skirt walls the fill exactly as every earlier build did.
+    /// skirt walls the fill exactly as every earlier build did. The fixture
+    /// is TRUE alpha AA (black ink, alpha ramp) — what a rendered stroke
+    /// actually is; over white it composites to the same greys the old
+    /// opaque-skirt fixture drew, so the assertions carry over verbatim.
     #[test]
     fn semi_transparent_paper_runs_the_fill_under_the_skirt() {
-        fn vline(doc: &mut Document, li: usize, x: i32, v: u8) {
+        fn vline(doc: &mut Document, li: usize, x: i32, a: u8) {
             for y in 0..128i32 {
                 let idx = TileIdx::of_pixel(x, y);
                 let (ox, oy) = idx.origin();
                 let t = doc.layers[li].tile_mut(idx);
                 let d = t.data_mut();
                 let o = ((y - oy) as usize * crate::tile::TILE_SIZE + (x - ox) as usize) * 4;
-                let f = f32_to_fix15(v as f32 / 255.0);
-                d[o] = f;
-                d[o + 1] = f;
-                d[o + 2] = f;
-                d[o + 3] = f32_to_fix15(1.0);
+                d[o] = 0;
+                d[o + 1] = 0;
+                d[o + 2] = 0;
+                d[o + 3] = f32_to_fix15(a as f32 / 255.0);
             }
         }
         let fill = |on: bool| {
             let mut doc = Document::new(128, 128);
             let li = doc.add_layer("line");
-            // Hand-made AA: light skirt → mid skirt → dark core.
-            for (x, v) in [(62, 210u8), (63, 160), (64, 40), (65, 160), (66, 210)] {
-                vline(&mut doc, li, x, v);
+            // Hand-made AA, as opacity: light skirt → mid skirt → dark core.
+            for (x, a) in [(62, 45u8), (63, 95), (64, 215), (65, 95), (66, 45)] {
+                vline(&mut doc, li, x, a);
             }
             let opts = FillOpts {
                 tolerance: 0.05,
@@ -1443,8 +1545,8 @@ mod tests {
         assert!(is_red(&off, 61, 64), "up to the skirt, as ever");
         assert!(!is_red(&off, 62, 64), "OFF: the light skirt walls the fill");
         assert_eq!(
-            px(&off, 64, 64)[0],
-            f32_to_fix15(40.0 / 255.0),
+            px(&off, 64, 64)[3],
+            f32_to_fix15(215.0 / 255.0),
             "core untouched"
         );
         let on = fill(true);
@@ -1452,8 +1554,44 @@ mod tests {
         assert!(is_red(&on, 62, 64), "the skirt is paper now");
         assert!(is_red(&on, 63, 64), "all the way to the core");
         assert!(!is_red(&on, 64, 64), "the dark core stays a wall");
-        assert_eq!(px(&on, 64, 64)[0], f32_to_fix15(40.0 / 255.0));
+        assert_eq!(px(&on, 64, 64)[3], f32_to_fix15(215.0 / 255.0));
         assert!(!is_red(&on, 66, 64), "the far side is a separate region");
+    }
+
+    /// The verdict's own divergence case (owner, 2026-08-27): a PALE but
+    /// OPAQUE tone is a WALL under the switch — opacity is the test, not
+    /// brightness. The old luma rule read this band as paper and the fill
+    /// leaked straight through it.
+    #[test]
+    fn semi_transparency_tests_opacity_not_luma() {
+        let mut doc = Document::new(128, 128);
+        let li = doc.add_layer("tone");
+        // Pale yellow, fully opaque — bright to look at, a real wall.
+        for y in 0..128i32 {
+            let idx = TileIdx::of_pixel(62, y);
+            let (ox, oy) = idx.origin();
+            let t = doc.layers[li].tile_mut(idx);
+            let d = t.data_mut();
+            let o = ((y - oy) as usize * crate::tile::TILE_SIZE + (62 - ox) as usize) * 4;
+            d[o] = f32_to_fix15(250.0 / 255.0);
+            d[o + 1] = f32_to_fix15(240.0 / 255.0);
+            d[o + 2] = f32_to_fix15(180.0 / 255.0);
+            d[o + 3] = f32_to_fix15(1.0);
+        }
+        let opts = FillOpts {
+            tolerance: 0.05,
+            gap_close_px: 0,
+            expand_px: 0,
+            semi_transparent_paper: true,
+            ..FillOpts::default()
+        };
+        assert!(bucket_fill(&mut doc, (10, 62), [1.0, 0.0, 0.0], &opts) > 0);
+        let p = px(&doc, 63, 62);
+        assert_eq!(p[3], 0, "the pale opaque band walls the fill (opacity, not luma)");
+        assert!(
+            px(&doc, 61, 62)[0] > 30_000 && px(&doc, 61, 62)[1] < 1_000,
+            "the near side did fill"
+        );
     }
 
     /// FI-016: area scaling is SIGNED. Negative erodes, so the fill pulls
