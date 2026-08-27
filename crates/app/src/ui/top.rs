@@ -645,6 +645,39 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                     ui.close();
                 }
             });
+            // FL-020..023 — the distort family. All four warp about the
+            // centre of the selection's bounds (the whole layer with no
+            // selection), which is the same missing centre handle the radial
+            // and spin blurs wait on.
+            ui.menu_button("Distort", |ui| {
+                if item(ui, "Pinch…", "") {
+                    app.push_cmd(AppCmd::FilterOpen(Some(mn_core::Filter::Pinch {
+                        amount: 0.4,
+                    })));
+                    ui.close();
+                }
+                if item(ui, "Ripple…", "") {
+                    app.push_cmd(AppCmd::FilterOpen(Some(mn_core::Filter::Ripple {
+                        amplitude: 8.0,
+                        wavelength: 48.0,
+                    })));
+                    ui.close();
+                }
+                if item(ui, "Wave…", "") {
+                    app.push_cmd(AppCmd::FilterOpen(Some(mn_core::Filter::Wave {
+                        amplitude: 8.0,
+                        wavelength: 48.0,
+                        dir: mn_core::WaveDir::Horizontal,
+                    })));
+                    ui.close();
+                }
+                if item(ui, "Twirl…", "") {
+                    app.push_cmd(AppCmd::FilterOpen(Some(mn_core::Filter::Twirl {
+                        angle_deg: 90.0,
+                    })));
+                    ui.close();
+                }
+            });
             ui.menu_button("Effect", |ui| {
                 // FL-033.
                 if item(ui, "Mosaic…", "") {

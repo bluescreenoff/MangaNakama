@@ -107,6 +107,25 @@ pub enum MotionMode {
     Taper,
 }
 
+/// Which way a wave displaces (CSP's Direction row on 波形).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum WaveDir {
+    /// Rows slide left/right — the wave runs down the page.
+    #[default]
+    Horizontal,
+    /// Columns slide up/down — the wave runs across the page.
+    Vertical,
+}
+
+impl WaveDir {
+    pub fn label(self) -> &'static str {
+        match self {
+            WaveDir::Horizontal => "Horizontal",
+            WaveDir::Vertical => "Vertical",
+        }
+    }
+}
+
 /// One filter, parameters included. The enum IS the command payload: the menu
 /// pushes a value of this and `Document::apply_filter` runs it.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -144,6 +163,23 @@ pub enum Filter {
     /// FL-014 Unsharp mask: `out = orig + (orig − blur)·amount`, the blur
     /// being the same three-box Gaussian at σ = `radius`.
     Unsharp { radius: f32, amount: f32 },
+    /// FL-020 Pinch: radial squeeze about the buffer's centre. Positive
+    /// `amount` (0..1) drags content inward; negative bulges it out, which
+    /// is the fish-eye and needs no arm of its own.
+    Pinch { amount: f32 },
+    /// FL-021 Ripple: concentric rings — the sample radius wobbles by
+    /// `amplitude` px every `wavelength` px of radius.
+    Ripple { amplitude: f32, wavelength: f32 },
+    /// FL-022 Wave: one sine shear, `amplitude` px every `wavelength` px
+    /// along the axis `dir` does NOT displace.
+    Wave {
+        amplitude: f32,
+        wavelength: f32,
+        dir: WaveDir,
+    },
+    /// FL-023 Twirl: rotate about the buffer's centre by `angle_deg`,
+    /// falling linearly to nothing at the rim.
+    Twirl { angle_deg: f32 },
 }
 
 impl Filter {
@@ -159,6 +195,10 @@ impl Filter {
             Filter::RadialBlur { .. } => "Radial blur",
             Filter::SpinBlur { .. } => "Spin blur",
             Filter::Unsharp { .. } => "Unsharp mask",
+            Filter::Pinch { .. } => "Pinch",
+            Filter::Ripple { .. } => "Ripple",
+            Filter::Wave { .. } => "Wave",
+            Filter::Twirl { .. } => "Twirl",
         }
     }
 
@@ -191,6 +231,15 @@ impl Filter {
             Filter::RadialBlur { .. } | Filter::SpinBlur { .. } => 0,
             // Its one neighbourhood read is the blur it subtracts.
             Filter::Unsharp { radius, .. } => gaussian_reach(radius),
+            // Both radial warps are confined to the buffer's INSCRIBED
+            // circle by construction ([`radial_frame`]), so like the two
+            // smears above they need no padding either way.
+            Filter::Pinch { .. } | Filter::Twirl { .. } => 0,
+            // A sine shear moves ink by at most its amplitude, in both
+            // directions; +1 for the bilinear tap straddling the far sample.
+            Filter::Ripple { amplitude, .. } | Filter::Wave { amplitude, .. } => {
+                wave_amplitude(amplitude).abs().ceil() as i32 + 1
+            }
         }
     }
 
@@ -213,6 +262,17 @@ impl Filter {
             Filter::RadialBlur { strength } => radial_blur(buf, strength),
             Filter::SpinBlur { angle_deg } => spin_blur(buf, angle_deg),
             Filter::Unsharp { radius, amount } => unsharp(buf, radius, amount),
+            Filter::Pinch { amount } => pinch(buf, amount),
+            Filter::Ripple {
+                amplitude,
+                wavelength,
+            } => ripple(buf, amplitude, wavelength),
+            Filter::Wave {
+                amplitude,
+                wavelength,
+                dir,
+            } => wave(buf, amplitude, wavelength, dir),
+            Filter::Twirl { angle_deg } => twirl(buf, angle_deg),
         }
     }
 
@@ -228,6 +288,17 @@ impl Filter {
             Filter::Unsharp { radius, amount } => {
                 !(amount > 0.01) || box_radii(radius).iter().all(|&r| r == 0)
             }
+            Filter::Pinch { amount } => !(amount.abs() > 0.01),
+            Filter::Twirl { angle_deg } => !(angle_deg.abs() >= 0.5),
+            Filter::Ripple {
+                amplitude,
+                wavelength,
+            }
+            | Filter::Wave {
+                amplitude,
+                wavelength,
+                ..
+            } => !(amplitude.abs() > 0.25) || !(wavelength >= 1.0),
             _ => false,
         }
     }
@@ -579,6 +650,134 @@ fn unsharp(buf: &mut Raster, radius: f32, amount: f32) {
         }
         buf.px[i..i + TILE_CHANNELS].copy_from_slice(&out);
     }
+}
+
+// --------------------------------------------------------------- distort --
+//
+// FL-020..023, the CSP Filter ▸ Distort family. All four are the SAME op with
+// a different two lines in the middle: for every destination pixel, work out
+// where its colour comes from and take one bilinear tap there — the INVERSE
+// map, the idiom `liquify.rs` warps with. Forward-mapping instead (push each
+// source pixel to where it lands) leaves holes wherever the map stretches, and
+// no amount of splatting fixes that; the inverse map cannot leave a hole
+// because it fills every destination exactly once.
+//
+// Sampling is premultiplied fix15, for the same reason the blur family
+// averages there: a bilinear tap IS a weighted average, and averaging
+// un-premultiplied colour drags a transparent neighbour's arbitrary colour
+// into a soft edge.
+
+/// Run one inverse map over `buf` in place. `inverse` answers, for a
+/// destination pixel, the SOURCE coordinate its colour comes from.
+fn warp(buf: &mut Raster, inverse: impl Fn(f32, f32) -> (f32, f32)) {
+    let mut src = Raster::new(buf.w, buf.h);
+    std::mem::swap(buf, &mut src);
+    for y in 0..src.h {
+        for x in 0..src.w {
+            let (sx, sy) = inverse(x as f32, y as f32);
+            let p = sample_bilinear(&src, sx, sy);
+            let mut out = [0u16; TILE_CHANNELS];
+            for (o, v) in out.iter_mut().zip(p) {
+                *o = (v + 0.5).clamp(0.0, u16::MAX as f32) as u16;
+            }
+            buf.set_pixel(x, y, out);
+        }
+    }
+}
+
+/// Centre and working radius of a buffer — the frame the two radial warps
+/// live in, as `(cx, cy, radius)`.
+///
+/// The radius is the INSCRIBED circle's, not the half-diagonal's, and that is
+/// load-bearing: a map that never sends a sample outside the inscribed circle
+/// never reads the buffer's transparent surround, which is why Pinch and Twirl
+/// can honestly declare a [`Filter::reach`] of zero. Outside the circle both
+/// warps are the identity, so the corners of a selection come through
+/// untouched rather than smeared against the marquee.
+///
+/// The centre is the buffer's own — the selection's bounds centre on every
+/// caller today, exactly as for radial and spin blur. A draggable centre
+/// handle is the same missing interaction round for all four.
+fn radial_frame(buf: &Raster) -> (f32, f32, f32) {
+    let cx = (buf.w as f32 - 1.0) * 0.5;
+    let cy = (buf.h as f32 - 1.0) * 0.5;
+    (cx, cy, cx.min(cy).max(1.0))
+}
+
+/// The amplitude a sine warp is allowed, shared by [`Filter::reach`] and the
+/// kernels so the halo and the taps cannot disagree.
+fn wave_amplitude(amplitude: f32) -> f32 {
+    amplitude.clamp(-1024.0, 1024.0)
+}
+
+/// FL-020: `r_src = R·(r/R)^(1−a)`. For `a > 0` the exponent is below one, so
+/// the source radius is the LARGER — each destination ring pulls in content
+/// from further out and the picture contracts toward the centre, which is the
+/// pinch. Negative `a` runs it the other way and is the bulge/fish-eye; that
+/// is why there is no separate Fish-eye arm. The exponent stays positive, so
+/// `r_src ≤ R` always and no tap leaves the inscribed circle.
+fn pinch(buf: &mut Raster, amount: f32) {
+    let a = amount.clamp(-0.95, 0.95);
+    let (cx, cy, rad) = radial_frame(buf);
+    warp(buf, |x, y| {
+        let (ux, uy) = (x - cx, y - cy);
+        let r = ux.hypot(uy);
+        if r <= 0.0 || r >= rad {
+            return (x, y);
+        }
+        // (r_src / r), so the ray direction comes along for free.
+        let k = (r / rad).powf(1.0 - a) * rad / r;
+        (cx + ux * k, cy + uy * k)
+    });
+}
+
+/// FL-021: the sample radius wobbles — `r_src = r + A·sin(2πr/λ)`. Purely
+/// radial, so ink never leaves the ray it started on; the rings are what a
+/// drop in water does to a reflection.
+fn ripple(buf: &mut Raster, amplitude: f32, wavelength: f32) {
+    let amp = wave_amplitude(amplitude);
+    let lam = wavelength.max(1.0);
+    let (cx, cy, _) = radial_frame(buf);
+    warp(buf, |x, y| {
+        let (ux, uy) = (x - cx, y - cy);
+        let r = ux.hypot(uy);
+        if r <= 0.0 {
+            return (x, y);
+        }
+        let rs = (r + amp * (std::f32::consts::TAU * r / lam).sin()).max(0.0);
+        (cx + ux * rs / r, cy + uy * rs / r)
+    });
+}
+
+/// FL-022: one sine shear. Horizontal slides each ROW sideways by
+/// `A·sin(2πy/λ)`; vertical does the transpose. Nothing moves along the axis
+/// the wave runs down, so straight lines parallel to it stay exactly as long
+/// as they were.
+fn wave(buf: &mut Raster, amplitude: f32, wavelength: f32, dir: WaveDir) {
+    let amp = wave_amplitude(amplitude);
+    let phase = std::f32::consts::TAU / wavelength.max(1.0);
+    warp(buf, |x, y| match dir {
+        WaveDir::Horizontal => (x + amp * (phase * y).sin(), y),
+        WaveDir::Vertical => (x, y + amp * (phase * x).sin()),
+    });
+}
+
+/// FL-023: rotate about the centre by `angle_deg`, the turn falling linearly
+/// to zero at the rim so the warp blends into the untouched surround instead
+/// of tearing against it. Radius is preserved exactly, so — like pinch — no
+/// tap escapes the inscribed circle.
+fn twirl(buf: &mut Raster, angle_deg: f32) {
+    let a = angle_deg.clamp(-1440.0, 1440.0).to_radians();
+    let (cx, cy, rad) = radial_frame(buf);
+    warp(buf, |x, y| {
+        let (ux, uy) = (x - cx, y - cy);
+        let r = ux.hypot(uy);
+        if r >= rad {
+            return (x, y);
+        }
+        let th = uy.atan2(ux) - a * (1.0 - r / rad);
+        (cx + r * th.cos(), cy + r * th.sin())
+    });
 }
 
 /// Bilinear tap; outside the raster is transparent.
@@ -1524,6 +1723,188 @@ mod tests {
             doc.undo_labels().last().map(String::as_str),
             Some("Unsharp mask")
         );
+    }
+
+    /// One opaque pixel on an otherwise empty square raster, for the distort
+    /// tests: `n` must be ODD so the centre lands exactly on a pixel and the
+    /// arithmetic below has no half-pixel in it.
+    fn dot_raster(n: usize, x: usize, y: usize) -> Raster {
+        assert!(n % 2 == 1, "the centre must land on a pixel");
+        let mut r = Raster::new(n, n);
+        r.set_pixel(x, y, [0, 0, 0, 32768]);
+        r
+    }
+
+    /// The strongest alpha in the 3×3 around `(x, y)` — the distorts land
+    /// their ink at a fractional position, so a probe is a neighbourhood.
+    fn near(r: &Raster, x: usize, y: usize) -> u16 {
+        let mut m = 0;
+        for dy in 0..3 {
+            for dx in 0..3 {
+                m = m.max(r.pixel(x + dx - 1, y + dy - 1)[3]);
+            }
+        }
+        m
+    }
+
+    /// FL-020: the sign of the amount is the whole feature. Both directions
+    /// are checked against the radius the map solves for exactly:
+    /// `R·(r/R)^(1−a) = 16` for the dot at radius 16, R = 32.
+    #[test]
+    fn pinch_pulls_inward_and_a_negative_amount_bulges_out() {
+        // Pinch: (r/32)^0.5 = 0.5 → r = 8 → the dot arrives at x = 40.
+        let mut out = dot_raster(65, 48, 32);
+        Filter::Pinch { amount: 0.5 }.run(&mut out, 0, 0);
+        assert!(near(&out, 40, 32) > 4000, "the dot moved inward to r = 8");
+        assert_eq!(out.pixel(48, 32)[3], 0, "and left r = 16");
+        assert_eq!(near(&out, 32, 24), 0, "nothing appeared off the ray");
+
+        // Bulge: (r/32)^1.5 = 0.5 → r = 32·0.5^(2/3) ≈ 20.2 → x ≈ 52.
+        let mut out = dot_raster(65, 48, 32);
+        Filter::Pinch { amount: -0.5 }.run(&mut out, 0, 0);
+        assert!(near(&out, 52, 32) > 4000, "the dot moved outward to r ≈ 20");
+        assert_eq!(out.pixel(48, 32)[3], 0, "and left r = 16");
+
+        // Outside the inscribed circle the map is the identity, which is
+        // what lets this filter claim a reach of zero.
+        assert_eq!(Filter::Pinch { amount: 0.5 }.reach(), 0);
+        let mut out = dot_raster(65, 64, 32); // r = 32 = R, on the rim
+        Filter::Pinch { amount: 0.5 }.run(&mut out, 0, 0);
+        assert_eq!(out.pixel(64, 32)[3], 32768, "the rim pixel did not move");
+    }
+
+    /// FL-023: the turn is strongest at the centre and dies at the rim. A dot
+    /// at r = 8 of R = 32 turns by `90° · (1 − 8/32)` = 67.5°, and its radius
+    /// is preserved exactly.
+    #[test]
+    fn twirl_turns_by_the_falloff_and_pins_the_rim() {
+        let mut out = dot_raster(65, 32, 24); // r = 8, due NORTH of centre
+        Filter::Twirl { angle_deg: 90.0 }.run(&mut out, 0, 0);
+        // Source angle −90°, destination angle −90° + 67.5° = −22.5°:
+        // (32 + 8·cos, 32 + 8·sin) = (39.4, 28.9).
+        assert!(near(&out, 39, 29) > 4000, "the dot turned by 67.5°");
+        assert_eq!(out.pixel(32, 24)[3], 0, "and left where it was");
+        // Radius preserved: nothing appeared inside or outside the ring.
+        for (x, y) in [(32usize, 32usize), (32, 12), (52, 32)] {
+            assert_eq!(near(&out, x, y), 0, "ink at the wrong radius: {x},{y}");
+        }
+        assert_eq!(Filter::Twirl { angle_deg: 90.0 }.reach(), 0);
+        let mut out = dot_raster(65, 64, 32);
+        Filter::Twirl { angle_deg: 90.0 }.run(&mut out, 0, 0);
+        assert_eq!(out.pixel(64, 32)[3], 32768, "the rim pixel did not move");
+    }
+
+    /// FL-021: purely radial. The dot changes radius but never leaves its ray
+    /// — the property that separates a ripple from a smear.
+    #[test]
+    fn ripple_moves_along_the_ray_and_never_off_it() {
+        let mut out = dot_raster(65, 48, 32); // r = 16, due EAST
+        let f = Filter::Ripple {
+            amplitude: 4.0,
+            wavelength: 64.0,
+        };
+        f.run(&mut out, 0, 0);
+        // r_src(16) = 16 + 4·sin(π/2) = 20, which is empty, so the dot's old
+        // seat is clear and its ink sits at the r solving r_src(r) = 16.
+        assert_eq!(out.pixel(48, 32)[3], 0, "the dot's old seat is clear");
+        let on_ray = (33..65).map(|x| out.pixel(x, 32)[3]).max().unwrap();
+        assert!(on_ray > 4000, "the ink is still on the east ray ({on_ray})");
+        for y in [30usize, 34] {
+            let off = (0..65).map(|x| out.pixel(x, y)[3]).max().unwrap();
+            assert_eq!(off, 0, "ink left the ray onto row {y}");
+        }
+        // The halo has to cover the amplitude, both ways.
+        assert_eq!(f.reach(), 5);
+    }
+
+    /// FL-022: a horizontal wave slides ROWS and only rows — a vertical line
+    /// becomes a sine and keeps every one of its pixels on its own row.
+    #[test]
+    fn wave_shears_rows_by_the_sine_and_leaves_the_other_axis_alone() {
+        let mut r = Raster::new(64, 64);
+        for y in 0..64 {
+            r.set_pixel(32, y, [0, 0, 0, 32768]); // a vertical line at x = 32
+        }
+        let f = Filter::Wave {
+            amplitude: 4.0,
+            wavelength: 16.0,
+            dir: WaveDir::Horizontal,
+        };
+        let mut out = r.clone();
+        f.run(&mut out, 0, 0);
+        // Destination x samples x + 4·sin(2πy/16), so the line lands at
+        // x = 32 − 4·sin(2πy/16): y = 4 → x = 28, y = 12 → x = 36.
+        assert_eq!(out.pixel(28, 4)[3], 32768, "the crest slid four left");
+        assert_eq!(out.pixel(32, 4)[3], 0, "and left the straight column");
+        assert_eq!(out.pixel(36, 12)[3], 32768, "the trough slid four right");
+        // y = 0, 8, 16 are the zero crossings — the line is where it was.
+        for y in [0usize, 8, 16] {
+            assert_eq!(out.pixel(32, y)[3], 32768, "zero crossing moved at y={y}");
+        }
+        // Every row still holds exactly the ink it started with — a
+        // fractional shift splits one pixel across two, but the row TOTAL is
+        // conserved, and no row gained any. That is what "the other axis is
+        // untouched" means, and it is the assertion a vertical leak breaks.
+        for y in 0..64 {
+            let sum: u32 = (0..64).map(|x| out.pixel(x, y)[3] as u32).sum();
+            assert!(
+                sum.abs_diff(32768) <= 2,
+                "row {y} holds {sum}, not the one pixel of ink it started with"
+            );
+        }
+        assert_eq!(f.reach(), 5);
+    }
+
+    /// The whole distort family through the document path: one undo step
+    /// each, labelled, and the no-op parameter sets refuse.
+    #[test]
+    fn every_distort_is_one_labelled_undo_step() {
+        for (f, label) in [
+            (Filter::Pinch { amount: 0.5 }, "Pinch"),
+            (
+                Filter::Ripple {
+                    amplitude: 4.0,
+                    wavelength: 32.0,
+                },
+                "Ripple",
+            ),
+            (
+                Filter::Wave {
+                    amplitude: 4.0,
+                    wavelength: 32.0,
+                    dir: WaveDir::Horizontal,
+                },
+                "Wave",
+            ),
+            (Filter::Twirl { angle_deg: 90.0 }, "Twirl"),
+        ] {
+            let mut doc = Document::new(256, 256);
+            paint_rect(&mut doc, 40, 40, 200, 160); // not radially symmetric
+            let before: Vec<[u16; 4]> = (0..256).map(|x| px_at(&doc, x, 100)).collect();
+            let depth = doc.undo_len();
+            assert!(doc.apply_filter(f), "{label} ran");
+            assert_eq!(doc.undo_len(), depth + 1, "{label}: one step, not many");
+            assert_eq!(doc.undo_labels().last().map(String::as_str), Some(label));
+            assert!(doc.undo(), "{label} undoes");
+            for x in 0..256 {
+                assert_eq!(px_at(&doc, x, 100), before[x as usize], "{label} at x={x}");
+            }
+        }
+        let mut doc = Document::new(128, 128);
+        paint_rect(&mut doc, 10, 10, 60, 60);
+        let depth = doc.undo_len();
+        assert!(!doc.apply_filter(Filter::Pinch { amount: 0.0 }));
+        assert!(!doc.apply_filter(Filter::Twirl { angle_deg: 0.0 }));
+        assert!(!doc.apply_filter(Filter::Ripple {
+            amplitude: 0.0,
+            wavelength: 32.0,
+        }));
+        assert!(!doc.apply_filter(Filter::Wave {
+            amplitude: 4.0,
+            wavelength: 0.0,
+            dir: WaveDir::Vertical,
+        }));
+        assert_eq!(doc.undo_len(), depth, "no empty undo steps were pushed");
     }
 
     /// WHY PREMULTIPLIED IS THE RIGHT SPACE. An opaque red shape against real

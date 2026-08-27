@@ -68,7 +68,7 @@ pub use edge::EdgeParams;
 pub use export::Background;
 pub use fill::{AutoFill, FillClose, FillOpts, FillRefer};
 pub use fill_layer::FillKind;
-pub use filter::{Filter, MotionDir, MotionMode, Raster};
+pub use filter::{Filter, MotionDir, MotionMode, Raster, WaveDir};
 pub use frame::{Frame, FrameSet};
 pub use genlines::{FocusLinesParams, SpeedLinesParams, render_focus, render_speed};
 pub use gradient::{

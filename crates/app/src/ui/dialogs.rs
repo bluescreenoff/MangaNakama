@@ -2199,7 +2199,7 @@ pub(super) fn gen_lines_window(ctx: &egui::Context, app: &mut App) {
 /// and shipping the filter without one beats not shipping it. The manual says
 /// so on the Layers page.
 pub(super) fn filter_window(ctx: &egui::Context, app: &mut App) {
-    use mn_core::filter::{MAX_SIGMA, MotionDir, MotionMode};
+    use mn_core::filter::{MAX_SIGMA, MotionDir, MotionMode, WaveDir};
     let Some(mut draft) = app.filter_draft else {
         return;
     };
@@ -2298,6 +2298,81 @@ pub(super) fn filter_window(ctx: &egui::Context, app: &mut App) {
                                 .text("×"),
                         )
                         .on_hover_text("how much of the original-minus-blur difference is added back");
+                        ui.end_row();
+                    }
+                    mn_core::Filter::Pinch { amount } => {
+                        ui.label("Amount");
+                        ui.add(
+                            egui::Slider::new(amount, -0.95..=0.95)
+                                .fixed_decimals(2)
+                                .text("pinch ⇠ ⇢ bulge"),
+                        )
+                        .on_hover_text(
+                            "positive squeezes toward the centre, negative bulges out",
+                        );
+                        ui.end_row();
+                    }
+                    mn_core::Filter::Ripple {
+                        amplitude,
+                        wavelength,
+                    } => {
+                        ui.label("Amplitude");
+                        ui.add(
+                            egui::DragValue::new(amplitude)
+                                .range(-256.0..=256.0)
+                                .speed(0.5)
+                                .suffix(" px"),
+                        );
+                        ui.end_row();
+                        ui.label("Wavelength");
+                        ui.add(
+                            egui::DragValue::new(wavelength)
+                                .range(2.0..=512.0)
+                                .speed(1.0)
+                                .suffix(" px"),
+                        )
+                        .on_hover_text("the spacing of the rings, measured out from the centre");
+                        ui.end_row();
+                    }
+                    mn_core::Filter::Wave {
+                        amplitude,
+                        wavelength,
+                        dir,
+                    } => {
+                        ui.label("Amplitude");
+                        ui.add(
+                            egui::DragValue::new(amplitude)
+                                .range(-256.0..=256.0)
+                                .speed(0.5)
+                                .suffix(" px"),
+                        );
+                        ui.end_row();
+                        ui.label("Wavelength");
+                        ui.add(
+                            egui::DragValue::new(wavelength)
+                                .range(2.0..=512.0)
+                                .speed(1.0)
+                                .suffix(" px"),
+                        );
+                        ui.end_row();
+                        ui.label("Direction");
+                        ui.horizontal(|ui| {
+                            for d in [WaveDir::Horizontal, WaveDir::Vertical] {
+                                ui.selectable_value(dir, d, d.label());
+                            }
+                        })
+                        .response
+                        .on_hover_text("which way the rows or columns slide");
+                        ui.end_row();
+                    }
+                    mn_core::Filter::Twirl { angle_deg } => {
+                        ui.label("Angle");
+                        ui.add(
+                            egui::Slider::new(angle_deg, -720.0..=720.0)
+                                .fixed_decimals(0)
+                                .text("°"),
+                        )
+                        .on_hover_text("strongest at the centre, nothing at the rim");
                         ui.end_row();
                     }
                     mn_core::Filter::Mosaic { cell } => {
