@@ -5994,7 +5994,7 @@ mod tests {    use super::*;
     fn rasterize_frame_folder_keeps_children_and_clips_by_mask() {
         let mut doc = Document::new(256, 256);
         let fs = FrameSet {
-            frames: vec![Frame::rect(32.0, 32.0, 224.0, 224.0)],
+            frames: vec![crate::Frame::rect(32.0, 32.0, 224.0, 224.0)],
             border_px: 4.0,
             slot: None,
             reading_pin: None,
@@ -6014,21 +6014,23 @@ mod tests {    use super::*;
         assert!(!h.folder, "the folder is gone");
         assert!(matches!(h.kind, LayerKind::Raster), "the header is plain ink now");
         assert!(h.tile_count() > 0, "the border ink raster survives");
-        for k in kids {
-            let c = &doc.layers[k];
+        for k in &kids {
+            let c = &doc.layers[*k];
             assert_eq!(c.depth, h.depth, "child hoisted loose beside the ink");
             assert!(
                 c.mask.as_ref().is_some_and(|m| !m.tiles.is_empty()),
                 "the panel clip rides as a layer mask"
             );
         }
-        assert_eq!(doc.undo_labels().len(), 1, "one structural undo step");
+        // add_frame_folder pushed its own structural step — the rasterize
+        // is exactly ONE more.
+        assert_eq!(doc.undo_labels().len(), 2, "setup + ONE rasterize step");
         assert!(doc.undo());
         let h = &doc.layers[hi];
         assert!(h.folder && h.is_frame(), "undo restores the frame folder");
-        for k in kids {
+        for k in &kids {
             assert!(
-                doc.layers[k].mask.is_none(),
+                doc.layers[*k].mask.is_none(),
                 "undo takes the clip back into the folder"
             );
         }
@@ -7083,6 +7085,7 @@ mod group_tests {
         let p = EdgeParams {
             width_px: 6.0,
             colour: [255, 255, 255],
+            ..Default::default()
         };
         assert!(doc.set_edge(0, Some(p)));
         doc.refresh_derived(600);
@@ -7147,6 +7150,7 @@ mod group_tests {
             Some(EdgeParams {
                 width_px: 4.0,
                 colour: [255, 255, 255],
+                ..Default::default()
             })
         ));
         doc.refresh_derived(600);

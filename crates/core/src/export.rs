@@ -1216,6 +1216,7 @@ mod tests {
             Some(crate::edge::EdgeParams {
                 width_px: 4.0,
                 colour: [255, 255, 255],
+                ..Default::default()
             })
         ));
         doc.refresh_derived(600);

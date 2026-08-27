@@ -5367,14 +5367,14 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             for r in &members {
                 match r {
                     crate::app::ObjRef::Text(l, t) => {
-                        if let Some(e) = text_layers.iter_mut().find(|(L, _)| L == l) {
+                        if let Some(e) = text_layers.iter_mut().find(|(la, _)| *la == *l) {
                             e.1.push(*t);
                         } else {
                             text_layers.push((*l, vec![*t]));
                         }
                     }
                     crate::app::ObjRef::Balloon(l, b) => {
-                        if let Some(e) = balloon_layers.iter_mut().find(|(L, _)| L == l) {
+                        if let Some(e) = balloon_layers.iter_mut().find(|(la, _)| *la == *l) {
                             e.1.push(*b);
                         } else {
                             balloon_layers.push((*l, vec![*b]));
@@ -5484,7 +5484,7 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 ));
                 app.mark_dirty();
             }
-            app.needs_redraw = true;
+            app.mark_dirty();
         }
         AppCmd::BalloonDelete { layer, balloon } => {
             if let Some(bs) = app.doc.layers.get(layer).and_then(|l| l.balloons()) {
@@ -7140,10 +7140,9 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             // View state, not document state: the canvas re-composites with
             // every layer forced to the 1-bit look, and nothing else — no
             // pixel changes, no export change, no dirty flag.
-            app.renderer.mono_preview = on;
-            app.layout.mono_preview = on;
-            app.layout.dirty = true;
-            app.needs_redraw = true;
+
+            app.layout.note_mono_preview(on);
+            app.mark_dirty();
             app.set_status(if on {
                 "monochrome preview on — display only, exports stay in colour"
             } else {

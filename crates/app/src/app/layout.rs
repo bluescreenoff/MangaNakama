@@ -295,6 +295,15 @@ impl UiLayout {
         }
     }
 
+    /// The monochrome preview (View menu, LP-022 page half). Saved only
+    /// when it changed.
+    pub fn note_mono_preview(&mut self, on: bool) {
+        if self.mono_preview != on {
+            self.mono_preview = on;
+            self.dirty = true;
+        }
+    }
+
     /// The font list's recently-used row (round 34). Saved only on change.
     pub fn note_recent_fonts(&mut self, fonts: &[String]) {
         if self.recent_fonts != fonts {
@@ -439,7 +448,7 @@ impl UiLayout {
             } else {
                 String::new()
             },
-            format!("mono_preview={}\n", self.mono_preview as u8),
+            self.mono_preview as u8,
             serde_json::to_string(&self.recent_fonts).unwrap_or_default(),
             serde_json::to_string(&self.material_folders).unwrap_or_default(),
             self.material_uses,
@@ -938,7 +947,13 @@ mod tests {
 
         // LP-022 page half: the mono preview persists as a plain bool.
         let mut mono = UiLayout::default();
-        assert!(mono.to_body().contains("\nmono_preview=0\n"));
+        assert!(
+            mono.to_body().contains("
+mono_preview=0
+"),
+            "body was: {:?}",
+            mono.to_body()
+        );
         mono.apply_kv("mono_preview=1");
         assert!(mono.mono_preview);
         assert!(mono.to_body().contains("\nmono_preview=1\n"));

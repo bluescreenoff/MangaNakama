@@ -515,6 +515,7 @@ fn cpu_matches_gpu_with_a_folder_knockout() {
         Some(mn_core::EdgeParams {
             width_px: 5.0,
             colour: [255, 255, 255],
+            ..Default::default()
         })
     ));
     doc.refresh_derived(600);

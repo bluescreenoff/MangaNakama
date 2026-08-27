@@ -65,6 +65,7 @@ impl Default for EdgeParams {
         Self {
             width_px: 3.0,
             colour: [255, 255, 255],
+            style: EdgeStyle::Solid,
         }
     }
 }

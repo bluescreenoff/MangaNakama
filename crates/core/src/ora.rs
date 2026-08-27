@@ -2327,6 +2327,7 @@ mod tests {
         let p = EdgeParams {
             width_px: 5.0,
             colour: [0, 128, 255],
+            ..Default::default()
         };
         assert!(doc.set_edge(0, Some(p)));
         assert!(doc.set_layer_sub_colour(0, Some([0xf2, 0xb8, 0x1c])));

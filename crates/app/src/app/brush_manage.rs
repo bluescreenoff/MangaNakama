@@ -178,14 +178,17 @@ impl App {
         };
         // Size: the px rail inverted through the same ln the imports use.
         set(settings, "radius_logarithmic", super::abr::rlog(props.size_px as f64));
-        // Wash pair: the sliders' current split, or the plain per-dab
-        // opacity in build-up.
-        json["mn-wash"] = serde_json::json!(props.wash);
+        // Wash pair: Flow is the per-dab knob in wash, the plain opacity
+        // otherwise. Both edits finish the settings borrow HERE — the
+        // json-level writes below must not hold a second live borrow.
         if props.wash {
-            json["mn-wash-opacity"] = serde_json::json!(props.opacity);
             set(settings, "opaque", props.flow as f64);
         } else {
             set(settings, "opaque", props.opacity as f64);
+        }
+        json["mn-wash"] = serde_json::json!(props.wash);
+        if props.wash {
+            json["mn-wash-opacity"] = serde_json::json!(props.opacity);
         }
         json["mn-hard-dab"] = serde_json::json!(props.hard_dab);
         json["mn-scatter"] = serde_json::json!(props.scatter);
@@ -507,7 +510,8 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(json["group"], "mine");
         assert_eq!(json["mn-wash"], true);
-        assert_eq!(json["mn-wash-opacity"], 0.7);
+        let wo = json["mn-wash-opacity"].as_f64().unwrap();
+        assert!((wo - 0.7).abs() < 1e-6, "wash opacity: {wo}");
         assert_eq!(json["mn-brush-blend"], "linear-burn");
         assert_eq!(json["mn-brush-draw"], "background");
         assert_eq!(json["mn-texture"], "grain-7");
@@ -516,7 +520,7 @@ mod tests {
         let rl = json["settings"]["radius_logarithmic"]["base_value"]
             .as_f64()
             .unwrap();
-        assert!((rl - (42.0 / 2.0).ln()).abs() < 1e-6, "size inverted: {rl}");
+        assert!((rl - (42.0f64 / 2.0).ln()).abs() < 1e-6, "size inverted: {rl}");
 
         // The saved preset LOADS with the tuned state (texture absent on
         // disk is fine — an unresolvable name keeps the brush usable).

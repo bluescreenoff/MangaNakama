@@ -8786,14 +8786,22 @@ fn object_multi_group_move_translates_the_set() {
         }
     };
 
-    // Stack both, then drag FROM on the first member.
+    // Stack both, then drag FROM on the first member. Each click is a
+    // real down-UP (a held press from a previous click would keep its
+    // single-object drag armed and swallow the move).
     app.object_combine = crate::cmd::SelectCombine::Add;
     app.canvas_down(60.0, 60.0, PointerKind::Mouse, &[]);
+    app.canvas_up(60.0, 60.0, &[]);
+    pump_cmds(&mut app);
     app.canvas_down(160.0, 60.0, PointerKind::Mouse, &[]);
+    app.canvas_up(160.0, 60.0, &[]);
+    pump_cmds(&mut app);
     assert_eq!(app.object_multi.len(), 2);
+    app.canvas_down(60.0, 60.0, PointerKind::Mouse, &[]);
     app.canvas_move(90.0, 100.0, &[]);
     assert!(app.group_drag.is_some(), "the set took the press");
     app.canvas_up(90.0, 100.0, &[]);
+    pump_cmds(&mut app);
 
     // BOTH moved by the whole-pixel delta (+30, +40) — under the old
     // single-object path only the primary would have.

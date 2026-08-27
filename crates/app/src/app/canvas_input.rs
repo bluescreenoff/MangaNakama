@@ -981,12 +981,16 @@ impl App {
                 // more than one arms a WHOLE-SET translate. After the
                 // combine block so Remove/Toggle keep their early
                 // returns; before the kind grabs so the set takes the
-                // press. A set of one (or a press outside the set) falls
-                // through to the ordinary single-object behaviour.
+                // press. The pressed member still becomes the PRIMARY
+                // (the Add/Toggle fall-through used to do that further
+                // down — its handles follow the click), and a set of one
+                // (or a press outside the set) falls through to the
+                // ordinary single-object behaviour.
                 if let Some(top) = self.object_candidates_at(cx, cy).first().copied()
                     && self.object_multi.len() > 1
                     && self.object_multi.iter().any(|r| *r == top)
                 {
+                    self.object_select_ref(top);
                     self.group_drag = Some(GroupObjDrag {
                         start: (cx, cy),
                         cur: (cx, cy),
