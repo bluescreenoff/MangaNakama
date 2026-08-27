@@ -141,6 +141,9 @@ pub enum Filter {
     /// ±`angle_deg` about the buffer's centre — the rotational smear of
     /// a spinning subject.
     SpinBlur { angle_deg: f32 },
+    /// FL-014 Unsharp mask: `out = orig + (orig − blur)·amount`, the blur
+    /// being the same three-box Gaussian at σ = `radius`.
+    Unsharp { radius: f32, amount: f32 },
 }
 
 impl Filter {
@@ -155,6 +158,7 @@ impl Filter {
             Filter::Mosaic { .. } => "Mosaic",
             Filter::RadialBlur { .. } => "Radial blur",
             Filter::SpinBlur { .. } => "Spin blur",
+            Filter::Unsharp { .. } => "Unsharp mask",
         }
     }
 
@@ -185,6 +189,8 @@ impl Filter {
             // ray and the arc stay inside its bounds), so the region needs
             // no padding for them.
             Filter::RadialBlur { .. } | Filter::SpinBlur { .. } => 0,
+            // Its one neighbourhood read is the blur it subtracts.
+            Filter::Unsharp { radius, .. } => gaussian_reach(radius),
         }
     }
 
@@ -206,6 +212,7 @@ impl Filter {
             Filter::Mosaic { cell } => mosaic(buf, cell.clamp(1, 4096) as i32, ox, oy),
             Filter::RadialBlur { strength } => radial_blur(buf, strength),
             Filter::SpinBlur { angle_deg } => spin_blur(buf, angle_deg),
+            Filter::Unsharp { radius, amount } => unsharp(buf, radius, amount),
         }
     }
 
@@ -218,6 +225,9 @@ impl Filter {
             Filter::Mosaic { cell } => cell <= 1,
             Filter::RadialBlur { strength } => !(strength > 0.02),
             Filter::SpinBlur { angle_deg } => !(angle_deg >= 0.5),
+            Filter::Unsharp { radius, amount } => {
+                !(amount > 0.01) || box_radii(radius).iter().all(|&r| r == 0)
+            }
             _ => false,
         }
     }
@@ -532,6 +542,42 @@ fn spin_blur(buf: &mut Raster, angle_deg: f32) {
             }
             buf.set_pixel(x, y, out);
         }
+    }
+}
+
+/// FL-014: the classic unsharp mask — `out = orig + (orig − blur)·amount`,
+/// the blur being the same Kovesi three-box Gaussian the blur family runs. All
+/// the sharpening is in the sign: the difference is large only where the blur
+/// disagrees with the original, which is exactly at an edge, so a flat field
+/// comes out untouched and an edge gains the overshoot on both sides that
+/// reads as "crisper".
+///
+/// Sharpened premultiplied, then REPAIRED. Colour and alpha overshoot
+/// independently, and an overshot colour channel can land above the alpha it
+/// is premultiplied by, which is not a representable pixel — so alpha is
+/// computed first and clamps the three colour channels. That is the right
+/// answer visually too: an over-sharpened edge should saturate, not glow.
+fn unsharp(buf: &mut Raster, radius: f32, amount: f32) {
+    let amount = amount.clamp(0.0, 10.0);
+    if amount <= 0.01 || box_radii(radius).iter().all(|&r| r == 0) {
+        return;
+    }
+    let orig = buf.clone();
+    gaussian(buf, radius);
+    for i in (0..buf.px.len()).step_by(TILE_CHANNELS) {
+        let mut out = [0u16; TILE_CHANNELS];
+        // Alpha (channel 3) first — it is the ceiling for the other three.
+        for c in (0..TILE_CHANNELS).rev() {
+            let o = orig.px[i + c] as f32;
+            let v = o + (o - buf.px[i + c] as f32) * amount;
+            let hi = if c == 3 {
+                crate::blend::FIX15_ONE_F
+            } else {
+                out[3] as f32
+            };
+            out[c] = (v + 0.5).clamp(0.0, hi) as u16;
+        }
+        buf.px[i..i + TILE_CHANNELS].copy_from_slice(&out);
     }
 }
 
@@ -1376,6 +1422,10 @@ mod tests {
         // No-op parameters.
         assert!(!doc.apply_filter(Filter::Gaussian { sigma: 0.0 }));
         assert!(!doc.apply_filter(Filter::Mosaic { cell: 1 }));
+        assert!(!doc.apply_filter(Filter::Unsharp {
+            radius: 3.0,
+            amount: 0.0,
+        }));
         assert!(!doc.apply_filter(Filter::Motion {
             angle: 0.0,
             length: 0.0,
@@ -1401,6 +1451,79 @@ mod tests {
         assert!(alpha_at(&doc, 63, 64) > 0 && alpha_at(&doc, 63, 64) < 32768);
         assert!(alpha_at(&doc, 64, 64) > alpha_at(&doc, 63, 64));
         assert_eq!(alpha_at(&doc, 66, 64), 32768);
+    }
+
+    /// FL-014: the mask overshoots on both sides of an edge and — the half
+    /// that matters — leaves everything that is not an edge exactly alone.
+    #[test]
+    fn unsharp_overshoots_an_edge_and_leaves_a_flat_field() {
+        let mut r = Raster::new(64, 64);
+        for y in 0..64 {
+            for x in 0..64 {
+                let v = if x < 32 { 8000 } else { 24000 };
+                r.set_pixel(x, y, [v, v, v, 32768]);
+            }
+        }
+        let f = Filter::Unsharp {
+            radius: 3.0,
+            amount: 1.0,
+        };
+        let mut out = r.clone();
+        f.run(&mut out, 0, 0);
+        // Flat ground, further than the reach from both the step and the
+        // buffer's transparent surround: byte-identical.
+        let m = f.reach() as usize;
+        assert!(m >= 4 && 32 - m > m, "the probes below sit in real interior");
+        assert_eq!(out.pixel(32 - m - 1, 32), [8000, 8000, 8000, 32768]);
+        assert_eq!(out.pixel(32 + m, 32), [24000, 24000, 24000, 32768]);
+        // The step itself: dark side darker, light side lighter.
+        assert!(out.pixel(31, 32)[0] < 8000, "undershoot on the dark side");
+        assert!(out.pixel(32, 32)[0] > 24000, "overshoot on the light side");
+        // Alpha was flat everywhere, so it never moved — and no colour
+        // channel ever escaped above it.
+        for x in m..64 - m {
+            let p = out.pixel(x, 32);
+            assert_eq!(p[3], 32768, "alpha moved at x={x}");
+            assert!(p[0] <= p[3], "colour above its own alpha at x={x}: {p:?}");
+        }
+        // Amount zero is nothing, and says so instead of pushing an undo.
+        assert!(Filter::Unsharp {
+            radius: 3.0,
+            amount: 0.0
+        }
+        .is_identity());
+    }
+
+    /// FL-014 reads a NEIGHBOURHOOD like every blur here, so it gets the same
+    /// seam test — a soft edge centred on the tile boundary must sharpen
+    /// symmetrically — plus the point of the filter: the ramp a blur laid
+    /// down is pulled back in.
+    #[test]
+    fn unsharp_sharpens_symmetrically_across_a_tile_boundary() {
+        let mut doc = Document::new(256, 256);
+        paint_rect(&mut doc, 40, 100, 88, 140); // centred on x = 64
+        assert!(doc.apply_filter(Filter::Gaussian { sigma: 6.0 }));
+        let skirt = alpha_at(&doc, 34, 120);
+        assert!(skirt > 0, "the blur laid down an outer skirt to sharpen");
+        let f = Filter::Unsharp {
+            radius: 3.0,
+            amount: 1.0,
+        };
+        assert!(doc.apply_filter(f));
+        for d in 0..=f.reach() + 4 {
+            let l = px_at(&doc, 64 - 1 - d, 120);
+            let r = px_at(&doc, 64 + d, 120);
+            assert_eq!(l, r, "seam at x=64, distance {d}: {l:?} vs {r:?}");
+        }
+        assert!(
+            alpha_at(&doc, 34, 120) < skirt,
+            "the ramp's outer skirt pulled back"
+        );
+        assert_eq!(alpha_at(&doc, 64, 120), 32768, "the middle is still solid");
+        assert_eq!(
+            doc.undo_labels().last().map(String::as_str),
+            Some("Unsharp mask")
+        );
     }
 
     /// WHY PREMULTIPLIED IS THE RIGHT SPACE. An opaque red shape against real

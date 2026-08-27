@@ -2281,6 +2281,25 @@ pub(super) fn filter_window(ctx: &egui::Context, app: &mut App) {
                         .on_hover_text("each pixel smears along its arc, both directions");
                         ui.end_row();
                     }
+                    mn_core::Filter::Unsharp { radius, amount } => {
+                        ui.label("Radius");
+                        ui.add(
+                            egui::DragValue::new(radius)
+                                .range(1.0..=50.0)
+                                .speed(0.1)
+                                .suffix(" px"),
+                        )
+                        .on_hover_text("the blur that gets subtracted — how wide the edge halo is");
+                        ui.end_row();
+                        ui.label("Amount");
+                        ui.add(
+                            egui::Slider::new(amount, 0.1..=5.0)
+                                .fixed_decimals(2)
+                                .text("×"),
+                        )
+                        .on_hover_text("how much of the original-minus-blur difference is added back");
+                        ui.end_row();
+                    }
                     mn_core::Filter::Mosaic { cell } => {
                         ui.label("Cell size");
                         ui.add(

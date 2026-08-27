@@ -635,6 +635,16 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                     ui.close();
                 }
             });
+            ui.menu_button("Sharpen", |ui| {
+                // FL-014.
+                if item(ui, "Unsharp mask…", "") {
+                    app.push_cmd(AppCmd::FilterOpen(Some(mn_core::Filter::Unsharp {
+                        radius: 2.0,
+                        amount: 1.0,
+                    })));
+                    ui.close();
+                }
+            });
             ui.menu_button("Effect", |ui| {
                 // FL-033.
                 if item(ui, "Mosaic…", "") {
