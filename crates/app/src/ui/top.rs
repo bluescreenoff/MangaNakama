@@ -678,6 +678,21 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                     ui.close();
                 }
             });
+            // LC-001/002 — CSP's ライン修正, the two that clean up a scan.
+            ui.menu_button("Line correction", |ui| {
+                if item(ui, "Adjust line width…", "") {
+                    app.push_cmd(AppCmd::FilterOpen(Some(mn_core::Filter::LineWidth {
+                        delta: 1,
+                    })));
+                    ui.close();
+                }
+                if item(ui, "Remove dust…", "") {
+                    app.push_cmd(AppCmd::FilterOpen(Some(mn_core::Filter::RemoveDust {
+                        max_px: 5,
+                    })));
+                    ui.close();
+                }
+            });
             ui.menu_button("Effect", |ui| {
                 // FL-033.
                 if item(ui, "Mosaic…", "") {

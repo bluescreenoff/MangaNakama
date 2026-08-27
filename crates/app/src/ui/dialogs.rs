@@ -2375,6 +2375,28 @@ pub(super) fn filter_window(ctx: &egui::Context, app: &mut App) {
                         .on_hover_text("strongest at the centre, nothing at the rim");
                         ui.end_row();
                     }
+                    mn_core::Filter::RemoveDust { max_px } => {
+                        ui.label("Speck size");
+                        ui.add(
+                            egui::DragValue::new(max_px)
+                                .range(1..=256)
+                                .speed(1.0)
+                                .suffix(" px"),
+                        )
+                        .on_hover_text(
+                            "the AREA of a blob, not its width — a blob of this many \
+                             connected pixels or fewer is cleared",
+                        );
+                        ui.end_row();
+                    }
+                    mn_core::Filter::LineWidth { delta } => {
+                        ui.label("Width");
+                        ui.add(
+                            egui::Slider::new(delta, -32..=32).text("thin ⇠ ⇢ thick"),
+                        )
+                        .on_hover_text("how many pixels the ink grows, or shrinks by");
+                        ui.end_row();
+                    }
                     mn_core::Filter::Mosaic { cell } => {
                         ui.label("Cell size");
                         ui.add(

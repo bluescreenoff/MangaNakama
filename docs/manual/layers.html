@@ -277,6 +277,17 @@ it somewhere else yet, so the way to aim one is to select the area you
 want it centred on. Pinch and Twirl fade to nothing at the edge of the
 biggest circle that fits, which is why the corners of a rectangular
 selection come through untouched.</div>
+<div class="quirk"><b>Remove dust counts pixels, not width.</b> The
+number is the AREA of a speck — a blob of that many touching pixels or
+fewer is cleared. Touching counts diagonally, so a four-pixel diagonal
+scratch is one four-pixel speck, not four one-pixel ones. Faint grey
+specks count as ink at any strength, which is the point: that is what a
+scanner leaves behind.</div>
+<div class="quirk"><b>Adjust line width keeps the soft edge.</b>
+Thickening moves the whole anti-aliased edge outward by the number of
+pixels you asked for instead of hardening it, and thinning moves it in;
+the ink keeps its colour either way. Thickening spreads past where the
+drawing was, like a blur does.</div>
 
 <h2>Solos</h2>
 <div class="quirk"><b>Alt+click an EYE solos the layer.</b> Every other

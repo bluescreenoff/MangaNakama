@@ -180,6 +180,13 @@ pub enum Filter {
     /// FL-023 Twirl: rotate about the buffer's centre by `angle_deg`,
     /// falling linearly to nothing at the rim.
     Twirl { angle_deg: f32 },
+    /// LC-001 Remove dust (CSP ゴミ取り): clear every connected speck of ink
+    /// of `max_px` pixels or fewer. The unit is AREA — the count of pixels
+    /// in the blob, not its width.
+    RemoveDust { max_px: u32 },
+    /// LC-002 Adjust line width (CSP 線幅修正): thicken the ink by `delta`
+    /// pixels, or thin it when `delta` is negative.
+    LineWidth { delta: i32 },
 }
 
 impl Filter {
@@ -199,6 +206,8 @@ impl Filter {
             Filter::Ripple { .. } => "Ripple",
             Filter::Wave { .. } => "Wave",
             Filter::Twirl { .. } => "Twirl",
+            Filter::RemoveDust { .. } => "Remove dust",
+            Filter::LineWidth { .. } => "Adjust line width",
         }
     }
 
@@ -240,6 +249,14 @@ impl Filter {
             Filter::Ripple { amplitude, .. } | Filter::Wave { amplitude, .. } => {
                 wave_amplitude(amplitude).abs().ceil() as i32 + 1
             }
+            // The halo is what makes the speck count TRUE rather than
+            // truncated. A blob with a pixel in the write region and a pixel
+            // on the buffer's rim spans at least this far, so it holds at
+            // least this many pixels — i.e. it is already too big to be dust,
+            // and cutting it off at the rim cannot change the verdict.
+            Filter::RemoveDust { max_px } => dust_max(max_px) as i32,
+            // Morphology reads (and grow writes) exactly its own radius out.
+            Filter::LineWidth { delta } => line_width_radius(delta) as i32,
         }
     }
 
@@ -273,6 +290,8 @@ impl Filter {
                 dir,
             } => wave(buf, amplitude, wavelength, dir),
             Filter::Twirl { angle_deg } => twirl(buf, angle_deg),
+            Filter::RemoveDust { max_px } => remove_dust(buf, max_px),
+            Filter::LineWidth { delta } => line_width(buf, delta),
         }
     }
 
@@ -299,6 +318,7 @@ impl Filter {
                 wavelength,
                 ..
             } => !(amplitude.abs() > 0.25) || !(wavelength >= 1.0),
+            Filter::LineWidth { delta } => line_width_radius(delta) == 0,
             _ => false,
         }
     }
@@ -778,6 +798,160 @@ fn twirl(buf: &mut Raster, angle_deg: f32) {
         let th = uy.atan2(ux) - a * (1.0 - r / rad);
         (cx + r * th.cos(), cy + r * th.sin())
     });
+}
+
+// -------------------------------------------------------- line correction --
+
+/// The speck size a dust removal is allowed to look for, in pixels of area.
+/// Shared by [`Filter::reach`] and [`remove_dust`] so the halo and the count
+/// can never disagree; the ceiling bounds the halo the same way `MAX_SIGMA`
+/// bounds the blur's.
+fn dust_max(max_px: u32) -> u32 {
+    max_px.clamp(1, 256)
+}
+
+/// LC-001: clear every 8-connected blob of `max_px` pixels or fewer.
+///
+/// 8-connected, not 4-: a scanner speck is as often a diagonal pair as a
+/// square one, and under 4-connectivity a four-pixel diagonal reads as four
+/// separate one-pixel specks — which would delete a chain the eye sees as one
+/// mark, at a threshold the user set to keep it.
+///
+/// Anything with ink at all counts, at any alpha: dust is usually the faint
+/// grey the scanner invented, and thresholding would keep exactly the specks
+/// worth removing. The flood is iterative (a page of ink is millions of
+/// pixels deep for a recursive one) and stops RECORDING a blob's pixels once
+/// it is too big to clear, so the scratch stays bounded by `max_px` rather
+/// than by the largest connected drawing on the layer.
+fn remove_dust(buf: &mut Raster, max_px: u32) {
+    let max = dust_max(max_px) as usize;
+    let (w, h) = (buf.w, buf.h);
+    if w == 0 || h == 0 {
+        return;
+    }
+    let inked = |b: &Raster, p: usize| b.px[p * TILE_CHANNELS + 3] != 0;
+    let mut seen = vec![false; w * h];
+    let mut stack: Vec<usize> = Vec::new();
+    let mut speck: Vec<usize> = Vec::new();
+    for start in 0..w * h {
+        if seen[start] || !inked(buf, start) {
+            continue;
+        }
+        seen[start] = true;
+        stack.clear();
+        speck.clear();
+        stack.push(start);
+        let mut count = 0usize;
+        while let Some(p) = stack.pop() {
+            count += 1;
+            if count <= max {
+                speck.push(p);
+            }
+            let (x, y) = ((p % w) as i32, (p / w) as i32);
+            for ny in (y - 1).max(0)..=(y + 1).min(h as i32 - 1) {
+                for nx in (x - 1).max(0)..=(x + 1).min(w as i32 - 1) {
+                    let q = ny as usize * w + nx as usize;
+                    if seen[q] || !inked(buf, q) {
+                        continue;
+                    }
+                    seen[q] = true;
+                    stack.push(q);
+                }
+            }
+        }
+        if count <= max {
+            for &p in &speck {
+                buf.px[p * TILE_CHANNELS..(p + 1) * TILE_CHANNELS].fill(0);
+            }
+        }
+    }
+}
+
+/// How far a line-width adjustment reaches, in pixels. Shared by
+/// [`Filter::reach`], [`Filter::is_identity`] and [`line_width`].
+fn line_width_radius(delta: i32) -> usize {
+    delta.clamp(-64, 64).unsigned_abs() as usize
+}
+
+/// One separable pass of a square-ball greyscale morphology along one axis.
+///
+/// Square ball = Chebyshev ball, and a Chebyshev ball is SEPARABLE — one
+/// horizontal pass then one vertical one, so any radius costs two passes
+/// instead of `r` rounds of a 3×3. That is `Selection::grow`'s trick; what is
+/// different here is the operator. `grow` runs on a boolean mask and can
+/// answer its windows from a prefix sum, and this cannot: thresholding the
+/// alpha to a mask would throw away the anti-aliasing on every line in the
+/// drawing, which for a tool whose whole job is line quality is the one
+/// unacceptable outcome. So the window extremum comes from a monotonic deque
+/// instead — every index enters and leaves once, still O(1) per pixel.
+///
+/// The winner's WHOLE premultiplied pixel travels, not just its alpha:
+/// thickening a line has to bring the line's colour out with it, and thinning
+/// one has to leave the thinned edge the colour it was, not black. Ties keep
+/// the centre pixel, which is what stops a flat region of two colours — where
+/// every alpha is equal — from swapping one for the other.
+fn morph_pass(src: &Raster, dst: &mut Raster, r: usize, vertical: bool, grow: bool) {
+    let (outer, inner) = if vertical { (src.w, src.h) } else { (src.h, src.w) };
+    let mut dq: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
+    for o in 0..outer {
+        let at = |i: usize| {
+            if vertical {
+                src.pixel(o, i)
+            } else {
+                src.pixel(i, o)
+            }
+        };
+        dq.clear();
+        let mut next = 0usize;
+        for i in 0..inner {
+            // Admit everything the window at `i` newly covers…
+            let hi = (i + r).min(inner - 1);
+            while next <= hi {
+                let a = at(next)[3];
+                while dq
+                    .back()
+                    .is_some_and(|&b| if grow { at(b)[3] <= a } else { at(b)[3] >= a })
+                {
+                    dq.pop_back();
+                }
+                dq.push_back(next);
+                next += 1;
+            }
+            // …and retire what it has left behind. The front is the extremum.
+            while dq.front().is_some_and(|&f| f + r < i) {
+                dq.pop_front();
+            }
+            let own = at(i);
+            let win = at(*dq.front().expect("the window always holds `i`"));
+            let take = if grow {
+                win[3] > own[3]
+            } else {
+                win[3] < own[3]
+            };
+            let p = if take { win } else { own };
+            if vertical {
+                dst.set_pixel(o, i, p);
+            } else {
+                dst.set_pixel(i, o, p);
+            }
+        }
+    }
+}
+
+/// LC-002: thicken (`delta > 0`) or thin (`delta < 0`) the ink by `delta`
+/// pixels — a signed square-ball dilation of the coverage, run as two
+/// [`morph_pass`]es.
+fn line_width(buf: &mut Raster, delta: i32) {
+    let r = line_width_radius(delta);
+    if r == 0 {
+        return;
+    }
+    let grow = delta > 0;
+    let mut tmp = Raster::new(buf.w, buf.h);
+    morph_pass(buf, &mut tmp, r, false, grow);
+    std::mem::swap(buf, &mut tmp);
+    morph_pass(buf, &mut tmp, r, true, grow);
+    std::mem::swap(buf, &mut tmp);
 }
 
 /// Bilinear tap; outside the raster is transparent.
@@ -1905,6 +2079,118 @@ mod tests {
             dir: WaveDir::Vertical,
         }));
         assert_eq!(doc.undo_len(), depth, "no empty undo steps were pushed");
+    }
+
+    /// LC-001: the threshold is an AREA, and it separates specks from the
+    /// drawing rather than from each other.
+    #[test]
+    fn remove_dust_clears_small_specks_and_keeps_the_line() {
+        let mut doc = Document::new(128, 128);
+        paint_rect(&mut doc, 20, 20, 100, 22); // the drawing: a 160 px bar
+        paint_rect(&mut doc, 60, 60, 61, 61); // 1 px
+        paint_rect(&mut doc, 70, 70, 72, 72); // 4 px
+        paint_rect(&mut doc, 80, 80, 83, 83); // 9 px
+        let depth = doc.undo_len();
+        assert!(doc.apply_filter(Filter::RemoveDust { max_px: 5 }));
+        assert_eq!(doc.undo_len(), depth + 1, "one step, not one per speck");
+        assert_eq!(
+            doc.undo_labels().last().map(String::as_str),
+            Some("Remove dust")
+        );
+        assert_eq!(alpha_at(&doc, 60, 60), 0, "the 1 px speck went");
+        assert_eq!(alpha_at(&doc, 70, 70), 0, "the 4 px speck went");
+        assert_eq!(alpha_at(&doc, 71, 71), 0, "all of it, not just a corner");
+        assert_eq!(alpha_at(&doc, 81, 81), 32768, "the 9 px blob stayed");
+        assert_eq!(alpha_at(&doc, 50, 21), 32768, "the drawing stayed");
+        assert!(doc.undo(), "and it all comes back in one press");
+        assert_eq!(alpha_at(&doc, 60, 60), 32768);
+    }
+
+    /// LC-001 is 8-connected: a diagonal chain is ONE speck, so a threshold
+    /// below its length keeps it. Under 4-connectivity the same chain would
+    /// be four one-pixel specks and this would wipe it.
+    #[test]
+    fn remove_dust_reads_a_diagonal_chain_as_one_speck() {
+        let mut doc = Document::new(128, 128);
+        for i in 0..4 {
+            paint_rect(&mut doc, 40 + i, 40 + i, 41 + i, 41 + i);
+        }
+        paint_rect(&mut doc, 60, 60, 61, 61); // a lone pixel, for contrast
+        assert!(doc.apply_filter(Filter::RemoveDust { max_px: 2 }));
+        for i in 0..4 {
+            assert_eq!(
+                alpha_at(&doc, 40 + i, 40 + i),
+                32768,
+                "the diagonal chain counts as four, not one — pixel {i}"
+            );
+        }
+        assert_eq!(alpha_at(&doc, 60, 60), 0, "the lone pixel still went");
+    }
+
+    /// LC-002: the ball is exact in both directions and the soft edge rides
+    /// along with it — the anti-aliased column moves out by the grow and in
+    /// by the erode, keeping both its coverage and its colour.
+    #[test]
+    fn line_width_moves_the_edge_by_exactly_the_radius() {
+        // A red bar, x 30..34 opaque, with one anti-aliased column at x = 29.
+        let mut bar = Raster::new(64, 64);
+        for y in 0..64 {
+            bar.set_pixel(29, y, [16384, 0, 0, 16384]);
+            for x in 30..34 {
+                bar.set_pixel(x, y, [32768, 0, 0, 32768]);
+            }
+        }
+        let mut out = bar.clone();
+        Filter::LineWidth { delta: 2 }.run(&mut out, 0, 0);
+        assert_eq!(out.pixel(28, 32), [32768, 0, 0, 32768], "solid grew two");
+        assert_eq!(out.pixel(27, 32), [16384, 0, 0, 16384], "the soft edge too");
+        assert_eq!(out.pixel(26, 32)[3], 0, "and not one pixel further");
+        assert_eq!(out.pixel(35, 32)[3], 32768, "the same on the far side");
+        assert_eq!(out.pixel(36, 32)[3], 0);
+
+        let mut out = bar.clone();
+        Filter::LineWidth { delta: -1 }.run(&mut out, 0, 0);
+        assert_eq!(out.pixel(29, 32)[3], 0, "the soft column eroded away");
+        assert_eq!(
+            out.pixel(30, 32),
+            [16384, 0, 0, 16384],
+            "and left the soft edge one in, still pure red"
+        );
+        assert_eq!(out.pixel(31, 32)[3], 32768, "the core is still solid");
+        assert_eq!(out.pixel(33, 32)[3], 0, "the far side lost its column");
+
+        assert_eq!(Filter::LineWidth { delta: 2 }.reach(), 2);
+        assert_eq!(Filter::LineWidth { delta: -3 }.reach(), 3);
+        assert!(Filter::LineWidth { delta: 0 }.is_identity());
+    }
+
+    /// LC-002 through the document: a grow spreads ink PAST the layer's old
+    /// footprint (so the halo has to be there), it is one undo step, and it
+    /// crosses a tile boundary without a seam.
+    #[test]
+    fn line_width_grows_past_the_footprint_in_one_step() {
+        let mut doc = Document::new(256, 256);
+        paint_rect(&mut doc, 40, 100, 88, 140); // centred on the x = 64 seam
+        let depth = doc.undo_len();
+        let f = Filter::LineWidth { delta: 3 };
+        assert!(doc.apply_filter(f));
+        assert_eq!(doc.undo_len(), depth + 1);
+        assert_eq!(
+            doc.undo_labels().last().map(String::as_str),
+            Some("Adjust line width")
+        );
+        assert_eq!(alpha_at(&doc, 37, 120), 32768, "grew three px outward");
+        assert_eq!(alpha_at(&doc, 36, 120), 0, "and no further");
+        assert_eq!(alpha_at(&doc, 64, 97), 32768, "on every side");
+        for d in 0..=f.reach() + 2 {
+            assert_eq!(
+                px_at(&doc, 64 - 1 - d, 120),
+                px_at(&doc, 64 + d, 120),
+                "seam at x=64, distance {d}"
+            );
+        }
+        assert!(!doc.apply_filter(Filter::LineWidth { delta: 0 }));
+        assert_eq!(doc.undo_len(), depth + 1, "a zero adjustment pushed nothing");
     }
 
     /// WHY PREMULTIPLIED IS THE RIGHT SPACE. An opaque red shape against real
