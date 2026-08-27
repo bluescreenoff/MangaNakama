@@ -66,7 +66,7 @@ pub use doc::{
 };
 pub use edge::EdgeParams;
 pub use export::Background;
-pub use fill::{AutoFill, FillOpts, FillRefer};
+pub use fill::{AutoFill, FillClose, FillOpts, FillRefer};
 pub use fill_layer::FillKind;
 pub use filter::{Filter, MotionDir, MotionMode, Raster};
 pub use frame::{Frame, FrameSet};

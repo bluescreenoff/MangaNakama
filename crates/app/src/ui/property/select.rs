@@ -158,7 +158,51 @@ fn auto_gap_block(
              against the flat",
         )
         .changed();
+    // C-005: 対象色, the Target-colour dropdown — which pixel classes the
+    // flood treats as fillable; everything else walls it.
+    let mut close = o.close;
+    ui.horizontal(|ui| {
+        ui.weak("Target colour");
+        egui::ComboBox::from_id_salt(format!("{salt}.close"))
+            .selected_text(close_label(close))
+            .width(170.0)
+            .show_ui(ui, |ui| {
+                for v in [
+                    mn_core::FillClose::AllColours,
+                    mn_core::FillClose::OnlyTransparent,
+                    mn_core::FillClose::NotTransparent,
+                    mn_core::FillClose::OnlyBlack,
+                    mn_core::FillClose::NotBlack,
+                    mn_core::FillClose::WhiteAndTransparent,
+                    mn_core::FillClose::NotWhiteAndTransparent,
+                ] {
+                    ui.selectable_value(&mut close, v, close_label(v));
+                }
+            })
+            .response
+            .on_hover_text(
+                "what counts as fillable: only the chosen class of pixels \
+                 fills, everything else is a wall (all colours = the \
+                 tolerance decides, as always)",
+            );
+    });
+    changed |= close != o.close;
+    o.close = close;
     changed
+}
+
+/// C-005 labels. "and transparent" spelled out — the pairing is the
+/// feature (white-on-white lineart work needs the transparent half).
+fn close_label(v: mn_core::FillClose) -> &'static str {
+    match v {
+        mn_core::FillClose::AllColours => "All colours",
+        mn_core::FillClose::OnlyTransparent => "Only transparent",
+        mn_core::FillClose::NotTransparent => "Other than transparent",
+        mn_core::FillClose::OnlyBlack => "Only black",
+        mn_core::FillClose::NotBlack => "Other than black",
+        mn_core::FillClose::WhiteAndTransparent => "White and transparent",
+        mn_core::FillClose::NotWhiteAndTransparent => "Other than white and transparent",
+    }
 }
 
 /// CSP's 参照 block: what the flood samples, whether draft layers count, and

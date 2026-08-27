@@ -20,6 +20,31 @@ pub(crate) fn pen_property(ui: &mut egui::Ui, app: &mut App) {
             {
                 app.detail_open = !app.detail_open;
             }
+            // BR-005: the rows eye — per sub tool, which sliders stay.
+            let eye = icon_btn(
+                ui,
+                Icon::Eye,
+                15.0,
+                app.pen_rows_open,
+                true,
+                "Show or hide rows (per sub tool)",
+            );
+            // The open flag goes through a local so `open_bool`'s borrow
+            // cannot cross the popup body's own `app` borrows.
+            let mut rows_open = app.pen_rows_open;
+            egui::Popup::from_response(&eye)
+                .open_bool(&mut rows_open)
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                .width(170.0)
+                .show(|ui| {
+                    for (id, label) in PEN_ROW_IDS {
+                        let mut on = app.pen_row_visible(id);
+                        if ui.checkbox(&mut on, *label).changed() {
+                            app.set_pen_row(id, on);
+                        }
+                    }
+                });
+            app.pen_rows_open = rows_open;
             // TL-013, CSP's own model: a locked sub tool still takes every
             // change — it just does not REMEMBER them. Leave it and come
             // back and the values below are the ones the padlock froze.
@@ -52,6 +77,28 @@ pub(crate) fn pen_property(ui: &mut egui::Ui, app: &mut App) {
     group_caption(ui, "Dynamics");
     dynamics_editor(ui, app);
 }
+
+/// BR-005: the gateable pen rows, in display order. The id is the
+/// persistence key (ui.txt `hidden_rows`); the label is what the eye
+/// popup shows. Rows NOT in this list are always visible.
+const PEN_ROW_IDS: &[(&str, &str)] = &[
+    ("size", "Size"),
+    ("min_size", "Min size"),
+    ("opacity", "Opacity"),
+    ("stabilize", "Stabilize"),
+    ("correction", "Correction"),
+    ("randomize", "Randomize"),
+    ("min_rand", "Min rand"),
+    ("random_abs", "Fixed px"),
+    ("tip", "Tip"),
+    ("anti_alias", "Anti-alias"),
+    ("interval", "Interval"),
+    ("scatter", "Scatter"),
+    ("sketch", "Sketch"),
+    ("ink", "Ink"),
+    ("flow", "Flow"),
+    ("texture", "Texture"),
+];
 
 /// The LIVE test stroke: one S-curve with a synthesized pressure ramp, re-inked
 /// with the current preset and its live overrides whenever any of them moves.
@@ -317,6 +364,41 @@ stops at the angle and picks up on the far side of it.",
 frame borders): a blocked pixel is never painted, so flats stay inside \
 the lineart. The stroke runs on the CPU while this is on.",
         );
+    if app.anti_overflow {
+        // A-016 (色余白): near-miss colours count as the line.
+        ui.horizontal(|ui| {
+            ui.weak("Colour margin");
+            let mut m = app.anti_overflow_margin;
+            let r = ui.add(
+                egui::DragValue::new(&mut m)
+                    .range(0..=128)
+                    .suffix(" /255"),
+            );
+            let changed = r.changed();
+            r.on_hover_text(
+                "how far a colour may sit from the reference ink's own colour \
+                 and still wall the stroke — the anti-aliased fringe and \
+                 off-hue strokes fold into the line",
+            );
+            if changed {
+                app.anti_overflow_margin = m;
+            }
+            // A-015 (ベクトルまで塗り): vector references wall at the
+            // spline, not the rendered edge.
+            let mut v = app.anti_overflow_vector_centreline;
+            if ui
+                .checkbox(&mut v, "Vector lines: centreline")
+                .on_hover_text(
+                    "a vector reference layer's strokes wall at their centre \
+                     line — paint tucks to the middle of the line instead of \
+                     stopping at its anti-aliased fringe",
+                )
+                .changed()
+            {
+                app.anti_overflow_vector_centreline = v;
+            }
+        });
+    }
 
     ui.add_space(2.0);
     let mut by_speed = c.stab_by_speed;
@@ -407,6 +489,7 @@ pub(crate) fn brush_sliders(ui: &mut egui::Ui, app: &mut App) {
     // whole `[`/`]` ladder, so the two controls can no longer disagree about
     // how big the brush is allowed to get. The readout is the engine's own
     // dab diameter rather than the pending slider value.
+    if app.pen_row_visible("size") {
     let mut size = p.size_px;
     if ValueBar::new("Size", 1.0, 2000.0)
         .log()
@@ -416,7 +499,10 @@ pub(crate) fn brush_sliders(ui: &mut egui::Ui, app: &mut App) {
     {
         app.push_cmd(AppCmd::SetBrushSizePx(size));
     }
+    }
 
+
+    if app.pen_row_visible("min_size") {
     let mut min = p.min_size;
     if ValueBar::new("Min size", 0.0, 100.0)
         .suffix("%")
@@ -425,7 +511,10 @@ pub(crate) fn brush_sliders(ui: &mut egui::Ui, app: &mut App) {
     {
         app.push_cmd(AppCmd::SetMinSize(min));
     }
+    }
 
+
+    if app.pen_row_visible("opacity") {
     let mut op = p.opacity * 100.0;
     if ValueBar::new("Opacity", 0.0, 100.0)
         .suffix("%")
@@ -434,7 +523,10 @@ pub(crate) fn brush_sliders(ui: &mut egui::Ui, app: &mut App) {
     {
         app.push_cmd(AppCmd::SetOpacity(op / 100.0));
     }
+    }
 
+
+    if app.pen_row_visible("stabilize") {
     let mut stab = p.stabilizer * 100.0;
     if ValueBar::new("Stabilize", 0.0, 100.0)
         .suffix("%")
@@ -443,13 +535,18 @@ pub(crate) fn brush_sliders(ui: &mut egui::Ui, app: &mut App) {
     {
         app.push_cmd(AppCmd::SetStabilizer(stab / 100.0));
     }
+    }
 
-    correction_rows(ui, app);
+
+    if app.pen_row_visible("correction") {
+        correction_rows(ui, app);
+    }
 
     // Brush-size randomization (CSP 乱数) with the two things stock
     // libmypaint lacks: a pressure floor for the deviation (like Min size /
     // Min opacity) and a fixed-pixel mode whose deviation does not scale
     // with brush size.
+    if app.pen_row_visible("randomize") {
     let mut rand = if p.random_abs {
         p.random
     } else {
@@ -471,7 +568,10 @@ pub(crate) fn brush_sliders(ui: &mut egui::Ui, app: &mut App) {
         let v = if p.random_abs { rand } else { rand / 100.0 };
         app.push_cmd(AppCmd::SetRandomization(v));
     }
+    }
 
+
+    if app.pen_row_visible("min_rand") {
     let mut rmin = p.random_min;
     if ValueBar::new("Min rand", 0.0, 100.0)
         .suffix("%")
@@ -480,7 +580,10 @@ pub(crate) fn brush_sliders(ui: &mut egui::Ui, app: &mut App) {
     {
         app.push_cmd(AppCmd::SetRandomMin(rmin));
     }
+    }
 
+
+    if app.pen_row_visible("random_abs") {
     let mut abs = p.random_abs;
     if ui
         .checkbox(&mut abs, "Fixed px (size-independent)")
@@ -493,10 +596,13 @@ pub(crate) fn brush_sliders(ui: &mut egui::Ui, app: &mut App) {
     {
         app.push_cmd(AppCmd::SetRandomAbs(abs));
     }
+    }
+
 
     // Krita-inspired dab modes (round 25): the tip selector swaps the dab
     // PROFILE — gaussian falloff (MyPaint classic) vs an exact AA disc
     // (Krita/CSP-style crisp ink edges). Presets can carry either.
+    if app.pen_row_visible("tip") {
     ui.horizontal(|ui| {
         ui.weak("Tip");
         let mut hard = app.props_current.hard_dab;
@@ -512,9 +618,16 @@ pub(crate) fn brush_sliders(ui: &mut egui::Ui, app: &mut App) {
 anti-aliased disc — CSP/Krita pen-crisp edges, the preset's hardness is ignored.",
     );
 
-    anti_alias_row(ui, app);
-    interval_rows(ui, app);
+    }
 
+    if app.pen_row_visible("anti_alias") {
+        anti_alias_row(ui, app);
+    }
+    if app.pen_row_visible("interval") {
+        interval_rows(ui, app);
+    }
+
+    if app.pen_row_visible("scatter") {
     let mut sc = app.props_current.scatter;
     let sc_resp = ValueBar::new("Scatter", 0.0, 2.0)
         .decimals(2)
@@ -527,7 +640,11 @@ anti-aliased disc — CSP/Krita pen-crisp edges, the preset's hardness is ignore
         "Krita Scatter: each dab lands within radius×this of the \
 stroke path — sketchy, sprayed lines at higher values.",
     );
+    }
 
+
+    // Krita SKETCH engine (round 27), gated as one row.
+    if app.pen_row_visible("sketch") {
     // Krita SKETCH engine (round 27): the stroke links back to its own
     // recent history — scribbles knot into hatching webs.
     let mut sk = app.props_current.sketch;
@@ -557,10 +674,12 @@ hatching web instead of a clean line. Distance = how far back it connects.",
             app.push_cmd(AppCmd::SetSketchDensity(dens / 100.0));
         }
     }
+    }
 
     // Krita Wash (flow vs opacity): Build-up = stock per-dab compositing;
     // Wash = the whole stroke composites once at Opacity, Flow is the per-dab
     // alpha, and the optional blend mode applies at the commit.
+    if app.pen_row_visible("ink") {
     ui.horizontal(|ui| {
         ui.weak("Ink");
         let mut wash = app.props_current.wash;
@@ -627,6 +746,9 @@ exceed its Opacity however much it overlaps, like a wet marker. Flow = per-dab \
 alpha; the blend mode is per-brush (Krita).",
     );
 
+    }
+
+    if app.pen_row_visible("flow") {
     if app.props_current.wash {
         let mut flow = app.props_current.flow * 100.0;
         let f_resp = ValueBar::new("Flow", 0.0, 100.0)
@@ -640,7 +762,11 @@ alpha; the blend mode is per-brush (Krita).",
 flow = faint dabs that stack up to the stroke's Opacity, never past it.",
         );
     }
+    }
 
+
+    // Krita texture tips — gated as one row (texture + crawl + angle).
+    if app.pen_row_visible("texture") {
     // Krita texture tips: a grayscale mask multiplies the dab, anchored to
     // the canvas — paper grain / tone that does not wash out.
     ui.horizontal(|ui| {
@@ -723,6 +849,7 @@ pattern is fixed; higher = the grain drifts as you draw, spray-like.",
             "what the stamped tip rotates with: a fixed base angle, the \
              stroke's direction, or the pen's physical tilt bearing",
         );
+    }
     }
 }
 

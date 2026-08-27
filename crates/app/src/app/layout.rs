@@ -164,6 +164,10 @@ pub struct UiLayout {
     /// so no pre-existing key could be reinterpreted as pixels; naming the
     /// unit in the key is the guarantee (the ui.txt rename rule).
     pub sub_tool_size_px: BTreeMap<String, f32>,
+    /// BR-005: per sub tool, the Tool Property rows the artist hid -
+    /// keyed by preset like the size map. An absent key (or an empty
+    /// list) shows every row.
+    pub hidden_rows: BTreeMap<String, Vec<String>>,
     dirty: bool,
 }
 
@@ -197,6 +201,7 @@ impl Default for UiLayout {
             test_stroke_hidden: false,
             gradients: String::new(),
             sub_tool_size_px: BTreeMap::new(),
+            hidden_rows: BTreeMap::new(),
             dirty: false,
         }
     }
@@ -405,6 +410,18 @@ impl UiLayout {
     /// and DELETES the entry — writing the default down would freeze it, and
     /// a preset whose shipped size changes has to be able to move an
     /// untouched sub tool with it.
+    /// BR-005: replace one sub tool's hidden-row list. An EMPTY list
+    /// removes the key (nothing hidden = nothing stored).
+    pub fn note_hidden_rows(&mut self, key: &str, list: Vec<String>) {
+        if list.is_empty() {
+            let had = self.hidden_rows.remove(key).is_some();
+            self.dirty |= had;
+        } else if self.hidden_rows.get(key) != Some(&list) {
+            self.hidden_rows.insert(key.to_owned(), list);
+            self.dirty = true;
+        }
+    }
+
     pub fn note_sub_tool_size(&mut self, key: &str, px: Option<f32>) {
         let changed = match px {
             Some(px) => self.sub_tool_size_px.insert(key.to_owned(), px) != Some(px),
@@ -426,7 +443,9 @@ impl UiLayout {
     /// `from_body` completes.
     pub(super) fn to_body(&self) -> String {
         format!(
-            "left_w={:.0}\nright_w={:.0}\nleft_collapsed={}\nright_collapsed={}\ndock_left={}\ndock_right={}\ndock_tree={}\nprop_hidden={}\nwin={}\n{}mono_preview={}\nrecent_fonts={}\nmaterial_folders={}\nmaterial_uses={}\nquick_pins={}\nworkspaces={}\nworkspace_current={}\ntouch_gestures={}\ncolor_history={}\nauto_swatch={}\nreader_page={}\nguides_hidden={}\ntest_stroke_hidden={}\ngradients={}\nsub_tool_size_px={}\nreferences={}\n",
+            "left_w={:.0}\nright_w={:.0}\nleft_collapsed={}\nright_collapsed={}\ndock_left={}\ndock_right={}\ndock_tree={}\nprop_hidden={}\nwin={}\n{}mono_preview={}\nrecent_fonts={}\nmaterial_folders={}\nmaterial_uses={}\nquick_pins={}\nworkspaces={}\nworkspace_current={}\ntouch_gestures={}\ncolor_history={}\nauto_swatch={}\nreader_page={}\nguides_hidden={}\ntest_stroke_hidden={}\ngradients={}\nsub_tool_size_px={}
+hidden_rows={}
+references={}\n",
             self.left_w,
             self.right_w,
             self.left_collapsed as u8,
@@ -463,6 +482,7 @@ impl UiLayout {
             self.test_stroke_hidden as u8,
             self.gradients.replace('\n', ""),
             serde_json::to_string(&self.sub_tool_size_px).unwrap_or_default(),
+            serde_json::to_string(&self.hidden_rows).unwrap_or_default(),
             serde_json::to_string(&self.references).unwrap_or_default(),
         )
     }
@@ -564,6 +584,13 @@ impl UiLayout {
                                 && (crate::cmd::SIZE_PX_MIN..=crate::cmd::SIZE_PX_MAX).contains(px)
                         })
                         .collect();
+                }
+            }
+            // BR-005: per-sub-tool hidden Tool Property rows (JSON map
+            // preset key → row ids). A malformed line costs the map only.
+            "hidden_rows" if !line.contains('\n') => {
+                if let Ok(m) = serde_json::from_str::<BTreeMap<String, Vec<String>>>(v) {
+                    self.hidden_rows = m.into_iter().filter(|(_, v)| !v.is_empty()).collect();
                 }
             }
             _ => {}

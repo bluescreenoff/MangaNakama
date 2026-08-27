@@ -10128,3 +10128,46 @@ fn frame_expand_arrows_grow_to_the_nearest_border() {
     let back = app.doc.layers[li].frames().unwrap().frames[1].bbox();
     assert_eq!(back[0], 320.0, "one undo = the gutter is back");
 }
+
+/// BR-005: the per-row eyes — hidden rows persist per sub tool through
+/// ui.txt (`hidden_rows=`), an empty list cleans its key, and a preset
+/// with no entry shows everything.
+#[test]
+fn pen_row_eyes_persist_per_sub_tool() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    let dir = std::env::temp_dir().join("mn-penrow-tests");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("mine")).unwrap();
+    let path = dir.join("mine/pen-1.myb");
+    std::fs::write(
+        &path,
+        r#"{"version": 3, "settings": {}, "name": "Pen"}"#,
+    )
+    .unwrap();
+    app.brushes_root = Some(dir.clone());
+    app.presets = vec![("Pen".to_owned(), path.clone())];
+    app.selected_preset = Some(0);
+    assert!(app.pen_row_visible("size"), "no entry: every row shows");
+
+    app.set_pen_row("size", false);
+    assert!(!app.pen_row_visible("size"), "hidden for THIS sub tool");
+    assert!(app.pen_row_visible("opacity"), "only the chosen row");
+    assert!(
+        app.layout
+            .hidden_rows
+            .get(&app.preset_key(&path))
+            .is_some_and(|v| v.len() == 1 && v[0] == "size"),
+        "keyed by the preset"
+    );
+
+    // Un-hiding empties the list, and the empty list cleans its key.
+    app.set_pen_row("size", true);
+    assert!(app.pen_row_visible("size"));
+    assert!(!app.layout.hidden_rows.contains_key(&app.preset_key(&path)));
+
+    // The ui.txt line carries it.
+    assert!(app.layout.to_body().contains("hidden_rows="));
+}

@@ -399,6 +399,13 @@ pub struct App {
     /// reference set's ink (and frame-border folders) — the barrier is
     /// built per stroke in `begin_stroke`; False paints freely.
     pub anti_overflow: bool,
+    /// A-016 (色余白): how far a source colour may sit from the reference
+    /// ink's own colour and still count as the line — folds near-miss
+    /// pixels into the brush wall. 0 = the luma rule alone, as ever.
+    pub anti_overflow_margin: u8,
+    /// A-015 (ベクトルまで塗り): vector reference layers wall at their
+    /// strokes' centreLINES, not their rendered anti-aliased edges.
+    pub anti_overflow_vector_centreline: bool,
     /// The barrier cache (audit small, 2026-08-25): a full reference
     /// composite per stroke was ~71 MB + a 24 MB mask on the UI thread
     /// at B4/600dpi. The mask only changes when the reference set's own
@@ -408,7 +415,7 @@ pub struct App {
     /// reference layer moves the key, and a paint stroke elsewhere
     /// never does.
     pub anti_overflow_cache: Option<(
-        ((u32, u32), Vec<usize>, u64),
+        ((u32, u32), Vec<usize>, u64, u8, bool),
         Option<std::sync::Arc<mn_brush::AntiOverflowMask>>,
     )>,
     /// The pen-pressure wizard (BR-014–016): open flag, the
@@ -618,6 +625,8 @@ pub struct App {
     pub nav_thumb_rev: u64,
     /// Sub Tool Detail floating window (the wrench).
     pub detail_open: bool,
+    /// BR-005: the rows-eye popup (per-sub-tool row visibility).
+    pub pen_rows_open: bool,
     /// The Tool Property full-properties window (CSP: Tool Property >
     // sub-tool-detail with per-category eye toggles).
     pub prop_detail_open: bool,
@@ -1420,7 +1429,10 @@ impl App {
             liquify_strength: 0.5,
             liquify_radius: 40.0,
             liquify_drag: None,
-            anti_overflow_cache: None,            anti_overflow: false,
+            anti_overflow_cache: None,
+            anti_overflow: false,
+            anti_overflow_margin: 0,
+            anti_overflow_vector_centreline: false,
             quick_query: String::new(),
             quick_pins: layout
                 .quick_pins
@@ -1502,6 +1514,7 @@ impl App {
             nav_thumb: None,
             nav_thumb_rev: 0,
             detail_open: false,
+            pen_rows_open: false,
             prop_detail_open: false,
             prop_hidden: std::collections::BTreeSet::new(),
             dock,
@@ -1994,6 +2007,43 @@ impl App {
     /// either a reading of the preset (which must follow a preset update) or
     /// session state by design (`locked`); the size is the one value the
     /// owner re-dials every launch, which is why it is the one persisted.
+
+    // --- BR-005: per-row eyes on Tool Property -------------------------
+    //
+    /// Is this pen row visible for the CURRENT sub tool? Rows the artist
+    /// hid ride ui.txt keyed by the preset (the `sub_tool_size_px`
+    /// pattern); an unknown preset shows every row.
+    pub fn pen_row_visible(&self, id: &str) -> bool {
+        let Some((_, path)) = self.selected_preset.and_then(|i| self.presets.get(i)) else {
+            return true;
+        };
+        let key = self.preset_key(path);
+        self.layout
+            .hidden_rows
+            .get(&key)
+            .map_or(true, |v| !v.contains(&id.to_owned()))
+    }
+
+    /// Show/hide a pen row for the current sub tool and persist it.
+    pub fn set_pen_row(&mut self, id: &str, visible: bool) {
+        let Some((_, path)) = self
+            .selected_preset
+            .and_then(|i| self.presets.get(i))
+            .cloned()
+        else {
+            return;
+        };
+        let key = self.preset_key(&path);
+        let mut list = self.layout.hidden_rows.get(&key).cloned().unwrap_or_default();
+        if visible {
+            list.retain(|r| r != id);
+        } else if !list.contains(&id.to_owned()) {
+            list.push(id.to_owned());
+        }
+        self.layout.note_hidden_rows(&key, list);
+        self.needs_redraw = true;
+    }
+
     fn note_sub_tool_size(&mut self, path: &Path) {
         // The current engine IS this preset's, so its shipped size is the
         // default to compare against. Callers run before the engine swap.
@@ -2697,12 +2747,21 @@ impl App {
             .map(|(_, t)| t.revision())
             .max()
             .unwrap_or(0);
-        let key = (self.doc.size, refs, rev);
+        // A-015/A-016 ride the cache key: changing the margin or the
+        // centreline mode must rebuild the mask, not reuse it.
+        let key = (
+            self.doc.size,
+            refs,
+            rev,
+            self.anti_overflow_margin,
+            self.anti_overflow_vector_centreline,
+        );
         match &self.anti_overflow_cache {
             Some((k, m)) if *k == key => m.clone(),
             _ => {
-                let m = mn_core::fill::anti_overflow_barrier(&self.doc)
-                    .map(|(w, allow)| std::sync::Arc::new(mn_brush::AntiOverflowMask { w, allow }));
+                let m =
+                    mn_core::fill::anti_overflow_barrier(&self.doc, self.anti_overflow_margin, self.anti_overflow_vector_centreline)
+                        .map(|(w, allow)| std::sync::Arc::new(mn_brush::AntiOverflowMask { w, allow }));
                 self.anti_overflow_cache = Some((key, m.clone()));
                 m
             }

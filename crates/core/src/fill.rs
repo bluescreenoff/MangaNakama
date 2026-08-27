@@ -67,6 +67,37 @@ pub struct FillOpts {
     /// OPAQUE tone read as paper and the fill leak across it. Defaults
     /// OFF — the wall every earlier build built, bit for bit.
     pub semi_transparent_paper: bool,
+    /// C-005 (CSP 対象色, the Target-colour dropdown, FI-030..039): which
+    /// pixel classes are FILLABLE — everything else walls. `AllColours`
+    /// (the default) is every build before this field: walls come from
+    /// the seed-colour tolerance alone, byte for byte. Class thresholds
+    /// are ours (CSP publishes none): transparent = alpha below half;
+    /// black = inked and composite luma under 64; white = inked and luma
+    /// at or past 192. The "area surrounded by X" trio of the CSP list is
+    /// the same wall classes through the close-area (Enclose) machinery,
+    /// and the two whole-motif "all enclosed areas" repaint modes are
+    /// deliberately not built (note on the row).
+    pub close: FillClose,
+}
+
+/// The Target-colour classes (see [`FillOpts::close`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum FillClose {
+    /// FI-030 対象色: すべての色 — tolerance walls, as ever.
+    #[default]
+    AllColours,
+    /// 透明のみ — only transparent pixels fill; drawn ink walls.
+    OnlyTransparent,
+    /// 透明以外 — drawn pixels fill; transparency walls.
+    NotTransparent,
+    /// 黒のみ — black fills.
+    OnlyBlack,
+    /// 黒以外 — everything but black fills.
+    NotBlack,
+    /// 白と透明 — white and transparent fill.
+    WhiteAndTransparent,
+    /// 白と透明以外 — everything but white/transparent fills.
+    NotWhiteAndTransparent,
 }
 
 /// Rec.709 luma of a composite-over-white source pixel, rounded — the
@@ -135,6 +166,7 @@ impl Default for FillOpts {
             expand_mode: ExpandMode::Rect,
             auto: false,
             semi_transparent_paper: false,
+            close: FillClose::default(),
         }
     }
 }
@@ -162,10 +194,10 @@ pub fn flood_region_measured(
     }
     let src = source_pixels(doc, opts);
     debug_assert_eq!(src.len(), w * h);
-    // The opacity walk runs only when the semi-transparent switch needs
-    // it — one extra composite pass, opted into, never a tax on the
-    // default fill.
-    let alpha = if opts.semi_transparent_paper {
+    // The opacity walk runs only when a rule needs it — the
+    // semi-transparent switch or the Target-colour classes — one extra
+    // composite pass, opted into, never a tax on the default fill.
+    let alpha = if opts.semi_transparent_paper || opts.close != FillClose::AllColours {
         source_alpha(doc, opts)
     } else {
         Vec::new()
@@ -258,23 +290,78 @@ fn source_alpha(doc: &Document, opts: &FillOpts) -> Vec<u8> {
 /// 2026-08-27). `None` when there is
 /// nothing to refer to — the toggle is then honestly a no-op, not an
 /// all-paper mask.
-pub fn anti_overflow_barrier(doc: &Document) -> Option<(usize, Vec<u8>)> {
+pub fn anti_overflow_barrier(
+    doc: &Document,
+    colour_margin: u8,
+    vector_centreline: bool,
+) -> Option<(usize, Vec<u8>)> {
     let (w, h) = (doc.size.0 as usize, doc.size.1 as usize);
     let refs = doc.reference_layers();
     if refs.is_empty() {
         return None;
     }
     let mut allow = vec![255u8; w * h];
-    let src = source_pixels(
-        doc,
-        &FillOpts {
-            refer: FillRefer::Reference,
-            ..FillOpts::default()
-        },
-    );
-    for (a, px) in allow.iter_mut().zip(&src) {
-        if luma_u8(*px) < 128 {
-            *a = 0;
+    // A-015 (ベクトルまで塗り): with centreline mode on, a VECTOR
+    // reference layer contributes its strokes' sample points as 1 px
+    // walls — the spline itself — and its rendered anti-aliased edge is
+    // excluded from the luma wall below, so paint may tuck right up to
+    // the middle of the line instead of stopping at its fringe.
+    let mut raster_refs = refs.clone();
+    if vector_centreline {
+        let (vector_refs, kept): (Vec<usize>, Vec<usize>) = refs
+            .into_iter()
+            .partition(|&li| doc.layers.get(li).is_some_and(|l| l.strokes.is_some()));
+        for li in vector_refs {
+            let Some(set) = doc.layers.get(li).and_then(|l| l.strokes.as_ref()) else {
+                continue;
+            };
+            for s in &set.strokes {
+                // Samples sit a couple of px apart; connect them with a
+                // short DDA so the wall has no gaps.
+                for pair in s.points.windows(2) {
+                    let (x0, y0) = (pair[0].0, pair[0].1);
+                    let (x1, y1) = (pair[1].0, pair[1].1);
+                    let n = ((x1 - x0).abs().max((y1 - y0).abs()).ceil() as usize).max(1);
+                    for i in 0..=n {
+                        let t = i as f32 / n as f32;
+                        let x = (x0 + (x1 - x0) * t).round() as i64;
+                        let y = (y0 + (y1 - y0) * t).round() as i64;
+                        if x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h {
+                            allow[y as usize * w + x as usize] = 0;
+                        }
+                    }
+                }
+            }
+        }
+        raster_refs = kept;
+    }
+    // The luma wall from the RASTER references (all of them when
+    // centreline mode is off — the behaviour every earlier build had).
+    if !raster_refs.is_empty() {
+        let src = layers_over_white(doc, &raster_refs);
+        // A-016 (色余白): the reference ink's own colour, for the
+        // margin — the darkest inked pixel is the line core.
+        let mut ink: Option<[u8; 3]> = None;
+        let mut ink_luma = 255u8;
+        for px in &src {
+            let l = luma_u8(*px);
+            if l < 128 && l < ink_luma {
+                ink_luma = l;
+                ink = Some(*px);
+            }
+        }
+        let m = colour_margin as i16;
+        for (a, px) in allow.iter_mut().zip(&src) {
+            let luma_wall = luma_u8(*px) < 128;
+            let margin_wall = m > 0
+                && ink.is_some_and(|k| {
+                    (px[0] as i16 - k[0] as i16).abs().max((px[1] as i16 - k[1] as i16).abs()).max(
+                        (px[2] as i16 - k[2] as i16).abs(),
+                    ) <= m
+                });
+            if luma_wall || margin_wall {
+                *a = 0;
+            }
         }
     }
     Some((w, allow))
@@ -329,6 +416,32 @@ fn region_from_src(
             if *a < 128 {
                 *b = false;
             }
+        }
+    }
+
+    // 2a'. C-005 (対象色, Target colour): the chosen class set REPLACES
+    // the tolerance barrier — a pixel is a wall exactly when its class
+    // is not the target. After the semi-transparent pass so the two
+    // compose deterministically, into BOTH barriers so the gap-recovery
+    // step agrees, and before the rim wall so FI-022 still closes the
+    // page edge.
+    if opts.close != FillClose::AllColours {
+        for i in 0..barrier.len() {
+            let transparent = alpha.get(i).is_none_or(|a| *a < 128);
+            let luma = luma_u8(src[i]);
+            let black = !transparent && luma < 64;
+            let white = !transparent && luma >= 192;
+            let fillable = match opts.close {
+                FillClose::AllColours => true,
+                FillClose::OnlyTransparent => transparent,
+                FillClose::NotTransparent => !transparent,
+                FillClose::OnlyBlack => black,
+                FillClose::NotBlack => !black,
+                FillClose::WhiteAndTransparent => white || transparent,
+                FillClose::NotWhiteAndTransparent => !(white || transparent),
+            };
+            barrier[i] = !fillable;
+            barrier_orig[i] = !fillable;
         }
     }
 
@@ -1558,6 +1671,82 @@ mod tests {
         assert!(!is_red(&on, 66, 64), "the far side is a separate region");
     }
 
+    /// C-005 (対象色): the Target-colour classes. Fixture: three bands —
+    /// opaque black, opaque white, untouched (transparent) — and one
+    /// assertion per mode about which bands a flood can cross. The
+    /// transparent band reads as WHITE in the composite-over-white RGB
+    /// (that is the paper), so only the alpha canvas separates it —
+    /// exactly what the class test uses.
+    #[test]
+    fn target_colour_decides_what_walls_and_what_fills() {
+        fn band(doc: &mut Document, li: usize, x0: i32, x1: i32, v: u8) {
+            for y in 0..128i32 {
+                for x in x0..x1 {
+                    let idx = TileIdx::of_pixel(x, y);
+                    let (ox, oy) = idx.origin();
+                    let d = doc.layers[li].tile_mut(idx).data_mut();
+                    let o = ((y - oy) as usize * TILE_SIZE + (x - ox) as usize) * 4;
+                    let f = f32_to_fix15(v as f32 / 255.0);
+                    d[o] = f;
+                    d[o + 1] = f;
+                    d[o + 2] = f;
+                    d[o + 3] = f32_to_fix15(1.0);
+                }
+            }
+        }
+        let build = || {
+            let mut doc = Document::new(128, 128);
+            let li = doc.add_layer("art");
+            band(&mut doc, li, 10, 42, 0); // black
+            band(&mut doc, li, 52, 84, 255); // white
+            doc
+        };
+        let opts = |close: FillClose| FillOpts {
+            tolerance: 0.05,
+            gap_close_px: 0,
+            expand_px: 0,
+            close,
+            ..FillOpts::default()
+        };
+        let covers = |doc: &Document, close: FillClose, seed: (i32, i32), x: i32| {
+            let r = flood_region(doc, seed, &opts(close)).expect("region");
+            r[64 * 128 + x as usize]
+        };
+        let doc = build();
+        // Only transparent: the untouched band fills, both inks wall.
+        assert!(covers(&doc, FillClose::OnlyTransparent, (100, 64), 90));
+        assert!(!covers(&doc, FillClose::OnlyTransparent, (100, 64), 20));
+        assert!(!covers(&doc, FillClose::OnlyTransparent, (100, 64), 60));
+        // Other than transparent: the ink band fills and the transparent
+        // gap (42..52) walls the crossing — drawn regions are separate.
+        assert!(covers(&doc, FillClose::NotTransparent, (20, 64), 15));
+        assert!(!covers(&doc, FillClose::NotTransparent, (20, 64), 60));
+        assert!(!covers(&doc, FillClose::NotTransparent, (20, 64), 100));
+        // Only black: the black band fills, nothing else.
+        assert!(covers(&doc, FillClose::OnlyBlack, (20, 64), 15));
+        assert!(!covers(&doc, FillClose::OnlyBlack, (20, 64), 60));
+        // Other than black: white and transparent fill.
+        assert!(covers(&doc, FillClose::NotBlack, (60, 64), 100));
+        assert!(!covers(&doc, FillClose::NotBlack, (60, 64), 20));
+        // White and transparent: everything but the black band.
+        assert!(covers(&doc, FillClose::WhiteAndTransparent, (60, 64), 100));
+        assert!(!covers(&doc, FillClose::WhiteAndTransparent, (60, 64), 20));
+        // Other than white and transparent: only the black band.
+        assert!(covers(&doc, FillClose::NotWhiteAndTransparent, (20, 64), 15));
+        assert!(!covers(
+            &doc,
+            FillClose::NotWhiteAndTransparent,
+            (20, 64),
+            60
+        ));
+        assert!(!covers(
+            &doc,
+            FillClose::NotWhiteAndTransparent,
+            (20, 64),
+            100
+        ));
+    }
+
     /// The verdict's own divergence case (owner, 2026-08-27): a PALE but
     /// OPAQUE tone is a WALL under the switch — opacity is the test, not
     /// brightness. The old luma rule read this band as paper and the fill
@@ -2185,6 +2374,58 @@ mod tests {
         assert!(!doc.set_layer_reference(9, true), "bad index refused");
     }
 
+
+    /// A-016 (色余白, colour margin): a pale-but-opaque tone beside the
+    /// line folds INTO the wall once the margin covers the colour
+    /// distance — at margin 0 it stays paintable.
+    #[test]
+    fn colour_margin_folds_near_miss_ink_into_the_wall() {
+        let mut doc = Document::new(64, 64);
+        let li = doc.add_layer("ref");
+        let t = doc.layers[li].tile_mut(TileIdx::new(0, 0));
+        // A dark line core and a pale opaque tone 200 away per channel
+        // (below the luma midpoint, so ONLY the margin can wall it).
+        t.set_pixel(10, 10, [0, 0, 0, 32768]);
+        let grey = f32_to_fix15(200.0 / 255.0);
+        t.set_pixel(30, 10, [grey, grey, grey, 32768]);
+        doc.set_layer_reference(li, true);
+        let (_, allow0) = anti_overflow_barrier(&doc, 0, false).expect("refs");
+        assert_eq!(allow0[10 * 64 + 10], 0, "the dark core walls, as ever");
+        assert_eq!(allow0[10 * 64 + 30], 255, "margin 0: the pale tone paints");
+        let (_, allow_m) = anti_overflow_barrier(&doc, 220, false).expect("refs");
+        assert_eq!(allow_m[10 * 64 + 30], 0, "the margin folded the tone in");
+    }
+
+    /// A-015 (ベクトルまで塗り): a VECTOR reference layer walls at its
+    /// strokes' centrelines — the 1 px spine — and nothing else of it.
+    #[test]
+    fn vector_reference_walls_at_the_centreline_when_asked() {
+        let mut doc = Document::new(64, 64);
+        let li = doc.add_layer("vector");
+        doc.layers[li].strokes = Some(crate::stroke_set::StrokeSet {
+            strokes: vec![crate::stroke_set::VectorStroke {
+                points: (0..=32)
+                    .map(|i| (32.0 + i as f32, 32.0, 0.9, 0.0, 0.0, i as f64 * 8.0))
+                    .collect(),
+                preset: "pen".into(),
+                size_px: 20.0,
+                color: [0, 0, 0],
+                eraser: false,
+                stabilizer: 0.0,
+                width_scale: 1.0,
+            }],
+        });
+        doc.set_layer_reference(li, true);
+        // Centreline OFF (the old behaviour): the layer has no rendered
+        // tiles here, so nothing walls.
+        let (_, allow_off) = anti_overflow_barrier(&doc, 0, false).expect("refs");
+        assert_eq!(allow_off[32 * 64 + 40], 255, "off: no wall without ink");
+        // Centreline ON: the spine walls, 2 px off it does not.
+        let (_, allow_on) = anti_overflow_barrier(&doc, 0, true).expect("refs");
+        assert_eq!(allow_on[32 * 64 + 40], 0, "on: the spine walls");
+        assert_eq!(allow_on[34 * 64 + 40], 255, "2 px above the spine paints");
+    }
+
     #[test]
     fn fill_refer_samples_the_reference_set_composited() {
         // Two reference layers stack: their MERGED image is what the fill
@@ -2233,7 +2474,7 @@ mod tests {
     fn anti_overflow_barrier_blocks_reference_ink_only() {
         let mut doc = Document::new(128, 128);
         assert!(
-            anti_overflow_barrier(&doc).is_none(),
+            anti_overflow_barrier(&doc, 0, false).is_none(),
             "nothing to refer to — no mask"
         );
 
@@ -2241,7 +2482,7 @@ mod tests {
         let fs = crate::frame::FrameSet::single_rect([16.0, 16.0, 112.0, 112.0], 4.0);
         doc.add_frame_folder("panel", fs);
         assert!(
-            anti_overflow_barrier(&doc).is_none(),
+            anti_overflow_barrier(&doc, 0, false).is_none(),
             "frame folders are not referents — no mask from them alone"
         );
 
@@ -2261,7 +2502,7 @@ mod tests {
             d[o + 3] = f32_to_fix15(1.0);
         }
 
-        let (w, allow) = anti_overflow_barrier(&doc).expect("references exist");
+        let (w, allow) = anti_overflow_barrier(&doc, 0, false).expect("references exist");
         assert_eq!(w, 128);
         let at = |x: usize, y: usize| allow[y * 128 + x];
         assert_eq!(at(64, 64), 255, "panel paper is paintable");
