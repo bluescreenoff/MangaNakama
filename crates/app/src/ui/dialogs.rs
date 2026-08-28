@@ -951,7 +951,9 @@ pub(super) fn adjust_window(ctx: &egui::Context, app: &mut App) {
     let mut open = true;
     let mut apply = false;
     let mut cancel = false;
-    let mut live = app.adjust_preview.as_ref().is_some_and(|p| p.live);
+    let live_mode = app.adjust_live.is_some();
+    let mut live = app.adjust_preview.as_ref().is_some_and(|p| p.live)
+        || app.adjust_live.as_ref().is_some_and(|l| l.live);
     egui::Window::new(adj.label())
         .open(&mut open)
         .resizable(false)
@@ -1116,16 +1118,22 @@ pub(super) fn adjust_window(ctx: &egui::Context, app: &mut App) {
                 ui.weak("Transparent pixels stay transparent; alpha is not touched.");
             }
             // TC-013: the target set was fixed when the dialog opened.
-            let n = app
-                .adjust_preview
-                .as_ref()
-                .map_or(1, |p| p.targets.len().max(1));
-            if n > 1 {
-                ui.weak(format!(
-                    "Applies to the {n} selected layers, inside the selection if there is one."
-                ));
+            if live_mode {
+                ui.weak("Edits this correction layer's parameters — nothing below is baked.");
             } else {
-                ui.weak("Applies to the ACTIVE layer only, inside the selection if there is one.");
+                let n = app
+                    .adjust_preview
+                    .as_ref()
+                    .map_or(1, |p| p.targets.len().max(1));
+                if n > 1 {
+                    ui.weak(format!(
+                        "Applies to the {n} selected layers, inside the selection if there is one."
+                    ));
+                } else {
+                    ui.weak(
+                        "Applies to the ACTIVE layer only, inside the selection if there is one.",
+                    );
+                }
             }
             ui.add_space(2.0);
             ui.checkbox(&mut live, "Preview").on_hover_text(
@@ -1144,6 +1152,9 @@ pub(super) fn adjust_window(ctx: &egui::Context, app: &mut App) {
     app.adjust_draft = Some(adj);
     if let Some(p) = app.adjust_preview.as_mut() {
         p.live = live;
+    }
+    if let Some(l) = app.adjust_live.as_mut() {
+        l.live = live;
     }
     if apply {
         app.push_cmd(AppCmd::AdjustApply);

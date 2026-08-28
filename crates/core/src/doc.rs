@@ -279,6 +279,12 @@ pub enum LayerKind {
     /// the raster is derived through the layer mask (the window). See
     /// `fill_layer`.
     Fill(crate::fill_layer::FillKind),
+    /// LIVE tonal correction (row 105): the content is an [`crate::Adjust`],
+    /// the raster is the corrected composite of everything BELOW, derived
+    /// over the paper so it is opaque and Normal blend acts as a replace.
+    /// The layer mask is the window ("paint where it applies"). See
+    /// `correction`.
+    Correction(crate::adjust::Adjust),
     Frame(FrameSet),
     Balloon(BalloonSet),
     Text(TextSet),
@@ -420,6 +426,9 @@ pub struct Layer {
     /// stamp because a maskless fill windows the whole canvas: a resize
     /// must re-derive even when nothing else moved.
     pub(crate) fill_stamp: Option<(crate::fill_layer::FillKind, Option<u64>, u32, (u32, u32))>,
+    /// Derived corrected-page raster + its stamps (row 105). Never
+    /// serialized — rebuilt by `Document::refresh_corrections`.
+    pub(crate) corr: Option<crate::correction::CorrDerived>,
 }
 
 impl Layer {
@@ -458,6 +467,7 @@ impl Layer {
             edge_stamp: None,
             fill_tiles: None,
             fill_stamp: None,
+            corr: None,
         }
     }
 
@@ -491,6 +501,9 @@ impl Layer {
             self.fill_tiles
                 .as_ref()
                 .unwrap_or_else(|| EMPTY.get_or_init(HashMap::new))
+        } else if matches!(self.kind, LayerKind::Correction(_)) {
+            self.corr_tiles()
+                .unwrap_or_else(|| EMPTY.get_or_init(HashMap::new))
         } else {
             &self.tiles
         }
@@ -521,6 +534,8 @@ impl Layer {
             self.tone_tiles.as_ref()?.get(&idx)
         } else if let LayerKind::Fill(_) = self.kind {
             self.fill_tiles.as_ref()?.get(&idx)
+        } else if let LayerKind::Correction(_) = self.kind {
+            self.corr_tiles()?.get(&idx)
         } else {
             self.tiles.get(&idx)
         }
@@ -1116,6 +1131,7 @@ impl Layer {
         self.tone_tiles = None;
         self.edge_tiles = None;
         self.edge_stamp = None;
+        self.corr = None;
 
         self.translate_vectors(dx as f32, dy as f32);
     }
@@ -1131,6 +1147,9 @@ impl Layer {
                 b[1] += dy;
             }
             LayerKind::Fill(_) => {}
+            // A correction has no geometry of its own; its window mask
+            // shifted with the layer above.
+            LayerKind::Correction(_) => {}
             LayerKind::Frame(fs) => {
                 for f in &mut fs.frames {
                     for p in &mut f.points {
@@ -3353,6 +3372,10 @@ impl Document {
                 self.refresh_folder_edge(fi);
             }
         }
+        // Correction layers LAST of all: their derivation composites the
+        // layers below through the real compositor, so every other derived
+        // raster must already be fresh when they read it.
+        self.refresh_corrections(dpi);
     }
 
     /// FB-knockout: derive a plain folder's border-effect raster from the

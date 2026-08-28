@@ -522,6 +522,35 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                     ui.close();
                 }
             });
+            // Row 105 (CSP 色調補正レイヤー): the parameterised kinds open
+            // their dialog on the fresh layer; Reverse gradient has nothing
+            // to ask. Same order as the Correction menu.
+            ui.menu_button("New correction layer", |ui| {
+                for (label, adj) in [
+                    ("Levels…", mn_core::Adjust::LEVELS),
+                    ("Tone curve…", mn_core::Adjust::TONE_CURVE),
+                    ("Brightness/Contrast…", mn_core::Adjust::BRIGHTNESS_CONTRAST),
+                    ("Hue/Saturation/Luminosity…", mn_core::Adjust::HUE_SATURATION),
+                    ("Posterization…", mn_core::Adjust::POSTERIZE),
+                    ("Colour balance…", mn_core::Adjust::COLOUR_BALANCE),
+                    ("Gradient map…", mn_core::Adjust::GRADIENT_MAP),
+                    ("Reverse gradient", mn_core::Adjust::Invert),
+                    ("Binarization…", mn_core::Adjust::BINARIZE),
+                ] {
+                    if item(ui, label, "") {
+                        app.push_cmd(AppCmd::NewCorrectionLayer(adj));
+                        ui.close();
+                    }
+                }
+            });
+            if matches!(
+                app.doc.active_layer().kind,
+                mn_core::LayerKind::Correction(_)
+            ) && item(ui, "Correction layer settings…", "")
+            {
+                app.push_cmd(AppCmd::CorrectionEdit);
+                ui.close();
+            }
             if item(ui, "New folder", "") {
                 app.push_cmd(AppCmd::AddFolder);
                 ui.close();

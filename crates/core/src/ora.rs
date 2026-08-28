@@ -289,6 +289,10 @@ pub fn save_to_with<W: Write + Seek>(
                 LayerKind::Fill(k) => serde_json::to_string(k).ok(),
                 _ => None,
             },
+            correction: match &layer.kind {
+                LayerKind::Correction(a) => serde_json::to_string(a).ok(),
+                _ => None,
+            },
             mask_src,
             strokes_src,
             mask_enabled: layer.mask.as_ref().map(|m| m.enabled),
@@ -393,6 +397,8 @@ struct LayerEntry {
     tone: Option<String>,
     genlines: Option<String>,
     fill: Option<String>,
+    /// Row 105 correction-layer params (`Adjust`), JSON.
+    correction: Option<String>,
     /// LP-002/LP-003 border-effect params, JSON.
     edge: Option<String>,
     /// LP-016 layer colour, hex RRGGBB.
@@ -498,6 +504,9 @@ fn stack_xml(
         }
         if let Some(j) = e.fill.as_deref() {
             extra.push_str(&format!(" mnc-fill=\"{}\"", xml_escape(j)));
+        }
+        if let Some(j) = e.correction.as_deref() {
+            extra.push_str(&format!(" mnc-correction=\"{}\"", xml_escape(j)));
         }
         if let Some(j) = e.genlines.as_deref() {
             extra.push_str(&format!(" mnc-genlines=\"{}\"", xml_escape(j)));
@@ -732,6 +741,10 @@ pub fn load_from<R: Read + Seek>(source: R) -> Result<Document, OraError> {
             // Live fill layer (TRIAGE 137): the DERIVED raster re-derives from
             // the params + the persisted mask window; no PNG fallback needed.
             layer.kind = LayerKind::Fill(*k);
+        } else if let Some(a) = &e.correction {
+            // Correction layer (row 105): same deal — the corrected page
+            // re-derives from the params + the layers below on load.
+            layer.kind = LayerKind::Correction(*a);
         } else if let Some(bytes) = read_entry(&mut zip, &e.src) {
             let img =
                 image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)?.to_rgba8();
@@ -988,6 +1001,9 @@ struct ParsedLayer {
     /// is what every file written before this round says.
     edge: Option<crate::edge::EdgeParams>,
     fill: Option<crate::fill_layer::FillKind>,
+    /// Row 105 correction layer (`mnc-correction`): params only, the
+    /// raster re-derives.
+    correction: Option<crate::adjust::Adjust>,
     genlines: Option<crate::genlines::GenLinesSpec>,
     /// TRIAGE 138 p2: `mnc-mask` zip path + the enabled flag.
     mask_src: Option<String>,
@@ -1166,6 +1182,7 @@ fn parse_stack_xml(xml: &str) -> Result<ParsedStack, OraError> {
                         tone: get("mnc-tone").and_then(|j| serde_json::from_str(j).ok()),
                         edge: get("mnc-edge").and_then(|j| serde_json::from_str(j).ok()),
                         fill: get("mnc-fill").and_then(|j| serde_json::from_str(j).ok()),
+                        correction: get("mnc-correction").and_then(|j| serde_json::from_str(j).ok()),
                         genlines: get("mnc-genlines").and_then(|j| serde_json::from_str(j).ok()),
                         mask_src: get("mnc-mask").map(str::to_string),
                         strokes_src: get("mnc-strokes").map(str::to_string),
@@ -1217,6 +1234,7 @@ fn parse_stack_xml(xml: &str) -> Result<ParsedStack, OraError> {
                     tone: get("mnc-tone").and_then(|j| serde_json::from_str(j).ok()),
                     edge: get("mnc-edge").and_then(|j| serde_json::from_str(j).ok()),
                     fill: get("mnc-fill").and_then(|j| serde_json::from_str(j).ok()),
+                    correction: get("mnc-correction").and_then(|j| serde_json::from_str(j).ok()),
                     genlines: get("mnc-genlines").and_then(|j| serde_json::from_str(j).ok()),
                     mask_src: get("mnc-mask").map(str::to_string),
                     strokes_src: get("mnc-strokes").map(str::to_string),

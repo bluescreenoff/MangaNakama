@@ -20,6 +20,19 @@ use mn_core::{Adjust, Tile, TileIdx};
 
 use crate::app::App;
 
+/// Row 105: the correction dialog opened ON a correction layer. No pixels
+/// are overwritten in this mode — the layer's PARAMS are the state, the
+/// derived raster follows them, and Cancel puts the opening params back.
+pub struct AdjustLive {
+    /// Which layer the dialog edits.
+    pub layer: usize,
+    /// The params when the dialog opened — Cancel's restore point.
+    pub orig: mn_core::Adjust,
+    /// The dialog's Preview checkbox: off shows the ORIGINAL params (the
+    /// "before"), without closing the dialog.
+    pub live: bool,
+}
+
 /// The pixels a live preview overwrote, and where they came from.
 pub struct AdjustPreview {
     /// Per-target restore points: each selected layer with its pre-image
@@ -38,6 +51,46 @@ pub struct AdjustPreview {
 }
 
 impl App {
+    /// Row 105: open the shared correction dialog ON the active correction
+    /// layer — the dialog edits the LAYER's params, nothing bakes. The
+    /// destructive machinery (snapshots, pixel preview) stays untouched:
+    /// this mode has no pixels of its own to guard.
+    pub fn adjust_begin_live(&mut self) {
+        self.adjust_preview_revert();
+        let li = self.doc.active;
+        let mn_core::LayerKind::Correction(cur) = self.doc.layers[li].kind else {
+            self.set_status("no correction layer selected");
+            return;
+        };
+        self.adjust_draft = Some(cur);
+        self.adjust_live = Some(AdjustLive {
+            layer: li,
+            orig: cur,
+            live: true,
+        });
+        self.mark_dirty();
+    }
+
+    /// Write `adj` into the live-mode layer's params and re-derive. The
+    /// deliberate twin of `SetFillParams`: no undo group — the params are
+    /// view-state-like layer content, and the fill convention holds until
+    /// the owner asks for more (noted in TODO).
+    fn adjust_live_write(&mut self, li: usize, adj: Adjust) {
+        let Some(l) = self.doc.layers.get_mut(li) else {
+            return;
+        };
+        if !matches!(l.kind, mn_core::LayerKind::Correction(_)) {
+            return;
+        }
+        if matches!(l.kind, mn_core::LayerKind::Correction(cur) if cur == adj) {
+            return;
+        }
+        l.kind = mn_core::LayerKind::Correction(adj);
+        self.doc.touch();
+        self.refresh_tones();
+        self.mark_dirty();
+    }
+
     /// Open a correction dialog and take the preview's restore points —
     /// one per selected layer that has pixels in reach (TC-013).
     pub fn adjust_begin(&mut self, adj: Adjust) {
@@ -70,6 +123,12 @@ impl App {
         let Some(adj) = self.adjust_draft else {
             return;
         };
+        // Live mode first: the layer's params ARE the preview.
+        if let Some(lv) = self.adjust_live.as_ref() {
+            let (li, want) = (lv.layer, if lv.live { adj } else { lv.orig });
+            self.adjust_live_write(li, want);
+            return;
+        }
         let Some(p) = self.adjust_preview.as_ref() else {
             return;
         };
@@ -97,6 +156,12 @@ impl App {
     /// was a preview to undo — callers use that to report "abandoned".
     pub fn adjust_preview_revert(&mut self) -> bool {
         self.adjust_draft = None;
+        if let Some(lv) = self.adjust_live.take() {
+            // Live mode: put the opening params back — the layer never
+            // held anything else worth guarding.
+            self.adjust_live_write(lv.layer, lv.orig);
+            return true;
+        }
         let Some(p) = self.adjust_preview.take() else {
             return false;
         };
@@ -116,6 +181,17 @@ impl App {
     /// preview. Committing on top of it would make Undo restore the
     /// *previewed* image instead of the original.
     pub fn adjust_commit(&mut self) {
+        // Live mode: the draft params become the layer's params, full stop.
+        if let Some(lv) = self.adjust_live.take() {
+            if let Some(adj) = self.adjust_draft.take() {
+                self.adjust_live_write(lv.layer, adj);
+                self.set_status(format!(
+                    "{} layer updated — parameters only, nothing baked",
+                    adj.label()
+                ));
+            }
+            return;
+        }
         let Some(adj) = self.adjust_draft else {
             return;
         };

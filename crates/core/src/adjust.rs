@@ -50,7 +50,11 @@ pub const TONE_CURVE_MAX: usize = 8;
 ///
 /// Slider ranges are normalised: CSP shows −100..100, we carry −1..1, and
 /// the dialog does the ×100 for display only.
-#[derive(Clone, Copy, PartialEq, Debug)]
+///
+/// Serde arrived with correction LAYERS (row 105): the serialized shape is
+/// the `mnc-correction` ORA attribute, so variant and field names are FILE
+/// FORMAT now — renaming one orphans every saved correction layer.
+#[derive(Clone, Copy, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Adjust {
     /// TC-004. `brightness` is an offset on 0..1; `contrast` pivots around
     /// mid grey. Both 0 = no change.

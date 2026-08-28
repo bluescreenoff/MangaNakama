@@ -118,6 +118,21 @@ pub fn composite_alpha_for_fill(doc: &Document, refer_drafts: bool) -> Vec<u8> {
     .collect()
 }
 
+/// Row 105: an arbitrary sub-rect of the EXPORT composite (drafts out) —
+/// the correction layer's derivation source. Kept `pub(crate)` so the
+/// correction module reuses the one true walk instead of growing a second
+/// compositor that could disagree.
+pub(crate) fn composite_rect_export(
+    doc: &Document,
+    background: Background,
+    w: u32,
+    h: u32,
+    ox: i32,
+    oy: i32,
+) -> image::RgbaImage {
+    composite_size(doc, background, w, h, ox, oy, CompOpts::Export)
+}
+
 /// Which layers a composite walks.
 #[derive(Clone, Copy)]
 enum CompOpts {

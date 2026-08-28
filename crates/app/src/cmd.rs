@@ -2630,6 +2630,14 @@ pub enum AppCmd {
     /// Edit a live layer's parameters (Tool Property). Re-derives only —
     /// never structural, no history clear.
     SetFillParams(usize, mn_core::FillKind),
+    /// Row 105: new correction LAYER — the params live on the layer, the
+    /// corrected page is derived, nothing below is baked. The current
+    /// selection cuts the window mask; no selection = the whole canvas.
+    NewCorrectionLayer(mn_core::Adjust),
+    /// Reopen the ACTIVE correction layer's dialog to edit its params.
+    /// Like `SetFillParams`, param edits are re-derives with no undo group
+    /// (the live-layer convention).
+    CorrectionEdit,
     /// Pick the Fill tool's sub tool (click / enclose / lasso).
     SetFillMode(FillMode),
     /// The one-gesture screentone (Tone tool): flood the enclosed region at
@@ -5852,6 +5860,21 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 app.mark_dirty();
             }
         }
+        AppCmd::NewCorrectionLayer(adj) => {
+            let from_sel = app.doc.selection.is_some();
+            app.doc.add_correction_layer(adj, from_sel);
+            app.refresh_tones();
+            app.set_status(
+                "correction layer — everything below renders through it; any brush edits its window",
+            );
+            app.mark_dirty();
+            // The parameterised kinds go straight into their dialog, CSP
+            // style; Invert has nothing to ask.
+            if !matches!(adj, mn_core::Adjust::Invert) {
+                app.push_cmd(AppCmd::CorrectionEdit);
+            }
+        }
+        AppCmd::CorrectionEdit => app.adjust_begin_live(),
         AppCmd::SetFillMode(m) => {
             app.fill_mode = m;
             app.set_status(match m {

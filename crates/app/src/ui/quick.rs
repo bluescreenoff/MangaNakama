@@ -118,6 +118,102 @@ pub fn command_index() -> Vec<(&'static str, &'static str, AppCmd)> {
             "Layer ▸ Ruler",
             RulerArm(crate::cmd::RulerKind::Symmetric),
         ),
+        // Row 109's other half — the Correction menu, whole. Seeds are the
+        // menu's own `Adjust` defaults; the parameterised ones open the
+        // shared correction dialog, Reverse gradient runs on the spot.
+        ("Levels", "Correction", AdjustOpen(mn_core::Adjust::LEVELS)),
+        (
+            "Tone curve",
+            "Correction",
+            AdjustOpen(mn_core::Adjust::TONE_CURVE),
+        ),
+        (
+            "Brightness/Contrast",
+            "Correction",
+            AdjustOpen(mn_core::Adjust::BRIGHTNESS_CONTRAST),
+        ),
+        (
+            "Hue/Saturation/Luminosity",
+            "Correction",
+            AdjustOpen(mn_core::Adjust::HUE_SATURATION),
+        ),
+        (
+            "Posterization",
+            "Correction",
+            AdjustOpen(mn_core::Adjust::POSTERIZE),
+        ),
+        (
+            "Colour balance",
+            "Correction",
+            AdjustOpen(mn_core::Adjust::COLOUR_BALANCE),
+        ),
+        (
+            "Gradient map",
+            "Correction",
+            AdjustOpen(mn_core::Adjust::GRADIENT_MAP),
+        ),
+        // Named for both things people call it, like the flatten row above.
+        (
+            "Reverse gradient (invert colours)",
+            "Correction",
+            AdjustNow(mn_core::Adjust::Invert),
+        ),
+        (
+            "Binarization",
+            "Correction",
+            AdjustOpen(mn_core::Adjust::BINARIZE),
+        ),
+        // Row 105 — correction LAYERS, the live spelling of the rows above.
+        (
+            "Levels correction layer",
+            "Layer ▸ New correction layer",
+            NewCorrectionLayer(mn_core::Adjust::LEVELS),
+        ),
+        (
+            "Tone curve correction layer",
+            "Layer ▸ New correction layer",
+            NewCorrectionLayer(mn_core::Adjust::TONE_CURVE),
+        ),
+        (
+            "Brightness/Contrast correction layer",
+            "Layer ▸ New correction layer",
+            NewCorrectionLayer(mn_core::Adjust::BRIGHTNESS_CONTRAST),
+        ),
+        (
+            "Hue/Saturation correction layer",
+            "Layer ▸ New correction layer",
+            NewCorrectionLayer(mn_core::Adjust::HUE_SATURATION),
+        ),
+        (
+            "Posterization correction layer",
+            "Layer ▸ New correction layer",
+            NewCorrectionLayer(mn_core::Adjust::POSTERIZE),
+        ),
+        (
+            "Colour balance correction layer",
+            "Layer ▸ New correction layer",
+            NewCorrectionLayer(mn_core::Adjust::COLOUR_BALANCE),
+        ),
+        (
+            "Gradient map correction layer",
+            "Layer ▸ New correction layer",
+            NewCorrectionLayer(mn_core::Adjust::GRADIENT_MAP),
+        ),
+        (
+            "Invert correction layer (reverse gradient)",
+            "Layer ▸ New correction layer",
+            NewCorrectionLayer(mn_core::Adjust::Invert),
+        ),
+        (
+            "Binarization correction layer",
+            "Layer ▸ New correction layer",
+            NewCorrectionLayer(mn_core::Adjust::BINARIZE),
+        ),
+        (
+            "Correction layer settings (edit parameters)",
+            "Layer",
+            CorrectionEdit,
+        ),
         // TRIAGE 109 — the Filter menu, whole. The seeds match the menu's own
         // (`ui::top`); a filter with parameters opens its dialog seeded the
         // same way from either door, and the no-dialog pair runs on the spot.
@@ -946,6 +1042,43 @@ mod tests {
             );
             assert_eq!(*wher, "Layer ▸ Ruler", "same menu path as its siblings");
         }
+    }
+
+    /// Row 109's other half: the Correction menu's nine rows are all
+    /// findable, each seeded exactly as the menu seeds it — the dialog
+    /// ones open, Reverse gradient runs on the spot.
+    #[test]
+    fn the_correction_menu_is_in_the_palette() {
+        use mn_core::Adjust as A;
+        let idx = command_index();
+        let row = |label: &str| {
+            idx.iter()
+                .find(|(l, _, _)| *l == label)
+                .unwrap_or_else(|| panic!("no palette row for {label}"))
+                .clone()
+        };
+        for (label, want) in [
+            ("Levels", A::LEVELS),
+            ("Tone curve", A::TONE_CURVE),
+            ("Brightness/Contrast", A::BRIGHTNESS_CONTRAST),
+            ("Hue/Saturation/Luminosity", A::HUE_SATURATION),
+            ("Posterization", A::POSTERIZE),
+            ("Colour balance", A::COLOUR_BALANCE),
+            ("Gradient map", A::GRADIENT_MAP),
+            ("Binarization", A::BINARIZE),
+        ] {
+            let (_, wher, cmd) = row(label);
+            assert_eq!(wher, "Correction", "menu path ({label})");
+            assert!(
+                matches!(cmd, AppCmd::AdjustOpen(a) if a == want),
+                "{label}: dialog door, menu seed — got {cmd:?}"
+            );
+        }
+        let (_, _, cmd) = row("Reverse gradient (invert colours)");
+        assert!(
+            matches!(cmd, AppCmd::AdjustNow(A::Invert)),
+            "invert runs with no dialog, like the menu: {cmd:?}"
+        );
     }
 
     /// TRIAGE 109: the Filter menu was reachable by mouse only — not one of

@@ -231,6 +231,9 @@ pub struct App {
     /// The pre-images the live preview overwrote. See `app/adjust.rs` — a
     /// preview writes real pixels outside the undo bracket.
     pub adjust_preview: Option<AdjustPreview>,
+    /// Row 105: the dialog is open ON a correction layer — params-only
+    /// mode, no pixels touched. Exclusive with `adjust_preview`.
+    pub adjust_live: Option<adjust::AdjustLive>,
     /// PM-022: the Go to Page dialog state (1-based draft number).
     pub goto_page_open: bool,
     pub goto_page_value: i32,
@@ -1335,6 +1338,7 @@ impl App {
             ui_scale_apply: None,
             adjust_draft: None,
             adjust_preview: None,
+            adjust_live: None,
             goto_page_open: false,
             goto_page_value: 1,
             spread_op: None,
@@ -2709,11 +2713,15 @@ impl App {
         self.brush.inner_mut().inner_mut().set_mask_mode_all(on);
     }
 
-    /// True while the active layer is a LIVE fill layer (TRIAGE 137):
-    /// every brush stroke edits its WINDOW mask — the same path and the
-    /// same alpha-scale semantics as mask-edit (LM-005), armed implicitly.
+    /// True while the active layer is a LIVE layer (TRIAGE 137 fill /
+    /// row 105 correction): every brush stroke edits its WINDOW mask — the
+    /// same path and the same alpha-scale semantics as mask-edit (LM-005),
+    /// armed implicitly.
     fn live_fill_active(&self) -> bool {
-        matches!(self.doc.active_layer().kind, mn_core::LayerKind::Fill(_))
+        matches!(
+            self.doc.active_layer().kind,
+            mn_core::LayerKind::Fill(_) | mn_core::LayerKind::Correction(_)
+        )
     }
 
     /// Audit H1 (rounds 50-68): leave mask-edit mode when the active layer
@@ -4347,6 +4355,8 @@ mod tone_round_tests;
 /// inherits from the fill machinery.
 #[cfg(test)]
 mod tone_gesture_tests;
+#[cfg(test)]
+mod correction_layer_tests;
 
 #[cfg(test)]
 mod view_reset_and_tool_lock_tests;

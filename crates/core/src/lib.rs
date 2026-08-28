@@ -20,6 +20,7 @@ pub mod adjust;
 pub mod align;
 pub mod balloon;
 pub mod blend;
+pub mod correction;
 pub mod curve;
 pub mod dab;
 pub mod doc;
