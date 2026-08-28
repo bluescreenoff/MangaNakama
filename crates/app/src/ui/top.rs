@@ -517,7 +517,11 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 if item(ui, "Tone (60 lpi dots)", "") {
                     app.push_cmd(AppCmd::NewLiveFill(mn_core::FillKind::Tone {
                         tone: mn_core::tone::ToneParams::default(),
-                        density: 1.0,
+                        // NOT 1.0: `ToneDensity::Specified(1.0)` short-circuits
+                        // `TonePattern::on` to always-true, so the "dots" came
+                        // out a solid black fill. 0.4 is the Tone tool's own
+                        // default — the same screen either door makes.
+                        density: 0.4,
                     }));
                     ui.close();
                 }
