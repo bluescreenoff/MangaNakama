@@ -44,6 +44,8 @@
 //!   remaining string out in small steps, finishing **exactly** on the last raw
 //!   sample.
 
+use serde::{Deserialize, Serialize};
+
 use crate::doc::Document;
 use crate::stroke::{PenSample, StrokeSink};
 
@@ -60,7 +62,7 @@ const DRAIN_MAX_STEPS: u32 = 64;
 // ---------------------------------------------------------------------------
 
 /// How the entry/exit shaping length is specified (CSP `S-024`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum SeHow {
     /// Absolute run-in / run-out distances in canvas px (`S-025`, `S-026`).
     #[default]
@@ -72,7 +74,7 @@ pub enum SeHow {
 }
 
 /// Which way the pull-string tracks pen speed (CSP `C-030`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum StabMode {
     /// A steady hand for detail: the string grows as the pen slows down.
     #[default]
@@ -87,7 +89,8 @@ pub enum StabMode {
 /// **Every field defaults to off**, and with the default value the whole stage
 /// is a byte-for-byte passthrough — a brush preset from before this existed
 /// draws exactly as it did (`default_cfg_is_an_exact_passthrough`).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CorrectCfg {
     /// `C-031` post correction, 0..1. 0 = off.
     pub post: f32,

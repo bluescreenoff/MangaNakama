@@ -928,6 +928,13 @@ pub fn bucket_fill_measured(
 /// one labelled undo step. Returns the pixels written (0 leaves no undo
 /// entry behind). `region` is canvas-sized, row-major.
 fn paint_region(doc: &mut Document, region: &[bool], color: [f32; 3], label: &str) -> usize {
+    // 0. The layer has to keep pixels. The fill family is the one ink path
+    // that never asked: a folder or a derived raster ate the fill at the
+    // next refresh, and a stroke-recording layer swallowed it at the next
+    // control-point nudge — silently, in all three cases.
+    if !doc.active_layer().paintable() {
+        return 0;
+    }
     let (w, h) = (doc.size.0 as usize, doc.size.1 as usize);
     debug_assert_eq!(region.len(), w * h);
 
@@ -2413,6 +2420,7 @@ mod tests {
                 eraser: false,
                 stabilizer: 0.0,
                 width_scale: 1.0,
+                settings: None,
             }],
         });
         doc.set_layer_reference(li, true);

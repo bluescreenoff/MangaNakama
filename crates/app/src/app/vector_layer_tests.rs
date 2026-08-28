@@ -36,6 +36,13 @@ fn drag(app: &mut App, y: f32) {
     app.end_stroke();
 }
 
+fn tiles(app: &App, li: usize) -> std::collections::BTreeMap<TileIdx, Vec<u16>> {
+    app.doc.layers[li]
+        .tiles()
+        .map(|(idx, t)| (idx, t.data().to_vec()))
+        .collect()
+}
+
 fn layer_alpha(app: &App, li: usize) -> u64 {
     let mut sum = 0u64;
     for (_, t) in app.doc.layers[li].tiles() {
@@ -200,7 +207,13 @@ fn translating_a_stroke_moves_ink_and_geometry_as_one_step() {
         sum
     };
     assert_eq!(col(&app, 58), 0, "ink left the old start");
-    assert!(col(&app, 98) > 0, "…and begins at the new one");
+    // Probed at the FAR end, not two px past the new start: the replay now
+    // runs the stroke's own entry taper (the preset's 217 px ramp from
+    // 18.3 % pressure), exactly as the pen did, so the first few px of the
+    // re-derived line are as good as transparent — as they were when it was
+    // drawn. Before the settings snapshot the replay skipped the taper and
+    // the line came back with a blunt, fat head.
+    assert!(col(&app, 260) > 0, "…and reaches 40 px past the old end");
 
     crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::Undo);
     let tiles_after_undo: std::collections::BTreeMap<TileIdx, Vec<u16>> = app.doc.layers[li]
@@ -223,7 +236,7 @@ fn translating_a_stroke_moves_ink_and_geometry_as_one_step() {
             .abs()
             < 1e-3
     );
-    assert!(col(&app, 98) > 0);
+    assert!(col(&app, 260) > 0);
 }
 
 /// Phase 2: dragging one POINT deforms locally — the grabbed sample moves
@@ -501,6 +514,82 @@ fn drawing_selects_the_newest_stroke() {
         app.vector_sel.is_none_or(|si| si < count(&app)),
         "selection dangles after undo: {:?}",
         app.vector_sel
+    );
+}
+
+/// A stroke-recording layer is `LayerKind::Raster`, so `is_vector()` is
+/// FALSE for it and every guard shaped `is_vector() || folder` waved raster
+/// ops straight through — then the next re-derive zeroed the tiles and
+/// replayed only the strokes, so the edit vanished with no warning at the
+/// moment it was made. The ops refuse now, and say so.
+#[test]
+fn raster_edits_refuse_a_recording_layer_instead_of_vanishing() {
+    let Some(mut app) = vector_app() else { return };
+    let li = app.doc.active;
+    drag(&mut app, 200.0);
+    let drawn = tiles(&app, li);
+    assert!(layer_alpha(&app, li) > 0);
+
+    // The `paintable()` family — Edit ▸ Fill stands for fill, clear-outside,
+    // the corrections, the filters and the transform commit.
+    assert!(
+        !app.doc.fill_selection([1.0, 0.0, 0.0]),
+        "menu fill refuses a recording layer"
+    );
+    // The bucket, which asked nothing at all before.
+    let opts = app.fill_opts;
+    assert_eq!(
+        mn_core::fill::bucket_fill(&mut app.doc, (300, 300), [1.0, 0.0, 0.0], &opts),
+        0,
+        "the bucket refuses one too"
+    );
+    // The command guards.
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::TransformStart);
+    assert!(app.transform_drag.is_none(), "Transform never opens");
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::ClearLayer);
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::Cut);
+    assert_eq!(tiles(&app, li), drawn, "not one of them wrote a pixel");
+
+    // …and what IS on the layer is exactly what its record replays, so the
+    // next control-point nudge changes nothing it should not.
+    app.doc.begin_op();
+    app.rederive_vector_layer(li);
+    app.doc.end_op();
+    assert_eq!(tiles(&app, li), drawn, "the replay is the same ink");
+}
+
+/// The replay re-inks at the STROKE's settings, not the preset's: a line
+/// drawn at 40 % opacity re-derives at 40 %. Before the snapshot existed
+/// the replay set only size/colour/eraser/stabilizer, so one nudge re-inked
+/// the whole layer opaque.
+#[test]
+fn the_replay_re_inks_at_the_strokes_own_settings() {
+    let Some(mut app) = vector_app() else { return };
+    let li = app.doc.active;
+    app.props_current.opacity = 0.4;
+    app.props_current.taper_px = 60.0;
+    app.props_current.taper_min = 0.1;
+    app.apply_props();
+    drag(&mut app, 200.0);
+    let drawn = tiles(&app, li);
+    assert!(layer_alpha(&app, li) > 0);
+
+    app.doc.begin_op();
+    app.rederive_vector_layer(li);
+    app.doc.end_op();
+    assert_eq!(tiles(&app, li), drawn, "re-derived as drawn, not as preset");
+
+    // The other arm, and the back-compat pin: a record from before the
+    // snapshot existed carries None and replays the old way — the preset's
+    // own opacity and no taper, which is visibly different ink.
+    app.doc.layers[li].strokes.as_mut().unwrap().strokes[0].settings = None;
+    app.doc.begin_op();
+    app.rederive_vector_layer(li);
+    app.doc.end_op();
+    assert_ne!(
+        tiles(&app, li),
+        drawn,
+        "an old record replays through the preset, exactly as it used to"
     );
 }
 

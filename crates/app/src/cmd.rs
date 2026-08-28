@@ -3144,7 +3144,12 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             }
         }
         AppCmd::MaskEdit => {
-            let ok = app.doc.active_layer().mask.is_some() && app.doc.active_layer().paintable();
+            // Mask strokes land in the MASK, which the stroke replay never
+            // touches — so a recording layer edits its mask like any other
+            // raster layer, and this asks for that directly rather than
+            // through `paintable()` (which now refuses one).
+            let l = app.doc.active_layer();
+            let ok = l.mask.is_some() && !l.folder && !l.is_vector();
             if !app.mask_edit && !ok {
                 app.set_status("edit-mask needs a masked raster layer");
                 return;
@@ -5629,6 +5634,10 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 app.set_status("layer is locked");
             } else if l.is_vector() {
                 app.set_status("Delete clears raster layers — this one is derived from vectors");
+            } else if l.records_strokes() {
+                // Zeroing the tiles would look like it worked and then hand
+                // every stroke back at the next re-derive.
+                app.set_status("this layer's ink is recorded — erase the strokes, or delete the layer");
             } else {
                 let tiles: Vec<_> = l.tiles().map(|(i, _)| i).collect();
                 if tiles.is_empty() {
@@ -5661,7 +5670,7 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             let l = app.doc.active_layer();
             if l.lock {
                 app.set_status("layer is locked");
-            } else if l.is_vector() || l.folder {
+            } else if l.is_vector() || l.records_strokes() || l.folder {
                 app.set_status("Cut applies to raster layers");
             } else {
                 match lift_clipboard_source(app) {
@@ -5987,7 +5996,7 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                     app.set_status("layer is locked");
                     return;
                 }
-                if l.is_vector() || l.folder {
+                if l.is_vector() || l.records_strokes() || l.folder {
                     app.set_status("Material pastes target raster layers");
                     return;
                 }
@@ -6137,7 +6146,7 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             let l = app.doc.active_layer();
             if l.lock {
                 app.set_status("layer is locked");
-            } else if l.is_vector() || l.folder {
+            } else if l.is_vector() || l.records_strokes() || l.folder {
                 app.set_status("Transform applies to raster layers");
             } else {
                 // Source rect: the selection's bounds when one exists, else
@@ -6161,7 +6170,7 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             let l = app.doc.active_layer();
             if l.lock {
                 app.set_status("layer is locked");
-            } else if l.is_vector() || l.folder {
+            } else if l.is_vector() || l.records_strokes() || l.folder {
                 app.set_status("Mesh transform applies to raster layers");
             } else {
                 match transform_lift_rect(app) {
@@ -6190,7 +6199,7 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             let l = app.doc.active_layer();
             if l.lock {
                 app.set_status("layer is locked");
-            } else if l.is_vector() || l.folder {
+            } else if l.is_vector() || l.records_strokes() || l.folder {
                 app.set_status("Puppet warp applies to raster layers");
             } else {
                 match transform_lift_rect(app) {
@@ -6262,7 +6271,7 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 let l = app.doc.active_layer();
                 if l.lock {
                     app.set_status("layer is locked");
-                } else if l.is_vector() || l.folder {
+                } else if l.is_vector() || l.records_strokes() || l.folder {
                     app.set_status("Flip applies to raster layers");
                 } else {
                     let rect = transform_lift_rect(app);

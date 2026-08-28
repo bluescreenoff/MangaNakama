@@ -745,10 +745,24 @@ impl Layer {
         !matches!(self.kind, LayerKind::Raster)
     }
 
-    /// Brush/fill target? Folders organise, vector layers derive — neither
-    /// takes ink.
+    /// A stroke-recording layer (vector inking): `LayerKind::Raster` with a
+    /// stroke set beside the pixels, so `is_vector()` is FALSE for it and
+    /// every guard written as `is_vector() || folder` used to let raster ops
+    /// straight through. Its raster is re-derived from the record at the
+    /// next control-point nudge — anything else that wrote tiles is zeroed
+    /// there without a word.
+    pub fn records_strokes(&self) -> bool {
+        self.strokes.is_some()
+    }
+
+    /// Takes a raster EDIT? Folders organise, vector layers derive, and a
+    /// stroke-recording layer replays — none of the three keeps pixels that
+    /// arrive any other way. (Inking itself does not ask: a pen stroke on a
+    /// recording layer is captured, so it survives the replay. This is the
+    /// guard for everything else — fill, gradient, transform, filter,
+    /// correction, cut, clear.)
     pub fn paintable(&self) -> bool {
-        !self.folder && !self.is_vector()
+        !self.folder && !self.is_vector() && !self.records_strokes()
     }
 
     /// Fill the whole canvas with opaque white, cheaply: every tile shares
@@ -1564,7 +1578,10 @@ impl Document {
         let Some(l) = self.layers.get_mut(index) else {
             return false;
         };
-        if !l.paintable() || l.lock || l.folder {
+        // NOT `paintable()`: a mask lives beside the tiles and the stroke
+        // replay never touches it, so a stroke-recording layer masks like
+        // any other raster one. Only derived rasters and folders refuse.
+        if l.is_vector() || l.lock || l.folder {
             return false;
         }
         let idxs: Vec<TileIdx> = l.tiles().map(|(i, _)| i).collect();
@@ -3615,6 +3632,13 @@ impl Document {
             return false;
         }
         if self.layers[index].is_vector() || self.layers[index - 1].is_vector() {
+            return false;
+        }
+        // The DESTINATION may not be a stroke-recording layer: the merged
+        // pixels would land in tiles the next replay zeroes. (The source
+        // may be one — that is CSP's rasterize-and-merge, and its record
+        // leaves with the layer.)
+        if self.layers[index - 1].records_strokes() {
             return false;
         }
         // Folders never merge, merging across a folder boundary would smuggle

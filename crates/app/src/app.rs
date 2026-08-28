@@ -3224,6 +3224,18 @@ impl App {
                 // The samples are captured BEFORE the pull-string — the
                 // replay must re-run it at the same strength.
                 stroke.stabilizer = self.props_current.stabilizer;
+                // …and the rest of what the engine was built with, or the
+                // replay would fall back to the preset's own numbers and
+                // re-ink the whole layer at settings nobody chose. Opacity
+                // is stored RESOLVED (the wash branch of `apply_props`), so
+                // the replay applies one number and never re-decides.
+                let p = &self.props_current;
+                stroke.settings = Some(mn_core::StrokeSettings {
+                    opacity: if p.wash { p.flow } else { p.opacity },
+                    correct: p.correct,
+                    taper_px: p.taper_px,
+                    taper_min: p.taper_min,
+                });
                 self.doc.end_op_vector_stroke(stroke);
                 // Reaching for the Object tool right after inking means "edit
                 // THAT stroke": select the record just pushed (the newest on

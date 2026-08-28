@@ -222,8 +222,23 @@ impl App {
                 Taper::new(Engine::new(EngineKind::My(Box::new(b)))),
                 s.stabilizer,
             );
+            // The stroke's own Tool Property snapshot, where it has one.
+            // Without this the wrapper stack keeps its constructor defaults
+            // and the engine keeps the preset's, so a layer inked at 40 %
+            // with an entry taper came back opaque and blunt. A record from
+            // before the snapshot existed has None and replays as it always
+            // did — same stack, same defaults.
+            if let Some(cfg) = s.settings {
+                fresh.set_correction(cfg.correct);
+                let t = fresh.inner_mut();
+                t.length_px = cfg.taper_px;
+                t.min = cfg.taper_min;
+            }
             {
                 let e = fresh.inner_mut().inner_mut();
+                if let Some(cfg) = s.settings {
+                    e.set_base_opacity(cfg.opacity);
+                }
                 e.set_size_px(s.size_px * s.width_scale.max(0.01));
                 e.set_color([
                     f32::from(s.color[0]) / 255.0,

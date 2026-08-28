@@ -2102,6 +2102,11 @@ impl App {
                     || l.lock
                     || l.folder
                     || l.is_vector()
+                    // A stroke-recording layer's Object-tool affordance is
+                    // its GEOMETRY (`vector_hit`, above, on the active
+                    // layer); lifting its pixels into the Transform float
+                    // would commit a raster the next re-derive throws away.
+                    || l.records_strokes()
                     // Shape-carrier layers have their own Object-tool
                     // affordances (handled above); text layers belong to
                     // the text flow, which ran before us.

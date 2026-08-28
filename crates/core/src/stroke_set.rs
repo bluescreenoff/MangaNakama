@@ -34,6 +34,48 @@ pub struct VectorStroke {
     pub stabilizer: f32,
     /// Future re-width edits multiply here; 1.0 as drawn.
     pub width_scale: f32,
+    /// The Tool Property values the stroke was drawn under, beyond the four
+    /// above. Without them the replay rebuilds the engine from the `.myb`
+    /// alone, so one control-point nudge re-inks the WHOLE layer at the
+    /// preset's authored opacity/correction/taper instead of yours.
+    /// `None` = a record written before this field existed: replay it the
+    /// old way (preset values), degraded not lost.
+    #[serde(default)]
+    pub settings: Option<StrokeSettings>,
+}
+
+/// The per-stroke half of the Tool Property panel that the replay has to
+/// restore. Deliberately not the whole panel: opacity, the Correction group
+/// and the entry taper are the ones a mangaka SEES change (the audit's
+/// "visible 90 %"); scatter, texture and the wash family stay preset-side
+/// until a stroke needs them.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StrokeSettings {
+    /// Absolute brush opacity 0..1 — the engine's BASE opacity, i.e. the
+    /// wash flow when the stroke was a wash one, exactly as the live path
+    /// resolves it.
+    pub opacity: f32,
+    /// CSP's Correction group minus the stabilizer slider (post correction,
+    /// the sharp-angle exception, the entry/exit shaping).
+    pub correct: crate::stabilize::CorrectCfg,
+    /// Entry taper: ramp length in px (0 = off) and its starting pressure.
+    pub taper_px: f32,
+    pub taper_min: f32,
+}
+
+impl Default for StrokeSettings {
+    /// The neutral stroke: full opacity, no correction, no taper — the same
+    /// numbers `Taper::new` and a fresh engine start from, so a snapshot
+    /// missing a field replays as if it were not there.
+    fn default() -> Self {
+        Self {
+            opacity: 1.0,
+            correct: crate::stabilize::CorrectCfg::default(),
+            taper_px: 0.0,
+            taper_min: 0.18,
+        }
+    }
 }
 
 impl VectorStroke {
@@ -68,6 +110,7 @@ impl VectorStroke {
             eraser,
             stabilizer: 0.0,
             width_scale: 1.0,
+            settings: None,
         }
     }
 }
@@ -436,5 +479,36 @@ mod tests {
         assert_eq!(back.strokes[0].samples().count(), 2);
         // Garbage degrades to empty, never an error.
         assert_eq!(StrokeSet::from_json("not json").strokes.len(), 0);
+    }
+
+    /// Back-compat for the settings snapshot: a sidecar written before it
+    /// existed has no `settings` key, loads clean, and comes back as `None`
+    /// — which the replay reads as "keep the preset's own numbers", i.e.
+    /// exactly what that file's ink was derived with when it was written.
+    #[test]
+    fn a_sidecar_without_settings_loads_and_keeps_the_old_replay() {
+        let old = r#"{"strokes":[{"points":[[10.0,20.0,0.9,0.0,0.0,0.0],
+            [30.0,20.0,0.9,0.0,0.0,8.0]],"preset":"pen","size_px":8.0,
+            "color":[0,0,0],"eraser":false,"stabilizer":0.25,
+            "width_scale":1.0}]}"#;
+        let set = StrokeSet::from_json(old);
+        assert_eq!(set.strokes.len(), 1, "the old sidecar still parses");
+        let s = &set.strokes[0];
+        assert_eq!(s.settings, None, "no snapshot: the replay stays as it was");
+        assert!((s.stabilizer - 0.25).abs() < 1e-6, "the old fields survive");
+
+        // And a snapshot round-trips through the same sidecar.
+        let mut set = set;
+        set.strokes[0].settings = Some(StrokeSettings {
+            opacity: 0.4,
+            correct: crate::stabilize::CorrectCfg {
+                post: 0.5,
+                sharp: true,
+                ..Default::default()
+            },
+            taper_px: 200.0,
+            taper_min: 0.1,
+        });
+        assert_eq!(StrokeSet::from_json(&set.to_json()), set);
     }
 }
