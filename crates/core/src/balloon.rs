@@ -184,6 +184,11 @@ impl BalloonTone {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Balloon {
+    /// Stable identity (the automation round) — `TextItem::id`'s twin: `0`
+    /// until a commit door (`Document::set_balloons`/`add_balloon_layer`)
+    /// mints it; unique in the document; rides the `mnc-balloons` JSON.
+    #[serde(default)]
+    pub id: u64,
     pub shape: BalloonShape,
     #[serde(default)]
     pub tails: Vec<Tail>,
@@ -219,6 +224,7 @@ pub struct Balloon {
 impl Default for Balloon {
     fn default() -> Self {
         Self {
+            id: 0,
             shape: BalloonShape::Ellipse {
                 center: [0.0, 0.0],
                 radii: [0.0, 0.0],
@@ -1170,6 +1176,26 @@ pub fn simplify_anchors(
 }
 
 impl BalloonSet {
+    /// Current index of the balloon with stable id `id`.
+    pub fn index_of_id(&self, id: u64) -> Option<usize> {
+        if id == 0 {
+            return None;
+        }
+        self.balloons.iter().position(|b| b.id == id)
+    }
+
+    /// `TextSet::mint_ids`'s twin — remint `0` and duplicates, first
+    /// occurrence keeps the id. The Document's commit doors call this.
+    pub fn mint_ids(&mut self) {
+        let mut seen = std::collections::HashSet::new();
+        for b in &mut self.balloons {
+            if b.id == 0 || !seen.insert(b.id) {
+                b.id = crate::doc::mint_id();
+                seen.insert(b.id);
+            }
+        }
+    }
+
     pub fn new(border_px: f32) -> Self {
         Self {
             balloons: Vec::new(),

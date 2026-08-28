@@ -354,6 +354,13 @@ impl TextStyle {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TextItem {
+    /// Stable identity (the automation round): unique within the document,
+    /// survives edits, undo and save/load (it rides the `mnc-texts` JSON).
+    /// `0` = not yet assigned — every item written before ids existed, and
+    /// every freshly built item until a commit door
+    /// (`Document::set_texts`/`add_text_layer`) mints it real.
+    #[serde(default)]
+    pub id: u64,
     pub text: String,
     /// Style spans over `text`, UTF-16 lengths.
     pub runs: Vec<StyleRun>,
@@ -438,7 +445,8 @@ fn white() -> [u8; 3] {
 /// Model equality ignores the cache (a loaded file has no sprites yet).
 impl PartialEq for TextItem {
     fn eq(&self, other: &Self) -> bool {
-        self.text == other.text
+        self.id == other.id
+            && self.text == other.text
             && self.runs == other.runs
             && self.pos == other.pos
             && self.size == other.size
@@ -675,6 +683,7 @@ fn rot(v: [f32; 2], a: f32) -> [f32; 2] {
 impl TextItem {
     pub fn new(pos: [f32; 2], font: String, size_pt: f32, color: [u8; 3], vertical: bool) -> Self {
         Self {
+            id: 0, // sentinel — the commit door mints (`TextSet::mint_ids`)
             text: String::new(),
             runs: Vec::new(),
             pos,
@@ -1309,6 +1318,28 @@ impl TextSet {
     /// Topmost item whose (rotated, slack-grown) box contains `p`.
     pub fn text_at(&self, p: [f32; 2], slack: f32) -> Option<usize> {
         self.texts.iter().rposition(|t| t.contains(p, slack))
+    }
+
+    /// Current index of the item with stable id `id`.
+    pub fn index_of_id(&self, id: u64) -> Option<usize> {
+        if id == 0 {
+            return None;
+        }
+        self.texts.iter().position(|t| t.id == id)
+    }
+
+    /// Make every item's stable id real and unique: `0` (fresh item, or one
+    /// from a file older than ids) and duplicates (a cloned item — the
+    /// earlier occurrence keeps the id) are reminted. The Document's commit
+    /// doors call this, so app code never mints by hand.
+    pub fn mint_ids(&mut self) {
+        let mut seen = std::collections::HashSet::new();
+        for t in &mut self.texts {
+            if t.id == 0 || !seen.insert(t.id) {
+                t.id = crate::doc::mint_id();
+                seen.insert(t.id);
+            }
+        }
     }
 
     /// Blit every cached sprite into sparse tiles (source-over in item order).

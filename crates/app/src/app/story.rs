@@ -314,12 +314,17 @@ impl App {
                 }
                 if let Some(ts) = layer.texts() {
                     if let Some(it) = ts.texts.last() {
-                        return it.clone();
+                        let mut t = it.clone();
+                        // A template styles a NEW field — it must not carry
+                        // the source item's identity (the commit re-mints).
+                        t.id = 0;
+                        return t;
                     }
                 }
             }
         }
         mn_core::text::TextItem {
+            id: 0,
             text: String::new(),
             runs: Vec::new(),
             pos: [64.0, 64.0],

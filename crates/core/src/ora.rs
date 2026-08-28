@@ -245,6 +245,7 @@ pub fn save_to_with<W: Write + Seek>(
             ms
         });
         entries.push(LayerEntry {
+            id: layer.id(),
             name: layer.name.clone(),
             src,
             x,
@@ -355,6 +356,8 @@ pub fn save_to_with<W: Write + Seek>(
 }
 
 struct LayerEntry {
+    /// Stable layer id, written as `mnc-id`.
+    id: u64,
     name: String,
     src: String,
     x: i32,
@@ -485,11 +488,12 @@ fn stack_xml(
     s.push_str(" <stack>\n");
 
     let mnc_attrs = |e: &LayerEntry| -> String {
-        let mut extra = e
-            .frames
-            .as_deref()
-            .map(|j| format!(" mnc-frames=\"{}\"", xml_escape(j)))
-            .unwrap_or_default();
+        // Identity first: always present (unlike every attr below, there is
+        // no "default" id a fresh read could reconstruct).
+        let mut extra = format!(" mnc-id=\"{}\"", e.id);
+        if let Some(j) = e.frames.as_deref() {
+            extra.push_str(&format!(" mnc-frames=\"{}\"", xml_escape(j)));
+        }
         if let Some(j) = e.balloons.as_deref() {
             extra.push_str(&format!(" mnc-balloons=\"{}\"", xml_escape(j)));
         }
@@ -694,6 +698,12 @@ pub fn load_from<R: Read + Seek>(source: R) -> Result<Document, OraError> {
     // (A folder header therefore lands *above* its children — our convention.)
     for e in parsed.iter().rev() {
         let mut layer = Layer::new(e.name.clone());
+        // The file's identity wins over the freshly minted one; absent
+        // (foreign / pre-id file) keeps the mint. `ensure_ids` below heals
+        // duplicates and lifts the mint past everything the file holds.
+        if let Some(id) = e.id {
+            layer.set_id(id);
+        }
         layer.opacity = e.opacity.clamp(0.0, 1.0);
         layer.visible = e.visible;
         layer.blend = e.blend;
@@ -791,6 +801,10 @@ pub fn load_from<R: Read + Seek>(source: R) -> Result<Document, OraError> {
     if doc.layers.is_empty() {
         doc.layers.push(Layer::new("Layer 1"));
     }
+    // Ids become real here: pre-id files and foreign files mint, hand-edited
+    // duplicates heal, and the mint lifts past the file's largest id so a
+    // fresh layer can never collide with a loaded one.
+    doc.ensure_ids();
     doc.comps = comps;
     // Rulers ride their own entry; absent (every pre-persistence file) =
     // the empty default, and a bad item degrades item-by-item inside
@@ -1036,6 +1050,9 @@ struct ParsedLayer {
     reference: bool,
     draft: bool,
     through: bool,
+    /// Stable layer id (`mnc-id`); absent in foreign and pre-id files —
+    /// the loader mints one.
+    id: Option<u64>,
 }
 
 /// `"x,y"` → `(x, y)` — the `mnc-mask-org` attr form.
@@ -1178,6 +1195,7 @@ fn parse_stack_xml(xml: &str) -> Result<ParsedStack, OraError> {
                         reference: get("mnc-reference").is_some(),
                         draft: get("mnc-draft").is_some(),
                         through: get("mnc-through").is_some(),
+                        id: get("mnc-id").and_then(|v| v.parse().ok()),
                         escape: false,
                         tone: get("mnc-tone").and_then(|j| serde_json::from_str(j).ok()),
                         edge: get("mnc-edge").and_then(|j| serde_json::from_str(j).ok()),
@@ -1230,6 +1248,7 @@ fn parse_stack_xml(xml: &str) -> Result<ParsedStack, OraError> {
                     reference: get("mnc-reference").is_some(),
                     draft: get("mnc-draft").is_some(),
                     through: get("mnc-through").is_some(),
+                    id: get("mnc-id").and_then(|v| v.parse().ok()),
                     escape: get("mnc-escape").is_some(),
                     tone: get("mnc-tone").and_then(|j| serde_json::from_str(j).ok()),
                     edge: get("mnc-edge").and_then(|j| serde_json::from_str(j).ok()),
@@ -1269,6 +1288,42 @@ mod tests {
         save_to(&doc, &mut buf).unwrap();
         assert_eq!(ora_canvas_size(buf.get_ref()), Some((1234, 777)));
         assert_eq!(ora_canvas_size(b"not a zip"), None);
+    }
+
+    /// Stable ids (the automation round): every layer writes `mnc-id`,
+    /// loads back with the SAME identity, and the mint is lifted past the
+    /// file's ids so a post-load layer can never collide.
+    #[test]
+    fn stable_layer_ids_round_trip_through_ora() {
+        let mut doc = crate::doc::Document::new(128, 128);
+        doc.add_layer("Layer 2");
+        doc.add_folder_above(1, "Folder");
+        let ids: Vec<u64> = doc.layers.iter().map(|l| l.id()).collect();
+        let folder_id = doc.layers.iter().find(|l| l.folder).unwrap().id();
+
+        let mut buf = std::io::Cursor::new(Vec::new());
+        save_to(&doc, &mut buf).unwrap();
+        {
+            let mut z = zip::ZipArchive::new(std::io::Cursor::new(buf.get_ref().clone())).unwrap();
+            let mut s = String::new();
+            std::io::Read::read_to_string(&mut z.by_name("stack.xml").unwrap(), &mut s).unwrap();
+            assert!(
+                s.contains(&format!(" mnc-id=\"{}\"", ids[0])),
+                "layers write their id: {s}"
+            );
+            assert!(
+                s.contains("mnc-folder=\"1\"") && s.contains(&format!(" mnc-id=\"{folder_id}\"")),
+                "folder headers write theirs too: {s}"
+            );
+        }
+        let mut back = load_from(std::io::Cursor::new(buf.into_inner())).unwrap();
+        let got: Vec<u64> = back.layers.iter().map(|l| l.id()).collect();
+        assert_eq!(got, ids, "identity survives save/load");
+        let fresh = back.add_layer("after");
+        assert!(
+            back.layers[fresh].id() > *ids.iter().max().unwrap(),
+            "the mint was lifted past the file's ids"
+        );
     }
 
     /// LC-001: comps persist as one `mnc-comps` attr on the image element
@@ -2181,7 +2236,10 @@ mod tests {
             rgba: (0..16 * 16).flat_map(|_| [0, 0, 0, 255]).collect(),
         }));
         let ts = TextSet { texts: vec![item] };
-        doc.add_text_layer("Text 1", ts.clone());
+        doc.add_text_layer("Text 1", ts);
+        // The commit door minted item ids — the doc's own state is the
+        // round-trip expectation (which also pins that ids survive).
+        let ts = doc.layers[1].texts().expect("installed").clone();
 
         let back = roundtrip(&doc);
         let tl = &back.layers[1];
@@ -2244,7 +2302,9 @@ mod tests {
             }],
             border_px: 4.0,
         };
-        doc.add_balloon_layer("Balloon 1", bs.clone());
+        doc.add_balloon_layer("Balloon 1", bs);
+        // Post-mint state = the expectation, ids included (text test's twin).
+        let bs = doc.layers[1].balloons().expect("installed").clone();
 
         let back = roundtrip(&doc);
         let bl = &back.layers[1];

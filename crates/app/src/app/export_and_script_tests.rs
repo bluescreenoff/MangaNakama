@@ -5,6 +5,7 @@ use crate::app::App;
 fn dump_item(text: &str, cx: f32, cy: f32) -> mn_core::text::TextItem {
     let size = [80.0f32, 40.0f32];
     mn_core::text::TextItem {
+        id: 0,
         text: text.into(),
         runs: Vec::new(),
         pos: [cx - size[0] * 0.5, cy - size[1] * 0.5],

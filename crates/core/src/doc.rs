@@ -13,6 +13,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::balloon::BalloonSet;
 use crate::frame::FrameSet;
@@ -307,8 +308,38 @@ pub struct LayerMask {
     pub revision: u64,
 }
 
+/// Stable-identity mint (the automation round). Process-global and monotonic
+/// (the `tile::REVISION` idiom): a fresh id is greater than every id any open
+/// document has ever seen, so within one session an id is never reissued —
+/// not even by a layer deleted and re-created. `0` is the "not yet assigned"
+/// sentinel (the page-identity convention, `project.rs`); serde-defaulted
+/// item ids from old files carry it until [`Document::ensure_ids`] runs.
+///
+/// Deliberately NOT persisted as a counter: uniqueness only matters within a
+/// document, and [`bump_ids_past`] at load lifts the mint above everything
+/// the file holds. The known soft spot — a persisted cross-reference to an id
+/// whose layer was deleted in an EARLIER session could see that id reborn in
+/// a later one — belongs to whichever round first persists cross-references
+/// (breakout part 2), which must prune dead ids at save.
+static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+/// A fresh, never-before-seen stable id.
+pub fn mint_id() -> u64 {
+    NEXT_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Make sure the mint never reissues anything up to and including `seen`
+/// (called with the largest id a loaded file carries).
+pub(crate) fn bump_ids_past(seen: u64) {
+    NEXT_ID.fetch_max(seen.saturating_add(1), Ordering::Relaxed);
+}
+
 #[derive(Clone, Debug)]
 pub struct Layer {
+    /// Stable identity: unique within the document, survives reorder,
+    /// rename, undo/redo (snapshots clone it) and save/load (`mnc-id`).
+    /// Read it with [`Layer::id`]; only the mint and the ORA loader write it.
+    id: u64,
     tiles: HashMap<TileIdx, Arc<Tile>>,
     /// Undo recording, armed by `Document::begin_op`. While `Some`, every
     /// `tile_mut` stashes the tile's pre-image here (first touch wins).
@@ -434,6 +465,7 @@ pub struct Layer {
 impl Layer {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
+            id: mint_id(),
             tiles: HashMap::new(),
             recording: None,
             kind: LayerKind::Raster,
@@ -469,6 +501,16 @@ impl Layer {
             fill_stamp: None,
             corr: None,
         }
+    }
+
+    /// Stable identity — see the field doc.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// ORA load / heal only: everyone else keeps the minted id.
+    pub(crate) fn set_id(&mut self, id: u64) {
+        self.id = id;
     }
 
     /// The frame folder's derived coverage mask, if any.
@@ -2736,6 +2778,8 @@ impl Document {
         for c in &mut block {
             // A clone must never inherit an open op's recording.
             c.recording = None;
+            // The originals stay in the source folder — new identities here.
+            c.id = mint_id();
         }
         let l = self.layers.get_mut(index)?;
         let LayerKind::Frame(cur) = &mut l.kind else {
@@ -2861,6 +2905,52 @@ impl Document {
         self.add_layer_above(self.active, name)
     }
 
+    /// Current index of the layer with stable id `id`. THE door for anything
+    /// holding an id across edits (automation, future cross-references) —
+    /// linear, stacks are small.
+    pub fn layer_index_of(&self, id: u64) -> Option<usize> {
+        self.layers.iter().position(|l| l.id == id)
+    }
+
+    /// Make every stable id in the document real and unique: layers, text
+    /// items and balloons. `0` (a file from before ids existed, or a fresh
+    /// item awaiting its commit) and duplicates (a hand-edited file; first
+    /// occurrence keeps the id) are reminted. Lifts the mint past the largest
+    /// id seen FIRST, so a heal can never hand out an id the file also holds.
+    /// Called by the ORA loader; harmless anywhere else.
+    pub fn ensure_ids(&mut self) {
+        let mut max = 0u64;
+        for l in &self.layers {
+            max = max.max(l.id);
+            match &l.kind {
+                LayerKind::Text(ts) => {
+                    for t in &ts.texts {
+                        max = max.max(t.id);
+                    }
+                }
+                LayerKind::Balloon(bs) => {
+                    for b in &bs.balloons {
+                        max = max.max(b.id);
+                    }
+                }
+                _ => {}
+            }
+        }
+        bump_ids_past(max);
+        let mut seen = std::collections::HashSet::new();
+        for l in &mut self.layers {
+            if l.id == 0 || !seen.insert(l.id) {
+                l.id = mint_id();
+                seen.insert(l.id);
+            }
+            match &mut l.kind {
+                LayerKind::Text(ts) => ts.mint_ids(),
+                LayerKind::Balloon(bs) => bs.mint_ids(),
+                _ => {}
+            }
+        }
+    }
+
     /// Remove a layer — a folder goes with everything inside it. Refuses to
     /// empty the document and refuses an out-of-range index; both return
     /// `false`. Records one structural undo step.
@@ -2897,6 +2987,8 @@ impl Document {
         for l in &mut block {
             // A clone must never inherit an open op's recording.
             l.recording = None;
+            // Both copies live from here on — the copy is a NEW identity.
+            l.id = mint_id();
         }
         if let Some(top) = block.last_mut() {
             top.name = format!("{} copy", top.name);
@@ -3527,7 +3619,8 @@ impl Document {
     /// New balloon layer at the **top** of the stack — balloons sit above the
     /// art and the frames they annotate — rasterized from `balloons` and made
     /// active. Records one structural undo step.
-    pub fn add_balloon_layer(&mut self, name: impl Into<String>, balloons: BalloonSet) -> usize {
+    pub fn add_balloon_layer(&mut self, name: impl Into<String>, mut balloons: BalloonSet) -> usize {
+        balloons.mint_ids();
         let (before, active_before) = (self.stack_snapshot(), self.active);
         let mut l = Layer::new(name);
         l.replace_tiles(balloons.rasterize(self.size));
@@ -3541,7 +3634,10 @@ impl Document {
 
     /// Replace a balloon layer's vector state, re-rasterize, and push one
     /// undo step. Returns `false` when `index` is not a balloon layer.
-    pub fn set_balloons(&mut self, index: usize, balloons: BalloonSet) -> bool {
+    pub fn set_balloons(&mut self, index: usize, mut balloons: BalloonSet) -> bool {
+        // New items arrive with id 0 (and a duplicated item carries its
+        // source's id) — the commit door is where identities become real.
+        balloons.mint_ids();
         let size = self.size;
         let Some(l) = self.layers.get_mut(index) else {
             return false;
@@ -3567,7 +3663,8 @@ impl Document {
     /// New text layer at the **top** of the stack (text sits above everything,
     /// balloons included), rasterized from `texts` and made active. Records
     /// one structural undo step.
-    pub fn add_text_layer(&mut self, name: impl Into<String>, texts: TextSet) -> usize {
+    pub fn add_text_layer(&mut self, name: impl Into<String>, mut texts: TextSet) -> usize {
+        texts.mint_ids();
         let (before, active_before) = (self.stack_snapshot(), self.active);
         let mut l = Layer::new(name);
         l.replace_tiles(texts.rasterize(self.size));
@@ -3584,7 +3681,8 @@ impl Document {
     /// Set a text layer's vector state with NO rasterize and NO undo —
     /// the Story Editor's non-active-page path (the doc re-encodes to
     /// bytes; its raster rebuilds when the page loads and warms).
-    pub fn set_texts_raw(&mut self, index: usize, texts: TextSet) -> bool {
+    pub fn set_texts_raw(&mut self, index: usize, mut texts: TextSet) -> bool {
+        texts.mint_ids();
         let Some(l) = self.layers.get_mut(index) else {
             return false;
         };
@@ -3596,7 +3694,9 @@ impl Document {
         true
     }
 
-    pub fn set_texts(&mut self, index: usize, texts: TextSet) -> bool {
+    pub fn set_texts(&mut self, index: usize, mut texts: TextSet) -> bool {
+        // Same contract as `set_balloons`: the commit mints new identities.
+        texts.mint_ids();
         let size = self.size;
         let Some(l) = self.layers.get_mut(index) else {
             return false;
@@ -3886,6 +3986,8 @@ impl Document {
             }
         }
         if keep_original {
+            // Original and converted copy both live — the copy is new.
+            l.id = mint_id();
             self.layers.insert(li + 1, l);
             self.active = li + 1;
         } else {
@@ -5845,9 +5947,13 @@ mod tests {    use super::*;
         let one = TextSet { texts: vec![item] };
 
         let mut doc = Document::default();
-        let li = doc.add_text_layer("Text 1", one.clone());
+        let li = doc.add_text_layer("Text 1", one);
         assert!(doc.layers[li].is_text() && doc.layers[li].is_vector());
         assert!(doc.layers[li].tile_count() > 0, "sprite rasterized");
+        // The commit door minted the item's id; clones of the DOC's set are
+        // how the app really edits, and they keep that identity.
+        let one = doc.layers[li].texts().unwrap().clone();
+        assert_ne!(one.texts[0].id, 0, "commit mints");
 
         let mut moved = one.clone();
         moved.texts[0].cache = Some(sprite(0));
@@ -5875,6 +5981,145 @@ mod tests {    use super::*;
         assert!(doc.layers[li].texts().unwrap().texts[0].cache.is_some());
         // Already-cached items are left alone.
         assert!(doc.warm_text_caches(li, |_| panic!("must not re-shape")));
+    }
+
+    /// Stable ids (the automation round): minted unique, copies are new
+    /// identities, and undo restores a deleted layer WITH its id — the
+    /// property an id-holding automation client depends on.
+    #[test]
+    fn stable_layer_ids_mint_survive_reorder_and_undo() {
+        let mut doc = Document::default();
+        doc.add_layer("2");
+        doc.add_layer("3");
+        let ids: Vec<u64> = doc.layers.iter().map(|l| l.id()).collect();
+        assert!(ids.iter().all(|&i| i != 0), "every layer has a real id");
+        let mut uniq = ids.clone();
+        uniq.sort();
+        uniq.dedup();
+        assert_eq!(uniq.len(), ids.len(), "ids are unique");
+
+        // Reorder: identity follows the layer, not the slot.
+        let moved = ids[2];
+        assert!(doc.move_layer(2, 0));
+        assert_eq!(doc.layer_index_of(moved), Some(0));
+
+        // Duplicate: the copy is a NEW identity.
+        let src = doc.layers[0].id();
+        let at = doc.duplicate_layer(0).unwrap();
+        assert_ne!(doc.layers[at].id(), src);
+        assert_eq!(doc.layer_index_of(src), Some(0), "original keeps its id");
+
+        // Delete + undo: the SAME identity comes back.
+        let gone = doc.layers[at].id();
+        assert!(doc.remove_layer(at));
+        assert_eq!(doc.layer_index_of(gone), None);
+        assert!(doc.undo());
+        assert_eq!(doc.layer_index_of(gone), Some(at), "undo restores the id");
+
+        // Convert-keeping-original: the kept copy is a new identity too.
+        let before = doc.layers[0].id();
+        assert!(doc.convert_layer(0, true, None, None, true, None));
+        assert_eq!(doc.layers[0].id(), before);
+        assert_ne!(doc.layers[1].id(), before);
+    }
+
+    /// `ensure_ids` (the ORA loader's heal): zeros and duplicates remint —
+    /// first occurrence keeps the id — and the mint is lifted first, so a
+    /// healed id can never equal one the file also holds.
+    #[test]
+    fn ensure_ids_heals_zeros_and_duplicates() {
+        use crate::text::{TextItem, TextSet};
+        let mut doc = Document::default();
+        doc.add_layer("2");
+        doc.add_layer("3");
+        let item = || TextItem::new([0.0, 0.0], "Meiryo".into(), 12.0, [0, 0, 0], false);
+        doc.add_text_layer("T", TextSet { texts: vec![item(), item(), item()] });
+        // Fake a hand-edited / pre-id file's stack, BEHIND the commit doors
+        // (they would heal on the way in). Uniqueness is PER COLLECTION —
+        // lookups are typed — so a layer and an item may share a number;
+        // only siblings must differ.
+        doc.layers[0].set_id(7);
+        doc.layers[1].set_id(7);
+        doc.layers[2].set_id(0);
+        if let LayerKind::Text(ts) = &mut doc.layers[3].kind {
+            ts.texts[0].id = 9;
+            ts.texts[1].id = 9;
+            ts.texts[2].id = 0;
+        }
+        doc.ensure_ids();
+        let mut lids: Vec<u64> = doc.layers.iter().map(|l| l.id()).collect();
+        assert_eq!(doc.layers[0].id(), 7, "first occurrence keeps the id");
+        assert!(lids.iter().all(|&i| i != 0));
+        let n = lids.len();
+        lids.sort();
+        lids.dedup();
+        assert_eq!(lids.len(), n, "layers healed unique");
+        let LayerKind::Text(ts) = &doc.layers[3].kind else {
+            unreachable!()
+        };
+        let iids: Vec<u64> = ts.texts.iter().map(|t| t.id).collect();
+        assert_eq!(iids[0], 9, "first occurrence keeps the id");
+        assert!(
+            iids[1] > 9 && iids[2] > 9,
+            "duplicate and zero healed from past the file's max (9): {iids:?}"
+        );
+    }
+
+    /// Item ids: the commit doors mint fresh (id 0) and cloned (duplicate
+    /// id) items, existing items keep their identity across edits, and
+    /// `index_of_id` tracks an item through a reorder of its set.
+    #[test]
+    fn text_and_balloon_item_ids_mint_and_stay_stable() {
+        use crate::balloon::{Balloon, BalloonSet};
+        use crate::text::{TextItem, TextSet};
+        let mut doc = Document::default();
+        let item = TextItem::new([0.0, 0.0], "Meiryo".into(), 12.0, [0, 0, 0], false);
+        let li = doc.add_text_layer("T", TextSet { texts: vec![item] });
+        let ts = doc.layers[li].texts().unwrap().clone();
+        let id0 = ts.texts[0].id;
+        assert_ne!(id0, 0);
+
+        // A cloned item (duplicate id) and a fresh one (id 0) both mint;
+        // the original keeps its id.
+        let mut edited = ts.clone();
+        let mut dup = edited.texts[0].clone();
+        dup.pos = [50.0, 50.0];
+        edited.texts.push(dup);
+        edited
+            .texts
+            .push(TextItem::new([9.0, 9.0], "Meiryo".into(), 12.0, [0, 0, 0], false));
+        assert!(doc.set_texts(li, edited));
+        let got = doc.layers[li].texts().unwrap();
+        assert_eq!(got.texts[0].id, id0, "original identity kept");
+        let all: Vec<u64> = got.texts.iter().map(|t| t.id).collect();
+        assert!(all.iter().all(|&i| i != 0));
+        let mut uniq = all.clone();
+        uniq.sort();
+        uniq.dedup();
+        assert_eq!(uniq.len(), all.len(), "minted unique");
+        assert_eq!(got.index_of_id(id0), Some(0));
+
+        // Balloons: same contract through their door.
+        let bli = doc.add_balloon_layer(
+            "B",
+            BalloonSet {
+                balloons: vec![Balloon::default(), Balloon::default()],
+                border_px: 4.0,
+                pressure_width: false,
+            },
+        );
+        let bs = doc.layers[bli].balloons().unwrap().clone();
+        assert!(bs.balloons.iter().all(|b| b.id != 0));
+        assert_ne!(bs.balloons[0].id, bs.balloons[1].id);
+        // Reorder inside the set: the id still finds the item.
+        let follow = bs.balloons[0].id;
+        let mut swapped = bs.clone();
+        swapped.balloons.swap(0, 1);
+        assert!(doc.set_balloons(bli, swapped));
+        assert_eq!(
+            doc.layers[bli].balloons().unwrap().index_of_id(follow),
+            Some(1)
+        );
     }
 
     #[test]
@@ -6104,9 +6349,12 @@ mod tests {    use super::*;
             border_px: 4.0,
             pressure_width: false,
         };
-        let li = doc.add_balloon_layer("Balloon 1", one.clone());
+        let li = doc.add_balloon_layer("Balloon 1", one);
         assert!(doc.layers[li].is_balloon() && doc.layers[li].is_vector());
         assert!(doc.layers[li].tile_count() > 0);
+        // Post-mint state — clones of it keep identity (text test's twin).
+        let one = doc.layers[li].balloons().unwrap().clone();
+        assert_ne!(one.balloons[0].id, 0, "commit mints");
 
         let mut moved = one.clone();
         moved.balloons[0].translate(30.0, 0.0);

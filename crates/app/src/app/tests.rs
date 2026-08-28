@@ -5038,6 +5038,7 @@ fn story_fields_move_across_pages() {
     let mut app = App::new(renderer, (600, 400), 1.0);
     use mn_core::text::TextItem;
     let item = |text: &str| TextItem {
+        id: 0,
         text: text.into(),
         runs: Vec::new(),
         pos: [64.0, 64.0],
@@ -5136,6 +5137,7 @@ fn story_same_page_move_is_refused() {
     let mut app = App::new(renderer, (600, 400), 1.0);
     use mn_core::text::TextItem;
     let item = |text: &str| TextItem {
+        id: 0,
         text: text.into(),
         runs: Vec::new(),
         pos: [64.0, 64.0],
@@ -5800,6 +5802,7 @@ fn story_editor_creates_splits_merges() {
     let mut app = App::new(renderer, (600, 400), 1.0);
     use mn_core::text::TextItem;
     let item = |text: &str| TextItem {
+        id: 0,
         text: text.into(),
         runs: Vec::new(),
         pos: [64.0, 64.0],
@@ -5887,6 +5890,7 @@ fn story_editor_writes_replaces_and_restyles() {
         let mut l = mn_core::Layer::new("script");
         l.kind = mn_core::LayerKind::Text(mn_core::TextSet {
             texts: vec![TextItem {
+                id: 0,
                 text: text.into(),
                 runs: Vec::new(),
                 pos: [64.0, 64.0],
