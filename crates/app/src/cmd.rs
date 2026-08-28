@@ -2585,6 +2585,39 @@ pub enum AppCmd {
         layer: usize,
         text: usize,
     },
+    // --- tier 3 automation: batch text edits BY STABLE ID ------------------
+    // (docs/AUTOMATION.md; archive TODO 2026-08-28.) The typesetting
+    // primitives the remote socket speaks: set per-item content, direction
+    // and alignment without opening the editor. The layer is still an index
+    // (AppCmd convention); the ITEMS inside are addressed by the stable ids
+    // the 2026-08-29 round minted, so a batch survives concurrent
+    // insertions/deletions. Each command is one `set_texts` commit = one
+    // undo press for the whole batch.
+    /// Apply per-item field patches by id. Items whose id is absent are
+    /// skipped, not an error — the reply's count says how many landed.
+    /// (No UI producer yet — the socket calls the door fns directly for
+    /// their counts; these variants are the auto-action/step surface,
+    /// dead-code-allowed on the `write_tone_spec` precedent, tested via
+    /// dispatch in `remote_tests`.)
+    #[cfg_attr(not(test), allow(dead_code))]
+    TextsPatch {
+        layer: usize,
+        patches: Vec<TextPatch>,
+    },
+    /// Append new items (id 0; the commit door mints). Fields not supplied
+    /// on the wire follow `story_item_template` — the same defaults a new
+    /// field created from the story script gets.
+    #[cfg_attr(not(test), allow(dead_code))]
+    TextsAdd {
+        layer: usize,
+        items: Vec<mn_core::TextItem>,
+    },
+    /// Remove items by id. Absent ids are skipped.
+    #[cfg_attr(not(test), allow(dead_code))]
+    TextsRemove {
+        layer: usize,
+        ids: Vec<u64>,
+    },
     /// Clear the active layer's pixels (Delete) — selection-clipped when a
     /// selection exists. Vector layers refuse.
     ClearLayer,
@@ -2944,6 +2977,146 @@ fn genlines_aim_point(app: &App) -> (f32, f32) {
         }
     }
     (app.doc.size.0 as f32 * 0.5, app.doc.size.1 as f32 * 0.5)
+}
+
+/// One item's field patch for [`AppCmd::TextsPatch`] — every field optional,
+/// absent = keep. Serde because this IS the wire shape the automation socket
+/// receives (`remote.rs`); the enum stays serde-free, only this leaf speaks
+/// JSON.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct TextPatch {
+    pub id: u64,
+    /// New content. Style runs are CLEARED with it — spans are UTF-16
+    /// offsets into the old string and would land mid-glyph in the new one.
+    pub text: Option<String>,
+    /// Direction: `true` = vertical JP columns (right-to-left).
+    pub vertical: Option<bool>,
+    pub align: Option<mn_core::Align>,
+    pub frame_align: Option<mn_core::FrameAlign>,
+    pub font: Option<String>,
+    pub size_pt: Option<f32>,
+    pub pos: Option<[f32; 2]>,
+    /// Explicit wrap box; setting it turns `auto_size` off, same as a
+    /// hand resize.
+    pub size: Option<[f32; 2]>,
+}
+
+/// The three batch doors share this shape: warm the ORA caches, clone the
+/// set, mutate, re-shape what changed, commit through `set_texts` (one undo
+/// press). Returns how many items the mutation actually reached, plus the
+/// minted ids for adds. All three tolerate absent ids — a remote batch may
+/// race the artist deleting an item, and "3 of 4 landed" is the honest
+/// answer, not an error.
+pub(crate) fn texts_patch(app: &mut App, layer: usize, patches: &[TextPatch]) -> usize {
+    if app.doc.layers.get(layer).and_then(|l| l.texts()).is_none() {
+        return 0;
+    }
+    app.warm_texts(layer);
+    let dpi = app.doc_dpi();
+    let mut ts = app.doc.layers[layer].texts().unwrap().clone();
+    let mut hit = 0;
+    for p in patches {
+        let Some(i) = ts.index_of_id(p.id) else {
+            continue;
+        };
+        let t = &mut ts.texts[i];
+        if let Some(s) = &p.text {
+            t.text = s.clone();
+            t.runs.clear();
+        }
+        if let Some(v) = p.vertical {
+            t.vertical = v;
+        }
+        if let Some(a) = p.align {
+            t.align = a;
+        }
+        if let Some(a) = p.frame_align {
+            t.frame_align = a;
+        }
+        if let Some(f) = &p.font {
+            t.font = f.clone();
+        }
+        if let Some(s) = p.size_pt {
+            t.size_pt = s.clamp(1.0, 500.0);
+        }
+        if let Some(pos) = p.pos {
+            t.pos = pos;
+        }
+        if let Some(size) = p.size {
+            t.size = size;
+            t.auto_size = false;
+        }
+        if let Some(engine) = app.text_engine.as_ref() {
+            // Same order as `edit_item`: natural metrics first when the box
+            // is auto-sized (vertical keeps the top-RIGHT corner planted),
+            // then the sprite cache.
+            if t.auto_size {
+                if let Ok(natural) = engine.natural_size(t, dpi) {
+                    if t.vertical {
+                        t.pos[0] += t.size[0] - natural[0];
+                    }
+                    t.size = natural;
+                }
+            }
+            t.cache = engine.render(t, dpi).ok().flatten();
+        }
+        hit += 1;
+    }
+    if hit > 0 {
+        app.doc.set_texts(layer, ts);
+    }
+    hit
+}
+
+pub(crate) fn texts_add(app: &mut App, layer: usize, items: Vec<mn_core::TextItem>) -> Vec<u64> {
+    if items.is_empty() || app.doc.layers.get(layer).and_then(|l| l.texts()).is_none() {
+        return Vec::new();
+    }
+    app.warm_texts(layer);
+    let dpi = app.doc_dpi();
+    let mut ts = app.doc.layers[layer].texts().unwrap().clone();
+    let start = ts.texts.len();
+    for mut t in items {
+        // A template never carries identity (`story_item_template` rule);
+        // the commit door mints the real id.
+        t.id = 0;
+        if let Some(engine) = app.text_engine.as_ref() {
+            if t.auto_size {
+                if let Ok(natural) = engine.natural_size(&t, dpi) {
+                    if t.vertical {
+                        t.pos[0] += t.size[0] - natural[0];
+                    }
+                    t.size = natural;
+                }
+            }
+            t.cache = engine.render(&t, dpi).ok().flatten();
+        }
+        ts.texts.push(t);
+    }
+    if !app.doc.set_texts(layer, ts) {
+        return Vec::new();
+    }
+    app.doc.layers[layer]
+        .texts()
+        .map(|ts| ts.texts[start..].iter().map(|t| t.id).collect())
+        .unwrap_or_default()
+}
+
+pub(crate) fn texts_remove(app: &mut App, layer: usize, ids: &[u64]) -> usize {
+    if app.doc.layers.get(layer).and_then(|l| l.texts()).is_none() {
+        return 0;
+    }
+    // Warm BEFORE cloning — the clone must carry the warmed caches, or the
+    // survivors of the retain would rasterize to nothing.
+    app.warm_texts(layer);
+    let mut ts = app.doc.layers[layer].texts().unwrap().clone();
+    let before = ts.texts.len();
+    ts.texts.retain(|t| !ids.contains(&t.id));
+    let gone = before - ts.texts.len();
+    if gone > 0 {
+        app.doc.set_texts(layer, ts);
+    }
+    gone
 }
 
 pub fn dispatch(app: &mut App, cmd: AppCmd) {
@@ -5633,6 +5806,27 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                     app.set_status("text deleted");
                     app.mark_dirty();
                 }
+            }
+        }
+        AppCmd::TextsPatch { layer, patches } => {
+            let n = texts_patch(app, layer, &patches);
+            if n > 0 {
+                app.set_status(format!("{n} text(s) updated"));
+                app.mark_dirty();
+            }
+        }
+        AppCmd::TextsAdd { layer, items } => {
+            let ids = texts_add(app, layer, items);
+            if !ids.is_empty() {
+                app.set_status(format!("{} text(s) added", ids.len()));
+                app.mark_dirty();
+            }
+        }
+        AppCmd::TextsRemove { layer, ids } => {
+            let n = texts_remove(app, layer, &ids);
+            if n > 0 {
+                app.set_status(format!("{n} text(s) removed"));
+                app.mark_dirty();
             }
         }
         AppCmd::ClearLayer => {

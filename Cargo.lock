@@ -819,6 +819,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "mn-mcp"
+version = "0.2.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "mn-text"
 version = "0.2.0"
 dependencies = [

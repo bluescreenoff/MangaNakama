@@ -1,0 +1,16 @@
+[package]
+name = "mn-mcp"
+description = "MCP shim for the MangaNakama automation socket — a thin stdio↔TCP bridge, deliberately its own binary so no MCP machinery lives in the app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "mn-mcp"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

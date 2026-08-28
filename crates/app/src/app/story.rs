@@ -293,7 +293,7 @@ impl App {
 
     /// A style template for a NEW field: the page's last visible text
     /// item, else any in the chapter, else tool defaults.
-    fn story_item_template(&self, p: usize) -> mn_core::text::TextItem {
+    pub(crate) fn story_item_template(&self, p: usize) -> mn_core::text::TextItem {
         let doc_of = |p: usize| -> Option<&mn_core::Document> {
             if p == self.page_index {
                 Some(&self.doc)

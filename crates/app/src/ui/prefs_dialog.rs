@@ -177,6 +177,17 @@ pub(crate) const PREF_INDEX: &[PrefMeta] = &[
                history, ctrl+z, steps, memory)",
     },
     PrefMeta {
+        id: "automation",
+        tab: "Performance",
+        label: "Automation server",
+        desc: "Lets scripts and AI assistants drive the app over a \
+               localhost-only socket — batch text edits, page renders — \
+               with every change undoable. Off unless you turn it on; the \
+               session token lives in automation.txt beside the exe. \
+               (automation, MCP, API, socket, remote, scripting, Claude, \
+               typesetting, JSON-RPC)",
+    },
+    PrefMeta {
         id: "gpu_inking",
         tab: "Performance",
         label: "GPU inking",
@@ -252,6 +263,7 @@ pub(super) fn prefs_window(ctx: &egui::Context, app: &mut App) {
     let mut fx = Fx::default();
     let autosave_before = app.prefs.autosave_min;
     let scale_before = app.prefs.ui_scale;
+    let automation_before = app.prefs.automation;
     let preset_now = app.prefs.new_preset_setup().name;
     // Read before the window borrows `app.prefs`. Live rather than cached:
     // the background measurement can land mid-session.
@@ -340,7 +352,7 @@ pub(super) fn prefs_window(ctx: &egui::Context, app: &mut App) {
                         "Interface" => tab_interface(ui, app, focus, &mut fx),
                         "Text" => tab_text(ui, app, focus, &mut fx),
                         "History" => tab_history(ui, app, focus, &mut fx),
-                        _ => tab_performance(ui, focus, &gpu_line),
+                        _ => tab_performance(ui, app, focus, &mut fx, &gpu_line),
                     }
                 });
             });
@@ -377,6 +389,11 @@ pub(super) fn prefs_window(ctx: &egui::Context, app: &mut App) {
     // multiplies the window DPI by the new scale (`main::pump_commands`).
     if (app.prefs.ui_scale - scale_before).abs() > 1e-4 {
         app.ui_scale_apply = Some(app.prefs.ui_scale);
+    }
+    // The automation socket opens/gates live through the pump, same
+    // HWND-free indirection as the autosave timer above.
+    if app.prefs.automation != automation_before {
+        app.automation_apply = Some(app.prefs.automation);
     }
     app.prefs_open = open;
     if !open {
@@ -783,13 +800,37 @@ fn tab_history(ui: &mut egui::Ui, app: &mut App, focus: Option<&str>, fx: &mut F
 /// duplicating a control here would create a second place for it to
 /// disagree. What was missing was never a control: it was any way to SEE
 /// which authority decided.
-fn tab_performance(ui: &mut egui::Ui, focus: Option<&str>, gpu_line: &str) {
+fn tab_performance(
+    ui: &mut egui::Ui,
+    app: &mut App,
+    focus: Option<&str>,
+    fx: &mut Fx,
+    gpu_line: &str,
+) {
     row_label(ui, focus, "gpu_inking");
     ui.label(gpu_line);
     ui.weak(
         "Inking moves to the GPU only where a measurement on this machine says \
          it is faster; on many laptops the CPU wins and it stays off. Set it \
          by hand in the View menu, under GPU inking.",
+    );
+    ui.add_space(8.0);
+    ui.separator();
+    egui::Grid::new("mn.prefs.automation")
+        .num_columns(2)
+        .spacing([10.0, 5.0])
+        .show(ui, |ui| {
+            row_label(ui, focus, "automation");
+            fx.changed |= ui
+                .add(egui::Checkbox::new(&mut app.prefs.automation, ""))
+                .changed();
+            ui.end_row();
+        });
+    ui.weak(
+        "A localhost-only command socket for scripts and AI assistants. \
+         Clients read the port and session token from automation.txt beside \
+         the exe; every remote edit lands in the normal undo history. \
+         docs/AUTOMATION.md has the protocol.",
     );
 }
 

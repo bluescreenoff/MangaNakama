@@ -22,6 +22,7 @@ mod gesture;
 mod input;
 mod input_path;
 mod recovery;
+mod remote;
 mod screenshot;
 mod shell;
 mod testlog;
@@ -622,7 +623,24 @@ fn main() {
     // the window's user data and stops being reachable by name.
     let autosave_ms = app.prefs.autosave_ms();
     let recent_depth = app.prefs.recent_depth;
+    let automation = app.prefs.automation;
     unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(app) as isize) };
+
+    // Tier 3 automation socket (remote.rs): opt-in via prefs. When it is
+    // off, also clear any stale `automation.txt` a crashed session left —
+    // a discovery file must never advertise a port nobody holds.
+    if automation {
+        match remote::start(hwnd as isize) {
+            Ok(port) => {
+                with_app(hwnd, |a| {
+                    a.set_status(format!("automation server on 127.0.0.1:{port} (automation.txt)"))
+                });
+            }
+            Err(e) => eprintln!("[app] automation socket failed to bind: {e}"),
+        }
+    } else {
+        remote::remove_auto_file();
+    }
 
     unsafe {
         ShowWindow(hwnd, if start.max { SW_MAXIMIZE } else { SW_SHOW });
@@ -701,6 +719,10 @@ fn main() {
         // `&mut App` is alive up the stack would alias it.
         pump_commands(hwnd);
     }
+    // A discovery file must not outlive its port: clients finding a stale
+    // automation.txt would knock on a socket nobody holds (the crash case
+    // is healed at the next launch instead).
+    remote::remove_auto_file();
     // The marker whose ABSENCE is the crash signal — the only way to see
     // the class no Rust hook can catch (a stack overflow is killed by the
     // OS outright). A session block with no tail crashed.
@@ -1002,6 +1024,31 @@ fn pump_commands(hwnd: HWND) {
             if ms > 0 {
                 SetTimer(hwnd, AUTOSAVE_TIMER, ms, None);
             }
+        }
+    }
+
+    // The Preferences automation toggle: open or gate the remote socket
+    // live (remote.rs; off = refuse auth and requests, the port itself
+    // stays bound until restart).
+    if let Some(on) = with_app(hwnd, |a| a.automation_apply.take()).flatten() {
+        if on {
+            match remote::start(hwnd as isize) {
+                Ok(port) => {
+                    with_app(hwnd, |a| {
+                        a.set_status(format!(
+                            "automation server on 127.0.0.1:{port} (automation.txt)"
+                        ))
+                    });
+                }
+                Err(e) => {
+                    with_app(hwnd, |a| {
+                        a.set_status(format!("automation socket failed to bind: {e}"))
+                    });
+                }
+            }
+        } else {
+            remote::stop();
+            with_app(hwnd, |a| a.set_status("automation server off"));
         }
     }
 
@@ -1818,6 +1865,20 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             unsafe { ValidateRect(hwnd, std::ptr::null()) };
             let out = app.render();
             schedule_repaint(hwnd, out.repaint_after);
+            0
+        }
+
+        // Tier 3 automation (remote.rs): parked remote requests. Served
+        // HERE — UI thread, `&mut App` in hand like every other arm — so a
+        // remote edit goes through the same dispatch doors as a click.
+        // Wire methods never open dialogs, so the pump_commands dialog
+        // dance does not apply.
+        m if m == remote::MSG => {
+            for p in remote::take_pending() {
+                let resp = remote::respond(app, &p.req);
+                let _ = p.reply.send(resp);
+            }
+            flush_redraw(hwnd, app);
             0
         }
 

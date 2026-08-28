@@ -124,6 +124,12 @@ pub struct Prefs {
     /// NOT serialized — it is typing state, not a preference; to_body
     /// names its keys explicitly so this never leaks into prefs.txt.
     pub theme_save_name: String,
+    /// Tier 3 automation (docs/AUTOMATION.md): the localhost JSON-RPC
+    /// socket that lets scripts and MCP clients drive the app. OFF by
+    /// default — the socket is a command port into the open document, so
+    /// it exists only for the user who turned it on. The port is always
+    /// ephemeral; clients discover it via `automation.txt` beside the exe.
+    pub automation: bool,
     /// Row 89 / BR-014–016: the GLOBAL pen-pressure correction curve as
     /// `"x:y,x:y,…"` with x,y in 0..=1 — the wizard's Stronger/Weaker
     /// output. Empty = identity (no correction; byte-stable with every
@@ -156,6 +162,7 @@ impl Default for Prefs {
             ui_scale: 1.0,
             icon_colours: true,
             show_pose3d_materials: false,
+            automation: false,
             theme_save_name: String::new(),
             pressure_curve: String::new(),
             unknown: Vec::new(),
@@ -285,6 +292,7 @@ impl Prefs {
             self.pressure_curve.replace('\n', ""),
             u8::from(self.new_folder_through),
         );
+        body.push_str(&format!("automation={}\n", u8::from(self.automation)));
         for line in &self.unknown {
             body.push_str(line);
             body.push('\n');
@@ -373,6 +381,16 @@ impl Prefs {
                 }
             }
             "ui_scale" => self.ui_scale = v.parse().unwrap_or(self.ui_scale),
+            // The honest-bool rule matters MORE here than anywhere else:
+            // gibberish must never read as ON — that would open a command
+            // socket the user did not ask for.
+            "automation" => {
+                self.automation = match v {
+                    "1" | "true" => true,
+                    "0" | "false" => false,
+                    _ => self.automation,
+                }
+            }
             // A key we do not know is a key from a NEWER build. Keep the
             // line so the next save writes it back out instead of eating it.
             _ if !k.is_empty() => self.unknown.push(line.to_owned()),
@@ -734,6 +752,27 @@ mod tests {    /// Row 19: the Through-default preference round-trips and takes 
             from_body("icon_colours=nope\n").icon_colours,
             "gibberish must not silently grey every icon in the app"
         );
+    }
+
+    /// The automation socket is opt-in and STAYS off on gibberish — a
+    /// mangled line reading as "on" would open a command port into the
+    /// open document without the user ever asking for one.
+    #[test]
+    fn automation_is_off_by_default_and_gibberish_keeps_it_off() {
+        assert!(!Prefs::default().automation, "opt-in, never on by default");
+        assert!(from_body("automation=1\n").automation);
+        assert!(from_body("automation=true\n").automation);
+        assert!(!from_body("automation=0\n").automation);
+        assert!(
+            !from_body("automation=yes please\n").automation,
+            "gibberish must not open the socket"
+        );
+        let mut me = Prefs::default();
+        me.automation = true;
+        let back = from_body(&me.to_body());
+        assert!(back.automation, "turning it on persists");
+        assert!(me.to_body().contains("automation=1\n"));
+        assert!(Prefs::default().to_body().contains("automation=0\n"));
     }
 
     /// The icon-colour switch survives the round trip both ways — turning it

@@ -661,6 +661,10 @@ pub struct App {
     /// field rather than a direct `SetTimer` because this crate stays free
     /// of `HWND`-poking beyond redraw requests.
     pub autosave_rearm: Option<u32>,
+    /// The Preferences automation toggle changed: `main::pump_commands`
+    /// starts or gates the remote socket (same HWND-free indirection as
+    /// `autosave_rearm` above).
+    pub automation_apply: Option<bool>,
     /// PR-041: the `Document::op_count` the last per-operation recovery
     /// save covered. The edge, not a flag: comparing counts is what makes
     /// the check idempotent, so `pump_commands` can ask every pass and
@@ -1663,6 +1667,7 @@ impl App {
             vector_sel: None,
             vector_drag: None,
             autosave_rearm: None,
+            automation_apply: None,
             autosave_op_seen: 0,
             pointer_visible: false,
             pen_preset: selected_preset,
@@ -4385,6 +4390,11 @@ mod balloon_carries_text_tests;
 /// pairs with, and the single undo step the reshape costs.
 #[cfg(test)]
 mod balloon_fit_tests;
+
+/// Tier 3 automation: the remote socket's UI-thread half against a real
+/// headless App (remote.rs holds the socket-half tests).
+#[cfg(test)]
+mod remote_tests;
 
 /// ROADMAP good-first-issue: LM-004's mask-stroke undo bracket — the
 /// snapshot has to predate the first dab, and undo/redo has to reach the
