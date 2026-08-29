@@ -8,8 +8,8 @@
 
 use super::{App, PointerKind, TransformGesture};
 use crate::cmd::{
-    AppCmd, BalloonMode, FigureMode, FillMode, FrameMode, GradMode, ObjectMode, PanMode, RulerKind,
-    SelectMode, Tool,
+    AppCmd, BalloonMode, FigureMode, FigureStage2, FigureStage2Kind, FillMode, FrameMode, GradMode,
+    ObjectMode, PanMode, RulerKind, SelectMode, Tool,
 };
 use mn_core::{
     Balloon, BalloonHandle, BalloonSet, BalloonShape, Frame, PenSample, Selection, Tail, selected,
@@ -780,6 +780,19 @@ impl App {
             }
             Tool::Figure => {
                 let (cx, cy) = self.viewport.to_canvas(x, y);
+                // Row 157: a figure already in its second stage is waiting
+                // for exactly this — the click that says "there". It fires
+                // before any sub-tool arm because at this moment the press
+                // means "commit", not "start another shape".
+                if let Some(s) = &mut self.figure_stage2 {
+                    // Take the aim from the PRESS, not from the last move:
+                    // a tap that arrives without a move before it (touch, or
+                    // any synthetic caller) must still mean where it landed.
+                    s.cur = (cx, cy);
+                    self.finish_figure_stage2();
+                    self.needs_redraw = true;
+                    return;
+                }
                 match self.figure_mode {
                     FigureMode::Polygon => {
                         // Click = place a vertex; a click back on the first
@@ -1474,6 +1487,9 @@ impl App {
                     })
                     .collect()
             }
+            // Row 157 / FG-002: stage one of the Curve is a straight line,
+            // and shows as one. The bend is stage two's business.
+            FigureMode::Arc => vec![[a.0, a.1], [b.0, b.1]],
             // Both click-list gestures: no drag geometry to preview, the
             // commit builds their path (see finish_figure_poly).
             FigureMode::Polygon | FigureMode::Curve => vec![],
@@ -1551,12 +1567,161 @@ impl App {
             FigureMode::Rect => "rectangle inked",
             FigureMode::Ellipse => "ellipse inked",
             FigureMode::Polygon => "polygon inked",
-            FigureMode::Curve => "curve inked",
+            FigureMode::Curve | FigureMode::Arc => "curve inked",
             // A generating release never reaches ink_figure (it makes a
             // layer instead) — arms exist for exhaustiveness only.
             FigureMode::Stream | FigureMode::Focus => "lines generated",
             FigureMode::Urchin | FigureMode::SolidFlash => "flash generated",
         });
+    }
+
+    /// Row 157: what a figure drag's RELEASE means. For most sub tools it
+    /// still means "ink it" — but `FG-002`'s Curve and `FG-011`'s "Adjust
+    /// angle after fixed" turn the release into a hand-off: the size is
+    /// fixed, and a second stage steers one more parameter until a click
+    /// commits. The whole state machine is here so there is one place that
+    /// decides, and `finish_figure_drag` keeps its old meaning for callers
+    /// (tests, screenshots) that want the one-stage behaviour outright.
+    pub fn release_figure_drag(&mut self, a: (f32, f32), b: (f32, f32)) {
+        // A tap, not a drag: there is no shape to adjust, and entering a
+        // second stage on an accidental click would strand the user in a
+        // mode with nothing on screen. Falls through to the old message.
+        let tiny = (b.0 - a.0).abs() + (b.1 - a.1).abs() < 2.0;
+        let kind = if tiny || self.figure_mode.generates() {
+            None
+        } else if self.figure_mode == FigureMode::Arc {
+            Some(FigureStage2Kind::Bend)
+        } else if self.figure_adjust_angle && self.figure_mode.can_adjust_angle() {
+            Some(FigureStage2Kind::Angle)
+        } else {
+            None
+        };
+        let Some(kind) = kind else {
+            self.finish_figure_drag(a, b);
+            return;
+        };
+        // Seed `cur` at the no-op: the baseline's midpoint bends nothing,
+        // and `b` itself turns nothing. Committing without moving therefore
+        // inks exactly the shape stage one already showed.
+        let cur = match kind {
+            FigureStage2Kind::Bend => ((a.0 + b.0) * 0.5, (a.1 + b.1) * 0.5),
+            FigureStage2Kind::Angle => b,
+        };
+        self.figure_stage2 = Some(FigureStage2 {
+            a,
+            b,
+            cur,
+            kind,
+            shift: false,
+        });
+        self.set_status(match kind {
+            FigureStage2Kind::Bend => {
+                "now bend it — the curve follows the pointer; click inks it, Esc cancels"
+            }
+            FigureStage2Kind::Angle => {
+                "now set the angle — click or Enter inks it, Shift snaps 15°, Esc cancels"
+            }
+        });
+    }
+
+    /// Row 157: the pointer moved with no button down. Only the second
+    /// stage cares — it is the one gesture here that steers on hover.
+    /// Called from the pointer plumbing beside `last_pointer`, because
+    /// `canvas_move` only runs while the canvas owns a held button.
+    pub fn figure_hover(&mut self, x: i32, y: i32) {
+        if self.figure_stage2.is_none() || self.shell.owns_pointer(x, y) {
+            // Over a palette the pointer is not aiming at the page — freeze
+            // the preview where it was rather than swinging the curve at
+            // whatever panel the hand crossed on its way somewhere.
+            return;
+        }
+        let (cx, cy) = self.viewport.to_canvas(x as f32, y as f32);
+        let shift = self.shell.sync_modifiers().shift;
+        if let Some(s) = &mut self.figure_stage2 {
+            s.cur = (cx, cy);
+            s.shift = shift;
+        }
+        self.needs_redraw = true;
+    }
+
+    /// Row 157: the path a second stage would ink right now — the bent
+    /// curve, or the shape spun to the pointer. ONE function, so the
+    /// overlay preview and the commit cannot disagree about what you are
+    /// about to get.
+    pub fn figure_stage2_path(&self, s: &FigureStage2) -> Vec<[f32; 2]> {
+        match s.kind {
+            FigureStage2Kind::Bend => {
+                mn_core::balloon::quad_through([s.a.0, s.a.1], [s.b.0, s.b.1], [s.cur.0, s.cur.1])
+            }
+            FigureStage2Kind::Angle => {
+                let (sin, cos) = s.angle().sin_cos();
+                let c = [(s.a.0 + s.b.0) * 0.5, (s.a.1 + s.b.1) * 0.5];
+                self.figure_path(s.a, s.b)
+                    .into_iter()
+                    .map(|p| {
+                        let (dx, dy) = (p[0] - c[0], p[1] - c[1]);
+                        [c[0] + dx * cos - dy * sin, c[1] + dx * sin + dy * cos]
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    /// Row 157: the click (or Enter) that ends a second stage. One undo
+    /// press, like every other figure — the bend and the spin are gesture
+    /// state, not history.
+    pub fn finish_figure_stage2(&mut self) {
+        let Some(s) = self.figure_stage2.take() else {
+            return;
+        };
+        // Re-guard at the COMMIT, for the same reason `finish_figure_poly`
+        // does: this gesture spans a release and a second click with the
+        // Layers palette live throughout, so the layer that was legal under
+        // the press need not be the layer under the commit.
+        if self.guard_frame_layer() {
+            self.needs_redraw = true;
+            return;
+        }
+        let path = self.figure_stage2_path(&s);
+        // Bend inks an OPEN curve (never closed, never filled); Angle inks
+        // the same closed shape stage one built, turned.
+        self.ink_figure(&path, s.kind == FigureStage2Kind::Angle);
+        self.needs_redraw = true;
+    }
+
+    /// Row 157: Esc during a second stage throws the whole figure away —
+    /// the size drag included. Nothing was inked yet, so there is nothing
+    /// to undo and no half-shape left behind.
+    pub fn cancel_figure_stage2(&mut self) {
+        if self.figure_stage2.take().is_some() {
+            self.set_status("figure cancelled");
+            self.needs_redraw = true;
+        }
+    }
+
+    /// Row 157 / `FG-012`: Backspace (or a right-click) takes back the LAST
+    /// placed point of a multi-point figure WITHOUT abandoning the figure —
+    /// the row people miss most, because the alternative is Esc and starting
+    /// a twelve-click polygon over for one bad vertex.
+    ///
+    /// At the first point there is nothing left to keep, so it ends the
+    /// gesture rather than being a dead key — the same rule the magnetic
+    /// lasso's anchor walk-back already uses.
+    pub fn figure_undo_point(&mut self) {
+        let Some(pts) = &mut self.figure_poly else {
+            return;
+        };
+        pts.pop();
+        let left = pts.len();
+        if left == 0 {
+            self.figure_poly = None;
+            self.set_status("figure cancelled — nothing left to take back");
+        } else {
+            self.set_status(format!(
+                "last point removed — {left} left, Backspace again to keep walking back"
+            ));
+        }
+        self.needs_redraw = true;
     }
 
     /// Figure release (line/rect/ellipse): ink the dragged shape.
@@ -3316,7 +3481,7 @@ impl App {
             return;
         }
         if let Some((a, b)) = self.figure_drag.take() {
-            self.finish_figure_drag(a, b);
+            self.release_figure_drag(a, b);
             self.needs_redraw = true;
             return;
         }

@@ -440,6 +440,9 @@ fn mode_sub_tools(ui: &mut egui::Ui, app: &mut App) {
                 (FigureMode::Rect, Icon::Rect),
                 (FigureMode::Ellipse, Icon::Ellipse),
                 (FigureMode::Polygon, Icon::Poly),
+                // Row 157 / FG-002: the two-stage arc sits next to the
+                // straight line it starts life as.
+                (FigureMode::Arc, Icon::Arc),
                 // Rows 84/85: the curve rides in Direct draw because that
                 // is what it does — it inks with your brush, unlike the
                 // generator groups below.
@@ -448,6 +451,7 @@ fn mode_sub_tools(ui: &mut egui::Ui, app: &mut App) {
                 if mode_row(ui, app.figure_mode == m, icon, m.label()).clicked() {
                     app.figure_mode = m;
                     app.figure_poly = None;
+                    app.figure_stage2 = None;
                 }
             }
             // The preset rows carry a WHOLE `FigureLineOpts` now, built in

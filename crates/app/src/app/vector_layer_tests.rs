@@ -610,3 +610,51 @@ fn plain_layers_do_not_record() {
     crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::Undo);
     assert_eq!(layer_alpha(&app, li), 0);
 }
+
+/// Row 71: the watercolour rim is BAKED at stroke end, so it only survives a
+/// replay if it rides `StrokeSettings`. Without that the first control-point
+/// nudge would quietly strip the rim off every stroke on the layer — the
+/// Wave-E trap, one feature later.
+#[test]
+fn the_replay_reproduces_the_watercolour_rim() {
+    let Some(mut app) = vector_app() else { return };
+    let li = app.doc.active;
+    app.props_current.water_edge = mn_core::edge::WaterEdge {
+        px: 3.0,
+        opacity: 1.0,
+        darkness: 0.0,
+        blur_px: 0.0,
+    };
+    app.apply_props();
+    drag(&mut app, 200.0);
+    let drawn = tiles(&app, li);
+    let rimmed = layer_alpha(&app, li);
+    assert!(rimmed > 0, "the stroke inked");
+    assert_eq!(
+        app.doc.layers[li].strokes.as_ref().unwrap().strokes[0]
+            .settings
+            .unwrap()
+            .water_edge
+            .px,
+        3.0,
+        "the rim rode the snapshot"
+    );
+
+    app.doc.begin_op();
+    app.rederive_vector_layer(li);
+    app.doc.end_op();
+    assert_eq!(tiles(&app, li), drawn, "the replay re-derives the rim too");
+
+    // The other arm: strip the snapshot and the replay falls back to the
+    // preset, which has no rim — visibly less ink. That difference is the
+    // proof the assertion above is measuring the rim and not the stroke.
+    app.doc.layers[li].strokes.as_mut().unwrap().strokes[0].settings = None;
+    app.doc.begin_op();
+    app.rederive_vector_layer(li);
+    app.doc.end_op();
+    assert!(
+        layer_alpha(&app, li) < rimmed,
+        "without the snapshot the rim is gone: {} vs {rimmed}",
+        layer_alpha(&app, li)
+    );
+}

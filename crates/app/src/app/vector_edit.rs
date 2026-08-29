@@ -238,6 +238,10 @@ impl App {
                 let e = fresh.inner_mut().inner_mut();
                 if let Some(cfg) = s.settings {
                     e.set_base_opacity(cfg.opacity);
+                    // Row 71: the rim is baked, so a replay that skipped it
+                    // would strip the watercolour edge off every stroke on
+                    // the layer the first time one control point moved.
+                    e.set_water_edge(cfg.water_edge);
                 }
                 e.set_size_px(s.size_px * s.width_scale.max(0.01));
                 e.set_color([

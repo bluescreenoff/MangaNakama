@@ -1798,6 +1798,26 @@ fn shortcut(app: &mut App, vk: u16, repeat: bool) -> bool {
             app.mark_dirty();
             true
         }
+        // Row 157 / FG-012: Backspace walks a multi-point figure back one
+        // point at a time instead of throwing the whole thing away. Safe to
+        // sit in this table — the arm above `key_down`'s caller stands down
+        // entirely while canvas text or an egui field has the keyboard, so
+        // this can never eat a character.
+        (false, 0x08) if app.figure_poly.is_some() => {
+            app.figure_undo_point();
+            true
+        }
+        // Row 157 / FG-002 + FG-011: a figure waiting on its second stage.
+        // BEFORE the plain figure-drag Esc arm, and before the transform
+        // arms, for the usual reason — the more specific gesture wins.
+        (false, 0x0D) if app.figure_stage2.is_some() => {
+            app.finish_figure_stage2();
+            true
+        }
+        (false, 0x1B) if app.figure_stage2.is_some() => {
+            app.cancel_figure_stage2();
+            true
+        }
         // Esc cancels an in-progress figure/gradient drag.
         (false, 0x1B) if app.figure_drag.is_some() || app.grad_drag.is_some() => {
             app.figure_drag = None;
@@ -2111,6 +2131,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     if let Some(p) = pos {
                         app.last_pointer = p;
                         app.pointer_visible = true;
+                        // Row 157: the figure tool's second stage steers on
+                        // hover, with no button down — so it rides here,
+                        // beside `last_pointer`, and not in `canvas_move`
+                        // (which only runs while a button is held).
+                        app.figure_hover(p.0, p.1);
                     }
                     // BEFORE the dispatch below, so a stylus flipped onto its
                     // tail has already selected the eraser by the time the
@@ -2266,6 +2291,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     PointerKind::Mouse,
                     &[mouse_sample(x, y)],
                 );
+            } else if app.figure_poly.is_some() {
+                // Row 157 / FG-012: right-click over the canvas is CSP's
+                // other way to take back the last point. Gated on a figure
+                // being in progress so the button stays free otherwise.
+                app.figure_undo_point();
             }
             flush_redraw(hwnd, app);
             0
@@ -2278,6 +2308,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let (x, y) = lparam_points(lparam);
             app.last_pointer = (x, y);
             app.pointer_visible = true;
+            // Row 157: same as the pen path — the second stage of a figure
+            // gesture follows the pointer with nothing pressed.
+            app.figure_hover(x, y);
             // A real mouse (pen-promoted messages returned above) means the
             // stylus is out of the picture — the tail-end eraser latch must
             // not survive into it. Same rule as every other latch here.

@@ -230,6 +230,21 @@ impl App {
         } else {
             o.insert("mn-jitter-per-dab".into(), serde_json::json!(jitter.per_dab));
         }
+        // Row 71's rim is ours too, and there is no libmypaint setting to
+        // hide it in. Written only when armed, so a brush without it stays
+        // byte-for-byte the file it was.
+        for (key, v) in [
+            ("mn-water-edge", props.water_edge.px),
+            ("mn-water-edge-opacity", props.water_edge.opacity),
+            ("mn-water-edge-darkness", props.water_edge.darkness),
+            ("mn-water-edge-blur", props.water_edge.blur_px),
+        ] {
+            if props.water_edge.on() {
+                o.insert(key.into(), serde_json::json!(v));
+            } else {
+                o.remove(key);
+            }
+        }
         for (key, mode) in [
             ("mn-tip-flip-h", props.tip_flip_h),
             ("mn-tip-flip-v", props.tip_flip_v),

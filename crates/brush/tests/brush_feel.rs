@@ -601,3 +601,193 @@ fn color_jitter_varies_along_the_stroke_and_repeats_exactly() {
     );
     assert_ne!(per_stroke[0], off[0], "...but it must move off the colour");
 }
+
+// --- Row 71: the watercolour edge (W-001..005) --------------------------
+//
+// The claim here is not arithmetic on a dab, it is "the pixels outside the
+// stroke changed and the pixels inside it did not". So these run a REAL
+// stroke twice — once with the rim off, once on — and compare the two
+// documents. The off run is the pin: every brush that has never heard of
+// this row must paint the bytes it always painted.
+
+/// Ink one stroke through a fresh Real G-Pen and hand back the document.
+/// `tune` gets the brush before `begin`, which is where the rim is armed.
+fn inked(tune: impl FnOnce(&mut MyBrush)) -> Document {
+    let mut b = pen();
+    b.set_size_px(20.0);
+    b.set_color_rgb([0.0, 0.0, 0.0]);
+    tune(&mut b);
+    let mut doc = Document::new(512, 256);
+    b.begin(&mut doc);
+    for i in 0..=40 {
+        b.sample(&mut doc, sample(80.0 + i as f32 * 8.0, 128.0, 1.0, i as f64 * 8.0));
+    }
+    b.end(&mut doc);
+    doc
+}
+
+fn px_at(doc: &Document, x: i32, y: i32) -> [u16; 4] {
+    let i = mn_core::TileIdx::of_pixel(x, y);
+    let (ox, oy) = i.origin();
+    doc.active_layer()
+        .tile(i)
+        .map(|t| t.pixel((x - ox) as usize, (y - oy) as usize))
+        .unwrap_or([0; 4])
+}
+
+/// How far the ink reaches above the stroke's centre line at x=240.
+fn top_reach(doc: &Document) -> i32 {
+    (0..128i32)
+        .filter(|dy| px_at(doc, 240, 128 - dy)[3] > 0)
+        .max()
+        .unwrap_or(-1)
+}
+
+/// The differential. With the rim armed the stroke reaches further and the
+/// pixels it gains are ink; with it off the stroke is exactly the stroke it
+/// has always been, byte for byte, and its opaque body is untouched either
+/// way.
+#[test]
+fn watercolour_edge_rims_the_stroke_and_spares_its_body() {
+    let off = inked(|_| {});
+    let off_again = inked(|b| b.set_water_edge(mn_core::edge::WaterEdge::default()));
+    for x in 60..460 {
+        for y in 100..156 {
+            assert_eq!(
+                px_at(&off, x, y),
+                px_at(&off_again, x, y),
+                "({x},{y}): the default rim is not off"
+            );
+        }
+    }
+
+    let rim = mn_core::edge::WaterEdge {
+        px: 4.0,
+        opacity: 1.0,
+        darkness: 0.0,
+        blur_px: 0.0,
+    };
+    let on = inked(|b| b.set_water_edge(rim));
+
+    let (r_off, r_on) = (top_reach(&off), top_reach(&on));
+    assert!(
+        r_on > r_off,
+        "the rim must reach further than the ink: {r_on} vs {r_off}"
+    );
+    assert!(
+        r_on <= r_off + 5,
+        "...and not further than the 4 px it was asked for: {r_on} vs {r_off}"
+    );
+
+    // The body: CSP puts the rim OUTSIDE the stroke, so every pixel the
+    // stroke inked keeps its exact bytes — not "almost", and not only where
+    // it went fully opaque. A G-Pen's antialiased skirt is inked too.
+    let mut body = 0;
+    for x in 60..460 {
+        for y in 100..156 {
+            if px_at(&off, x, y)[3] >= 200 {
+                body += 1;
+                assert_eq!(px_at(&on, x, y), px_at(&off, x, y), "body pixel ({x},{y})");
+            }
+        }
+    }
+    assert!(body > 1000, "only {body} inked body pixels to check");
+}
+
+/// An eraser stroke rims nothing: its coverage went the other way, and a
+/// fringed hole is the classic way this feature ruins an erase.
+#[test]
+fn an_eraser_grows_no_watercolour_rim() {
+    let rim = mn_core::edge::WaterEdge {
+        px: 4.0,
+        opacity: 1.0,
+        ..mn_core::edge::WaterEdge::default()
+    };
+    // Ink a band, then erase across it twice — once with the rim armed.
+    let erased = |armed: bool| {
+        let mut doc = inked(|_| {});
+        let mut b = pen();
+        b.set_size_px(20.0);
+        b.set_eraser(true);
+        if armed {
+            b.set_water_edge(rim);
+        }
+        b.begin(&mut doc);
+        for i in 0..=20 {
+            b.sample(&mut doc, sample(240.0, 60.0 + i as f32 * 8.0, 1.0, i as f64 * 8.0));
+        }
+        b.end(&mut doc);
+        doc
+    };
+    let (plain, armed) = (erased(false), erased(true));
+    for x in 200..280 {
+        for y in 60..200 {
+            assert_eq!(
+                px_at(&plain, x, y),
+                px_at(&armed, x, y),
+                "({x},{y}): the eraser grew a rim"
+            );
+        }
+    }
+}
+
+/// The rim decides the stroke's routing: it is derived from the CPU tiles at
+/// stroke end, and under GPU BYPASS those were never written — so an armed
+/// brush must refuse the compute path rather than silently draw no rim.
+#[test]
+fn the_watercolour_rim_routes_the_stroke_cpu() {
+    let mut b = pen();
+    assert!(b.gpu_ready(), "a plain pen is GPU-ready");
+    b.set_water_edge(mn_core::edge::WaterEdge {
+        px: 3.0,
+        opacity: 0.5,
+        ..mn_core::edge::WaterEdge::default()
+    });
+    assert!(!b.gpu_ready(), "an armed rim must force the CPU path");
+    b.set_water_edge(mn_core::edge::WaterEdge::default());
+    assert!(b.gpu_ready(), "and give it back when the rim goes off");
+}
+
+/// The four knobs survive a `.myb` round trip, clamped, and a preset that
+/// says nothing about them loads OFF.
+#[test]
+fn watercolour_edge_loads_from_a_preset() {
+    let plain = pen();
+    assert!(
+        !plain.water_edge().on(),
+        "a preset with no rim keys must load off"
+    );
+
+    let mut json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(csp("real-g-pen.myb")).unwrap()).unwrap();
+    json["mn-water-edge"] = serde_json::json!(2.5);
+    json["mn-water-edge-opacity"] = serde_json::json!(0.4);
+    json["mn-water-edge-darkness"] = serde_json::json!(0.75);
+    json["mn-water-edge-blur"] = serde_json::json!(1.5);
+    let dir = std::env::temp_dir().join(format!("mn-we-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("rim.myb");
+    std::fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+    let loaded = MyBrush::load(&path).expect("the rim preset must load");
+    let e = loaded.water_edge();
+    assert!(e.on());
+    assert!((e.px - 2.5).abs() < 1e-6, "{e:?}");
+    assert!((e.opacity - 0.4).abs() < 1e-6, "{e:?}");
+    assert!((e.darkness - 0.75).abs() < 1e-6, "{e:?}");
+    assert!((e.blur_px - 1.5).abs() < 1e-6, "{e:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // Nonsense is clamped, never carried into the tile loop as a NaN reach.
+    let mut b = pen();
+    b.set_water_edge(mn_core::edge::WaterEdge {
+        px: f32::NAN,
+        opacity: 9.0,
+        darkness: -3.0,
+        blur_px: 1e9,
+    });
+    let e = b.water_edge();
+    assert_eq!(e.px, 0.0, "NaN width degrades to off");
+    assert_eq!(e.opacity, 1.0);
+    assert_eq!(e.darkness, 0.0);
+    assert_eq!(e.blur_px, mn_core::edge::WIDTH_MAX);
+}

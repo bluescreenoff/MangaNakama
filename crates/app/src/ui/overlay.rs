@@ -1220,6 +1220,30 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
             painter.circle_filled(*pts.last().expect("path"), 3.0, col);
         }
     }
+    // Row 157: the second stage — the bend or the spin, drawn as the path
+    // it will actually ink (`figure_stage2_path`, the same function the
+    // commit calls) with the frozen baseline behind it so you can see how
+    // far you have taken it.
+    if let Some(s) = &app.figure_stage2 {
+        let col = theme::c().accent;
+        let pts: Vec<egui::Pos2> = app
+            .figure_stage2_path(s)
+            .iter()
+            .map(|p| to_pt(p[0], p[1]))
+            .collect();
+        if pts.len() >= 2 {
+            painter.add(egui::Shape::line(
+                vec![to_pt(s.a.0, s.a.1), to_pt(s.b.0, s.b.1)],
+                egui::Stroke::new(1.0, theme::c().text_weak),
+            ));
+            painter.add(egui::Shape::line(pts, egui::Stroke::new(1.5, col)));
+            painter.circle_filled(to_pt(s.a.0, s.a.1), 3.0, col);
+            painter.circle_filled(to_pt(s.b.0, s.b.1), 3.0, col);
+            // The steering point itself: it is ON the curve for a bend, and
+            // where the corner is heading for a spin.
+            painter.circle_stroke(to_pt(s.cur.0, s.cur.1), 4.5, egui::Stroke::new(1.5, col));
+        }
+    }
     if let Some(pts) = &app.figure_poly {
         let col = theme::c().accent;
         for p in pts {

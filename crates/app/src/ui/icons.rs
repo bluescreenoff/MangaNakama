@@ -111,6 +111,9 @@ pub enum Icon {
     Ellipse,
     /// Figure ▸ polygon (click vertices).
     Poly,
+    /// Figure ▸ curve (row 157 / `FG-002`): the two-stage arc — the straight
+    /// baseline you drag, ghosted, with the bend it becomes over it.
+    Arc,
     /// Gradient tool: a ramp square.
     Gradient,
     /// Vector layer (docs/VECTOR-INKING.md): a curve with its control points
@@ -219,6 +222,7 @@ impl Icon {
             | Self::Rect
             | Self::Ellipse
             | Self::Poly
+            | Self::Arc
             | Self::Gradient
             | Self::Liquify
             | Self::Tone
@@ -1106,6 +1110,31 @@ pub fn paint_role(p: &Painter, r: Rect, icon: Icon, base: Color32, accent: Optio
                 pts.push(Pos2::new(c.x + a.cos() * rad, c.y + a.sin() * rad));
             }
             p.add(egui::Shape::closed_line(pts, a_line));
+        }
+        Icon::Arc => {
+            // The gesture itself, in one glyph: the dragged baseline drawn
+            // faint, and the curve it bends into drawn solid, sharing both
+            // endpoints. Distinct from `Vector` (which wears square control
+            // grips — this tool has none, which is its whole point).
+            let ends = [(0.14, 0.72), (0.86, 0.72)];
+            p.add(Shape::line(
+                vec![pt(r, ends[0].0, ends[0].1), pt(r, ends[1].0, ends[1].1)],
+                a_thin,
+            ));
+            let bend: Vec<Pos2> = (0..=16)
+                .map(|i| {
+                    let t = i as f32 / 16.0;
+                    let u = 1.0 - t;
+                    // Control point solved so the arc peaks at (0.50, 0.22).
+                    let x = u * u * ends[0].0 + 2.0 * u * t * 0.50 + t * t * ends[1].0;
+                    let y = u * u * ends[0].1 + 2.0 * u * t * (2.0 * 0.22 - 0.72) + t * t * ends[1].1;
+                    pt(r, x, y)
+                })
+                .collect();
+            p.add(Shape::line(bend, line));
+            for (x, y) in ends {
+                p.circle_filled(pt(r, x, y), w * 0.09, a);
+            }
         }
         Icon::Gradient => {
             // A ramp square: dark to light, top-left to bottom-right.

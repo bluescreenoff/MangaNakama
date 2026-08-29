@@ -62,6 +62,12 @@ pub struct StrokeSettings {
     /// Entry taper: ramp length in px (0 = off) and its starting pressure.
     pub taper_px: f32,
     pub taper_min: f32,
+    /// Row 71's watercolour edge. Rides the snapshot for the reason the
+    /// whole snapshot exists: the rim is baked at stroke end, so a replay
+    /// that rebuilt the engine from the `.myb` alone would re-ink the layer
+    /// with the PRESET's rim (usually none) and quietly strip yours off
+    /// every stroke the moment you nudge one control point.
+    pub water_edge: crate::edge::WaterEdge,
 }
 
 impl Default for StrokeSettings {
@@ -74,6 +80,7 @@ impl Default for StrokeSettings {
             correct: crate::stabilize::CorrectCfg::default(),
             taper_px: 0.0,
             taper_min: 0.18,
+            water_edge: crate::edge::WaterEdge::default(),
         }
     }
 }
@@ -508,7 +515,30 @@ mod tests {
             },
             taper_px: 200.0,
             taper_min: 0.1,
+            water_edge: crate::edge::WaterEdge {
+                px: 3.0,
+                opacity: 0.4,
+                darkness: 0.2,
+                blur_px: 1.0,
+            },
         });
         assert_eq!(StrokeSet::from_json(&set.to_json()), set);
+    }
+
+    /// Row 71: a snapshot written before the rim field existed replays with
+    /// the rim OFF, not with whatever the preset happens to carry — the
+    /// `serde(default)` on `StrokeSettings` plus `WaterEdge`'s own off
+    /// default, which is the pair that keeps every existing sidecar drawing
+    /// the ink it drew.
+    #[test]
+    fn a_settings_snapshot_without_a_rim_replays_without_one() {
+        let old = r#"{"strokes":[{"points":[[1.0,2.0,1.0,0.0,0.0,0.0]],
+            "preset":"pen","size_px":8.0,"color":[0,0,0],"eraser":false,
+            "stabilizer":0.0,"width_scale":1.0,
+            "settings":{"opacity":0.4,"taper_px":12.0}}]}"#;
+        let set = StrokeSet::from_json(old);
+        let cfg = set.strokes[0].settings.expect("the snapshot parses");
+        assert!((cfg.opacity - 0.4).abs() < 1e-6, "its own fields survive");
+        assert!(!cfg.water_edge.on(), "and the rim it never had is off");
     }
 }

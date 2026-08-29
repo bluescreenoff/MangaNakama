@@ -1047,6 +1047,13 @@ pub enum FigureMode {
     /// is not closed. The mark a hand cannot make in one pass: a 900 px
     /// hair sweep, a cable, a curved speed line.
     Curve,
+    /// Row 157 / `FG-002` 曲線 Curve: the TWO-STAGE arc. Drag the straight
+    /// baseline, release, then move the pointer and the line bends to run
+    /// through it; a click inks it. Distinct from [`FigureMode::Curve`],
+    /// which is CSP's 連続曲線 *Continuous* curve (a click list) — this one
+    /// is one segment and one bend, the quick swoosh you reach for mid-panel
+    /// when a straight line is nearly right.
+    Arc,
     /// CSP 流線 Stream line: drag along the motion — a fresh speed-line
     /// layer sweeps the canvas at that angle (the GenLines engine; the
     /// layer stays parameter-editable afterwards, unlike CSP's).
@@ -1100,10 +1107,75 @@ impl FigureMode {
             FigureMode::Ellipse => "Ellipse",
             FigureMode::Polygon => "Polygon",
             FigureMode::Curve => "Continuous curve",
+            FigureMode::Arc => "Curve",
             FigureMode::Stream => "Stream line",
             FigureMode::Focus => "Saturated line",
             FigureMode::Urchin => "Sea urchin flash",
             FigureMode::SolidFlash => "Solid flash",
+        }
+    }
+
+    /// Row 157 / `FG-011`: does this sub tool offer "Adjust angle after
+    /// fixed" — the optional second stage that spins the finished shape
+    /// before it inks? Only the two DRAGGED closed shapes. A straight line's
+    /// angle already came from the drag, the click-list gestures have no
+    /// "after the size is fixed" moment, and the generators place a layer.
+    pub fn can_adjust_angle(self) -> bool {
+        matches!(self, FigureMode::Rect | FigureMode::Ellipse)
+    }
+}
+
+/// Row 157: what the SECOND stage of a two-stage figure gesture is steering.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FigureStage2Kind {
+    /// `FG-002`: the pointer is a point ON the curve; the baseline bends
+    /// through it.
+    Bend,
+    /// `FG-011`: the pointer is where the dragged corner should end up; the
+    /// whole shape spins about its centre to follow.
+    Angle,
+}
+
+/// Row 157: the live state of a figure gesture's SECOND stage — the size
+/// drag is over, `a`/`b` are frozen, and the pointer now steers one more
+/// parameter until a click (or Enter) commits and Esc throws it away.
+///
+/// It is a SEPARATE field from `App::figure_drag` rather than a variant
+/// inside it, and the two are mutually exclusive by construction: the
+/// release `take()`s the drag and only then may set this. Keeping them apart
+/// means every mode that has no second stage — which is most of them, and
+/// all of the generators — runs exactly the one-stage path it always did.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct FigureStage2 {
+    /// Where stage one's drag began, canvas px.
+    pub a: (f32, f32),
+    /// Where it ended. Frozen: stage two never resizes.
+    pub b: (f32, f32),
+    /// The live pointer. Seeded so that committing without moving reproduces
+    /// stage one exactly (baseline midpoint for Bend, `b` for Angle).
+    pub cur: (f32, f32),
+    pub kind: FigureStage2Kind,
+    /// Shift held on the last pointer move — snaps the Angle stage to 15°
+    /// steps. Sampled on the move like the balloon object drag does, because
+    /// a commit arriving by key has no modifier state of its own.
+    pub shift: bool,
+}
+
+impl FigureStage2 {
+    /// The Angle stage's rotation about the shape's centre, radians: the
+    /// turn that carries the dragged corner `b` onto the pointer. Zero at
+    /// the seeded `cur == b`, so a click that never moved inks the unrotated
+    /// shape.
+    pub fn angle(&self) -> f32 {
+        let c = ((self.a.0 + self.b.0) * 0.5, (self.a.1 + self.b.1) * 0.5);
+        let base = (self.b.1 - c.1).atan2(self.b.0 - c.0);
+        let now = (self.cur.1 - c.1).atan2(self.cur.0 - c.0);
+        let d = now - base;
+        if self.shift {
+            const STEP: f32 = std::f32::consts::PI / 12.0; // 15°
+            (d / STEP).round() * STEP
+        } else {
+            d
         }
     }
 }
@@ -1732,6 +1804,7 @@ impl SubTool {
             SubTool::Figure(FigureMode::Rect),
             SubTool::Figure(FigureMode::Ellipse),
             SubTool::Figure(FigureMode::Polygon),
+            SubTool::Figure(FigureMode::Arc),
             SubTool::Figure(FigureMode::Curve),
             SubTool::Figure(FigureMode::Stream),
             SubTool::Figure(FigureMode::Focus),
@@ -1956,6 +2029,10 @@ pub struct ToolProps {
     /// sit inert (and say so).
     pub tip_flip_h: mn_brush::TipFlip,
     pub tip_flip_v: mn_brush::TipFlip,
+    /// CSP Advanced ▸ Watercolor edge (W-001..005, row 71): the bleed rim
+    /// baked outside a finished stroke. Width 0 = off, which is where every
+    /// preset that has never asked for it sits.
+    pub water_edge: mn_core::edge::WaterEdge,
 }
 
 impl Default for ToolProps {
@@ -2008,6 +2085,8 @@ impl Default for ToolProps {
             },
             tip_flip_h: mn_brush::TipFlip::Off,
             tip_flip_v: mn_brush::TipFlip::Off,
+            // Width 0 — off, and byte-exact off (see `apply_stroke_rim`).
+            water_edge: mn_core::edge::WaterEdge::default(),
         }
     }
 }
@@ -2603,6 +2682,10 @@ pub enum AppCmd {
     SetPaintDensity(f32),
     /// CSP Ink ▸ Color stretch (I-011), 0..1.
     SetColorStretch(f32),
+    /// CSP Advanced ▸ Watercolor edge (W-001..005, row 71): all four knobs
+    /// in one variant — they are one effect, and a rim set half-way from a
+    /// previous value is not a state anyone wants to see.
+    SetWaterEdge(mn_core::edge::WaterEdge),
     /// CSP Ink ▸ Intensity of blur (I-013): the width, in the unit the
     /// companion `SetBlurAbs` selects.
     SetBlur(f32),
@@ -7828,6 +7911,13 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             app.engine_mut().set_color_stretch(v);
             app.mark_dirty();
         }
+        AppCmd::SetWaterEdge(e) => {
+            app.engine_mut().set_water_edge(e);
+            // Read the clamped value back so the panel shows what the engine
+            // actually holds, the `set_paint_density` habit.
+            app.props_current.water_edge = app.engine().water_edge();
+            app.mark_dirty();
+        }
         AppCmd::SetBlur(v) => {
             app.props_current.blur = v;
             let (v, abs) = (app.props_current.blur, app.props_current.blur_abs);
@@ -8318,6 +8408,10 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 app.frame_drag = None;
                 app.frame_poly = None;
                 app.frame_pen = None;
+                // Row 157: a figure waiting on its second stage has no
+                // gesture left to commit it once the tool changes, and it
+                // would keep painting its preview over the new tool.
+                app.figure_stage2 = None;
                 // L-001: a half-traced magnetic outline has no gesture left
                 // to close it once the tool changes — and it holds an edge
                 // cache, so dropping it frees that too.
@@ -8432,6 +8526,7 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 SubTool::Figure(m) => {
                     app.figure_mode = m;
                     app.figure_poly = None;
+                    app.figure_stage2 = None;
                 }
                 SubTool::Gradient(m) => app.grad_mode = m,
                 SubTool::Eyedrop(r) => app.eyedrop_opts.refer = r,

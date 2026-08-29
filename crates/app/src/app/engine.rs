@@ -197,6 +197,31 @@ impl Engine {
         for t in &mut self.twins {
             t.kind.apply_props(p, texture_mask);
         }
+        self.disarm_twin_rims();
+    }
+
+    /// Row 71: the watercolour rim runs on the MAIN engine only, never on a
+    /// twin.
+    ///
+    /// The rim is derived at stroke end from "what this stroke added to the
+    /// layer", and by then the twins have added their mirrors to the SAME
+    /// layer — so every armed engine measures the union and rims all of it,
+    /// and the second one to finish also rims the first one's rim. Two
+    /// mirrors made the rim three times as wide and stacked three
+    /// composites on it. One pass over the union is not a compromise: it is
+    /// the right answer, because the union is exactly the stroke.
+    ///
+    /// The ordering that makes this true is `Engine`'s own: all `begin`s,
+    /// then samples to all, then all `end`s (see the `StrokeSink` impl
+    /// below). Change that to run each engine start-to-finish and the twins
+    /// would each rim their own half — at which point this call becomes
+    /// wrong instead of necessary.
+    fn disarm_twin_rims(&mut self) {
+        for t in &mut self.twins {
+            if let EngineKind::My(b) = &mut t.kind {
+                b.set_water_edge(mn_core::edge::WaterEdge::default());
+            }
+        }
     }
 
     /// LM-004: route strokes to the mask on every MyPaint engine.
@@ -622,6 +647,25 @@ impl Engine {
         }
     }
 
+    /// CSP Advanced ▸ Watercolor edge (W-001..005, row 71). Main engine
+    /// only — see [`Self::disarm_twin_rims`] for why the twins must not
+    /// each run their own pass.
+    pub fn set_water_edge(&mut self, e: mn_core::edge::WaterEdge) {
+        if let EngineKind::My(b) = &mut self.main {
+            b.set_water_edge(e);
+        }
+        self.disarm_twin_rims();
+    }
+
+    /// The watercolour edge as the PRESET holds it — the reading a sub tool
+    /// is seeded from. Off for every engine kind that has no rim pass.
+    pub fn water_edge(&self) -> mn_core::edge::WaterEdge {
+        match &self.main {
+            EngineKind::My(b) => b.water_edge(),
+            _ => mn_core::edge::WaterEdge::default(),
+        }
+    }
+
     /// CSP Ink ▸ Color stretch (I-011).
     pub fn set_color_stretch(&mut self, v: f32) {
         self.each_kind(|k| {
@@ -962,6 +1006,11 @@ impl EngineKind {
         if (p.blur - b_amt).abs() > 1e-3 || p.blur_abs != b_abs {
             b.set_blur(p.blur, p.blur_abs);
         }
+        // Row 71's rim carries its own off state (width 0), which IS every
+        // untouched preset's state, so it applies unconditionally and still
+        // changes nothing there — the jitter/tip-flip rule, not the
+        // read-back-guarded one above: it replaces no authored base value.
+        b.set_water_edge(p.water_edge);
         // Jitter and tip flip carry their own off state (all-zero amounts,
         // both axes Off), which IS every untouched preset's state, so they
         // apply unconditionally and still change nothing there.

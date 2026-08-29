@@ -115,6 +115,7 @@ const PEN_ROW_IDS: &[(&str, &str)] = &[
     ("ink", "Ink"),
     ("flow", "Flow"),
     ("mixing", "Color mixing"),
+    ("water_edge", "Watercolor edge"),
     ("jitter", "Color jitter"),
     ("texture", "Texture"),
     ("tip_flip", "Tip flip"),
@@ -791,6 +792,9 @@ flow = faint dabs that stack up to the stroke's Opacity, never past it.",
     if app.pen_row_visible("mixing") {
         mixing_rows(ui, app);
     }
+    if app.pen_row_visible("water_edge") {
+        water_edge_rows(ui, app);
+    }
     if app.pen_row_visible("jitter") {
         jitter_rows(ui, app);
     }
@@ -963,6 +967,70 @@ and changes meaning when you switch, exactly like Randomize's Fixed px.",
         .changed()
     {
         app.push_cmd(AppCmd::SetBlurAbs(pinned));
+    }
+}
+
+/// CSP Advanced ▸ Watercolor edge (W-001..005) — the bleed rim.
+///
+/// One width bar plus three that only appear once it is on, the mixing
+/// group's rule and for the same reason: with no rim there is nothing for
+/// opacity, darkness or blur to act on, and three live-looking sliders that
+/// cannot change a pixel are a lie the panel tells.
+pub(crate) fn water_edge_rows(ui: &mut egui::Ui, app: &mut App) {
+    let e = app.props_current.water_edge;
+    let mut next = e;
+    let mut width = e.px;
+    let w_resp = ValueBar::new("Wet edge", 0.0, mn_core::edge::WIDTH_MAX)
+        .decimals(1)
+        .suffix(" px")
+        .show(ui, &mut width);
+    if w_resp.changed() {
+        next.px = width;
+    }
+    w_resp.on_hover_text(
+        "CSP's Watercolor edge: a darker bleed rim laid just OUTSIDE the \
+stroke when you lift the pen, the way pigment pools at the edge of a wet \
+wash. 0 px is off. It is baked into the pixels, like CSP's — the \
+non-destructive version of the same look is the layer's Border effect.",
+    );
+    if e.on() {
+        let mut op = e.opacity * 100.0;
+        let o_resp = ValueBar::new("Wet op", 0.0, 100.0)
+            .suffix("%")
+            .show(ui, &mut op);
+        if o_resp.changed() {
+            next.opacity = op / 100.0;
+        }
+        o_resp.on_hover_text("How strong the rim is. Higher reads darker.");
+
+        let mut dark = e.darkness * 100.0;
+        let d_resp = ValueBar::new("Wet dark", 0.0, 100.0)
+            .suffix("%")
+            .show(ui, &mut dark);
+        if d_resp.changed() {
+            next.darkness = dark / 100.0;
+        }
+        d_resp.on_hover_text(
+            "CSP's Darkness: drains the colour out of the rim toward grey \
+and takes its brightness down with it. 0 % keeps the rim the colour you \
+drew with.",
+        );
+
+        let mut blur = e.blur_px;
+        let b_resp = ValueBar::new("Wet blur", 0.0, mn_core::edge::WIDTH_MAX)
+            .decimals(1)
+            .suffix(" px")
+            .show(ui, &mut blur);
+        if b_resp.changed() {
+            next.blur_px = blur;
+        }
+        b_resp.on_hover_text(
+            "Softens the rim's outer boundary over this distance instead of \
+one pixel. It fades the edge inward; it does not make the rim wider.",
+        );
+    }
+    if next != e {
+        app.push_cmd(AppCmd::SetWaterEdge(next));
     }
 }
 

@@ -203,12 +203,66 @@ pub fn write_sut_import(root: &Path, b: &SutBrush, set_name: &str, doc_dpi: u32)
         notes.push("watercolour blending".into());
     }
 
+    // The `mn-` extras the translation adds beyond the plain settings map.
+    let mut extras = serde_json::Map::new();
+
+    // -- W-001..005 (row 71): the watercolour EDGE, which is a different
+    // feature from the watercolour BLENDING above and shares only a name.
+    //
+    // Units, from the owner's own EditImageTool.todb: `BrushWaterEdgeRadius`
+    // reads 3 on all 150 factory tools that keep the effect off, which is
+    // CSP's own displayed default and therefore a LENGTH-in-px reading, not
+    // the ×100 mm that `BrushSize` unit 0 turned out to be — the tuned tools
+    // that switch the effect on switch the unit to 2 (mm) at the same time
+    // (0.2 mm on ノイズ欠けペン, 0.1 mm on Textured blender). So: unit 2 goes
+    // through the dpi like every other CSP length, unit 0 is px literal, and
+    // an unknown unit says so in a note rather than guessing.
+    if p("BrushUseWaterEdge", 0.0) > 0.0 {
+        let raw = p("BrushWaterEdgeRadius", 3.0);
+        let len_px = |v: f64, unit: f64, what: &str, notes: &mut Vec<String>| -> f64 {
+            match unit as i64 {
+                0 => v,
+                2 => v * dpi / 25.4,
+                other => {
+                    notes.push(format!(
+                        "BrushWaterEdge{what}Unit {other} untranslated — read as px"
+                    ));
+                    v
+                }
+            }
+        };
+        let px = len_px(raw, p("BrushWaterEdgeRadiusUnit", 0.0), "Radius", &mut notes)
+            .clamp(0.0, mn_core::edge::WIDTH_MAX as f64);
+        let blur = len_px(
+            p("BrushWaterEdgeBlur", 0.0),
+            p("BrushWaterEdgeBlurUnit", 0.0),
+            "Blur",
+            &mut notes,
+        )
+        .clamp(0.0, mn_core::edge::WIDTH_MAX as f64);
+        if px > 0.0 {
+            extras.insert("mn-water-edge".into(), json!(px));
+            // Both Powers are 0..100 in the file, 0..1 on our side.
+            extras.insert(
+                "mn-water-edge-opacity".into(),
+                json!((p("BrushWaterEdgeAlphaPower", 20.0) / 100.0).clamp(0.0, 1.0)),
+            );
+            extras.insert(
+                "mn-water-edge-darkness".into(),
+                json!((p("BrushWaterEdgeValuePower", 0.0) / 100.0).clamp(0.0, 1.0)),
+            );
+            extras.insert("mn-water-edge-blur".into(), json!(blur));
+            notes.push(format!("watercolour edge {px:.1} px"));
+        }
+        // W-004 is not translated and does not need to be: our rim always
+        // runs after the stroke, which is the setting's ON state.
+    }
+
     // -- tip material, when the file carries one --
     let tip_gray = b.tip_pngs.first().and_then(|png| {
         let img = image::load_from_memory(png).ok()?.to_luma8();
         Some((img.clone().into_raw(), img.width(), img.height()))
     });
-    let mut extras = serde_json::Map::new();
     if tip_gray.is_some() {
         extras.insert("mn-texture-anchor".into(), json!("dab"));
     }
@@ -640,6 +694,90 @@ mod tests {
         // The airbrush set exists beside it, its own first preset.
         let air = read_myb(&root, "csp-airbrush-1");
         assert_eq!(air["name"], "Hard Airbrush");
+        std::fs::remove_dir_all(root.parent().unwrap()).ok();
+    }
+
+    /// Row 71: the watercolour EDGE keys land on the four `mn-` knobs, in
+    /// the units the owner's own tool bank uses — and a tool that keeps the
+    /// effect off (which is 175 of the 181 in that bank) writes no rim keys
+    /// at all, so importing a pen cannot smuggle one in.
+    #[test]
+    fn the_watercolour_edge_maps_off_and_on() {
+        let root = tmp_root("wedge");
+
+        // Every factory tool carries Radius 3 / AlphaPower 20 with the
+        // effect OFF. Those numbers must not become a 3 px rim.
+        let b = brush(&[
+            ("BrushSize", 100.0),
+            ("BrushUseWaterEdge", 0.0),
+            ("BrushWaterEdgeRadius", 3.0),
+            ("BrushWaterEdgeAlphaPower", 20.0),
+        ]);
+        write_sut_import(&root, &b, "off", 600);
+        let myb = read_myb(&root, "off-1");
+        assert!(myb.get("mn-water-edge").is_none(), "off writes no rim: {myb}");
+
+        // ノイズ欠けペン's own numbers: radius 0.2 mm (unit 2), blur 0.07 mm,
+        // AlphaPower 20, ValuePower 100.
+        let b = brush(&[
+            ("BrushSize", 170.0),
+            ("BrushUseWaterEdge", 1.0),
+            ("BrushWaterEdgeRadius", 0.2),
+            ("BrushWaterEdgeRadiusUnit", 2.0),
+            ("BrushWaterEdgeBlur", 0.07),
+            ("BrushWaterEdgeBlurUnit", 2.0),
+            ("BrushWaterEdgeAlphaPower", 20.0),
+            ("BrushWaterEdgeValuePower", 100.0),
+        ]);
+        write_sut_import(&root, &b, "mm", 600);
+        let myb = read_myb(&root, "mm-1");
+        let px = myb["mn-water-edge"].as_f64().unwrap();
+        assert!(
+            (px - 0.2 * 600.0 / 25.4).abs() < 1e-6,
+            "unit 2 is mm through the dpi, got {px}"
+        );
+        assert!((myb["mn-water-edge-opacity"].as_f64().unwrap() - 0.2).abs() < 1e-9);
+        assert!((myb["mn-water-edge-darkness"].as_f64().unwrap() - 1.0).abs() < 1e-9);
+        assert!(
+            (myb["mn-water-edge-blur"].as_f64().unwrap() - 0.07 * 600.0 / 25.4).abs() < 1e-6
+        );
+        // …and the preset that comes back out of it really is armed.
+        let path = root.join("imported").join("mm-1.myb");
+        let loaded = mn_brush::MyBrush::load(&path).expect("the imported rim brush loads");
+        assert!(loaded.water_edge().on(), "{:?}", loaded.water_edge());
+
+        // Round watercolor brush: radius 2, unit 0 = 2 px literal.
+        let b = brush(&[
+            ("BrushSize", 120.0),
+            ("BrushUseWaterEdge", 1.0),
+            ("BrushWaterEdgeRadius", 2.0),
+            ("BrushWaterEdgeRadiusUnit", 0.0),
+            ("BrushWaterEdgeAlphaPower", 5.0),
+        ]);
+        write_sut_import(&root, &b, "px", 600);
+        let myb = read_myb(&root, "px-1");
+        assert!((myb["mn-water-edge"].as_f64().unwrap() - 2.0).abs() < 1e-9);
+        assert!((myb["mn-water-edge-opacity"].as_f64().unwrap() - 0.05).abs() < 1e-9);
+
+        // An unknown unit says so instead of guessing.
+        let b = brush(&[
+            ("BrushUseWaterEdge", 1.0),
+            ("BrushWaterEdgeRadius", 4.0),
+            ("BrushWaterEdgeRadiusUnit", 9.0),
+        ]);
+        write_sut_import(&root, &b, "u9", 600);
+        let myb = read_myb(&root, "u9-1");
+        let notes: Vec<String> = myb["mn"]["unmapped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            notes.iter().any(|n| n.starts_with("BrushWaterEdgeRadiusUnit 9")),
+            "the honest note, got {notes:?}"
+        );
+        assert!((myb["mn-water-edge"].as_f64().unwrap() - 4.0).abs() < 1e-9);
         std::fs::remove_dir_all(root.parent().unwrap()).ok();
     }
 }

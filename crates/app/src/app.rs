@@ -951,6 +951,14 @@ pub struct App {
     pub figure_drag: Option<((f32, f32), (f32, f32))>,
     /// Figure ▸ Polygon: the placed vertices so far.
     pub figure_poly: Option<Vec<(f32, f32)>>,
+    /// Row 157 (`FG-002`/`FG-011`): the gesture's SECOND stage, once the size
+    /// drag has been released. Mutually exclusive with `figure_drag` — the
+    /// release takes one and may then set the other.
+    pub figure_stage2: Option<crate::cmd::FigureStage2>,
+    /// Row 157 / `FG-011` "Adjust angle after fixed": when on, a Rectangle or
+    /// Ellipse drag does not ink on release — the pointer spins it first and
+    /// a click commits. Session-only, like every other Tool Property knob.
+    pub figure_adjust_angle: bool,
     /// Figure ▸ Stream line: parameters the next drag generates with
     /// (session-only, like every other Tool Property knob here).
     pub figure_stream: crate::cmd::FigureLineOpts,
@@ -1713,6 +1721,8 @@ impl App {
             figure_fill: false,
             figure_drag: None,
             figure_poly: None,
+            figure_stage2: None,
+            figure_adjust_angle: false,
             figure_stream: crate::cmd::FigureLineOpts::stream_default(),
             figure_focus: crate::cmd::FigureLineOpts::focus_default(),
             grad_mode: GradMode::FgToBg,
@@ -2313,6 +2323,11 @@ impl App {
                 jitter: e.color_jitter(),
                 tip_flip_h: e.tip_flip().0,
                 tip_flip_v: e.tip_flip().1,
+                // Row 71 seeds as a reading too, and for the ink group's
+                // reason: `mn-water-edge` is a value the preset file
+                // carries, so a watercolour sub tool shows the rim it
+                // really draws instead of reading "off".
+                water_edge: e.water_edge(),
             }
         });
     }
@@ -3444,6 +3459,7 @@ impl App {
                     correct: p.correct,
                     taper_px: p.taper_px,
                     taper_min: p.taper_min,
+                    water_edge: p.water_edge,
                 });
                 self.doc.end_op_vector_stroke(stroke);
                 // Reaching for the Object tool right after inking means "edit
@@ -4195,17 +4211,19 @@ impl App {
                 // line too would make the shortcut a six-stop tour where a
                 // stray press generates a layer — those two are a deliberate
                 // sub-tool-list (or Ctrl+K) pick.
-                const M: [FigureMode; 5] = [
+                const M: [FigureMode; 6] = [
                     FigureMode::Line,
                     FigureMode::Rect,
                     FigureMode::Ellipse,
                     FigureMode::Polygon,
+                    FigureMode::Arc,
                     FigureMode::Curve,
                 ];
                 let cur = M.iter().position(|m| *m == self.figure_mode).unwrap_or(0);
                 self.figure_mode = M[cycle(cur, M.len())];
                 self.figure_drag = None;
                 self.figure_poly = None;
+                self.figure_stage2 = None;
             }
             Tool::Gradient => {
                 const M: [GradMode; 3] = [
@@ -4748,3 +4766,9 @@ mod material_tone_tests;
 /// driver handles that were off the page when you could.
 #[cfg(test)]
 mod gen_lines_object_tests;
+
+/// Row 157: the Figure tool's mid-draw gesture grammar — the two-stage
+/// curve, "Adjust angle after fixed", and Backspace walking a multi-point
+/// figure back one point at a time.
+#[cfg(test)]
+mod figure_stage_tests;

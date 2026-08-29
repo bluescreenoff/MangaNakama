@@ -1138,6 +1138,44 @@ pub fn tessellate_open(points: &[[f32; 2]]) -> Vec<[f32; 2]> {
     out
 }
 
+/// `FG-002` (the Figure ▸ Curve sub tool): the quadratic Bezier that runs
+/// from `a` to `b` and passes exactly THROUGH `through` at its own midpoint.
+///
+/// This is what makes CSP's two-stage curve gesture need no control-point
+/// model at all. Stage one drags the straight baseline `a`→`b`; stage two
+/// moves the pointer and the curve follows it, because the pointer IS a
+/// point on the curve rather than an off-line Bezier handle nobody can aim.
+/// The control point is solved for, not steered:
+///
+/// `B(½) = ¼a + ½c + ¼b = through`  ⇒  `c = 2·through − ½a − ½b`
+///
+/// so the pointer sits on the curve by construction. `through` at the
+/// baseline's midpoint gives back the straight line, which is why releasing
+/// stage one and clicking without moving inks exactly what stage one showed.
+pub fn quad_through(a: [f32; 2], b: [f32; 2], through: [f32; 2]) -> Vec<[f32; 2]> {
+    let c = [
+        2.0 * through[0] - 0.5 * a[0] - 0.5 * b[0],
+        2.0 * through[1] - 0.5 * a[1] - 0.5 * b[1],
+    ];
+    // Step count from the control polygon, not the chord: a hard bend is
+    // much longer than the baseline under it and would ink as facets.
+    const STEP_PX: f32 = 4.0;
+    let span = len(sub(c, a)) + len(sub(b, c));
+    let steps = (span / STEP_PX).ceil().clamp(2.0, 1024.0) as usize;
+    let mut out = Vec::with_capacity(steps + 1);
+    for k in 0..steps {
+        let t = k as f32 / steps as f32;
+        let u = 1.0 - t;
+        out.push([
+            u * u * a[0] + 2.0 * u * t * c[0] + t * t * b[0],
+            u * u * a[1] + 2.0 * u * t * c[1] + t * t * b[1],
+        ]);
+    }
+    // The dragged end verbatim — same rule as `tessellate_open`.
+    out.push(b);
+    out
+}
+
 fn mul(a: [f32; 2], k: f32) -> [f32; 2] {
     [a[0] * k, a[1] * k]
 }
@@ -3503,5 +3541,54 @@ mod tests {
             None,
             "nothing to fit around"
         );
+    }
+
+    /// `FG-002`'s whole promise: the second stage's pointer is ON the curve,
+    /// so what you aim at is what you get. The ends stay where stage one
+    /// dragged them, and an unmoved pointer inks the baseline unchanged.
+    #[test]
+    fn quad_through_passes_through_the_aimed_point() {
+        let a = [40.0, 200.0];
+        let b = [240.0, 200.0];
+        let aim = [140.0, 60.0];
+        let path = quad_through(a, b, aim);
+
+        assert!(path.len() > 32, "dense enough to ink: {}", path.len());
+        assert_eq!(path[0], a, "starts where the drag started");
+        assert_eq!(path[path.len() - 1], b, "ends where the drag ended");
+
+        // The midpoint of the parameter range is the aimed point. The
+        // sample list is uniform in t, so index len/2 is t≈½.
+        let mid = path[path.len() / 2];
+        assert!(
+            (mid[0] - aim[0]).hypot(mid[1] - aim[1]) < 1.5,
+            "the curve runs through the pointer, got {mid:?} for {aim:?}"
+        );
+
+        // And it BENDS: the deepest sample is far off the baseline, on the
+        // aimed side, and never overshoots past the aim (a quadratic with
+        // this control point peaks exactly at the aim).
+        let top = path.iter().map(|p| p[1]).fold(f32::MAX, f32::min);
+        assert!(
+            (top - aim[1]).abs() < 1.5,
+            "peaks at the aimed point, not past it: {top}"
+        );
+
+        // Aim at the baseline's own midpoint and the curve IS the baseline —
+        // the no-op that makes "release, click" behave like the line tool.
+        let flat = quad_through(a, b, [140.0, 200.0]);
+        for p in &flat {
+            assert!((p[1] - 200.0).abs() < 0.01, "straight, got {p:?}");
+        }
+    }
+
+    /// A degenerate baseline (press and release without moving) must not
+    /// divide by zero or emit an empty path — the caller refuses tiny drags,
+    /// but the geometry is not allowed to be the thing that breaks.
+    #[test]
+    fn quad_through_survives_a_zero_length_baseline() {
+        let p = quad_through([10.0, 10.0], [10.0, 10.0], [10.0, 10.0]);
+        assert!(p.len() >= 2, "at least a segment: {}", p.len());
+        assert!(p.iter().all(|q| q[0].is_finite() && q[1].is_finite()));
     }
 }

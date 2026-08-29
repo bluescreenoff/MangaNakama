@@ -10637,3 +10637,58 @@ fn ink_options_reach_the_engine_and_come_home_with_the_sub_tool() {
     let (amount, absolute) = app.engine().blur();
     assert!(absolute && (amount - 4.0).abs() < 0.05, "{amount} px");
 }
+
+/// Row 71 × symmetry: the watercolour rim runs ONCE, on the main engine.
+///
+/// Failed against the first cut, which armed every twin: each one measured
+/// "what this stroke added to the layer" at its own `end`, by which time the
+/// mirror had added its half too — so both rimmed the union, and the second
+/// also rimmed the first one's rim. The stroke's own side came back with a
+/// fatter, doubly-composited edge that the un-mirrored stroke never had.
+#[test]
+fn the_watercolour_rim_is_not_doubled_by_a_mirror_twin() {
+    let rim = mn_core::edge::WaterEdge {
+        px: 4.0,
+        opacity: 1.0,
+        darkness: 0.0,
+        blur_px: 0.0,
+    };
+    let ink = |mirrored: bool| {
+        let mut engine = Engine::new(pen_kind());
+        if mirrored {
+            engine.set_twins(vec![StrokeTwin {
+                kind: pen_kind(),
+                x: Some(TwinAxis::Mirror),
+                y: None,
+                xf: None,
+            }]);
+        }
+        engine.set_water_edge(rim);
+        let mut doc = Document::new(512, 512);
+        doc.begin_op();
+        engine.begin(&mut doc);
+        for i in 0..=40 {
+            engine.sample(&mut doc, sample(120.0 + i as f32 * 2.0, 130.0, i as f64 * 8.0));
+        }
+        engine.end(&mut doc);
+        doc.end_op();
+        doc
+    };
+    let (plain, mirrored) = (ink(false), ink(true));
+    assert!(ink_at(&mirrored, 312, 130), "the twin still reflects");
+    // The stroke's OWN side must be byte-for-byte what it is without the
+    // mirror: same rim, once.
+    for x in 100i32..260 {
+        for y in 100i32..160 {
+            let px = |d: &Document| {
+                let i = mn_core::TileIdx::of_pixel(x, y);
+                let (ox, oy) = i.origin();
+                d.active_layer()
+                    .tile(i)
+                    .map(|t| t.pixel((x - ox) as usize, (y - oy) as usize))
+                    .unwrap_or([0; 4])
+            };
+            assert_eq!(px(&plain), px(&mirrored), "({x},{y}): the rim was run twice");
+        }
+    }
+}

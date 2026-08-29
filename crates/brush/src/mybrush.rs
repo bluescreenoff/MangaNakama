@@ -15,6 +15,7 @@
 //! `mypaint_brush_from_defaults` first, so the ~19 settings the classic presets
 //! omit get their stock values instead of zero.
 
+use std::collections::HashMap;
 use std::ffi::c_int;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -22,6 +23,7 @@ use std::sync::Arc;
 
 use mn_core::blend::{blend_premul, f32_to_fix15, fix15_to_f32, px_to_f32, scale_opacity};
 use mn_core::dab::{DabParams, DabRecord};
+use mn_core::edge::WaterEdge;
 use mn_core::{Blend, Document, PenSample, StrokeSink, Tile, TileIdx};
 use serde_json::Value;
 
@@ -452,6 +454,16 @@ pub struct MyBrush {
     flip_variants: Box<[(*const u8, i32); 4]>,
     /// Keeps the mirrored buffers `flip_variants` points into alive.
     _flip_masks: Vec<Arc<TextureMask>>,
+    /// W-001..005 (row 71): the brush-side watercolour edge. `px == 0` is
+    /// the off switch and the state every preset ships in.
+    water_edge: WaterEdge,
+    /// The paint target's tiles as they stood at `begin`, captured only
+    /// while the edge is armed. `Arc` clones: free until a dab lands, and
+    /// then the tile path's copy-on-write leaves this one holding the
+    /// pre-image, which is exactly the stroke-coverage difference
+    /// `apply_stroke_rim` needs. `None` = not armed, and the pass is skipped
+    /// without so much as a branch in the dab loop.
+    we_pre: Option<HashMap<TileIdx, Arc<Tile>>>,
 }
 
 /// CSP Advanced ▸ Stroke ▸ Interval (S-028) — the gap between the individual
@@ -890,6 +902,21 @@ impl MyBrush {
         let flip_h = flip_of("mn-tip-flip-h");
         let flip_v = flip_of("mn-tip-flip-v");
 
+        // W-001..005 (row 71): the brush-side watercolour edge. Width 0 is
+        // the off switch, so a preset that says nothing loads the default
+        // and draws exactly as it always did.
+        let we_num = |key: &str, dflt: f32| {
+            json.get(key)
+                .and_then(Value::as_f64)
+                .map_or(dflt, |v| v as f32)
+        };
+        let water_edge = WaterEdge {
+            px: we_num("mn-water-edge", 0.0).clamp(0.0, mn_core::edge::WIDTH_MAX),
+            opacity: we_num("mn-water-edge-opacity", WaterEdge::default().opacity).clamp(0.0, 1.0),
+            darkness: we_num("mn-water-edge-darkness", 0.0).clamp(0.0, 1.0),
+            blur_px: we_num("mn-water-edge-blur", 0.0).clamp(0.0, mn_core::edge::WIDTH_MAX),
+        };
+
         // Krita sketch mode (round 27): link the stroke back to its recent
         // history — scribble webs / hatching for roughing.
         let sketch = json
@@ -967,6 +994,8 @@ impl MyBrush {
             // finished brush's own texture, which is moved into it here.
             flip_variants: Box::new([(std::ptr::null(), 0); 4]),
             _flip_masks: Vec::new(),
+            water_edge,
+            we_pre: None,
         };
         loaded.rebuild_flip_variants();
         Ok(loaded)
@@ -1330,6 +1359,39 @@ impl MyBrush {
             1.0
         };
         self.set_smudge(1.0 - d);
+    }
+
+    /// CSP Advanced ▸ **Watercolor edge** (`W-001`–`005`, row 71): the
+    /// darker bleed rim added outside a finished stroke.
+    ///
+    /// Not a libmypaint setting and deliberately not faked as one — no
+    /// `smudge`-style reinterpretation exists for it. The rim is a pass over
+    /// the stroke's OWN coverage, run at `end`, described in
+    /// [`mn_core::edge::apply_stroke_rim`]. Two consequences worth knowing
+    /// before you turn it on:
+    ///
+    /// - it forces the stroke onto the CPU dab path ([`Self::gpu_ready`]),
+    ///   because under GPU BYPASS the CPU tiles are never written and there
+    ///   is no coverage to read;
+    /// - it is baked, like CSP's. The layer-effect version (`LP-004`,
+    ///   triage row 28) is the non-destructive one.
+    ///
+    /// Width 0 keeps every byte of the stroke as the dabs left it.
+    pub fn set_water_edge(&mut self, e: WaterEdge) {
+        self.water_edge = WaterEdge {
+            px: if e.px.is_finite() { e.px } else { 0.0 }
+                .clamp(0.0, mn_core::edge::WIDTH_MAX),
+            opacity: if e.opacity.is_finite() { e.opacity } else { 0.0 }.clamp(0.0, 1.0),
+            darkness: if e.darkness.is_finite() { e.darkness } else { 0.0 }.clamp(0.0, 1.0),
+            blur_px: if e.blur_px.is_finite() { e.blur_px } else { 0.0 }
+                .clamp(0.0, mn_core::edge::WIDTH_MAX),
+        };
+    }
+
+    /// The watercolour edge as the engine holds it (a preset nobody has
+    /// touched reports its own authored value).
+    pub fn water_edge(&self) -> WaterEdge {
+        self.water_edge
     }
 
     /// Density of paint as the engine holds it (a preset nobody has touched
@@ -1774,7 +1836,16 @@ impl MyBrush {
         // non-starter, so the honest answer is CPU. The app-side wiring
         // (wash-key oracle + per-sample wash flush) is in place and
         // correct for the day a cheaper visibility trick exists.
-        !self.exotic && !(self.wash && self.smudge)
+        //
+        // Row 71 joins them, for a structural reason rather than a measured
+        // one: the watercolour rim is derived at `end` from the difference
+        // between the CPU tiles now and the `Arc`s taken at `begin`, and
+        // under BYPASS the CPU never rasterized, so that difference is
+        // empty and the rim would silently not appear. Routing it CPU is
+        // the paint-density precedent (a knob that decides the path, set
+        // where the knob is set); the alternative is a GPU readback at
+        // stroke end, which is the same pixels an entire CPU stroke costs.
+        !self.exotic && !(self.wash && self.smudge) && !self.water_edge.on()
     }
 
     /// Whether the preset samples the canvas per dab (the `smudge`
@@ -2047,6 +2118,22 @@ impl StrokeSink for MyBrush {
             let (w, h) = doc.size;
             self.wash_buf = Some(Box::new(Document::new(w, h)));
         }
+        // Row 71: the pre-image the rim's coverage is measured against.
+        // Mask and selection strokes write other targets entirely, so they
+        // are never armed — a rim on a mask would be a rim on the wrong
+        // picture. A wash stroke's target is the buffer this `begin` just
+        // made, and it starts blank, so its pre-image is empty by
+        // construction rather than by a second snapshot.
+        self.we_pre = (self.water_edge.on() && !self.mask_mode && !self.sel_mode).then(|| {
+            if self.wash_buf.is_some() {
+                HashMap::new()
+            } else {
+                doc.active_layer()
+                    .tiles()
+                    .map(|(i, t)| (i, t.clone()))
+                    .collect()
+            }
+        });
         unsafe {
             // reset() makes the next stroke_to a pure "put the pen here" — it
             // seeds position/pressure state and paints nothing, which is how
@@ -2109,6 +2196,24 @@ impl StrokeSink for MyBrush {
 
     fn end(&mut self, doc: &mut Document) {
         self.last_t_ms = None;
+        // Row 71, BEFORE the wash commit: on a wash stroke the rim belongs
+        // to the buffer, so it rides the same stroke opacity and the same
+        // blend the ink does instead of being stamped on afterwards at full
+        // strength. An eraser rims nothing — `apply_stroke_rim`'s coverage
+        // clamp already handles the plain case (alpha only went down), but
+        // wash-erase inverts that (the buffer accumulates PAINT and the
+        // commit subtracts), so the flag has to be read here too.
+        if let Some(pre) = self.we_pre.take() {
+            let erasing = self.wash_erase || self.base_value(setting::ERASER) >= 0.5;
+            if !erasing {
+                let e = self.water_edge;
+                let target: &mut Document = match self.wash_buf.as_deref_mut() {
+                    Some(b) => b,
+                    None => doc,
+                };
+                mn_core::edge::apply_stroke_rim(target, &pre, e);
+            }
+        }
         // Under BYPASS the buffer is blank by construction (the CPU never
         // rasterized) and the GPU path owns the stroke-end commit: leave the
         // buffer alive for the app's flush — it seeds the GPU tiles and is

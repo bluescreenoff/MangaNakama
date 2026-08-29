@@ -1023,6 +1023,15 @@ pub(crate) fn sec_figure(ui: &mut egui::Ui, app: &mut App) {
         _ => {
             ui.checkbox(&mut app.figure_fill, "Fill with drawing colour")
                 .on_hover_text("closed shapes fill before the outline inks");
+            // Row 157 / FG-011. Only on the two DRAGGED closed shapes: on a
+            // straight line the drag already IS the angle, and the click-list
+            // gestures have no "size is fixed now" moment to hang it on.
+            if app.figure_mode.can_adjust_angle() {
+                ui.checkbox(&mut app.figure_adjust_angle, "Adjust angle after fixed")
+                    .on_hover_text(
+                        "release sets the size, then the pointer spins it — click inks it",
+                    );
+            }
         }
     }
 }
@@ -1031,11 +1040,20 @@ pub(crate) fn sec_figure_guide(ui: &mut egui::Ui, app: &mut App) {
     use crate::cmd::FigureMode;
     ui.weak(match app.figure_mode {
         FigureMode::Line => "drag start to end; Shift snaps to 45° steps",
+        FigureMode::Rect if app.figure_adjust_angle => {
+            "drag corner to corner, release, then spin it — click inks it"
+        }
+        FigureMode::Ellipse if app.figure_adjust_angle => {
+            "drag the bounding box, release, then spin it — click inks it"
+        }
         FigureMode::Rect => "drag corner to corner; Shift keeps it square",
         FigureMode::Ellipse => "drag the bounding box; Shift keeps it round",
-        FigureMode::Polygon => "click vertices; the first one / Enter closes, Esc cancels",
+        FigureMode::Polygon => {
+            "click vertices; the first one / Enter closes, Backspace takes one back, Esc cancels"
+        }
+        FigureMode::Arc => "drag the straight line, release, then bend it — click inks it",
         FigureMode::Curve => {
-            "click along the curve; Enter (or the last point twice) inks it, Esc cancels"
+            "click along the curve; Enter (or the last point twice) inks it, Backspace takes one back"
         }
         FigureMode::Stream => "drag along the motion — angle and length come from the drag",
         FigureMode::Focus => "drag from the convergence point out to the lines' reach",
