@@ -1382,6 +1382,13 @@ fn resolve_dialog(hwnd: HWND, cmd: AppCmd) -> Option<AppCmd> {
             )
             .pick_file()
             .map(AppCmd::ImportPagePath),
+        // Images only, unlike Import Page: a batch underlay is placed INTO
+        // pages that already exist, and an .ora is a page, not a photo.
+        AppCmd::BatchImportPages => rfd::FileDialog::new()
+            .set_title("Batch Import Pages — pick every rough")
+            .add_filter("Images", &["png", "jpg", "jpeg", "bmp", "tif", "tiff", "webp"])
+            .pick_files()
+            .map(AppCmd::BatchImportPagesPicked),
         AppCmd::ImportPalette => rfd::FileDialog::new()
             .set_title("Import Palette (.gpl)")
             .add_filter("GIMP/Krita palette", &["gpl"])

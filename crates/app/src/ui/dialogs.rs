@@ -555,6 +555,85 @@ pub(super) fn work_settings_window(ctx: &egui::Context, app: &mut App) {
     }
 }
 
+/// Batch Import (workflow audit #4): the files the picker returned, in
+/// name order, mapped one-to-one onto consecutive pages from a chosen
+/// start. The list is the preview — a row per file naming the page it will
+/// land on — because the one thing that goes wrong here is an off-by-one
+/// start page across twenty roughs.
+pub(super) fn batch_import_window(ctx: &egui::Context, app: &mut App) {
+    if !app.batch_import_open {
+        return;
+    }
+    let mut open = app.batch_import_open;
+    let (mut apply, mut cancel) = (false, false);
+    let pages = app.pages.len();
+    egui::Window::new("Batch Import Pages")
+        .open(&mut open)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, -30.0))
+        .show(ctx, |ui| {
+            let n = app.batch_import.files.len();
+            ui.horizontal(|ui| {
+                ui.label("Start at page");
+                ui.add(
+                    egui::DragValue::new(&mut app.batch_import.start)
+                        .range(1..=pages.saturating_add(1))
+                        .speed(1.0),
+                );
+                ui.weak(format!("of {pages}"));
+            });
+            ui.add_space(4.0);
+            ui.label(format!("{n} file(s), in name order:"));
+            let start = app.batch_import.start;
+            egui::ScrollArea::vertical()
+                .max_height(160.0)
+                .show(ui, |ui| {
+                    for (i, p) in app.batch_import.files.iter().enumerate() {
+                        let slot = start + i;
+                        ui.weak(format!(
+                            "page {slot}{} — {}",
+                            if slot > pages { " (new)" } else { "" },
+                            p.file_name().unwrap_or_default().to_string_lossy()
+                        ));
+                    }
+                });
+            ui.add_space(4.0);
+            let added = (start + n).saturating_sub(1).saturating_sub(pages);
+            ui.weak(format!(
+                "Each image is scaled to fit and becomes that page's draft \
+                 underlay — on screen, never in the export. {}",
+                if added > 0 {
+                    format!("{added} page(s) will be added at the end.")
+                } else {
+                    "No pages need to be added.".to_owned()
+                }
+            ));
+            // Same wording contract as the batch-ops and canvas-size
+            // dialogs: say what undo will not cover rather than implying
+            // an undo that is not there.
+            ui.weak(
+                "Pages other than the open one are written directly — undo covers \
+                 only the open page.",
+            );
+            ui.add_space(2.0);
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("  Import  ").clicked() {
+                    apply = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+            });
+        });
+    if apply {
+        app.push_cmd(AppCmd::BatchImportApply);
+        app.batch_import_open = false;
+    } else {
+        app.batch_import_open = open && !cancel;
+    }
+}
+
 /// Change Canvas Size: new pixel size + the CSP 3×3 anchor the existing
 /// content pins to (基準位置). Structural — clears the undo history.
 pub(super) fn canvas_size_window(ctx: &egui::Context, app: &mut App) {

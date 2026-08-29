@@ -2181,6 +2181,13 @@ pub enum AppCmd {
     /// (asks for a path first).
     ImportPage,
     ImportPagePath(PathBuf),
+    /// Workflow audit #4 (CSP EX's File ▸ Import ▸ Batch import): pick N
+    /// images, each becomes the draft underlay of one page (asks for the
+    /// files first, then opens the dialog).
+    BatchImportPages,
+    BatchImportPagesPicked(Vec<PathBuf>),
+    /// Run the Batch Import dialog's draft.
+    BatchImportApply,
     /// Import a Photoshop brush set (.abr): sampled tips become
     /// `imported/` presets + texture masks (TRIAGE 151).
     ImportAbr,
@@ -3958,8 +3965,29 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 }
             }
         }
-        AppCmd::ImportPage | AppCmd::ReplacePage => {
-            // Resolved to their *Path forms by `main::pump_commands`.
+        AppCmd::ImportPage | AppCmd::ReplacePage | AppCmd::BatchImportPages => {
+            // Resolved to their picked forms by `main::pump_commands`.
+        }
+        AppCmd::BatchImportPagesPicked(mut files) => {
+            // NAME order is the page order. A stack of ネーム photos is
+            // named for the chapter (p01, p02, …); the order the OS picker
+            // happened to hand them back is not an order at all. Plain
+            // lexicographic, lowercased — zero-padded names, which is how
+            // every camera and scanner writes them, sort right.
+            files.sort_by_key(|p| {
+                p.file_name()
+                    .map(|s| s.to_string_lossy().to_lowercase())
+                    .unwrap_or_default()
+            });
+            app.batch_import.files = files;
+            app.batch_import.start = app.page_index + 1;
+            app.batch_import_open = true;
+            app.mark_dirty();
+        }
+        AppCmd::BatchImportApply => {
+            let s = app.batch_import_pages();
+            app.set_status(s);
+            app.mark_dirty();
         }
         AppCmd::ImportAbr => {
             // Resolved to ImportAbrPath by `main::pump_commands`.

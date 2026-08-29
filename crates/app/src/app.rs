@@ -47,7 +47,9 @@ pub use layout::{ScreenRect, UiLayout, WinGeom, peek_win};
 pub use prefs::Prefs;
 
 pub use crate::cmd::RulerKind;
-pub use pages::{CanvasSizeDraft, NewComicDraft, PageEntry, SpreadOp, WorkSettingsDraft};
+pub use pages::{
+    BatchImportDraft, CanvasSizeDraft, NewComicDraft, PageEntry, SpreadOp, WorkSettingsDraft,
+};
 pub use session::{DocSession, unsaved_autosave_folder_for, unsaved_autosave_path_for};
 pub use transform::{
     MeshLattice,
@@ -215,6 +217,8 @@ pub struct App {
     pub work_settings_draft: WorkSettingsDraft,
     /// Change Canvas Size dialog (Edit menu): new size + CSP anchor.
     pub canvas_size_open: bool,
+    /// Batch Import dialog (workflow audit #4): N roughs -> N page underlays.
+    pub batch_import_open: bool,
     /// Preferences window (Edit ▸ Preferences…).
     pub prefs_open: bool,
     /// What the window opened ON: a tab name ("Performance") or a row id
@@ -493,6 +497,8 @@ pub struct App {
     pub story_repl: String,
     pub story_ignore_case: bool,
     pub canvas_size_draft: CanvasSizeDraft,
+    /// The Batch Import dialog's picked files + start slot.
+    pub batch_import: BatchImportDraft,
     /// Print story info in page margins (round 14 feature).
     pub print_margin_info: bool,
     /// The work's expression colour (TRIAGE 132 preflight): Mono = B&W
@@ -1344,6 +1350,7 @@ impl App {
             work_settings_open: false,
             work_settings_draft: WorkSettingsDraft::default(),
             canvas_size_open: false,
+            batch_import_open: false,
             prefs_open: false,
             prefs_focus: None,
             prefs_tab: 0,
@@ -1474,6 +1481,7 @@ impl App {
                 anchor: ResizeAnchor::Center,
                 all_pages: false,
             },
+            batch_import: BatchImportDraft::default(),
             print_margin_info: false,
             expression: mn_core::Expression::Mono,
             spine_mm: 0.0,
@@ -4433,6 +4441,13 @@ mod page_size_tests;
 /// `new_document_tests`: 72 dpi drafts, one App at a time.
 #[cfg(test)]
 mod import_placement_tests;
+
+/// Workflow audit #4: the batch import — N roughs become N page underlays.
+/// Pins the underlay's placement against a page's White base, the park
+/// staleness a direct byte write must cause, and the open page's single
+/// undo press. Same frugality rule as `new_document_tests`: 72 dpi drafts.
+#[cfg(test)]
+mod batch_import_tests;
 
 /// ROADMAP good-first-issue: ruler creation/move/clear on the document's
 /// one undo history — and the two things that must NOT be steps (the

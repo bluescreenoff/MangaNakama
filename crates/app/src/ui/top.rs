@@ -934,6 +934,10 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 app.push_cmd(AppCmd::ImportPage);
                 ui.close();
             }
+            if item(ui, "Batch import pages (roughs as underlays)…", "") {
+                app.push_cmd(AppCmd::BatchImportPages);
+                ui.close();
+            }
             if item(ui, "Replace page with file…", "") {
                 app.push_cmd(AppCmd::ReplacePage);
                 ui.close();
