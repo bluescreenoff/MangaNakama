@@ -24,29 +24,37 @@ fn the_three_view_resets_stay_distinct() {
     // so this test does not care what shape the fit function has.
     crate::cmd::dispatch(&mut app, AppCmd::ZoomFit);
     let fitted = app.viewport;
+    // Every axis a reset could name is set: angle, BOTH mirrors, zoom.
     let twist = |app: &mut App| {
         app.viewport = fitted;
         let c = app.canvas_center();
         app.viewport.rotate_around(c, 0.6);
         app.viewport.flip_around(c);
+        app.viewport.flip_v_around(c);
         app.viewport.zoom_around(c, 3.0);
-        assert!(app.viewport.flip_h && app.viewport.rotate_rad != 0.0);
+        assert!(app.viewport.flip_h && app.viewport.flip_v && app.viewport.rotate_rad != 0.0);
     };
 
-    // 1. Rotation only — the mirror is untouched, because the
-    //    drawing-error check must survive straightening the page.
+    // 1. Rotation only — the mirrors are untouched, because the
+    //    drawing-error check must survive straightening the page, and so
+    //    is the zoom: nothing but the angle is this command's business.
     twist(&mut app);
+    let zoom = app.viewport.zoom;
     crate::cmd::dispatch(&mut app, AppCmd::RotateReset);
     assert_eq!(app.viewport.rotate_rad, 0.0);
     assert!(app.viewport.flip_h, "RotateReset must not unmirror");
+    assert!(app.viewport.flip_v, "…on either axis");
+    assert_eq!(app.viewport.zoom, zoom, "nor rescale");
 
-    // 2. Rotation + flip — the zoom survives, so it can be used
-    //    mid-drawing without losing the magnification being inked at.
+    // 2. Rotation + flip — BOTH mirrors go (a reset that left the page
+    //    upside down would be a lie), and the zoom survives, so it can be
+    //    used mid-drawing without losing the magnification being inked at.
     twist(&mut app);
     let zoom = app.viewport.zoom;
     crate::cmd::dispatch(&mut app, AppCmd::RotateFlipReset);
     assert_eq!(app.viewport.rotate_rad, 0.0, "upright");
     assert!(!app.viewport.flip_h, "and unmirrored");
+    assert!(!app.viewport.flip_v, "on both axes");
     assert_eq!(app.viewport.zoom, zoom, "the zoom is not its business");
 
     // 3. The lot — upright, unmirrored AND refitted.

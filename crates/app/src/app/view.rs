@@ -1,7 +1,40 @@
 //! Viewport navigation: pan, the Move▸Rotate sub-tool drag, zoom, fit.
 //! `fitted_viewport` (the fit computation) stays private in `app.rs`.
 
+use mn_gpu::Viewport;
+
 use super::{App, fitted_viewport};
+
+/// Exact cache key for a viewport (`Viewport` has no `PartialEq`, and float
+/// bits are the right comparison here anyway: the texture is valid for
+/// EXACTLY the numbers it was rendered from).
+/// The second view's fit. Deliberately NOT `fitted_viewport`: that one
+/// floors the zoom at 0.05 because it sizes the DRAWING surface, and a
+/// 64pt-wide overview pane of a 2048px page wants 0.03 — the floor cropped
+/// the page in exactly the pane the feature exists for. Everything else
+/// (the margin preference, centring) is the same.
+fn pane_fit(doc_size: (u32, u32), size_px: (u32, u32), margin: f32) -> Viewport {
+    let (dw, dh) = (doc_size.0.max(1) as f32, doc_size.1.max(1) as f32);
+    let (pw, ph) = (size_px.0.max(1) as f32, size_px.1.max(1) as f32);
+    let zoom = ((pw / dw).min(ph / dh) * margin).clamp(1e-4, 8.0);
+    Viewport {
+        pan: [(pw - dw * zoom) * 0.5, (ph - dh * zoom) * 0.5],
+        zoom,
+        rotate_rad: 0.0,
+        flip_h: false,
+        flip_v: false,
+    }
+}
+
+fn view_key(vp: &Viewport) -> [u32; 5] {
+    [
+        vp.pan[0].to_bits(),
+        vp.pan[1].to_bits(),
+        vp.zoom.to_bits(),
+        vp.rotate_rad.to_bits(),
+        u32::from(vp.flip_h) | (u32::from(vp.flip_v) << 1),
+    ]
+}
 
 impl App {
     /// Centre of the canvas area (the rect the panels leave free), client px —
@@ -168,6 +201,88 @@ impl App {
         self.viewport.pan[0] += c[0] - s.0;
         self.viewport.pan[1] += c[1] - s.1;
         self.needs_redraw = true;
+    }
+
+    /// CV-021's "New Window", as a pane: a SECOND live view of the page
+    /// being drawn, with its own zoom and pan.
+    ///
+    /// Deliberately view-only. Rendering two live GPU viewports is out by
+    /// design (docs/DOCKING-2.md: one live drawing surface, parked pages
+    /// are bytes, the target machine has an iGPU) and `Shell::owns_pointer`
+    /// routes the pen by ONE canvas rect, so the second view composites
+    /// offscreen through its own viewport and shows the result — exactly
+    /// the mechanism the Navigator thumbnail already runs on, one size up
+    /// and steerable. It therefore updates when the document revision
+    /// moves, i.e. at every stroke end, not mid-stroke.
+    ///
+    /// The long-edge cap keeps a dragged-huge pane from minting
+    /// page-sized textures per stroke (the Pages palette's clamp, same
+    /// reasoning).
+    pub const VIEW_PANE_MAX_PX: f32 = 1200.0;
+
+    /// The viewport the second view is showing `size_px` through. Untouched
+    /// (`view_pane_vp` = `None`) it simply fits the page into the pane, so
+    /// resizing or re-docking the pane needs no bookkeeping at all.
+    pub fn view_pane_viewport(&self, size_px: (u32, u32)) -> Viewport {
+        self.view_pane_vp
+            .unwrap_or_else(|| pane_fit(self.doc.size, size_px, self.prefs.fit_margin))
+    }
+
+    /// Put the second view back to "the whole page" — the fit is recomputed
+    /// from the pane's size on every frame after this, so it also un-sticks
+    /// a view the user had panned away.
+    pub fn view_pane_fit(&mut self) {
+        self.view_pane_vp = None;
+    }
+
+    /// Zoom the second view by `factor`, keeping the page point under
+    /// `anchor` (target pixels, pane-local) where it is.
+    pub fn view_pane_zoom(&mut self, size_px: (u32, u32), anchor: [f32; 2], factor: f32) {
+        let mut vp = self.view_pane_viewport(size_px);
+        // The clamp is the pane's own: below the fit there is nothing left
+        // to see, and past 8x a second view stops being an overview.
+        let fit = pane_fit(self.doc.size, size_px, self.prefs.fit_margin).zoom;
+        let want = (vp.zoom * factor).clamp(fit * 0.5, 8.0);
+        if vp.zoom > 0.0 {
+            vp.zoom_around(anchor, want / vp.zoom);
+        }
+        self.view_pane_vp = Some(vp);
+    }
+
+    /// Pan the second view by a target-pixel delta.
+    pub fn view_pane_pan(&mut self, size_px: (u32, u32), dx: f32, dy: f32) {
+        let mut vp = self.view_pane_viewport(size_px);
+        vp.pan[0] += dx;
+        vp.pan[1] += dy;
+        self.view_pane_vp = Some(vp);
+    }
+
+    /// The second view's texture: one offscreen composite of the LIVE
+    /// document through the pane's own viewport, cached against everything
+    /// it was rendered from (revision, size, viewport). Same door the
+    /// `--screenshot` harness uses, so what the pane shows is what the
+    /// canvas would show at that viewport.
+    pub fn view_pane_texture(&mut self, size_px: (u32, u32)) -> egui::TextureHandle {
+        let (w, h) = (size_px.0.max(1), size_px.1.max(1));
+        let vp = self.view_pane_viewport((w, h));
+        let key = (self.doc.revision, w, h, view_key(&vp));
+        if self.view_pane_tex.is_none() || self.view_pane_key != Some(key) {
+            let img = self.renderer.render_offscreen_vp(&self.doc, &vp, w, h);
+            let ci = egui::ColorImage::from_rgba_unmultiplied(
+                [img.width() as usize, img.height() as usize],
+                img.as_raw(),
+            );
+            // One handle exists at a time (the pane is deduped to one), so
+            // a fixed name cannot alias a second live texture the way page
+            // thumbnails could.
+            let tex = self
+                .shell
+                .ctx
+                .load_texture("mn.viewpane", ci, egui::TextureOptions::LINEAR);
+            self.view_pane_key = Some(key);
+            self.view_pane_tex = Some(tex);
+        }
+        self.view_pane_tex.clone().expect("just stored")
     }
 
     /// CV-036 sticky fit: while the toggle is on, a surface-size change

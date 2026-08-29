@@ -24,6 +24,7 @@ pub mod correction;
 pub mod curve;
 pub mod dab;
 pub mod doc;
+pub mod dust;
 pub mod edge;
 pub mod export;
 pub mod fill;
@@ -67,6 +68,7 @@ pub use doc::{
 };
 pub use edge::EdgeParams;
 pub use export::Background;
+pub use dust::DustMode;
 pub use fill::{AutoFill, FillClose, FillOpts, FillRefer};
 pub use fill_layer::FillKind;
 pub use filter::{Filter, MotionDir, MotionMode, Raster, WaveDir};

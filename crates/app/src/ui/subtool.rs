@@ -216,6 +216,18 @@ fn mode_sub_tools(ui: &mut egui::Ui, app: &mut App) {
             {
                 app.push_cmd(AppCmd::SetFillMode(FillMode::Leftover));
             }
+            // Row 160 / RD-001: CSP's 線修正 group folded in here — same
+            // freehand drag, and the thing it cleans up is what the three
+            // rows above leave behind.
+            if mode_row(ui, app.fill_mode == FillMode::Dust, Icon::Fill, "Remove dust")
+                .on_hover_text(
+                    "drag around a patch — specks smaller than the size row are cleared, \
+                     or the pinholes inside a flat are plugged",
+                )
+                .clicked()
+            {
+                app.push_cmd(AppCmd::SetFillMode(FillMode::Dust));
+            }
         }
         Tool::Tone => {
             // The nine screen shapes — the choice made BEFORE the click.

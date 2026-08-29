@@ -3404,12 +3404,16 @@ impl App {
                 self.set_status(match self.fill_mode {
                     FillMode::Lasso => "drag the shape to fill",
                     FillMode::Leftover => "scrub across the area with holes in it",
+                    FillMode::Dust => "drag around the patch to clean",
                     _ => "drag right around the areas to fill",
                 });
             } else {
                 match self.fill_mode {
                     FillMode::Lasso => self.push_cmd(AppCmd::LassoFill { pts }),
                     FillMode::Leftover => self.push_cmd(AppCmd::LeftoverFill { pts }),
+                    // Row 160: the path CLOSES into the window, so unlike
+                    // its three siblings this one is a polygon, not seeds.
+                    FillMode::Dust => self.push_cmd(AppCmd::DustScrub { pts }),
                     _ => self.push_cmd(AppCmd::EncloseFill { pts }),
                 }
             }

@@ -5458,6 +5458,154 @@ fn leftover_pen_drag_fills_the_holes_and_not_the_flat() {
     );
 }
 
+/// Row 160 / RD-001 e2e: the Remove-dust sub tool through the real canvas
+/// down/move/up path. One loop drawn around the top-left corner clears the
+/// specks INSIDE the loop and leaves the identical speck outside it, in one
+/// undo press — the drag is the window, which is the whole difference
+/// between this and the Filter menu's page-wide LC-001.
+#[test]
+fn remove_dust_drag_cleans_only_what_the_loop_encloses() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (256, 256), 1.0);
+    app.viewport = mn_gpu::Viewport::default(); // canvas == client
+    let mut speck = |x: i32, y: i32, n: i32| {
+        for dy in 0..n {
+            for dx in 0..n {
+                let idx = TileIdx::of_pixel(x + dx, y + dy);
+                let (ox, oy) = idx.origin();
+                app.doc.active_layer_mut().tile_mut(idx).set_pixel(
+                    (x + dx - ox) as usize,
+                    (y + dy - oy) as usize,
+                    [0, 0, 0, 32768],
+                );
+            }
+        }
+    };
+    speck(30, 30, 1); // 1 px, inside the loop
+    speck(50, 50, 2); // 4 px, inside the loop
+    speck(60, 60, 5); // 25 px, inside — too big to be dust
+    speck(200, 200, 1); // 1 px, OUTSIDE the loop
+    let steps = app.doc.undo_labels().len();
+
+    app.tool = Tool::Fill;
+    crate::cmd::dispatch(&mut app, AppCmd::SetFillMode(FillMode::Dust));
+    crate::cmd::dispatch(
+        &mut app,
+        AppCmd::SetDustOpts(crate::cmd::DustOpts {
+            max_px: 4,
+            mode: mn_core::DustMode::OnTransparency,
+            select: false,
+        }),
+    );
+    // A loop around (0,0)–(100,100), drawn as a real freehand drag.
+    let loop_pts: Vec<(f32, f32)> = [
+        (10.0, 10.0),
+        (100.0, 10.0),
+        (100.0, 100.0),
+        (10.0, 100.0),
+        (10.0, 10.0),
+    ]
+    .into_iter()
+    .collect();
+    drag_path(&mut app, &loop_pts);
+
+    assert_eq!(active_px(&app, 30, 30)[3], 0, "the 1 px speck is gone");
+    assert_eq!(active_px(&app, 50, 50)[3], 0, "the 4 px speck too");
+    assert!(active_px(&app, 62, 62)[3] > 0, "25 px is not dust at 4");
+    assert!(
+        active_px(&app, 200, 200)[3] > 0,
+        "the identical speck outside the loop is untouched"
+    );
+    assert_eq!(
+        app.doc.undo_labels().len(),
+        steps + 1,
+        "one drag, one undo press: {:?}",
+        app.doc.undo_labels()
+    );
+    assert_eq!(
+        app.doc.undo_labels()[steps],
+        "Remove dust on transparency",
+        "the step is named for the MODE"
+    );
+    assert!(
+        app.status.contains("5 px"),
+        "the status counts what it cleaned: {}",
+        app.status
+    );
+    // One press puts all five pixels back.
+    assert!(app.doc.undo());
+    assert!(active_px(&app, 30, 30)[3] > 0 && active_px(&app, 50, 50)[3] > 0);
+}
+
+/// Row 160 / RD-007 e2e: the same drag with "Select instead of cleaning"
+/// on paints nothing and hands back marching ants over exactly the dust —
+/// and a live selection still bounds the drag (the window is the
+/// intersection, and it survives the op).
+#[test]
+fn select_dust_drag_makes_a_selection_and_respects_the_live_one() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (256, 256), 1.0);
+    app.viewport = mn_gpu::Viewport::default();
+    for (x, y) in [(30, 30), (80, 80)] {
+        let idx = TileIdx::of_pixel(x, y);
+        let (ox, oy) = idx.origin();
+        app.doc.active_layer_mut().tile_mut(idx).set_pixel(
+            (x - ox) as usize,
+            (y - oy) as usize,
+            [0, 0, 0, 32768],
+        );
+    }
+    // A live selection that covers only the first speck.
+    app.doc.selection = Some(mn_core::Selection::from_rect(&app.doc, 0.0, 0.0, 50.0, 50.0));
+    let steps = app.doc.undo_labels().len();
+
+    app.tool = Tool::Fill;
+    crate::cmd::dispatch(&mut app, AppCmd::SetFillMode(FillMode::Dust));
+    crate::cmd::dispatch(
+        &mut app,
+        AppCmd::SetDustOpts(crate::cmd::DustOpts {
+            max_px: 4,
+            mode: mn_core::DustMode::OnTransparency,
+            select: true,
+        }),
+    );
+    // The loop encloses BOTH specks; the live selection holds one back.
+    let loop_pts: Vec<(f32, f32)> = [
+        (10.0, 10.0),
+        (120.0, 10.0),
+        (120.0, 120.0),
+        (10.0, 120.0),
+        (10.0, 10.0),
+    ]
+    .into_iter()
+    .collect();
+    drag_path(&mut app, &loop_pts);
+
+    assert!(active_px(&app, 30, 30)[3] > 0, "select mode paints nothing");
+    assert!(active_px(&app, 80, 80)[3] > 0);
+    assert_eq!(
+        app.doc.undo_labels().len(),
+        steps,
+        "and records no undo step: {:?}",
+        app.doc.undo_labels()
+    );
+    let sel = app.doc.selection.as_ref().expect("ants over the dust");
+    assert!(mn_core::selected(sel.coverage(30, 30)), "the speck inside");
+    assert!(
+        !mn_core::selected(sel.coverage(80, 80)),
+        "the one the live selection excluded is not in the find"
+    );
+    assert!(
+        app.status.contains("selected"),
+        "the status says it selected: {}",
+        app.status
+    );
+}
+
 /// Rows 84/85 e2e: the Figure ▸ Continuous curve sub tool. Click three
 /// points, commit with Enter (`finish_figure_poly`, the arm main.rs calls),
 /// and the CURRENT brush inks a spline THROUGH them — not the chords

@@ -696,6 +696,18 @@ pub struct App {
     /// rendered from (re-render only when the document moves).
     pub nav_thumb: Option<egui::TextureHandle>,
     pub nav_thumb_rev: u64,
+    /// CV-021 "New Window", as a PANE (`ui::dock::Pane::CanvasView`): the
+    /// SECOND live view of the page being drawn, with its own zoom and pan.
+    /// `None` means "not touched yet" — an untouched second view FITS the
+    /// whole page into whatever size the pane is now, which is the
+    /// see-the-whole-page-while-inking default and needs no resize
+    /// bookkeeping. Panning or zooming in the pane materializes it.
+    pub view_pane_vp: Option<Viewport>,
+    /// The second view's texture and the exact inputs it was rendered from
+    /// (doc revision, target px, viewport bits): re-rendered only when one
+    /// of them moves, like the Navigator thumbnail one door up.
+    pub view_pane_tex: Option<egui::TextureHandle>,
+    pub view_pane_key: Option<(u64, u32, u32, [u32; 5])>,
     /// Sub Tool Detail floating window (the wrench).
     pub detail_open: bool,
     /// BR-005: the rows-eye popup (per-sub-tool row visibility).
@@ -844,6 +856,11 @@ pub struct App {
     pub fill_auto: Option<mn_core::AutoFill>,
     /// Fill-tool sub tool: click / FI-003 enclose-and-fill / FI-004 lasso fill.
     pub fill_mode: FillMode,
+    /// Row 160 / RD-002/RD-003/RD-007: the Remove-dust sub tool's own Tool
+    /// Property. Separate from `fill_opts` because it shares none of it —
+    /// dust removal runs no flood, so tolerance, gap closing and 参照 have
+    /// nothing to say about it.
+    pub dust_opts: crate::cmd::DustOpts,
     /// In-progress Enclose/Lasso fill drag, canvas coords. Same shape as
     /// `select_drag` — the overlay traces it while the pen is down.
     pub fill_drag: Option<Vec<(f32, f32)>>,
@@ -1615,6 +1632,9 @@ impl App {
             nav_last_surface: (0, 0),
             nav_thumb: None,
             nav_thumb_rev: 0,
+            view_pane_vp: None,
+            view_pane_tex: None,
+            view_pane_key: None,
             detail_open: false,
             pen_rows_open: false,
             prop_detail_open: false,
@@ -1651,6 +1671,7 @@ impl App {
             fill_opts: FillOpts::default(),
             fill_auto: None,
             fill_mode: FillMode::Click,
+            dust_opts: crate::cmd::DustOpts::default(),
             fill_drag: None,
             wand_opts: FillOpts::default(),
             tone_opts: crate::cmd::ToneToolOpts::default(),
@@ -4095,11 +4116,12 @@ impl App {
                 // parameter of the Click sub tool (strip rows + the Tool
                 // Property dropdown, both one click) and the key belongs to
                 // the three aiming modes.
-                const M: [FillMode; 4] = [
+                const M: [FillMode; 5] = [
                     FillMode::Click,
                     FillMode::Enclose,
                     FillMode::Lasso,
                     FillMode::Leftover,
+                    FillMode::Dust,
                 ];
                 let cur = M.iter().position(|m| *m == self.fill_mode).unwrap_or(0);
                 self.fill_mode = M[cycle(cur, M.len())];
@@ -4648,6 +4670,11 @@ mod layer_defaults_tests;
 
 #[cfg(test)]
 mod view_reset_and_tool_lock_tests;
+
+/// CV-021: the second live view's own viewport — independent of the
+/// canvas's, and fitted to the pane until the user steers it.
+#[cfg(test)]
+mod view_pane_tests;
 
 /// ROADMAP good-first-issue #1: the vertical view flip, and the brush
 /// compensation it has to reach.

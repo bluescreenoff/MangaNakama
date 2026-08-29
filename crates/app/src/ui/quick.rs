@@ -354,6 +354,7 @@ pub fn command_index() -> Vec<(&'static str, &'static str, AppCmd)> {
             "View",
             ViewReset,
         ),
+        ("New view of this page", "View", OpenCanvasView),
         ("Hide crop marks and margins", "View", SetGuidesHidden(true)),
         (
             "Show crop marks and margins",

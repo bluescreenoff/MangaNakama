@@ -301,6 +301,13 @@ pub(crate) fn sec_fill(ui: &mut egui::Ui, app: &mut App) {
         ui.weak("combines with an active selection like any fill");
         return;
     }
+    // Row 160 / RD-002/RD-003/RD-007. Nothing below this block applies:
+    // dust removal runs no flood, so tolerance / gap closing / area scaling
+    // / 参照 would all be knobs that do nothing.
+    if app.fill_mode == crate::cmd::FillMode::Dust {
+        sec_dust(ui, app);
+        return;
+    }
     if app.fill_mode == crate::cmd::FillMode::Enclose {
         ui.weak("drag right around the areas to fill — everything closed inside goes");
     }
@@ -330,6 +337,62 @@ pub(crate) fn sec_fill(ui: &mut egui::Ui, app: &mut App) {
     }
     if changed {
         app.push_cmd(AppCmd::SetFillOpts(o));
+    }
+}
+
+/// Row 160 — the Remove-dust sub tool's Tool Property: RD-002's one
+/// threshold, RD-003's Mode row, and RD-007 folded in as a switch.
+fn sec_dust(ui: &mut egui::Ui, app: &mut App) {
+    ui.weak("drag around the patch to clean — the drag is the window");
+    let mut o = app.dust_opts;
+    // RD-002. The unit is AREA and the row says so: "5 px" here is a blob
+    // of five connected pixels, not a five-pixel-wide one, and the same
+    // number means the same thing in the Filter menu's Remove dust.
+    let mut size = o.max_px as f32;
+    let mut changed = ValueBar::new("Dust size", 1.0, 64.0)
+        .step(1.0)
+        .suffix(" px")
+        .show(ui, &mut size)
+        .on_hover_text(
+            "the AREA of a blob, not its width — a blob of this many connected \
+             pixels or fewer counts as dust",
+        )
+        .changed();
+    o.max_px = (size.round() as u32).max(1);
+    // RD-003: the four definitions of "dust". With the switch below on,
+    // the two gap rows detect the same pixels (RD-009's 3-way).
+    let mut mode = o.mode;
+    egui::ComboBox::from_id_salt("mn.dust.mode")
+        .width(ui.available_width() - 8.0)
+        .selected_text(if o.select {
+            mode.select_label()
+        } else {
+            mode.label()
+        })
+        .show_ui(ui, |ui| {
+            for m in mn_core::DustMode::ALL {
+                let text = if o.select { m.select_label() } else { m.label() };
+                ui.selectable_value(&mut mode, m, text);
+            }
+        });
+    changed |= mode != o.mode;
+    o.mode = mode;
+    ui.weak(match o.mode {
+        mn_core::DustMode::OnTransparency => "isolated ink floating in emptiness",
+        mn_core::DustMode::OnWhite => "blobs darker than the paper — cleaned back to white",
+        mn_core::DustMode::GapsSurrounding => {
+            "transparent pinholes inside a flat — what a bucket fill leaves"
+        }
+        mn_core::DustMode::GapsForeground => "the same pinholes, in the current colour",
+    });
+    // RD-007 Select dust, folded in: same detection, same window, and it
+    // hands back marching ants instead of editing pixels.
+    changed |= ui
+        .checkbox(&mut o.select, "Select instead of cleaning")
+        .on_hover_text("hands back a selection of what it found, so you can look before deleting")
+        .changed();
+    if changed {
+        app.push_cmd(AppCmd::SetDustOpts(o));
     }
 }
 

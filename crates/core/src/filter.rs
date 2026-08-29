@@ -187,6 +187,22 @@ pub enum Filter {
     /// LC-002 Adjust line width (CSP 線幅修正): thicken the ink by `delta`
     /// pixels, or thin it when `delta` is negative.
     LineWidth { delta: i32 },
+    /// Row 160 / `RD-001`–`RD-003` — the **Remove dust TOOL**'s scrub, in
+    /// all four of CSP's senses of the word ([`crate::dust::DustMode`]).
+    /// It rides the filter framework because everything the tool needs is
+    /// already here: the tile gather with its halo, the selection window,
+    /// the layer guards and the one-press undo. `color` is the current
+    /// drawing colour, which only the "fill gaps" half reads.
+    ///
+    /// Not in the Filter menu — the menu's dust entry is [`Self::RemoveDust`]
+    /// (LC-001), which is this filter's `OnTransparency` mode with no drag
+    /// and no mode row. The two share [`dust_max`] so the thresholds mean
+    /// the same thing in both places.
+    Dust {
+        max_px: u32,
+        mode: crate::dust::DustMode,
+        color: [f32; 3],
+    },
 }
 
 impl Filter {
@@ -208,6 +224,9 @@ impl Filter {
             Filter::Twirl { .. } => "Twirl",
             Filter::RemoveDust { .. } => "Remove dust",
             Filter::LineWidth { .. } => "Adjust line width",
+            // The undo label is the MODE: "undo Fill gaps with surrounding
+            // colour" is what the artist thinks they just did.
+            Filter::Dust { mode, .. } => mode.label(),
         }
     }
 
@@ -255,6 +274,10 @@ impl Filter {
             // least this many pixels — i.e. it is already too big to be dust,
             // and cutting it off at the rim cannot change the verdict.
             Filter::RemoveDust { max_px } => dust_max(max_px) as i32,
+            // Same argument, and `dust`'s rim rule leans on it: a component
+            // holding a writable pixel and a rim pixel spans at least this
+            // far, so it already holds more than `max_px` pixels.
+            Filter::Dust { max_px, .. } => dust_max(max_px) as i32,
             // Morphology reads (and grow writes) exactly its own radius out.
             Filter::LineWidth { delta } => line_width_radius(delta) as i32,
         }
@@ -292,6 +315,11 @@ impl Filter {
             Filter::Twirl { angle_deg } => twirl(buf, angle_deg),
             Filter::RemoveDust { max_px } => remove_dust(buf, max_px),
             Filter::LineWidth { delta } => line_width(buf, delta),
+            Filter::Dust {
+                max_px,
+                mode,
+                color,
+            } => crate::dust::scrub(buf, mode, max_px, color),
         }
     }
 
@@ -806,7 +834,7 @@ fn twirl(buf: &mut Raster, angle_deg: f32) {
 /// Shared by [`Filter::reach`] and [`remove_dust`] so the halo and the count
 /// can never disagree; the ceiling bounds the halo the same way `MAX_SIGMA`
 /// bounds the blur's.
-fn dust_max(max_px: u32) -> u32 {
+pub(crate) fn dust_max(max_px: u32) -> u32 {
     max_px.clamp(1, 256)
 }
 
@@ -1040,7 +1068,7 @@ fn mosaic(buf: &mut Raster, cell: i32, ox: i32, oy: i32) {
 ///
 /// Row-slice copies, not per-pixel: a full-page gather is ~24 M pixels and the
 /// per-pixel form is measurably the slower half of the whole filter.
-fn gather(layer: &Layer, gx: i32, gy: i32, gw: usize, gh: usize) -> Raster {
+pub(crate) fn gather(layer: &Layer, gx: i32, gy: i32, gw: usize, gh: usize) -> Raster {
     let mut out = Raster::new(gw, gh);
     if gw == 0 || gh == 0 {
         return out;

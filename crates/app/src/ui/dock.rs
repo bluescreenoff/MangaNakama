@@ -68,6 +68,18 @@ pub enum Pane {
     PageView {
         page: usize,
     },
+    /// CV-021 (CSP's Window ▸ Canvas ▸ **New Window**): a SECOND live view
+    /// of the page being drawn, with its own zoom and pan — ink zoomed in
+    /// on the Canvas pane, watch the whole page here, both moving together.
+    /// Exactly one (the runtime state — viewport and texture — lives on
+    /// `App`, and two panes would thrash one cache); extras collapse on
+    /// load, like the canvas pane's own dedupe.
+    ///
+    /// View-only by design, not by shortfall: `Shell::owns_pointer` routes
+    /// the pen by ONE canvas rect and two live GPU viewports are ruled out
+    /// in docs/DOCKING-2.md, so this composites offscreen through its own
+    /// viewport instead (`App::view_pane_texture`).
+    CanvasView,
 }
 
 pub const ALL: [Palette; 16] = [
@@ -159,13 +171,17 @@ impl Pane {
             Pane::Palette(p) => p.title().to_string(),
             Pane::Canvas => "Canvas".to_string(),
             Pane::PageView { page } => format!("p.{}", page + 1),
+            Pane::CanvasView => "View 2".to_string(),
         }
     }
 
     /// Canvas-class panes share tab bars with each other and never with
     /// palettes (patch #16's rule).
     fn is_canvas_class(self) -> bool {
-        matches!(self, Pane::Canvas | Pane::PageView { .. })
+        matches!(
+            self,
+            Pane::Canvas | Pane::PageView { .. } | Pane::CanvasView
+        )
     }
 }
 
@@ -255,24 +271,24 @@ pub fn from_json_tree(s: &str) -> DockTree {
         .iter_all_tabs()
         .filter(|(_, t)| **t == Pane::Canvas)
         .count();
-    match canvases {
-        1 => tree,
-        0 => default_tree(),
-        // Phase 1 owns exactly one canvas pane; extras (hand-edits, or a
-        // future build's layout) collapse to the first.
-        _ => {
-            dedupe_canvases(&mut tree);
-            tree
-        }
+    if canvases == 0 {
+        return default_tree();
     }
+    // Phase 1 owns exactly one canvas pane; extras (hand-edits, or a future
+    // build's layout) collapse to the first. CV-021's second view is
+    // singular for a different reason — its viewport and texture live on
+    // `App` — but the repair is the same one.
+    dedupe(&mut tree, Pane::Canvas);
+    dedupe(&mut tree, Pane::CanvasView);
+    tree
 }
 
-/// Remove every canvas pane after the first (tree order).
-fn dedupe_canvases(tree: &mut DockTree) {
+/// Remove every occurrence of `pane` after the first (tree order).
+fn dedupe(tree: &mut DockTree, pane: Pane) {
     loop {
         let mut seen = false;
         let extra = tree.iter_all_tabs().find_map(|(p, t)| {
-            if *t == Pane::Canvas {
+            if *t == pane {
                 if seen {
                     return Some(p);
                 }
@@ -455,6 +471,7 @@ impl TabViewer for Viewer<'_> {
             Pane::Palette(p) => p.body(ui, self.app),
             Pane::Canvas => canvas_pane_body(ui, self.app),
             Pane::PageView { page } => page_view_body(ui, self.app, *page),
+            Pane::CanvasView => canvas_view_body(ui, self.app),
         }
     }
 
@@ -647,6 +664,156 @@ fn page_view_body(ui: &mut egui::Ui, app: &mut App, page: usize) {
     }
 }
 
+/// CV-021's second live view (`Pane::CanvasView`): the page being drawn,
+/// composited offscreen through the pane's OWN viewport, so one view can sit
+/// at 400% on an eye while this one holds the whole page — and both move
+/// together, because both read the live document.
+///
+/// It re-renders when the document revision moves (stroke end, layer edit,
+/// undo), when the pane is resized, and when its own zoom or pan changes.
+/// Drag to pan, wheel to zoom, and the strip's Fit puts the whole page back;
+/// clicking never draws (the Canvas pane is the one drawing surface — see
+/// `Pane::CanvasView`).
+fn canvas_view_body(ui: &mut egui::Ui, app: &mut App) {
+    let full = ui.available_rect_before_wrap();
+    const STRIP_H: f32 = 20.0;
+    let img_rect = egui::Rect::from_min_max(
+        full.min,
+        egui::pos2(full.max.x, (full.max.y - STRIP_H).max(full.min.y)),
+    );
+    if img_rect.width() < 16.0 || img_rect.height() < 16.0 {
+        return;
+    }
+
+    // Target pixels per point: the pane renders at display resolution, up to
+    // the long-edge cap (a pane dragged to fill the window must not mint a
+    // page-sized texture on every stroke).
+    let ppp = ui.ctx().pixels_per_point();
+    let long_pt = img_rect.width().max(img_rect.height());
+    let scale = ppp * (App::VIEW_PANE_MAX_PX / (long_pt * ppp)).min(1.0);
+    let size_px = (
+        (img_rect.width() * scale).round().max(1.0) as u32,
+        (img_rect.height() * scale).round().max(1.0) as u32,
+    );
+
+    let resp = ui.interact(
+        img_rect,
+        ui.id().with("mn.viewpane"),
+        egui::Sense::click_and_drag(),
+    );
+    // Input BEFORE the render, so a drag shows this frame instead of next.
+    if resp.hovered() {
+        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+        if scroll.abs() > 0.1
+            && let Some(p) = ui.input(|i| i.pointer.hover_pos())
+        {
+            let anchor = [
+                (p.x - img_rect.left()) * scale,
+                (p.y - img_rect.top()) * scale,
+            ];
+            app.view_pane_zoom(size_px, anchor, (scroll * 0.0015).exp());
+        }
+    }
+    if resp.dragged() {
+        let d = resp.drag_delta();
+        app.view_pane_pan(size_px, d.x * scale, d.y * scale);
+    }
+    if resp.double_clicked() {
+        app.view_pane_fit();
+    }
+
+    let tex = app.view_pane_texture(size_px);
+    ui.painter().image(
+        tex.id(),
+        img_rect,
+        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+        egui::Color32::WHITE,
+    );
+
+    // The strip: the Navigator's vocabulary, aimed at THIS view instead of
+    // the canvas — nothing here touches `app.viewport`.
+    let zoom = app.view_pane_viewport(size_px).zoom;
+    let strip = egui::Rect::from_min_max(egui::pos2(full.min.x, img_rect.max.y), full.max);
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(strip)
+            .id_salt("mn.viewpane.strip"),
+        |ui| {
+            ui.horizontal(|ui| {
+                if ui
+                    .small_button("−")
+                    .on_hover_text("zoom this view out")
+                    .clicked()
+                {
+                    app.view_pane_zoom(size_px, centre_of(size_px), 1.0 / 1.25);
+                }
+                if ui
+                    .small_button("＋")
+                    .on_hover_text("zoom this view in")
+                    .clicked()
+                {
+                    app.view_pane_zoom(size_px, centre_of(size_px), 1.25);
+                }
+                if ui
+                    .small_button("Fit")
+                    .on_hover_text("the whole page again — and it stays fitted as the pane resizes")
+                    .clicked()
+                {
+                    app.view_pane_fit();
+                }
+                ui.weak(format!("{:.0}%", zoom * 100.0));
+                if app.view_pane_vp.is_none() {
+                    ui.weak("· whole page");
+                }
+            });
+        },
+    );
+}
+
+/// Centre of a target-pixel rect — the anchor the strip's zoom buttons use
+/// (the wheel anchors on the pointer instead).
+fn centre_of(size_px: (u32, u32)) -> [f32; 2] {
+    [size_px.0 as f32 * 0.5, size_px.1 as f32 * 0.5]
+}
+
+/// Is the second live view open anywhere (docked or floating)?
+pub fn canvas_view_open(app: &App) -> bool {
+    app.dock
+        .iter_all_tabs()
+        .any(|(_, t)| *t == Pane::CanvasView)
+}
+
+/// Open (or focus) the second live view (CV-021). Like `open_page_pane` it
+/// splits off the canvas leaf's right side — beside where the eye already is
+/// — and a second call focuses the pane that exists instead of adding one.
+pub fn open_canvas_view(app: &mut App) {
+    let existing = app
+        .dock
+        .iter_all_tabs()
+        .find(|(_, t)| **t == Pane::CanvasView)
+        .map(|(path, _)| path);
+    if let Some(path) = existing {
+        let _ = app.dock.set_active_tab(path);
+        app.dock.set_focused_node_and_surface(path.node_path());
+        return;
+    }
+    let canvas = canvas_leaf(&app.dock).unwrap_or(NodeIndex::root());
+    app.dock
+        .main_surface_mut()
+        .split_right(canvas, 0.6, vec![Pane::CanvasView]);
+}
+
+/// The main-surface leaf holding THE canvas pane.
+fn canvas_leaf(dock: &DockTree) -> Option<NodeIndex> {
+    dock.iter_all_nodes().find_map(|(path, node)| {
+        (path.surface.is_main()
+            && node
+                .get_leaf()
+                .is_some_and(|l| l.tabs.contains(&Pane::Canvas)))
+        .then_some(path.node)
+    })
+}
+
 /// Open (or focus) a page-view pane for `page`. A new pane splits off the
 /// canvas leaf's right side — beside where the eye already is; from there
 /// the user drags it wherever the layout wants it.
@@ -662,17 +829,7 @@ pub fn open_page_pane(app: &mut App, page: usize) {
         app.dock.set_focused_node_and_surface(path.node_path());
         return;
     }
-    let canvas = app
-        .dock
-        .iter_all_nodes()
-        .find_map(|(path, node)| {
-            (path.surface.is_main()
-                && node
-                    .get_leaf()
-                    .is_some_and(|l| l.tabs.contains(&Pane::Canvas)))
-            .then_some(path.node)
-        })
-        .unwrap_or(NodeIndex::root());
+    let canvas = canvas_leaf(&app.dock).unwrap_or(NodeIndex::root());
     app.dock
         .main_surface_mut()
         .split_right(canvas, 0.55, vec![pane]);
@@ -1081,6 +1238,126 @@ mod tests {
             1,
             "the canvas pane is untouched by page panes"
         );
+    }
+
+    /// CV-021: the second live view rides the tree exactly like a page
+    /// view — it round-trips `ui.txt`, classes with the canvas so a
+    /// palette can never be tabbed over it (and it can never be tabbed
+    /// over the drawing surface), and it is SINGULAR: its viewport and
+    /// texture live on `App`, so a hand-edited or future layout carrying
+    /// two collapses to one on load, the canvas pane's own repair.
+    ///
+    /// This deliberately extends the pinned layout round trip rather than
+    /// loosening it: the pin still says "one canvas, byte-stable JSON",
+    /// with the new pane inside the tree while it says so.
+    #[test]
+    fn the_second_view_pane_serdes_classes_and_is_singular() {
+        let mut tree = default_tree();
+        let canvas = tree
+            .iter_all_tabs()
+            .find(|(_, t)| **t == Pane::Canvas)
+            .map(|(p, _)| p)
+            .expect("canvas leaf");
+        tree.main_surface_mut()
+            .split_right(canvas.node, 0.6, vec![Pane::CanvasView]);
+
+        let back = from_json_tree(&to_json_tree(&tree));
+        assert!(
+            back.iter_all_tabs().any(|(_, t)| *t == Pane::CanvasView),
+            "the second view survives the ui.txt round trip"
+        );
+        assert_eq!(
+            back.iter_all_tabs()
+                .filter(|(_, t)| **t == Pane::Canvas)
+                .count(),
+            1,
+            "and is NOT deduped away as a second canvas pane"
+        );
+        // The pin: still byte-stable with the new pane in the tree.
+        let json = to_json_tree(&back);
+        assert_eq!(to_json_tree(&from_json_tree(&json)), json);
+
+        // Class: with the canvas, never with palettes (patch #16's rule,
+        // which `Viewer::can_tab_into` keys on).
+        assert!(Pane::CanvasView.is_canvas_class());
+
+        // Two collapse to one.
+        let mut two = tree;
+        let canvas = two
+            .iter_all_tabs()
+            .find(|(_, t)| **t == Pane::Canvas)
+            .map(|(p, _)| p)
+            .expect("canvas leaf");
+        two.main_surface_mut()
+            .split_left(canvas.node, 0.3, vec![Pane::CanvasView]);
+        assert_eq!(
+            two.iter_all_tabs()
+                .filter(|(_, t)| **t == Pane::CanvasView)
+                .count(),
+            2,
+            "two were really built"
+        );
+        let deduped = from_json_tree(&to_json_tree(&two));
+        assert_eq!(
+            deduped
+                .iter_all_tabs()
+                .filter(|(_, t)| **t == Pane::CanvasView)
+                .count(),
+            1,
+            "a layout with two second views loads as one"
+        );
+        assert_eq!(
+            deduped
+                .iter_all_tabs()
+                .filter(|(_, t)| **t == Pane::Canvas)
+                .count(),
+            1,
+            "and the canvas is still there"
+        );
+    }
+
+    /// `open_canvas_view` is the Workspace-menu door: it opens ONE pane and
+    /// then focuses that one, never stacking a second (the state it steers
+    /// is per-App, so a duplicate would thrash one texture cache).
+    #[test]
+    fn open_canvas_view_focuses_instead_of_duplicating() {
+        let Some(renderer) = crate::app::headless_renderer() else {
+            return;
+        };
+        let mut app = App::new(renderer, (800, 600), 1.0);
+        app.dock = default_tree();
+        assert!(!canvas_view_open(&app), "closed by default");
+
+        open_canvas_view(&mut app);
+        assert!(canvas_view_open(&app));
+        let count = |app: &App| {
+            app.dock
+                .iter_all_tabs()
+                .filter(|(_, t)| **t == Pane::CanvasView)
+                .count()
+        };
+        assert_eq!(count(&app), 1, "the pane opened");
+        open_canvas_view(&mut app);
+        assert_eq!(count(&app), 1, "asking again focuses, never duplicates");
+        assert_eq!(
+            app.dock
+                .iter_all_tabs()
+                .filter(|(_, t)| **t == Pane::Canvas)
+                .count(),
+            1,
+            "the drawing surface is untouched"
+        );
+
+        // Closing it is ordinary tab removal — nothing refuses, unlike the
+        // canvas pane.
+        let path = app
+            .dock
+            .iter_all_tabs()
+            .find(|(_, t)| **t == Pane::CanvasView)
+            .map(|(p, _)| p)
+            .expect("open");
+        app.dock.remove_tab(path);
+        assert!(!canvas_view_open(&app), "and it closes freely");
     }
 
     /// Parity P0-3: a fresh launch must show the LAYER palette. Two things

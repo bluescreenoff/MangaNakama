@@ -806,6 +806,13 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 crate::ui::open_command_palette(app);
                 ui.close();
             }
+            // CV-021, CSP's Window ▸ Canvas ▸ New Window — a pane here
+            // rather than an OS window, so it docks and floats with
+            // everything else.
+            if item(ui, "New view of this page", "") {
+                app.push_cmd(AppCmd::OpenCanvasView);
+                ui.close();
+            }
             ui.separator();
             ui.weak("closed palettes reopen beside Layers");
             for p in crate::ui::dock::ALL {

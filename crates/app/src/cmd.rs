@@ -845,6 +845,92 @@ fn subsample_path(pts: &[(f32, f32)], step: f32) -> Vec<(i32, i32)> {
     seeds
 }
 
+/// Row 160 / `RD-001`–`RD-003`, `RD-007` — the Remove-dust drag.
+///
+/// The freehand path closes into a polygon, and that polygon is the tool's
+/// WINDOW. An existing selection is not thrown away: the window is the
+/// intersection of the two, so ants you set still bound the tool exactly
+/// the way they bound a fill. The window is installed as the document's
+/// selection only for the duration of the op — that is what makes
+/// `apply_filter`'s tile gather, its selection clip and its single undo
+/// group do all the work here (`mn_core::dust`), and the real selection
+/// goes back afterwards.
+///
+/// The detection runs FIRST, as a query, for two reasons: the status line
+/// can then say how much it found, and a drag that finds nothing leaves no
+/// undo step behind — the fill family's `paint_region` rule.
+fn dust_scrub(app: &mut App, pts: &[(f32, f32)]) {
+    app.refresh_tones();
+    let o = app.dust_opts;
+    let drag = mn_core::Selection::from_polygon(&app.doc, pts);
+    let window = match &app.doc.selection {
+        Some(cur) if !drag.is_empty() => {
+            cur.combine(&drag, &app.doc, mn_core::SelectionOp::Intersect)
+        }
+        _ => drag,
+    };
+    if window.is_empty() {
+        app.set_status("that drag enclosed nothing — circle the patch to clean");
+        return;
+    }
+    let keep = app.doc.selection.replace(window);
+    let found = app.doc.dust_selection(o.mode, o.max_px);
+    let Some(found) = found else {
+        app.doc.selection = keep;
+        app.set_status(format!(
+            "nothing under {} px of {} in there",
+            o.max_px,
+            if o.mode.detects_gaps() { "gap" } else { "dust" }
+        ));
+        app.mark_dirty();
+        return;
+    };
+    let n = count_coverage(&found);
+    if o.select {
+        // RD-007: look before you delete. The find REPLACES the selection
+        // (RD-008's New/Add/Subtract/Intersect row is `S-002` — absent
+        // house-wide, not skipped here specifically).
+        app.doc.selection = Some(found);
+        app.doc.touch();
+        app.set_status(format!(
+            "{n} px of {} selected — Delete clears it",
+            if o.mode.detects_gaps() { "gaps" } else { "dust" }
+        ));
+        app.mark_dirty();
+        return;
+    }
+    let color = app.active_color();
+    let ok = app.doc.apply_filter(mn_core::Filter::Dust {
+        max_px: o.max_px,
+        mode: o.mode,
+        color,
+    });
+    app.doc.selection = keep;
+    app.set_status(if ok {
+        format!("{}: {n} px", o.mode.label())
+    } else {
+        "that layer will not take pixel edits".into()
+    });
+    app.mark_dirty();
+}
+
+/// How many pixels a selection actually covers — the honest number for a
+/// status line, read off the coverage inside its own bounds.
+fn count_coverage(sel: &mn_core::Selection) -> u32 {
+    let Some([x0, y0, x1, y1]) = sel.bounds() else {
+        return 0;
+    };
+    let mut n = 0;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            if mn_core::selected(sel.coverage(x, y)) {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
 /// The auto-fill tail of a fill's status line. With auto off it is empty;
 /// with auto on it names what was measured, because a fill that silently
 /// chooses its own numbers teaches the user nothing and cannot be argued
@@ -1288,6 +1374,22 @@ pub enum FillMode {
     /// finished colour and only the still-EMPTY enclosed pockets under the
     /// drag fill. A filter shaped like a brush — see `fill::leftover_fill`.
     Leftover,
+    /// Row 160 / `RD-001`–`RD-009` Remove dust (CSP ゴミ取り): drag around a
+    /// patch and every blob under the size threshold in it is cleaned —
+    /// specks removed, or transparent pinholes plugged, per
+    /// [`mn_core::DustMode`]. See `mn_core::dust`.
+    ///
+    /// **Placement call (2026-08-29).** CSP hangs this off a 線修正
+    /// "Correct line" tool group we do not have, next to a 塗り残し部分に塗る
+    /// (RD-005) we already ship as [`FillMode::Leftover`]. It lands here
+    /// instead, for the house reason sub tools always fold: the gesture is
+    /// the fill family's own freehand drag, the machinery is the fill
+    /// subsystem's, and the Tool Property it needs is the Fill panel plus
+    /// two rows. RD-007's "Select dust" folds one level further — it is
+    /// the [`mn_core::DustMode`] rows plus this sub tool's "Select instead
+    /// of cleaning" switch, not a fifth Selection sub tool, because the
+    /// detection and the window are identical and only the verb differs.
+    Dust,
 }
 
 impl FillMode {
@@ -1297,6 +1399,33 @@ impl FillMode {
             FillMode::Enclose => "Enclose and fill",
             FillMode::Lasso => "Lasso fill",
             FillMode::Leftover => "Leftover pen",
+            FillMode::Dust => "Remove dust",
+        }
+    }
+}
+
+/// The Remove-dust sub tool's Tool Property state (RD-002/RD-003/RD-009).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct DustOpts {
+    /// RD-002 "Dust size": the largest blob still counted as dust, in
+    /// pixels of AREA — the unit LC-001's menu filter already uses, and the
+    /// unit the row says out loud.
+    pub max_px: u32,
+    /// RD-003: which of the four definitions of "dust" this drag means.
+    pub mode: mn_core::DustMode,
+    /// RD-007: hand the detection back as a SELECTION instead of acting on
+    /// it, so you can look before you delete.
+    pub select: bool,
+}
+
+impl Default for DustOpts {
+    fn default() -> Self {
+        Self {
+            // CSP ships ゴミ取り at a small default and so does our menu
+            // filter (`quick.rs` opens LC-001 at 5 px).
+            max_px: 5,
+            mode: mn_core::DustMode::default(),
+            select: false,
         }
     }
 }
@@ -1568,6 +1697,7 @@ impl SubTool {
             SubTool::Fill(FillMode::Enclose),
             SubTool::Fill(FillMode::Lasso),
             SubTool::Fill(FillMode::Leftover),
+            SubTool::Fill(FillMode::Dust),
             SubTool::Tone(P::Dots),
             SubTool::Tone(P::Lines),
             SubTool::Tone(P::Square),
@@ -1649,6 +1779,7 @@ impl SubTool {
             SubTool::Fill(FillMode::Enclose) => "Enclose and fill",
             SubTool::Fill(FillMode::Lasso) => "Lasso fill",
             SubTool::Fill(FillMode::Leftover) => "Leftover pen",
+            SubTool::Fill(FillMode::Dust) => "Remove dust",
             SubTool::Tone(p) => p.label(),
             SubTool::Wand(All) => "Refer all layers",
             SubTool::Wand(Active) => "Refer editing layer only",
@@ -2897,6 +3028,16 @@ pub enum AppCmd {
     LeftoverFill {
         pts: Vec<(f32, f32)>,
     },
+    /// Row 160 / RD-001: the Remove-dust drag's freehand path. The path
+    /// closes into the WINDOW (intersected with any live selection) and
+    /// every blob under the threshold inside it is cleaned — or selected,
+    /// per `DustOpts::select`. One undo step.
+    DustScrub {
+        pts: Vec<(f32, f32)>,
+    },
+    /// The Remove-dust sub tool's whole Tool Property, pushed as one value
+    /// like `SetToneOpts`.
+    SetDustOpts(DustOpts),
     // --- materials (TRIAGE 133, part 1) ------------------------------------
     /// Paste an image material as the move/scale float, at natural size,
     /// centred on the view. `tile` covers the WHOLE canvas in N×N copies as
@@ -2979,6 +3120,12 @@ pub enum AppCmd {
     /// `fit_to_view_sized` deliberately carries a mirror through a fit, and
     /// clearing the flip first is what makes the two fit paths agree.
     ViewReset,
+    /// CV-021 (CSP's Window ▸ Canvas ▸ New Window), as a PANE: open — or
+    /// focus — the SECOND live view of this page, with its own zoom and
+    /// pan. View-only; the Canvas pane stays the one drawing surface
+    /// (docs/DOCKING-2.md, and `Shell::owns_pointer` routes the pen by one
+    /// canvas rect).
+    OpenCanvasView,
     /// CV-041: hide the manuscript crop marks and margins WITHOUT deleting
     /// them. Unlike the Tab hides this one persists (`guides_hidden=` in
     /// ui.txt) — it is a workspace preference, not a panic button.
@@ -6576,8 +6723,13 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 FillMode::Leftover => {
                     "leftover pen: scrub across the flat — only the enclosed spots still empty fill"
                 }
+                FillMode::Dust => "remove dust: drag around the patch to clean",
             });
         }
+        AppCmd::SetDustOpts(o) => {
+            app.dust_opts = o;
+        }
+        AppCmd::DustScrub { pts } => dust_scrub(app, &pts),
         AppCmd::ToneRegion(x, y) => crate::app::tone_tool::tone_region(app, x, y),
         AppCmd::SetToneOpts(o) => {
             app.tone_opts = o;
@@ -8633,6 +8785,15 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             app.fit_to_view();
             app.set_status("view reset — upright, unmirrored, fitted");
             app.mark_dirty();
+        }
+        AppCmd::OpenCanvasView => {
+            let had = crate::ui::dock::canvas_view_open(app);
+            crate::ui::dock::open_canvas_view(app);
+            app.set_status(if had {
+                "second view focused"
+            } else {
+                "second view opened — the whole page, live, with its own zoom"
+            });
         }
         AppCmd::SetGuidesHidden(hidden) => {
             app.layout.note_guides_hidden(hidden);
