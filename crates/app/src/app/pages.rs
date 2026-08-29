@@ -23,8 +23,20 @@ pub struct PageEntry {
     /// the previous occupant's art after a reorder, because `rev` cannot
     /// tell two pages apart (a single-file `.mnc` loads every page at
     /// revision 0, and cmd.rs already warns about coincidental matches).
-    /// Not persisted — `id` is the on-disk identity; this one only has to
-    /// be unique while the app is running.
+    ///
+    /// PERSISTED since workflow audit §11 (`mn_core::project`'s
+    /// `ProjectMeta::page_uids` / `FolderPageMeta::uid`): the ネーム
+    /// promotion copies a work's page identities into the new work, and
+    /// the stamp back onto the manuscript matches on them — which only
+    /// means anything if they survive being saved and reopened. A work
+    /// saved before §11 (or any page whose stored uid is 0) still gets a
+    /// fresh runtime identity on load; uniqueness WITHIN a work is what
+    /// the park LRU and the reader's texture map need, and
+    /// [`PageEntry::bump_uid_floor`] keeps a later mint from colliding
+    /// with an adopted one. Two DIFFERENT works may legitimately share
+    /// identities — that is the promotion — and nothing reads a uid
+    /// across works (`forget_document_caches` clears the reader map on
+    /// every tab switch).
     pub uid: u64,
     /// Stable work-folder file identity (`pNNN.ora`); 0 until the first
     /// folder save assigns one — order changes never rename files.
@@ -86,14 +98,28 @@ pub struct PageEntry {
     pub parked_rev: u64,
 }
 
+/// The process-wide page-identity mint (see [`PageEntry::uid`]).
+static UID_CLOCK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 impl PageEntry {
     /// The next runtime page identity. A process-wide counter rather than
     /// an App field so EVERY construction path gets one — including the
     /// `..PageEntry::active()` shorthands — and pages from two open tabs
     /// never collide. Starts at 1: 0 means "no such page".
     pub fn next_uid() -> u64 {
-        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        UID_CLOCK.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Lift the mint counter above every identity just ADOPTED from disk.
+    ///
+    /// Persisted uids (workflow audit §11) arrive from a previous session,
+    /// where the counter started at 1 again. Without this, opening a saved
+    /// 10-page work and then adding a page would mint uid 1 a second time
+    /// — two pages of ONE work sharing an identity, which is exactly what
+    /// the park LRU (`find(|e| e.uid == evict)`) and the reader's texture
+    /// map cannot survive.
+    pub fn bump_uid_floor(seen: u64) {
+        UID_CLOCK.fetch_max(seen.saturating_add(1), std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn active() -> Self {
@@ -366,6 +392,31 @@ impl App {
         self.pages[i].exported_rev = self.pages[i].rev.max(1);
     }
 
+    /// The pages' stable identities in reading order — what a `.mnc` save
+    /// records as `ProjectMeta::page_uids` so the ネーム promotion's
+    /// page-to-page mapping survives a reopen (workflow audit §11).
+    pub fn page_uids(&self) -> Vec<u64> {
+        self.pages.iter().map(|e| e.uid).collect()
+    }
+
+    /// Adopt the identities a work arrived from disk with, minting a fresh
+    /// one wherever the file recorded none (0 — a work saved before §11),
+    /// and lifting the mint floor over everything adopted. `stored` may be
+    /// shorter than `self.pages`.
+    pub fn adopt_page_uids(&mut self, stored: &[u64]) {
+        // The floor moves FIRST, so the fresh identities minted for any
+        // unrecorded page below cannot collide with an adopted one.
+        if let Some(hi) = stored.iter().copied().max() {
+            PageEntry::bump_uid_floor(hi);
+        }
+        for (i, e) in self.pages.iter_mut().enumerate() {
+            e.uid = match stored.get(i).copied().unwrap_or(0) {
+                0 => PageEntry::next_uid(),
+                uid => uid,
+            };
+        }
+    }
+
     /// File names the current pages map to in a work folder (the managed set).
     pub fn page_file_names(&self) -> Vec<String> {
         self.pages
@@ -420,6 +471,7 @@ impl App {
                     rev: e.rev,
                     saved_rev: e.saved_rev,
                     exported_rev: e.exported_rev,
+                    uid: e.uid,
                     // A still-blank template page materializes HERE — the
                     // one place bytes are truly required (the save). This
                     // is the lazy-blank design's single deliberate cost.
@@ -496,6 +548,7 @@ impl App {
                     // this write advances.
                     saved_rev: e.autosaved_rev,
                     exported_rev: e.exported_rev,
+                    uid: e.uid,
                     bytes: e.bytes.clone().unwrap_or_default(),
                 })
                 .collect(),

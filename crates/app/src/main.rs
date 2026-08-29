@@ -1412,6 +1412,13 @@ fn resolve_dialog(hwnd: HWND, cmd: AppCmd) -> Option<AppCmd> {
             .add_filter("Images", &["png", "jpg", "jpeg", "bmp", "tif", "tiff", "webp"])
             .pick_files()
             .map(AppCmd::BatchImportPagesPicked),
+        // Workflow audit §11: the source is a WORK, either flavour of
+        // `.mnc` — a name work is pages, not an image.
+        AppCmd::StampNamePages => rfd::FileDialog::new()
+            .set_title("Stamp Name Pages — pick the ネーム work")
+            .add_filter("MangaNakama work", &["mnc"])
+            .pick_file()
+            .map(AppCmd::StampNamePagesPath),
         AppCmd::ImportPalette => rfd::FileDialog::new()
             .set_title("Import Palette (.gpl)")
             .add_filter("GIMP/Krita palette", &["gpl"])
@@ -1430,6 +1437,39 @@ fn resolve_dialog(hwnd: HWND, cmd: AppCmd) -> Option<AppCmd> {
             )
             .pick_file()
             .map(AppCmd::ReplacePagePath),
+        // Row 166 file objects. Same picker as Import Image as Layer — a
+        // file object IS an imported image, with a link kept.
+        AppCmd::ImportFileObject => rfd::FileDialog::new()
+            .set_title("Import Image as File Object")
+            .add_filter(
+                "Images",
+                &["png", "jpg", "jpeg", "bmp", "tif", "tiff", "webp", "gif"],
+            )
+            .pick_file()
+            .map(AppCmd::ImportFileObjectPath),
+        // `FO-009`. The row is offered on any layer (the palette's ≡ menu
+        // and the command palette both aim at one), so the "is that a file
+        // object?" question is answered HERE — before a dialog opens — and
+        // the picker starts in the folder the dead link pointed at.
+        AppCmd::RelinkFileObject(which) => {
+            let Some(li) = with_app(hwnd, |a| a.relink_target(which)).flatten() else {
+                with_app(hwnd, |a| {
+                    a.set_status("Relink file object: select a file object layer first")
+                });
+                return None;
+            };
+            let mut d = rfd::FileDialog::new()
+                .set_title("Relink File Object")
+                .add_filter(
+                    "Images",
+                    &["png", "jpg", "jpeg", "bmp", "tif", "tiff", "webp", "gif"],
+                );
+            if let Some(dir) = with_app(hwnd, |a| a.file_object_dir(li)).flatten() {
+                d = d.set_directory(dir);
+            }
+            d.pick_file()
+                .map(|p| AppCmd::RelinkFileObjectPath(li, p))
+        }
         other => Some(other),
     }
 }
@@ -2111,6 +2151,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 app.cancel_input_latches("focus left the window");
             }
             app.shell.on_focus(msg == WM_SETFOCUS);
+            // Row 166 `FO-008`, the automatic half: coming back to the front
+            // is the moment "I redrew the background in the other app"
+            // becomes true. Silent when nothing changed, and it stats
+            // nothing at all on a page with no file objects.
+            if msg == WM_SETFOCUS {
+                app.refresh_file_objects_quiet();
+            }
             app.mark_dirty();
             flush_redraw(hwnd, app);
             0

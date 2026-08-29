@@ -19,6 +19,10 @@ pub(crate) mod canvas_input;
 mod comps;
 mod diag;
 mod engine;
+/// Row 166 file objects: a layer that references an image file and
+/// re-reads it when it changes (`mn_core::file_object` is the document
+/// half). Import, the two update doors, and the relink repair.
+mod file_object;
 mod frames;
 mod kpp_import;
 /// TRIAGE 36 (`L-001`/`L-002` magnetic lasso) and 38 (`S-001` layer pick),
@@ -34,6 +38,9 @@ mod make_brush;
 pub mod materials;
 mod pages;
 pub mod pattern;
+/// Workflow audit §11: the ネーム promotion path — "New work from this
+/// work at a different dpi" and the stamp back onto the manuscript.
+pub mod promote;
 pub mod prefs;
 pub(crate) mod print;
 pub(crate) mod reader;
@@ -54,6 +61,7 @@ pub use crate::cmd::RulerKind;
 pub use pages::{
     BatchImportDraft, CanvasSizeDraft, NewComicDraft, PageEntry, SpreadOp, WorkSettingsDraft,
 };
+pub use promote::PromoteDraft;
 pub use session::{DocSession, unsaved_autosave_folder_for, unsaved_autosave_path_for};
 pub use transform::{
     MeshLattice,
@@ -237,6 +245,10 @@ pub struct App {
     pub canvas_size_open: bool,
     /// Batch Import dialog (workflow audit #4): N roughs -> N page underlays.
     pub batch_import_open: bool,
+    /// "New work from this work…" dialog (workflow audit §11): the ネーム
+    /// promotion's target dpi.
+    pub promote_open: bool,
+    pub promote: PromoteDraft,
     /// Preferences window (Edit ▸ Preferences…).
     pub prefs_open: bool,
     /// What the window opened ON: a tab name ("Performance") or a row id
@@ -1449,6 +1461,8 @@ impl App {
             work_settings_draft: WorkSettingsDraft::default(),
             canvas_size_open: false,
             batch_import_open: false,
+            promote_open: false,
+            promote: PromoteDraft::default(),
             prefs_open: false,
             prefs_focus: None,
             prefs_tab: 0,
@@ -2407,8 +2421,20 @@ impl App {
     }
 
     /// Remember the document's path (the title bar polls `desired_title`).
+    ///
+    /// Row 166 rides here: a document that just ARRIVED from a new path —
+    /// every open branch calls this once the stack is installed — gets one
+    /// quiet file-object pass, so a broken link wears its palette mark the
+    /// moment the page opens instead of at the next alt-tab, and a
+    /// background that changed since the last save is already the new one.
+    /// Never a modal: the mark IS the notification. (Chosen over touching
+    /// each open branch because this is the one line all of them share.)
     pub fn set_doc_path(&mut self, path: Option<PathBuf>) {
+        let arrived = path.is_some() && path != self.doc_path;
         self.doc_path = path;
+        if arrived {
+            self.refresh_file_objects_quiet();
+        }
     }
 
     /// Hand the serialized dock tree to the layout for persistence (called
@@ -3024,6 +3050,18 @@ impl App {
         let live = self.live_fill_active();
         if live && self.doc.active_layer().mask.is_none() {
             self.set_status("live layer has no window mask — make one from a selection first");
+            return;
+        }
+        // Row 166: a file object's pixels come FROM a file and are replaced
+        // wholesale by the next refresh, so a stroke here is not an edit —
+        // it is work about to be thrown away without a word. Refused at the
+        // same chokepoint and for the same reason as the maskless live
+        // layer above; `paintable()` already refuses fill/transform/filter,
+        // but the brush engine writes tiles directly and never asks it.
+        if self.doc.active_layer().file_object().is_some() {
+            self.set_status(
+                "file object: the picture comes from the linked file — draw on a layer above it",
+            );
             return;
         }
         // Selection paint (SE round 2026-08-19): the selection pen/eraser
@@ -4749,12 +4787,28 @@ mod page_size_tests;
 #[cfg(test)]
 mod import_placement_tests;
 
+/// Row 166 `FO-001`/`FO-008`/`FO-009`: the app half of file objects —
+/// import, both update doors, relink, the palette row's broken-link mark,
+/// and the save/reload/still-updates round the whole feature exists for.
+#[cfg(test)]
+mod file_object_tests;
+
 /// Workflow audit #4: the batch import — N roughs become N page underlays.
 /// Pins the underlay's placement against a page's White base, the park
 /// staleness a direct byte write must cause, and the open page's single
 /// undo press. Same frugality rule as `new_document_tests`: 72 dpi drafts.
 #[cfg(test)]
 mod batch_import_tests;
+
+/// Workflow audit §11: the ネーム promotion — a second work at another dpi
+/// carrying this one's page identities, and the stamp of its pages back
+/// into the manuscript as draft underlays. Pins the identity round trip
+/// (the only thing that makes the stamp land on the right page), that the
+/// stamp renders draft ink rather than the export view, and the same
+/// placement / park-staleness / one-undo-press contracts the batch import
+/// holds. Same frugality rule as `new_document_tests`: 72 dpi drafts.
+#[cfg(test)]
+mod promote_tests;
 
 /// ROADMAP good-first-issue: ruler creation/move/clear on the document's
 /// one undo history — and the two things that must NOT be steps (the

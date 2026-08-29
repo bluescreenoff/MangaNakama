@@ -354,6 +354,16 @@ pub fn command_index() -> Vec<(&'static str, &'static str, AppCmd)> {
             "Layer",
             BrightnessToOpacity,
         ),
+        // Row 166 file objects. The update row is the manual half of
+        // `FO-008` (the automatic half is focus regain); relink is
+        // `FO-009`, the repair path for a broken link.
+        (
+            "Import Image as File Object…",
+            "File ▸ Import",
+            ImportFileObject,
+        ),
+        ("Update file objects", "File", UpdateFileObjects),
+        ("Relink file object…", "File", RelinkFileObject(None)),
         ("Revert to last save", "File", RevertFile),
         ("Export All Pages…", "File", ExportAllPages),
         ("Export Text (script)…", "File", ExportText),

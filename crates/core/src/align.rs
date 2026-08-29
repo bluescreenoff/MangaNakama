@@ -309,6 +309,13 @@ impl Document {
                 LayerKind::Fill(_) => {
                     notes.push(format!("{} is a live fill/tone layer", l.name))
                 }
+                // Row 166: a file object's raster is re-derived CENTRED from
+                // its source, so a nudge would be undone by the next refresh
+                // without a word. Refusing it out loud beats moving pixels
+                // that will silently snap back.
+                LayerKind::FileObject(_) => {
+                    notes.push(format!("{} is a file object", l.name))
+                }
                 _ => out.push(li),
             }
         }

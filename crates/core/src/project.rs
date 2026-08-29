@@ -76,6 +76,14 @@ pub struct ProjectMeta {
     pub profile: Option<crate::profile::PublisherProfile>,
     /// Page file names inside the zip, reading order.
     pages: Vec<String>,
+    /// Stable page identities, reading order, parallel to `pages`
+    /// (workflow audit §11). A work PROMOTED from another one carries the
+    /// source work's identities, and that mapping is what lets a ネーム
+    /// page be stamped onto the manuscript page it was drawn for after
+    /// both have been closed and reopened. Empty (or short) for works
+    /// saved before §11 — the stamp then falls back to page ORDER.
+    #[serde(default)]
+    pub page_uids: Vec<u64>,
 }
 
 /// What the pages are FOR (CSP expression colour) — decides which content
@@ -114,6 +122,7 @@ impl ProjectMeta {
             template_page: None,
             profile: None,
             pages: Vec::new(),
+            page_uids: Vec::new(),
         }
     }
 }
@@ -139,6 +148,7 @@ impl Project {
                 template_page: None,
                 profile: None,
                 pages: Vec::new(),
+                page_uids: Vec::new(),
             },
             pages: Vec::new(),
         }
@@ -300,6 +310,11 @@ pub struct FolderPageMeta {
     /// loads clean and simply says "never exported" until the next export.
     #[serde(default)]
     pub exported_rev: u64,
+    /// Stable page identity — see [`ProjectMeta::page_uids`]. `0` = a page
+    /// saved before workflow audit §11; the loader mints a fresh runtime
+    /// identity for it and the ネーム stamp falls back to page ORDER.
+    #[serde(default)]
+    pub uid: u64,
 }
 
 /// The work-folder index payload (`workfolder.json` inside `work.mnc`).
@@ -346,6 +361,9 @@ pub struct FolderPage {
     /// an app that writes bookkeeping into an output folder unasked is a
     /// trap (plans/21-M5-M6-DECISIONS.md, owner ask 2026-08-22).
     pub exported_rev: u64,
+    /// Stable page identity — see [`ProjectMeta::page_uids`]. `0` = none
+    /// recorded (a work from before workflow audit §11).
+    pub uid: u64,
     pub bytes: Vec<u8>,
 }
 
@@ -462,6 +480,7 @@ pub fn save_folder(
                 id,
                 rev: p.rev.max(1),
                 exported_rev: p.exported_rev,
+                uid: p.uid,
             })
             .collect(),
     };
@@ -547,6 +566,7 @@ pub fn load_folder(path: &Path) -> Result<WorkFolder, OraError> {
             rev: pm.rev,
             saved_rev: pm.rev,
             exported_rev: pm.exported_rev,
+            uid: pm.uid,
             bytes: buf,
         });
     }
@@ -627,6 +647,7 @@ mod tests {
                     rev: 1,
                     saved_rev: 0,
                     exported_rev: 0,
+                    uid: 7001,
                     bytes: doc_to_bytes(&d1).unwrap(),
                 },
                 FolderPage {
@@ -634,6 +655,7 @@ mod tests {
                     rev: 2,
                     saved_rev: 0,
                     exported_rev: 0,
+                    uid: 7002,
                     bytes: doc_to_bytes(&d2).unwrap(),
                 },
             ],
@@ -660,6 +682,12 @@ mod tests {
                 .map(|p| p.name),
             "M2: the publisher profile rides the index too"
         );
+        assert_eq!(
+            back.pages.iter().map(|p| p.uid).collect::<Vec<_>>(),
+            vec![7001, 7002],
+            "§11: the stable PAGE IDENTITIES ride the index — without them a \
+             ネーム promoted from this work could not find its way home"
+        );
         let _ = ids;
 
         // The pre-132 index shape: every new key absent.
@@ -675,6 +703,14 @@ mod tests {
         assert_eq!(m.expression, Expression::Mono);
         assert_eq!(m.spine_mm, 0.0);
         assert_eq!(m.cover, None);
+
+        // A page entry written before §11 carries no `uid` key at all; it
+        // must load as "no identity recorded" rather than refusing to
+        // parse, which is what sends the stamp to its page-ORDER fallback.
+        let old_page = r#"{ "file": "p001.ora", "id": 1, "rev": 4 }"#;
+        let pm: FolderPageMeta = serde_json::from_str(old_page).expect("old page must parse");
+        assert_eq!(pm.uid, 0);
+        assert_eq!(pm.exported_rev, 0);
     }
 
     /// The unexported-pages reminder (owner ask 2026-08-22): the export

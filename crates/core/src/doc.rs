@@ -286,6 +286,12 @@ pub enum LayerKind {
     /// The layer mask is the window ("paint where it applies"). See
     /// `correction`.
     Correction(crate::adjust::Adjust),
+    /// FILE OBJECT (row 166, `FO-001`–`009`): the layer REFERENCES an image
+    /// file on disk. Unlike every other non-`Raster` kind the pixels live in
+    /// the layer's ordinary `tiles` — derived from the file, re-derivable,
+    /// and saved like any raster so the page still opens on a machine
+    /// without the source. See `file_object`.
+    FileObject(crate::file_object::FileObject),
     Frame(FrameSet),
     Balloon(BalloonSet),
     Text(TextSet),
@@ -784,6 +790,22 @@ impl Layer {
         }
     }
 
+    /// The external-file reference, if this layer is a file object
+    /// (row 166). `None` for everything else.
+    pub fn file_object(&self) -> Option<&crate::file_object::FileObject> {
+        match &self.kind {
+            LayerKind::FileObject(fo) => Some(fo),
+            _ => None,
+        }
+    }
+
+    /// The layer's own pixels, moved out. Only the file-object re-derive
+    /// uses this (it builds the new raster in a throwaway layer and swaps
+    /// it in through [`Self::replace_tiles`]).
+    pub(crate) fn take_tiles(&mut self) -> HashMap<TileIdx, Arc<Tile>> {
+        std::mem::take(&mut self.tiles)
+    }
+
     pub fn is_frame(&self) -> bool {
         matches!(self.kind, LayerKind::Frame(_))
     }
@@ -1235,6 +1257,13 @@ impl Layer {
                     item.pos[1] += dy;
                 }
             }
+            // Row 166: a file object's geometry IS its raster (it shifted
+            // with the tiles above). The path and the fit box are not
+            // positions, so there is nothing here to move — and the shifted
+            // pixels are what the next refresh will overwrite, which is the
+            // documented v1 cut: a moved file object snaps back to centred
+            // when its source changes.
+            LayerKind::FileObject(_) => {}
             LayerKind::Raster => {}
         }
     }

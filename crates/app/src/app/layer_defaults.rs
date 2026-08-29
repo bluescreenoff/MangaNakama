@@ -55,6 +55,11 @@ pub fn kind_key(l: &Layer) -> &'static str {
         LayerKind::Fill(FillKind::Gradient { .. }) => "gradient",
         LayerKind::Fill(FillKind::Tone { .. }) => "tone",
         LayerKind::Correction(_) => "correction",
+        // Row 166. It gets its own key so a "save as default" made on a
+        // file object never leaks onto plain rasters — and `applies_to`
+        // below says false for it, because a file object's content comes
+        // from a file, not from a default.
+        LayerKind::FileObject(_) => "file-object",
         LayerKind::Raster if l.records_strokes() => "vector",
         LayerKind::Raster => "raster",
     }
@@ -86,6 +91,7 @@ pub fn kind_label(key: &str) -> &'static str {
         "balloon" => "balloon layers",
         "frame" => "frame layers",
         "frame-folder" => "frame folders",
+        "file-object" => "file objects",
         _ => "layers of this type",
     }
 }

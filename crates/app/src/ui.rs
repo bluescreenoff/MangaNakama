@@ -51,7 +51,8 @@ use dialogs::{
     adjust_window, batch_import_window, canvas_size_window, detail_window, export_all_window,
     feedback_window,
     filter_window, gen_lines_window, goto_page_window, hud, new_doc_window, pen_wizard_window,
-    property_detail_window, spread_window, story_window, text_styles_window, work_settings_window,
+    promote_window, property_detail_window, spread_window, story_window, text_styles_window,
+    work_settings_window,
     workspace_window,
 };
 use overlay::canvas_overlay;
@@ -141,6 +142,7 @@ pub fn build(ui: &mut egui::Ui, app: &mut App) {
     work_settings_window(ui.ctx(), app);
     canvas_size_window(ui.ctx(), app);
     batch_import_window(ui.ctx(), app);
+    promote_window(ui.ctx(), app);
     pen_wizard_window(ui.ctx(), app);
     prefs_window(ui.ctx(), app);
     pattern::pattern_window(ui.ctx(), app);

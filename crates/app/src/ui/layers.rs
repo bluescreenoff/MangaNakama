@@ -81,6 +81,10 @@ pub(super) fn tools_for_layer(l: &mn_core::Layer) -> &'static [Tool] {
         // Live layers: a brush edits the WINDOW, and the parameters live in
         // Tool Property rather than in a tool of their own.
         LayerKind::Fill(_) | LayerKind::Correction(_) => &[Tool::Pen, Tool::Eraser],
+        // Row 166: the raster comes from a file and is re-derived, so no
+        // drawing tool applies to it — the Object tool is still honest
+        // (selection/inspection), and the repair lives in the row's ≡ menu.
+        LayerKind::FileObject(_) => &[Tool::Object],
         // Vector inking: strokes are captured (inking does not ask
         // `paintable`), and Object is what edits the control points. The
         // pixel ops that `paintable` refuses are correctly absent.
@@ -946,6 +950,11 @@ pub(crate) fn row_glyph(l: &mn_core::Layer) -> Option<Icon> {
     if matches!(l.kind, LayerKind::Fill(_)) {
         return Some(Icon::Fill);
     }
+    // Row 166: the pixels are ordinary tiles, so nothing else about the row
+    // would say this layer is a live reference to a file on disk.
+    if l.file_object().is_some() {
+        return Some(Icon::FileObject);
+    }
     if l.strokes.is_some() {
         return Some(Icon::Vector);
     }
@@ -984,6 +993,14 @@ struct Row {
     /// paints a second thumbnail for it — CSP's mask cell — and a cross
     /// through it when the mask is kept but switched off.
     mask: Option<bool>,
+    /// Row 166: the row references an external image file.
+    file_object: bool,
+    /// Row 166: this is a file object whose source could not be found at
+    /// the last refresh. The row says so — the glyph turns `ref_mark` red
+    /// and the meta line reads "file missing". Never a dialog at load
+    /// time: the last picture is still on the page and the artist decides
+    /// when to repair it (`Relink file object…`).
+    file_missing: bool,
 }
 
 /// The row's ≡ menu: the per-row half of the layer commands, all of them
@@ -1040,6 +1057,28 @@ fn row_menu(ui: &mut egui::Ui, app: &mut App, i: usize, row: &Row) {
     if ui.button("Layer colour…").clicked() {
         app.layer_colour_pick = Some(i);
         ui.close();
+    }
+    // Row 166: the repair path lives on the row that is broken, which is
+    // the row the artist is looking at when they notice. Only file-object
+    // rows carry it — two dead entries on every other row would be worse
+    // than the walk to the File menu.
+    if row.file_object {
+        ui.separator();
+        if ui
+            .button(if row.file_missing {
+                "Relink file object… (source missing)"
+            } else {
+                "Relink file object…"
+            })
+            .clicked()
+        {
+            app.push_cmd(AppCmd::RelinkFileObject(Some(i)));
+            ui.close();
+        }
+        if ui.button("Update file objects").clicked() {
+            app.push_cmd(AppCmd::UpdateFileObjects);
+            ui.close();
+        }
     }
     ui.separator();
     match row.mask {
@@ -1450,6 +1489,8 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
             reference: l.reference,
             draft: l.draft,
             mask: l.mask.as_ref().map(|m| m.enabled),
+            file_object: l.file_object().is_some(),
+            file_missing: l.file_object().is_some_and(|fo| fo.missing),
         })
         .collect();
     // Rows inside a collapsed folder are hidden (top-first walk).
@@ -1970,7 +2011,12 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
                 p,
                 fr,
                 icon,
-                if selected {
+                if row.file_missing {
+                    // Row 166: the broken-link mark, in the same red the
+                    // reference flag uses — the palette's one "look at
+                    // this" hue, so it reads without a legend.
+                    theme::c().ref_mark
+                } else if selected {
                     theme::c().text_strong
                 } else {
                     theme::c().text_weak
@@ -1993,9 +2039,16 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
         let meta = match row.tone_lpi {
             Some(lpi) if row.blend == Blend::Normal => format!("{lpi:.1} LPI"),
             Some(lpi) => format!("{lpi:.1} LPI · {}", bname(row.blend)),
+            // Row 166: a broken link REPLACES the opacity/blend line rather
+            // than appending to it. Those two numbers are readable in the
+            // header the moment the row is selected; "your background is
+            // gone" is not readable anywhere else.
+            None if row.file_missing => "file missing".to_owned(),
             None => format!("{:.0} % {}", row.opacity * 100.0, bname(row.blend)),
         };
-        let meta_col = if selected {
+        let meta_col = if row.file_missing {
+            theme::c().ref_mark
+        } else if selected {
             theme::c().text
         } else {
             theme::c().text_weak
@@ -2834,6 +2887,25 @@ mod tests {
         assert_eq!(row_glyph(&d.layers[hdr]), Some(Icon::Frame));
         let plain = d.add_folder_above(hdr, "Group");
         assert_eq!(row_glyph(&d.layers[plain]), Some(Icon::Folder));
+
+        // Row 166: a file object's pixels are ordinary tiles, so the glyph
+        // is the ONLY thing on the row that says it is a live reference.
+        let li = d.add_layer("Classroom");
+        d.layers[li].kind = LayerKind::FileObject(mn_core::FileObject {
+            path: "C:/art/classroom.png".into(),
+            fit: (200, 200),
+            stamp: Default::default(),
+            missing: false,
+        });
+        assert_eq!(row_glyph(&d.layers[li]), Some(Icon::FileObject));
+        // And no drawing tool applies to it — the derived-raster refusal,
+        // reached through `is_vector()` rather than a new special case.
+        let tools = tools_for_layer(&d.layers[li]);
+        assert!(!d.layers[li].paintable());
+        assert!(
+            !tools.contains(&Tool::Pen) && !tools.contains(&Tool::Fill),
+            "a file object offers no brush: {tools:?}"
+        );
     }
 
     /// The mask cell's picture IS the coverage, and the rule that decides

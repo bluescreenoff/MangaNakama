@@ -123,6 +123,9 @@ pub enum Icon {
     Tone,
     /// The paper under the stack (PA-001): a sheet with a folded corner.
     Paper,
+    /// File object (row 166): a sheet with an arrow coming INTO it — the
+    /// picture arrives from outside and keeps arriving.
+    FileObject,
     /// An OPEN layer folder (the palette rows' disclosure state — CSP
     /// draws open and closed folders differently and the owner asked for
     /// the same).
@@ -258,6 +261,10 @@ impl Icon {
             | Self::SelCopy
             | Self::SelPaste
             | Self::Pattern
+            // A file object IS a file on the page — it belongs with the
+            // other "content that came from outside" glyphs, not with the
+            // layer kinds it sits beside in the palette.
+            | Self::FileObject
             | Self::Pose3d => Media,
             // Layer kinds and layer-to-layer ops.
             Self::Folder
@@ -1211,6 +1218,27 @@ pub fn paint_role(p: &Painter, r: Rect, icon: Icon, base: Color32, accent: Optio
             ));
             // The turned-down corner is the accent.
             p.line(poly(r, &[(0.62, 0.10), (0.62, 0.30), (0.82, 0.30)]), a_thin);
+        }
+        Icon::FileObject => {
+            // The Paper sheet, pushed right to leave room for the arrow
+            // that keeps feeding it.
+            p.add(Shape::closed_line(
+                poly(
+                    r,
+                    &[
+                        (0.42, 0.10),
+                        (0.76, 0.10),
+                        (0.92, 0.26),
+                        (0.92, 0.90),
+                        (0.42, 0.90),
+                    ],
+                ),
+                thin,
+            ));
+            p.line(poly(r, &[(0.76, 0.10), (0.76, 0.26), (0.92, 0.26)]), thin);
+            // The link: an arrow entering the sheet from outside.
+            p.line(poly(r, &[(0.06, 0.50), (0.42, 0.50)]), a_thin);
+            p.line(poly(r, &[(0.28, 0.36), (0.42, 0.50), (0.28, 0.64)]), a_thin);
         }
         Icon::Play => {
             p.add(Shape::convex_polygon(

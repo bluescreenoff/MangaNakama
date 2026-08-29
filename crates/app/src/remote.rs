@@ -608,6 +608,7 @@ fn kind_label(l: &mn_core::Layer) -> &'static str {
         }
         Fill(_) => "fill",
         Correction(_) => "correction",
+        FileObject(_) => "file-object",
         Frame(_) => "frame",
         Balloon(_) => "balloon",
         Text(_) => "text",

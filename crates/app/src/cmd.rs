@@ -2490,6 +2490,15 @@ pub enum AppCmd {
     BatchImportPagesPicked(Vec<PathBuf>),
     /// Run the Batch Import dialog's draft.
     BatchImportApply,
+    /// Workflow audit §11, first half: open the "New work from this work…"
+    /// dialog (the ネーム promotion's target dpi).
+    PromoteNewWork,
+    /// Build it — a second work, same pages and order, new dpi, in a new tab.
+    PromoteNewWorkApply,
+    /// Workflow audit §11, second half: stamp a ネーム work's pages into
+    /// this work's pages as fitted draft underlays (asks for the `.mnc`).
+    StampNamePages,
+    StampNamePagesPath(PathBuf),
     /// Import a Photoshop brush set (.abr): sampled tips become
     /// `imported/` presets + texture masks (TRIAGE 151).
     ImportAbr,
@@ -2583,6 +2592,20 @@ pub enum AppCmd {
     /// to hang a checkbox; see the note on [`import_image_layer`].
     ImportImageDraft,
     ImportImageDraftPath(PathBuf),
+    /// Row 166 `FO-001`: import an image as a FILE OBJECT — a layer that
+    /// keeps a link to the file and re-reads it when it changes. Third
+    /// import door for the same reason the draft one is a second: the OS
+    /// picker has nowhere to hang a checkbox.
+    ImportFileObject,
+    ImportFileObjectPath(PathBuf),
+    /// `FO-008`: re-read every file object on this page whose source
+    /// changed. The manual half of the update story (the automatic half is
+    /// focus regain, `main.rs`).
+    UpdateFileObjects,
+    /// `FO-009`: repoint a file object at another file — the repair path
+    /// for a broken link. `None` = the active layer.
+    RelinkFileObject(Option<usize>),
+    RelinkFileObjectPath(usize, PathBuf),
     // --- layers -----------------------------------------------------------
     AddLayer,
     /// Vector inking (docs/VECTOR-INKING.md): a raster layer that RECORDS
@@ -4542,6 +4565,24 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             app.set_status(s);
             app.mark_dirty();
         }
+        // Workflow audit §11 — the ネーム promotion path.
+        AppCmd::PromoteNewWork => {
+            app.promote_open = true;
+            app.mark_dirty();
+        }
+        AppCmd::PromoteNewWorkApply => {
+            let s = app.promote_new_work();
+            app.set_status(s);
+            app.mark_dirty();
+        }
+        AppCmd::StampNamePages => {
+            // Resolved to StampNamePagesPath by `main::pump_commands`.
+        }
+        AppCmd::StampNamePagesPath(p) => {
+            let s = app.stamp_name_pages(&p);
+            app.set_status(s);
+            app.mark_dirty();
+        }
         AppCmd::ImportAbr => {
             // Resolved to ImportAbrPath by `main::pump_commands`.
         }
@@ -5249,6 +5290,8 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                                     pages,
                                 } = wf;
                                 let n = pages.len();
+                                let stored_uids: Vec<u64> =
+                                    pages.iter().map(|fp| fp.uid).collect();
                                 // A load lands in a NEW TAB unless the current
                                 // document is an untouched blank (session.rs).
                                 app.prepare_open_target();
@@ -5267,6 +5310,10 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                                     .map(|(i, fp)| PageEntry {
                                         bytes: (i != 0).then_some(fp.bytes),
                                         thumb: None,
+                                        // Overwritten by `adopt_page_uids`
+                                        // below with the identity the work
+                                        // was saved with (workflow audit
+                                        // §11), where it recorded one.
                                         uid: PageEntry::next_uid(),
                                         id: fp.id,
                                         rev: fp.rev,
@@ -5291,6 +5338,7 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                                         parked_rev: 0,
                                     })
                                     .collect();
+                                app.adopt_page_uids(&stored_uids);
                                 app.page_index = 0;
                                 let managed = app.page_file_names();
                                 app.adopt_folder_state(next_id, managed);
@@ -5337,6 +5385,7 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                                         ..PageEntry::active()
                                     })
                                     .collect();
+                                app.adopt_page_uids(&proj.meta.page_uids);
                                 app.page_index = 0;
                                 app.pages[0].doc_rev = app.doc.revision;
                                 app.renderer.invalidate();
@@ -5419,6 +5468,11 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                             proj.meta.cover = app.cover;
                             proj.meta.template_page = app.template_page;
                             proj.meta.profile = app.profile.clone();
+                            // Workflow audit §11: the pages' stable
+                            // identities ride the file, so a work promoted
+                            // from this one can still be stamped back onto
+                            // it after both have been closed.
+                            proj.meta.page_uids = app.page_uids();
                             proj.pages = app
                                 .pages
                                 .iter()
@@ -5489,6 +5543,7 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                     proj.meta.cover = app.cover;
                     proj.meta.template_page = app.template_page;
                     proj.meta.profile = app.profile.clone();
+                    proj.meta.page_uids = app.page_uids();
                     proj.pages = app
                         .pages
                         .iter()
@@ -7455,6 +7510,7 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                         proj.meta.cover = app.cover;
                         proj.meta.template_page = app.template_page;
                         proj.meta.profile = app.profile.clone();
+                        proj.meta.page_uids = app.page_uids();
                         proj.pages = app
                             .pages
                             .iter()
@@ -8897,6 +8953,16 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
         AppCmd::ImportImage | AppCmd::ImportImageDraft => {}
         AppCmd::ImportImagePath(p) => import_image_layer(app, &p, false),
         AppCmd::ImportImageDraftPath(p) => import_image_layer(app, &p, true),
+
+        // --- row 166 file objects (app/file_object.rs) ----------------------
+        // `ImportFileObject` / `RelinkFileObject` are the picker's cue and
+        // never reach here with anything to do — `main::pump_commands`
+        // turns them into the `…Path` forms (and drops them on cancel), the
+        // way every other file command in this file works.
+        AppCmd::ImportFileObject | AppCmd::RelinkFileObject(_) => {}
+        AppCmd::ImportFileObjectPath(p) => app.import_file_object(&p),
+        AppCmd::RelinkFileObjectPath(li, p) => app.relink_file_object(li, &p),
+        AppCmd::UpdateFileObjects => app.update_file_objects(),
 
         // --- view -----------------------------------------------------------
         AppCmd::ZoomFit => app.fit_to_view(),

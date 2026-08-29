@@ -65,6 +65,15 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 app.push_cmd(AppCmd::NewPattern);
                 ui.close();
             }
+            // Workflow audit §11. It is a NEW WORK, so it sits with the
+            // other New items rather than in the Page menu — and like
+            // File ▸ New it opens in a tab beside what you had. Its other
+            // half (the stamp back onto these pages) is a page operation
+            // and lives with the other page imports.
+            if item(ui, "New work from this work (ネーム, other dpi)…", "") {
+                app.push_cmd(AppCmd::PromoteNewWork);
+                ui.close();
+            }
             if item(ui, "Open…", "Ctrl+O") {
                 app.push_cmd(AppCmd::OpenOra);
                 ui.close();
@@ -116,6 +125,21 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
             // rather than a checkbox (workflow audit #3c).
             if item(ui, "Import Image as Draft…", "") {
                 app.push_cmd(AppCmd::ImportImageDraft);
+                ui.close();
+            }
+            // Third door for the same reason (row 166 `FO-001`): the layer
+            // keeps a LINK to the file and re-reads it when it changes —
+            // the background reused across a chapter.
+            if item(ui, "Import Image as File Object…", "") {
+                app.push_cmd(AppCmd::ImportFileObject);
+                ui.close();
+            }
+            if item(ui, "Update File Objects", "") {
+                app.push_cmd(AppCmd::UpdateFileObjects);
+                ui.close();
+            }
+            if item(ui, "Relink File Object…", "") {
+                app.push_cmd(AppCmd::RelinkFileObject(None));
                 ui.close();
             }
             if item(ui, "Import Brushes (.abr, .gbr, .gih, .kpp, .sut)…", "") {
@@ -956,6 +980,14 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
             }
             if item(ui, "Batch import pages (roughs as underlays)…", "") {
                 app.push_cmd(AppCmd::BatchImportPages);
+                ui.close();
+            }
+            // Workflow audit §11, second half. The digital twin of the
+            // batch import above: instead of N photographed roughs, the
+            // pages of a ネーム WORK — matched to the pages they were
+            // drawn for, not to whatever slot they happen to sit in.
+            if item(ui, "Stamp name pages as drafts…", "") {
+                app.push_cmd(AppCmd::StampNamePages);
                 ui.close();
             }
             if item(ui, "Replace page with file…", "") {

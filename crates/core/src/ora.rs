@@ -294,6 +294,18 @@ pub fn save_to_with<W: Write + Seek>(
                 LayerKind::Correction(a) => serde_json::to_string(a).ok(),
                 _ => None,
             },
+            // Row 166 file object: only the RECIPE (path, fit box, last-seen
+            // stamp) rides as JSON — the raster went out as the layer PNG
+            // above like any other, which is what makes the page open on a
+            // machine that has never seen the source, and what makes a
+            // build predating this attribute open it as a plain raster
+            // showing the right picture. A non-UTF-8 path cannot be JSON:
+            // the attribute is then omitted and the layer degrades to that
+            // same plain raster rather than failing the save.
+            file_object: match &layer.kind {
+                LayerKind::FileObject(fo) => serde_json::to_string(fo).ok(),
+                _ => None,
+            },
             mask_src,
             strokes_src,
             mask_enabled: layer.mask.as_ref().map(|m| m.enabled),
@@ -402,6 +414,8 @@ struct LayerEntry {
     fill: Option<String>,
     /// Row 105 correction-layer params (`Adjust`), JSON.
     correction: Option<String>,
+    /// Row 166 file-object reference (`mnc-fileobj`), JSON.
+    file_object: Option<String>,
     /// LP-002/LP-003 border-effect params, JSON.
     edge: Option<String>,
     /// LP-016 layer colour, hex RRGGBB.
@@ -511,6 +525,9 @@ fn stack_xml(
         }
         if let Some(j) = e.correction.as_deref() {
             extra.push_str(&format!(" mnc-correction=\"{}\"", xml_escape(j)));
+        }
+        if let Some(j) = &e.file_object {
+            extra.push_str(&format!(" mnc-fileobj=\"{}\"", xml_escape(j)));
         }
         if let Some(j) = e.genlines.as_deref() {
             extra.push_str(&format!(" mnc-genlines=\"{}\"", xml_escape(j)));
@@ -768,6 +785,18 @@ pub fn load_from<R: Read + Seek>(source: R) -> Result<Document, OraError> {
         if let Some(g) = &e.genlines {
             layer.genlines = Some(*g);
         }
+        // Row 166 file object: same shape as `genlines` and for the same
+        // reason — the PNG the plain-raster arm decoded above IS its
+        // raster, so this must NOT be an arm of the chain (chaining would
+        // leave the layer blank on a machine without the source, which is
+        // exactly the case the raster is saved for). `missing` is decided
+        // by the app's refresh pass after load, never by the file.
+        if let Some(fo) = &e.file_object
+            && !layer.folder
+            && matches!(layer.kind, LayerKind::Raster)
+        {
+            layer.kind = LayerKind::FileObject(fo.clone());
+        }
         // Vector inking: reattach the stroke record. An unreadable sidecar
         // degrades to an EMPTY-but-present set (the raster is intact; the
         // record is gone) — never a load failure.
@@ -1018,6 +1047,11 @@ struct ParsedLayer {
     /// Row 105 correction layer (`mnc-correction`): params only, the
     /// raster re-derives.
     correction: Option<crate::adjust::Adjust>,
+    /// Row 166 file object (`mnc-fileobj`): path + fit box + last-seen
+    /// stamp. The raster itself came from the layer PNG, so an absent or
+    /// unparseable attribute simply loads a plain raster layer showing the
+    /// last picture — never a load failure, never a blank layer.
+    file_object: Option<crate::file_object::FileObject>,
     genlines: Option<crate::genlines::GenLinesSpec>,
     /// TRIAGE 138 p2: `mnc-mask` zip path + the enabled flag.
     mask_src: Option<String>,
@@ -1201,6 +1235,8 @@ fn parse_stack_xml(xml: &str) -> Result<ParsedStack, OraError> {
                         edge: get("mnc-edge").and_then(|j| serde_json::from_str(j).ok()),
                         fill: get("mnc-fill").and_then(|j| serde_json::from_str(j).ok()),
                         correction: get("mnc-correction").and_then(|j| serde_json::from_str(j).ok()),
+                        file_object: get("mnc-fileobj")
+                            .and_then(|j| serde_json::from_str(j).ok()),
                         genlines: get("mnc-genlines").and_then(|j| serde_json::from_str(j).ok()),
                         mask_src: get("mnc-mask").map(str::to_string),
                         strokes_src: get("mnc-strokes").map(str::to_string),
@@ -1254,6 +1290,7 @@ fn parse_stack_xml(xml: &str) -> Result<ParsedStack, OraError> {
                     edge: get("mnc-edge").and_then(|j| serde_json::from_str(j).ok()),
                     fill: get("mnc-fill").and_then(|j| serde_json::from_str(j).ok()),
                     correction: get("mnc-correction").and_then(|j| serde_json::from_str(j).ok()),
+                    file_object: get("mnc-fileobj").and_then(|j| serde_json::from_str(j).ok()),
                     genlines: get("mnc-genlines").and_then(|j| serde_json::from_str(j).ok()),
                     mask_src: get("mnc-mask").map(str::to_string),
                     strokes_src: get("mnc-strokes").map(str::to_string),
@@ -2491,6 +2528,91 @@ mod tests {
         let back = load_from(std::io::Cursor::new(buf.into_inner())).unwrap();
         assert_eq!(back.paper.colour, [250, 243, 224]);
         assert!(!back.paper.visible, "the eye survives the round trip");
+    }
+
+    /// Row 166 `FO-001`/`FO-008`: a file object's RECIPE rides one
+    /// `mnc-fileobj` attribute — path, fit box and last-seen stamp — while
+    /// its raster goes out as the ordinary layer PNG. Both halves matter:
+    /// the recipe is what makes the link live, the PNG is what makes the
+    /// page open on a machine that has never seen the source.
+    ///
+    /// The exact attribute spelling is pinned here on purpose. It IS the
+    /// file format.
+    #[test]
+    fn file_object_round_trips_path_fit_and_stamp() {
+        use crate::file_object::{FileObject, FileStamp};
+        let fo = FileObject {
+            path: std::path::PathBuf::from("C:/art/backgrounds/classroom & hall.png"),
+            fit: (1240, 1754),
+            stamp: FileStamp {
+                mtime_ms: 1_756_000_000_123,
+                len: 987_654,
+            },
+            missing: true,
+        };
+        let mut doc = Document::new(128, 128);
+        doc.begin_op();
+        doc.layers[0]
+            .tile_mut(TileIdx::new(0, 0))
+            .set_pixel(5, 5, [0, 0, 32768, 32768]);
+        doc.end_op();
+        doc.layers[0].kind = crate::doc::LayerKind::FileObject(fo.clone());
+
+        let bytes = to_bytes(&doc);
+        {
+            let mut z = zip::ZipArchive::new(Cursor::new(bytes.clone())).unwrap();
+            let mut s = String::new();
+            std::io::Read::read_to_string(&mut z.by_name("stack.xml").unwrap(), &mut s).unwrap();
+            assert!(s.contains(" mnc-fileobj=\""), "the attribute is named: {s}");
+            // XML-escaped, because a path may hold `&` — and a raw one would
+            // produce a stack.xml no parser accepts.
+            assert!(s.contains("classroom &amp; hall.png"), "{s}");
+            assert!(
+                !s.contains("\"missing\""),
+                "`missing` is THIS machine's fact and must not be persisted: {s}"
+            );
+        }
+        let back = load_from(Cursor::new(bytes)).expect("load");
+        let got = back.layers[0].file_object().expect("kind survives");
+        assert_eq!(got.path, fo.path);
+        assert_eq!(got.fit, fo.fit);
+        assert_eq!(got.stamp, fo.stamp);
+        assert!(!got.missing, "and it loads whole, for the refresh to judge");
+        // The raster came back too — the whole point of keeping the pixels
+        // in ordinary tiles.
+        assert_eq!(
+            back.layers[0]
+                .display_tile(TileIdx::new(0, 0))
+                .expect("the saved PNG was decoded")
+                .pixel(5, 5)[3],
+            32768
+        );
+
+        // Downgrade both directions. A build that predates the attribute
+        // ignores it and sees a plain raster layer with the right picture;
+        // saving from THAT build drops the attribute, so the link is lost
+        // and the layer stays an ordinary raster holding the last image.
+        // Nothing is corrupted either way — that is the whole contract, and
+        // this is it simulated by stripping the attribute.
+        let mut doc2 = doc.clone();
+        doc2.layers[0].kind = crate::doc::LayerKind::Raster;
+        let plain = to_bytes(&doc2);
+        {
+            let mut z = zip::ZipArchive::new(Cursor::new(plain.clone())).unwrap();
+            let mut s = String::new();
+            std::io::Read::read_to_string(&mut z.by_name("stack.xml").unwrap(), &mut s).unwrap();
+            assert!(!s.contains("mnc-fileobj"), "no attribute for a plain layer");
+        }
+        let back = load_from(Cursor::new(plain)).expect("load");
+        assert!(back.layers[0].file_object().is_none());
+        assert_eq!(
+            back.layers[0]
+                .display_tile(TileIdx::new(0, 0))
+                .expect("pixels intact")
+                .pixel(5, 5)[3],
+            32768,
+            "an old build's save keeps the picture; only the link is gone"
+        );
     }
 
     const TILE_PIXELS_F: f32 = (TILE_SIZE * TILE_SIZE) as f32;

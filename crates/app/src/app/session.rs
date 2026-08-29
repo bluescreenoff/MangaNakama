@@ -103,6 +103,10 @@ impl DocSession {
         proj.meta.expression = self.expression;
         proj.meta.spine_mm = self.spine_mm;
         proj.meta.cover = self.cover;
+        // Workflow audit §11: a recovered tab must come back with the page
+        // identities it had, or a ネーム promoted from it would no longer
+        // know which manuscript page each of its pages belongs to.
+        proj.meta.page_uids = self.pages.iter().map(|e| e.uid).collect();
         let active = mn_core::project::doc_to_bytes(&self.doc).ok()?;
         proj.pages = self
             .pages

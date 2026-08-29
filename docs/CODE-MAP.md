@@ -86,6 +86,29 @@ The recurring failure shapes, in order of how often they have shipped:
   un-derived content only on tone/frame layers — the worst kind of
   sometimes-bug.
 
+## Page identity (`app/pages.rs` ⇄ `core/project.rs` ⇄ every work writer)
+
+- `PageEntry::uid` is the page's identity — the key the park LRU, the
+  reader's texture map and the MCP page lookups use, precisely because
+  page INDICES move under reorder/insert/delete (seam pattern 2).
+- It is **persisted** (`ProjectMeta::page_uids` for a single-file
+  `.mnc`, `FolderPageMeta::uid` for a work folder). The ネーム promotion
+  copies a work's identities into the promoted work, and the stamp back
+  (`app/promote.rs`) matches on them; identities that do not survive a
+  save would reduce that to page-ORDER matching, silently, months later.
+  **A new writer of a work file must write them, and a new reader must
+  adopt them through `App::adopt_page_uids`.**
+- That adopt is also the only place the mint floor moves
+  (`PageEntry::bump_uid_floor`). Adopting identities from a previous
+  session without it lets the next `AddPage` mint one that a loaded page
+  already holds — two pages of one work sharing an identity, which is
+  what the uid exists to make impossible. `0` means "none recorded"
+  (a work saved before the field existed) and always mints fresh.
+- Two DIFFERENT works may legitimately hold the same identities — that
+  is what the promotion produces — so nothing may key a cache on a uid
+  across works. `forget_document_caches` clears the reader map on every
+  tab switch; the park LRU is per doc slot.
+
 ## The frame reading-order cache (`app/frames.rs` ⇄ layer ops)
 
 - `App::frame_order` is a cache of computed panel numbering, keyed by a
@@ -320,6 +343,36 @@ The recurring failure shapes, in order of how often they have shipped:
   `[String; N]` makes serde reject the whole line the day the entry grows —
   and the parse is an `unwrap_or_default()`, so every saved workspace would
   vanish without a word. New fields go on the END only.
+
+## File objects (core `file_object.rs` ⇄ `ora.rs` ⇄ `app.rs` ⇄ `layers.rs`)
+
+- `LayerKind::FileObject` is the ONE non-`Raster` kind whose pixels live in
+  the layer's ordinary `tiles` instead of a derived cache. Everything good
+  about the feature depends on that: the ORA save writes the raster for
+  free, a broken link keeps its last picture, and an older build opens the
+  page as a plain raster showing the right image. Move those pixels into a
+  derive cache and all three break at once, silently.
+- Consequence in the ORA LOADER: the file-object arm must sit AFTER the
+  frames/balloons/texts/fill/correction chain — the same place `genlines`
+  sits — never inside it. Inside the chain the layer PNG is never decoded,
+  so a page opened on a machine without the source comes up BLANK, which is
+  exactly the case the saved raster exists for. `mnc-fileobj` carries the
+  recipe only.
+- `FileObject::missing` is `#[serde(skip)]` on purpose: it is a fact about
+  this machine right now. Persisting it would tell the studio desktop that
+  a background it can see perfectly well is gone.
+- The brush guard is NOT `paintable()`. `paintable()` (false here, via
+  `is_vector()`) refuses fill/gradient/transform/filter/clear/merge, but the
+  MyPaint engine writes tiles directly and never asks it — so the stroke
+  refusal is an explicit arm in `App::begin_stroke`, beside the maskless
+  live-layer refusal. A new derived kind needs BOTH.
+- A refresh records no undo (external truth, CSP's rule) and calls
+  `Document::touch()` only when something changed — an idle alt-tab must not
+  dirty the document, because `WM_SETFOCUS` runs the refresh on every one.
+- The palette row is the only place a file object announces itself
+  (`row_glyph` → `Icon::FileObject`, red + "file missing" when the link is
+  broken). There is no modal at load time, by design: the mark IS the
+  notification.
 
 ## Tests and process
 

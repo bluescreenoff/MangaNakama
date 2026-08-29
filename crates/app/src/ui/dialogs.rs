@@ -3,7 +3,7 @@
 
 use super::property::{Section, brush_sliders, prop_sections};
 use super::theme::{self, ValueBar};
-use crate::app::App;
+use crate::app::{App, PromoteDraft};
 use crate::cmd::AppCmd;
 use mn_core::PageSetup;
 
@@ -631,6 +631,90 @@ pub(super) fn batch_import_window(ctx: &egui::Context, app: &mut App) {
         app.batch_import_open = false;
     } else {
         app.batch_import_open = open && !cancel;
+    }
+}
+
+/// New work from this work (workflow audit §11): one number, the target
+/// dpi, and a live readout of what it produces. The readout is the whole
+/// dialog's job — "150 dpi" means nothing until it says the page will be
+/// 1276×1795 px instead of 5102×7181, which is the reason to draw the
+/// ネーム in a second work at all.
+pub(super) fn promote_window(ctx: &egui::Context, app: &mut App) {
+    if !app.promote_open {
+        return;
+    }
+    let mut open = app.promote_open;
+    let (mut apply, mut cancel) = (false, false);
+    let pages = app.pages.len();
+    let own_dpi = app.work_dpi();
+    let setup = app.page.clone();
+    egui::Window::new("New Work From This Work")
+        .open(&mut open)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, -30.0))
+        .show(ctx, |ui| {
+            let Some(mut setup) = setup else {
+                ui.label(
+                    "This work has no page setup to copy. Give it one in \
+                     Page ▸ Work settings… first.",
+                );
+                if ui.button("Close").clicked() {
+                    cancel = true;
+                }
+                return;
+            };
+            ui.horizontal(|ui| {
+                ui.label("Resolution");
+                ui.add(
+                    egui::DragValue::new(&mut app.promote.dpi)
+                        .range(PromoteDraft::MIN_DPI..=PromoteDraft::MAX_DPI)
+                        .speed(1.0)
+                        .suffix(" dpi"),
+                );
+                if ui
+                    .button(format!("{} dpi (name)", PromoteDraft::NAME_DPI))
+                    .clicked()
+                {
+                    app.promote.dpi = PromoteDraft::NAME_DPI;
+                }
+                if let Some(d) = own_dpi
+                    && ui.button(format!("{d} dpi (same)")).clicked()
+                {
+                    app.promote.dpi = d;
+                }
+            });
+            setup.dpi = app
+                .promote
+                .dpi
+                .clamp(PromoteDraft::MIN_DPI, PromoteDraft::MAX_DPI);
+            let (w, h) = setup.paper_px();
+            ui.add_space(4.0);
+            ui.weak(format!(
+                "{pages} blank page(s), {w} × {h} px — same paper, same binding, \
+                 same page order."
+            ));
+            ui.weak(
+                "The pages keep this work's page identities, which is what lets \
+                 Page ▸ Stamp name pages as drafts… put each of them back on the \
+                 page it was drawn for. Save both works for that to survive a restart.",
+            );
+            ui.weak("It opens in a new tab — this work stays exactly as it is.");
+            ui.add_space(2.0);
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("  Create  ").clicked() {
+                    apply = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+            });
+        });
+    if apply {
+        app.push_cmd(AppCmd::PromoteNewWorkApply);
+        app.promote_open = false;
+    } else {
+        app.promote_open = open && !cancel;
     }
 }
 
