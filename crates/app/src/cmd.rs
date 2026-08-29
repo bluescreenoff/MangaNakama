@@ -530,6 +530,11 @@ fn commit_transform_drag(app: &mut App, drag: crate::app::TransformDrag) {
             mesh_buf
                 .as_ref()
                 .map(|(b, r)| (b.as_slice(), *r)),
+            // `I-005`. A MESH drag already resampled through `warp_buffer`
+            // and hands the finished buffer in above, so the kernel does
+            // not reach it — the Tool Property row says so rather than
+            // sitting there looking live (see `interp_row`).
+            app.transform_interp,
         );
         // LM-009: a pure translation drags a LINKED mask with the art
         // (the hole stays over the same ink); scale/rotate/skew leave it
@@ -2028,6 +2033,11 @@ pub struct ToolProps {
     /// CSP Ink ▸ Color stretch (I-011), 0..1: how far the picked-up pigment
     /// is dragged along the stroke.
     pub color_stretch: f32,
+    /// CSP Ink ▸ Mixing mode (I-014, triage rows 58 + 167): additive
+    /// (Standard) or spectral pigment (Perceptual). Standard is what every
+    /// preset that has never heard of the row already does, and the row is
+    /// a no-op until it is moved — the `paint_density` rule.
+    pub brush_mix: mn_core::BrushMix,
     /// CSP Ink ▸ Intensity of blur (I-013): how wide the running colour is
     /// sampled from. A multiple of the brush radius, unless `blur_abs`.
     pub blur: f32,
@@ -2088,6 +2098,7 @@ impl Default for ToolProps {
             // a pixel until the artist reaches for them.
             paint_density: 1.0,
             color_stretch: 0.5,
+            brush_mix: mn_core::BrushMix::Standard,
             blur: 1.0,
             blur_abs: false,
             jitter: mn_brush::ColorJitter {
@@ -2706,6 +2717,11 @@ pub enum AppCmd {
     /// FB-overflow: art bursts out of the panel — the layer composites
     /// above its frame folder's mask and border ink.
     SetLayerEscape(usize, bool),
+    /// FB-overflow part 2: move a breakout layer's insertion marker to the
+    /// layer at `.1` (`None` = back to "over my own panel only"). Paint
+    /// order is a stack, so this covers everything BELOW that layer too —
+    /// core stores the cascade as stable ids.
+    SetLayerSpillSeat(usize, Option<usize>),
     /// Part 3 (RL-031): the special-ruler snap veto (parallel/concentric/
     /// guide/symmetric). The master `RulerSnapToggle` still gates all.
     RulerSpecialSnapToggle,
@@ -2752,6 +2768,13 @@ pub enum AppCmd {
     SetPaintDensity(f32),
     /// CSP Ink ▸ Color stretch (I-011), 0..1.
     SetColorStretch(f32),
+    /// CSP Ink ▸ Mixing mode (I-014, triage rows 58 + 167): Standard
+    /// (additive) vs Perceptual (spectral pigment). Routes the brush to the
+    /// CPU dab path — see `MyBrush::set_color_mixing`.
+    SetBrushMix(mn_core::BrushMix),
+    /// CSP Image settings ▸ Interpolation method (I-005): the kernel the
+    /// transform COMMIT resamples with.
+    SetTransformInterp(mn_core::transform::Interp),
     /// CSP Advanced ▸ Watercolor edge (W-001..005, row 71): all four knobs
     /// in one variant — they are one effect, and a rim set half-way from a
     /// previous value is not a state anyone wants to see.
@@ -7421,6 +7444,13 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                                     true,
                                     false, // a lifted flip, not a paste
                                     None,
+                                    // A flip is a ±1 scale: every sampled
+                                    // position is integral and every kernel
+                                    // degenerates to the same permutation
+                                    // (`flip_is_an_exact_pixel_permutation`).
+                                    // Pinned to Bilinear so the row cannot
+                                    // make Edit ▸ Flip resample at all.
+                                    mn_core::transform::Interp::Bilinear,
                                 );
                                 app.doc.selection = sel;
                                 app.set_status(if ok {
@@ -7932,6 +7962,23 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 app.mark_dirty();
             }
         }
+        AppCmd::SetLayerSpillSeat(i, top) => {
+            // The seat is not a tile edit — no revision moves — so the
+            // renderer only notices through its layer signature. It does
+            // (mn_gpu::LayerSig::spill); the invalidate is belt and braces
+            // for the incremental path.
+            if app.doc.set_layer_spill_seat(i, top) {
+                let name = top
+                    .and_then(|t| app.doc.layers.get(t))
+                    .map(|l| l.name.clone());
+                app.set_status(match name {
+                    Some(n) => format!("the burst now draws over “{n}” and everything below it"),
+                    None => "the burst draws over its own panel only".to_owned(),
+                });
+                app.renderer.invalidate();
+                app.mark_dirty();
+            }
+        }
 
         // --- brush --------------------------------------------------------
         AppCmd::SelectBrush(p) => {
@@ -8062,6 +8109,18 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             let v = app.props_current.color_stretch;
             app.engine_mut().set_color_stretch(v);
             app.mark_dirty();
+        }
+        AppCmd::SetBrushMix(m) => {
+            app.props_current.brush_mix = m;
+            app.engine_mut().set_color_mixing(m);
+            app.mark_dirty();
+        }
+        AppCmd::SetTransformInterp(i) => {
+            // No `mark_dirty`: nothing has been resampled yet. The kernel is
+            // read once, at commit — changing it mid-drag costs nothing and
+            // re-rendering the overlay would only redraw the SAME GPU-sampled
+            // preview (see `interp_row`).
+            app.transform_interp = i;
         }
         AppCmd::SetWaterEdge(e) => {
             app.engine_mut().set_water_edge(e);

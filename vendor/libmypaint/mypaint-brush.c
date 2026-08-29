@@ -31,6 +31,18 @@ float mnc_brush_radius_random_abs_px(void);
 float mnc_brush_hard_dab(void);
 float mnc_brush_scatter(void);
 
+/* mnc (PATCHES.md #21, 2026-08-30): SPECTRAL PIGMENT MIXING under the
+ * legacy stroke entry — CSP Ink > Mixing mode (I-014), triage rows 58/167.
+ * Returns the paint_mode weight for the stroke in flight: 0.0 = the classic
+ * additive behaviour, bit for bit, which is what every caller that never
+ * touches the row gets. libmypaint's own PAINT_MODE base value defaults to
+ * 1.0 and is deliberately NOT read here: this engine only ever calls the
+ * legacy (v1-surface) entry, where upstream forces paint_factor to 0, so
+ * honouring the base value would silently turn spectral mixing on for every
+ * preset in the tree. The Rust side publishes the weight per stroke_to,
+ * exactly like the flags above. */
+float mnc_brush_paint_mode(void);
+
 /* mnc (round 26, 2026-08-16): texture tips (vendor/PATCHES.md #10). The mask
  * data and current scroll offset live in the Rust brush;
  * mnc_brush_texture_advance() steps the offset once per dab, called from
@@ -1104,7 +1116,12 @@ gboolean prepare_and_draw_dab (MyPaintBrush *self, MyPaintSurface * surface, gbo
         }
     }
 
-    const float paint_factor = legacy ? 0.0 : SETTING(self, PAINT_MODE);
+    /* mnc (PATCHES.md #21): under the legacy entry the weight comes from the
+     * Rust-published stroke flag rather than being forced to zero. It IS
+     * constant for the whole stroke (the row is a two-way switch, not a
+     * dynamic), so paint_setting_constant stays TRUE and legacy_smudge below
+     * still resolves to the stock value whenever the flag is 0. */
+    const float paint_factor = legacy ? mnc_brush_paint_mode() : SETTING(self, PAINT_MODE);
     const gboolean paint_setting_constant =
         legacy ? TRUE : mypaint_mapping_is_constant(self->settings[MYPAINT_BRUSH_SETTING_PAINT_MODE]);
     const gboolean legacy_smudge = paint_factor <= 0.0 && paint_setting_constant;

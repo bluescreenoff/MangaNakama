@@ -11,6 +11,8 @@ use crate::app::{App, LayerFilterKind};
 use crate::cmd::{AppCmd, Tool};
 use mn_core::{Blend, FillKind, LayerKind};
 
+mod breakout;
+
 // The picker order is OURS, not CSP's: parts 1, 2 and 3 in the order they
 // shipped, appended never re-sorted, because a saved workspace and the
 // owner's muscle memory both index into this list. So Color burn sits at the
@@ -438,21 +440,9 @@ pub(super) fn layer_property(ui: &mut egui::Ui, app: &mut App) {
         app.push_cmd(AppCmd::SetLayerDraft(i, draft));
     }
 
-    // FB-overflow: only offered where it means something — a non-folder
-    // layer living inside a frame folder.
-    if !app.doc.layers[i].folder && app.doc.enclosing_frame_folder(i).is_some() {
-        let mut esc = app.doc.layers[i].escape_frame;
-        if ui
-            .checkbox(&mut esc, "Burst out of the panel")
-            .on_hover_text(
-                "this layer draws OVER the frame border and outside the panel mask — \
-                 the art overflows, the panel stays editable, the layer stays in its folder",
-            )
-            .changed()
-        {
-            app.push_cmd(AppCmd::SetLayerEscape(i, esc));
-        }
-    }
+    // FB-overflow, both parts (the flag, the mask cap, the seat) — see
+    // `breakout.rs` for why the seat is one marker and not per-row ticks.
+    breakout::section(ui, app, i);
 
     // LP-016 Layer colour: draw black, DISPLAY as the chosen colour (the
     // draft/two-tone workflow — non-destructive; pixels stay black).
@@ -1549,6 +1539,9 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
     }
 
     let mut drop: Option<(usize, usize, u8)> = None;
+    // Where the active breakout layer's art is inserted, if it has been
+    // moved off its own frame folder (`None` = nothing to draw).
+    let spill_marker = breakout::marker_row(&app.doc);
     ui.spacing_mut().item_spacing.y = 1.0;
 
     for (i, row) in rows.iter().enumerate().rev() {
@@ -2285,6 +2278,13 @@ pub(super) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
             if let Some(from) = resp.dnd_release_payload::<LayerDrag>() {
                 drop = Some((from.0, slot, depth));
             }
+        }
+        // FB-overflow part 2, item 3: the selected burst's insertion marker.
+        // Painted LAST so it sits over the row's own fills, and on the top
+        // edge because the display is top-first — above this row is where
+        // the escaped art lands in the paint order.
+        if spill_marker == Some(i) {
+            breakout::paint_marker(ui, rect);
         }
     }
 

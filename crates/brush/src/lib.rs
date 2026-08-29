@@ -39,6 +39,10 @@ pub use kpp::{KppPreset, parse_kpp, parse_kpp_file};
 
 pub use dab::{CurveDab, DynaDab, GridDab, HairyDab, SimpleDab};
 pub use mn_core::dab::{DabParams, DabRecord};
+/// CSP Ink ▸ Mixing mode (`I-014`). Lives in `mn-core` beside the gradient's
+/// own mixing enum (one colour-mixing core, two tools); re-exported here so
+/// brush callers name it `mn_brush::BrushMix` like every other ink row.
+pub use mn_core::mix::BrushMix;
 pub use mybrush::{
     AntiAlias, BrushDraw, BrushError, BrushLibrary, ColorJitter, TextureRotate, DENSITY_BY_GAP_DEFAULT, Interval, MyBrush, RecordMode,
     SketchParams, TextureMask, TipFlip, commit_wash, load_texture,

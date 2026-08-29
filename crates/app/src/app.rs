@@ -1089,6 +1089,16 @@ pub struct App {
     /// default): corner and side handles scale both axes by one ratio.
     /// Shift does the same for a single drag.
     pub transform_keep_aspect: bool,
+    /// `I-005` — Transform Tool Property "Interpolation method": the kernel
+    /// the COMMIT resamples with. Lives beside `transform_keep_aspect` as an
+    /// App field rather than in `ToolProps` for the same reason that one
+    /// does: it belongs to the transform modal, not to a brush preset, and
+    /// nothing about a sub tool should carry it around.
+    ///
+    /// Session state, deliberately not persisted: CSP resets it too, and a
+    /// remembered "Hard edges" is a stair-stepped scale nobody asked for
+    /// three weeks later.
+    pub transform_interp: mn_core::transform::Interp,
     /// New-text defaults (Tool Property). Font resolves to 源暎アンチック v5
     /// when installed; size in pt at the document dpi; manga default vertical.
     pub text_font: String,
@@ -1787,6 +1797,7 @@ impl App {
             text_bar_drag: None,
             transform_drag: None,
             transform_keep_aspect: true,
+            transform_interp: mn_core::transform::Interp::default(),
             text_font: String::new(),
             text_size_pt: prefs.text_size_pt,
             text_vertical: true,
@@ -2338,6 +2349,10 @@ impl App {
                 // mixing it really does instead of reading "neat paint".
                 paint_density: e.paint_density(),
                 color_stretch: e.color_stretch(),
+                // I-014 seeds as a reading too: `paint_mode` is an ordinary
+                // libmypaint base value, so an imported MyPaint 2 brush that
+                // was authored spectral shows Perceptual instead of lying.
+                brush_mix: e.color_mixing(),
                 blur: e.blur().0,
                 blur_abs: e.blur().1,
                 jitter: e.color_jitter(),

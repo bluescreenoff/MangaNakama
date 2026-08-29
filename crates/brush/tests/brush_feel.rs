@@ -791,3 +791,334 @@ fn watercolour_edge_loads_from_a_preset() {
     assert_eq!(e.darkness, 0.0);
     assert_eq!(e.blur_px, mn_core::edge::WIDTH_MAX);
 }
+
+// --- Rows 58 + 167: Ink ▸ Mixing mode (I-014) ---------------------------
+//
+// The pigment model, not an amount — so unlike the rows above these are
+// measured on PIXELS, not on the recorded dab parameters. The whole change
+// lives between the dab and the tile (libmypaint's spectral blend, vendored
+// and reached through PATCHES.md #21); a dab record would look identical in
+// both modes and prove nothing.
+
+/// Straight (un-premultiplied) 0..1 RGB at a canvas pixel, or `None` where
+/// nothing was painted.
+fn straight_rgb(doc: &Document, x: i32, y: i32) -> Option<[f32; 3]> {
+    let ti = mn_core::TileIdx::of_pixel(x, y);
+    let t = doc.layers[0].tile(ti)?;
+    let p = t.pixel((x - ti.x * 64) as usize, (y - ti.y * 64) as usize);
+    if p[3] == 0 {
+        return None;
+    }
+    let a = p[3] as f32;
+    Some([p[0] as f32 / a, p[1] as f32 / a, p[2] as f32 / a])
+}
+
+/// A fat opaque band of `under` across y = 512, then a second pass of `over`
+/// through the mixing mode being tested. `flow` thins the second pass so the
+/// two colours actually have to meet — at full opacity every mixing model
+/// agrees, which is the trap this helper exists to avoid.
+fn band_over_band(mix: mn_brush::BrushMix, under: [f32; 3], over: [f32; 3], flow: f32) -> Document {
+    let mut doc = Document::new(1024, 1024);
+    fn run(doc: &mut Document, b: &mut MyBrush) {
+        b.begin(doc);
+        for i in 0..=24 {
+            b.sample(
+                doc,
+                sample(100.0 + i as f32 * 8.0, 512.0, 1.0, i as f64 * 8.0),
+            );
+        }
+        b.end(doc);
+    }
+    let mut base = pen();
+    base.set_size_px(80.0);
+    base.set_color_rgb(under);
+    run(&mut doc, &mut base);
+
+    let mut top = pen();
+    top.set_size_px(60.0);
+    top.set_color_rgb(over);
+    top.set_flow(flow);
+    top.set_color_mixing(mix);
+    run(&mut doc, &mut top);
+    doc
+}
+
+/// The default, and the routing claim: an untouched preset mixes additively
+/// and stays on the GPU dab path.
+#[test]
+fn mixing_defaults_to_standard_and_stays_gpu_ready() {
+    let b = pen();
+    assert_eq!(b.color_mixing(), mn_brush::BrushMix::Standard);
+    assert!(b.gpu_ready(), "a stock pen must still take the GPU path");
+}
+
+/// Row 58's routing requirement, stated as a test because getting it wrong
+/// is invisible until someone draws: the spectral blend has no arm in
+/// `dab.wgsl`, so selecting it MUST clear `gpu_ready`, and going back to
+/// Standard must give the GPU path back rather than stranding the brush on
+/// the CPU for the rest of the session.
+#[test]
+fn perceptual_mixing_routes_the_stroke_to_the_cpu_and_back() {
+    let mut b = pen();
+    b.set_color_mixing(mn_brush::BrushMix::Perceptual);
+    assert_eq!(b.color_mixing(), mn_brush::BrushMix::Perceptual);
+    assert!(
+        !b.gpu_ready(),
+        "spectral mixing has no GPU arm — the stroke must route CPU"
+    );
+    b.set_color_mixing(mn_brush::BrushMix::Standard);
+    assert!(b.gpu_ready(), "Standard hands the GPU path back");
+}
+
+/// THE BYTE-PIN. Standard is not "close to" the old behaviour, it IS the old
+/// behaviour: the patched C reads a published weight where it used to read
+/// the literal `0.0`, and Standard publishes exactly `0.0`.
+///
+/// Three strokes that must be identical to the byte — never touched, set to
+/// Standard, and toggled through Perceptual and back — because the switch
+/// writes a libmypaint base value, and a one-way write is the classic way a
+/// "revert" quietly is not one.
+#[test]
+fn standard_mixing_leaves_the_stroke_byte_identical() {
+    fn row(doc: &Document) -> Vec<[u16; 4]> {
+        (100..300)
+            .map(|x| {
+                let ti = mn_core::TileIdx::of_pixel(x, 512);
+                doc.layers[0]
+                    .tile(ti)
+                    .map(|t| t.pixel((x - ti.x * 64) as usize, (512 - ti.y * 64) as usize))
+                    .unwrap_or([0; 4])
+            })
+            .collect()
+    }
+    let draw = |setup: &dyn Fn(&mut MyBrush)| -> Document {
+        let mut doc = Document::new(1024, 1024);
+        let mut b = pen();
+        b.set_size_px(60.0);
+        b.set_color_rgb([0.1, 0.4, 0.9]);
+        b.set_flow(0.5);
+        setup(&mut b);
+        b.begin(&mut doc);
+        for i in 0..=24 {
+            b.sample(
+                &mut doc,
+                sample(100.0 + i as f32 * 8.0, 512.0, 1.0, i as f64 * 8.0),
+            );
+        }
+        b.end(&mut doc);
+        doc
+    };
+    let untouched = row(&draw(&|_b| {}));
+    let explicit = row(&draw(&|b| b.set_color_mixing(mn_brush::BrushMix::Standard)));
+    let round_trip = row(&draw(&|b| {
+        b.set_color_mixing(mn_brush::BrushMix::Perceptual);
+        b.set_color_mixing(mn_brush::BrushMix::Standard);
+    }));
+    assert!(untouched.iter().any(|p| p[3] > 0), "the stroke painted");
+    assert_eq!(untouched, explicit, "setting Standard changed the pixels");
+    assert_eq!(
+        untouched, round_trip,
+        "Perceptual → Standard did not restore the original path"
+    );
+}
+
+/// The feature actually reaching the pixels — the fail-before-fix half.
+/// Before PATCHES.md #21 the legacy stroke entry forced the spectral weight
+/// to zero, so this assertion could not have passed no matter what the row
+/// was set to.
+#[test]
+fn perceptual_mixing_changes_the_pixels() {
+    let yellow = [1.0, 0.9, 0.0];
+    let blue = [0.0, 0.1, 0.9];
+    let std_doc = band_over_band(mn_brush::BrushMix::Standard, yellow, blue, 0.5);
+    let perc_doc = band_over_band(mn_brush::BrushMix::Perceptual, yellow, blue, 0.5);
+    let mut differing = 0;
+    for x in 120..280 {
+        let a = straight_rgb(&std_doc, x, 512);
+        let b = straight_rgb(&perc_doc, x, 512);
+        if let (Some(a), Some(b)) = (a, b)
+            && (0..3).any(|c| (a[c] - b[c]).abs() > 1e-3)
+        {
+            differing += 1;
+        }
+    }
+    assert!(
+        differing > 100,
+        "spectral mixing changed only {differing} pixels — the weight is not reaching the blend"
+    );
+}
+
+/// The CLAIM, not just a difference — triage row 58's own words: *"Standard
+/// mixes in raw RGB, which drives blends toward grey mud. Perceptual mixes
+/// the way paint looks like it should."*
+///
+/// So the measure is CHANNEL SPREAD, not channel level. Subtractive mixing
+/// is darker by definition (two pigments each subtract), so asserting "more
+/// green" in absolute terms would be asserting the wrong physics and would
+/// fail on a correct implementation — it did, on the first run: additive
+/// left `[0.469, 0.475, 0.478]`, which is grey to three decimals, and
+/// spectral left `[0.056, 0.343, 0.228]`, which is a green. What separates
+/// them is that one has a dominant channel and the other has none.
+#[test]
+fn blue_over_yellow_goes_green_under_pigment_mixing() {
+    let mid = |mix| {
+        let doc = band_over_band(mix, [1.0, 0.9, 0.0], [0.0, 0.1, 0.9], 0.5);
+        let mut acc = [0.0f32; 3];
+        let mut n = 0.0f32;
+        for x in 150..250 {
+            if let Some(p) = straight_rgb(&doc, x, 512) {
+                for c in 0..3 {
+                    acc[c] += p[c];
+                }
+                n += 1.0;
+            }
+        }
+        assert!(n > 0.0, "nothing painted to measure");
+        [acc[0] / n, acc[1] / n, acc[2] / n]
+    };
+    let s = mid(mn_brush::BrushMix::Standard);
+    let p = mid(mn_brush::BrushMix::Perceptual);
+    let spread = |c: [f32; 3]| c[0].max(c[1]).max(c[2]) - c[0].min(c[1]).min(c[2]);
+    assert!(
+        spread(s) < 0.05,
+        "additive blue-over-yellow should be grey mud, got {s:?}"
+    );
+    assert!(
+        p[1] > p[0] && p[1] > p[2],
+        "pigment blue-over-yellow must read GREEN: {p:?}"
+    );
+    assert!(
+        spread(p) > 4.0 * spread(s),
+        "pigment mixing must keep far more colour than additive: {p:?} vs {s:?}"
+    );
+}
+
+/// "Smudge sampling uses the chosen mix": with paint density below 1 the
+/// brush picks colour up off the canvas, and the sampler has to weight
+/// spectrally too — otherwise the dab mixes pigment with a colour that was
+/// averaged additively, a blend that is half one model and half the other
+/// and looks like neither.
+#[test]
+fn the_smudge_sampler_follows_the_mixing_mode() {
+    let picked = |mix: mn_brush::BrushMix| -> Vec<[u16; 3]> {
+        let mut doc = Document::new(1024, 1024);
+        let mut under = pen();
+        under.set_size_px(90.0);
+        under.set_color_rgb([1.0, 0.9, 0.0]);
+        under.begin(&mut doc);
+        for i in 0..=24 {
+            under.sample(
+                &mut doc,
+                sample(100.0 + i as f32 * 8.0, 512.0, 1.0, i as f64 * 8.0),
+            );
+        }
+        under.end(&mut doc);
+
+        let mut b = pen();
+        b.set_size_px(60.0);
+        b.set_color_rgb([0.0, 0.1, 0.9]);
+        b.set_paint_density(0.35);
+        b.set_color_stretch(0.5);
+        b.set_color_mixing(mix);
+        b.set_dab_recording(RecordMode::Tap);
+        b.begin(&mut doc);
+        for i in 0..=24 {
+            b.sample(
+                &mut doc,
+                sample(100.0 + i as f32 * 8.0, 512.0, 1.0, i as f64 * 8.0),
+            );
+        }
+        b.end(&mut doc);
+        b.take_dab_record().dabs.iter().map(|d| d.color).collect()
+    };
+    let s = picked(mn_brush::BrushMix::Standard);
+    let p = picked(mn_brush::BrushMix::Perceptual);
+    assert_eq!(s.len(), p.len(), "the mode must not change dab placement");
+    assert!(
+        s.iter().zip(&p).any(|(a, b)| a != b),
+        "the picked-up colour is identical in both modes — the sampler ignored the weight"
+    );
+}
+
+/// `I-014`'s second clause, which CSP's manual states outright: the mixing
+/// mode ALSO governs colour jitter. Under Perceptual the offsets are applied
+/// in Oklab through `mn_core::mix::shift_oklab` — the SAME implementation the
+/// gradient's Perceptual ramp uses — instead of libmypaint's HSV.
+///
+/// Both halves: it changes the colours when jitter is on, and it changes
+/// NOTHING when jitter is off (the mode must not tint a plain stroke).
+#[test]
+fn the_mixing_mode_also_governs_colour_jitter() {
+    let colors = |mix: mn_brush::BrushMix, jitter: mn_brush::ColorJitter| -> Vec<[u16; 3]> {
+        let mut b = pen();
+        b.set_color_rgb([0.2, 0.5, 0.9]);
+        b.set_color_mixing(mix);
+        b.set_color_jitter(jitter);
+        record_stroke(&mut b).iter().map(|d| d.color).collect()
+    };
+    let on = mn_brush::ColorJitter {
+        hue: 0.2,
+        sat: 0.3,
+        bri: 0.3,
+        per_dab: true,
+    };
+    let off = mn_brush::ColorJitter {
+        hue: 0.0,
+        sat: 0.0,
+        bri: 0.0,
+        per_dab: true,
+    };
+    assert_ne!(
+        colors(mn_brush::BrushMix::Standard, on),
+        colors(mn_brush::BrushMix::Perceptual, on),
+        "the mixing mode must reach the jitter"
+    );
+    assert_eq!(
+        colors(mn_brush::BrushMix::Standard, off),
+        colors(mn_brush::BrushMix::Perceptual, off),
+        "with jitter off, the mode must not touch the drawing colour"
+    );
+}
+
+/// A preset authored with libmypaint's own `paint_mode` setting loads as
+/// Perceptual AND as `exotic` — the load-time detection that had been dead
+/// since round 27 because it matched the wrong key (`"paint"`, while
+/// libmypaint's setting is `"paint_mode"`).
+#[test]
+fn a_preset_authored_with_paint_mode_loads_spectral_and_cpu_bound() {
+    let raw = std::fs::read_to_string(csp("real-g-pen.myb")).unwrap();
+    let mut json: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    json["settings"]["paint_mode"] = serde_json::json!({ "base_value": 1.0 });
+    let dir = std::env::temp_dir().join(format!("mn-mix-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("pigment.myb");
+    std::fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+    let b = MyBrush::load(&path).expect("the pigment preset must load");
+    assert_eq!(b.color_mixing(), mn_brush::BrushMix::Perceptual);
+    assert!(!b.gpu_ready(), "an authored spectral preset routes CPU");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The default the OTHER way round: `paint_mode`'s own default in
+/// `brushsettings.json` is 1.0 — MyPaint 2 ships spectral mixing ON. Every
+/// preset in this tree must still load Standard, or the row would have
+/// silently re-inked the whole brush library the day the C patch landed.
+#[test]
+fn stock_presets_do_not_inherit_libmypaints_spectral_default() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/brushes/csp");
+    let mut checked = 0;
+    for e in std::fs::read_dir(&dir).expect("the csp preset folder must exist") {
+        let p = e.unwrap().path();
+        if p.extension().and_then(|s| s.to_str()) != Some("myb") {
+            continue;
+        }
+        let Ok(b) = MyBrush::load(&p) else { continue };
+        assert_eq!(
+            b.color_mixing(),
+            mn_brush::BrushMix::Standard,
+            "{p:?} inherited libmypaint's spectral default"
+        );
+        checked += 1;
+    }
+    assert!(checked > 0, "no presets were checked");
+}

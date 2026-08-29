@@ -12,11 +12,13 @@
 //! # Sampling
 //!
 //! The committed resample walks DESTINATION pixels and inverse-maps into the
-//! source (no holes, no double-writes). Bilinear filtering on premultiplied
+//! source (no holes, no double-writes). Every kernel runs on premultiplied
 //! fix15 — premultiplied means the filter is correct at alpha edges without a
-//! divide. A GPU resample path does not exist yet — the `resampled`
-//! parameter below is its designed seam; `Affine2` here is the shared math
-//! either path would use.
+//! divide. Which kernel is [`Interp`], CSP's `I-005` interpolation method;
+//! [`Interp::Bilinear`] is the default and is bit-for-bit what this module
+//! did when bilinear was the only option. A GPU resample path does not exist
+//! yet — the `resampled` parameter below is its designed seam; `Affine2` here
+//! is the shared math either path would use.
 //!
 //! Only raster layers transform. Vector layers (frame/balloon/text) keep
 //! their geometry editable through their own Object-tool paths instead —
@@ -195,6 +197,207 @@ fn sample_bilinear(
     out
 }
 
+/// `I-005` — CSP Tool Settings ▸ Image settings ▸ **Interpolation method**:
+/// which kernel a scaling commit resamples with.
+///
+/// # Why this is a manga row and not a graphics-nerd row
+///
+/// Shrink a page and the first thing that dies is the thinnest line on it.
+/// [`Self::Bilinear`] reads a 2×2 neighbourhood around the destination
+/// pixel's centre; at a 0.4× shrink most 1 px hairlines fall BETWEEN the
+/// sampled centres and simply are not there any more — not faint, gone, and
+/// gone in a way that reads as a broken line rather than a light one.
+/// [`Self::HighAccuracy`] averages the whole area a destination pixel covers,
+/// so every source pixel contributes its share and a hairline comes through
+/// grey instead of absent. That is CSP's 高精度 (「平均色」), and the reason
+/// its own manual singles it out for reduction.
+///
+/// `a_hairline_survives_the_high_accuracy_shrink` pins the difference with
+/// counted lines rather than a feeling.
+///
+/// # What is NOT here
+///
+/// CSP's fifth entry, **Smooth (oversampling)**, is deferred: it is a
+/// multi-sample refinement of the same box this already integrates exactly,
+/// and CSP itself forbids it on image-material layers. Nothing else in the
+/// tree can express it either.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Interp {
+    /// CSP **Hard edges** — nearest neighbour. No new colours at all, so a
+    /// 1-bit page stays 1-bit and pixel art stays crisp. Everything else it
+    /// touches gets stair-stepped.
+    Nearest,
+    /// CSP **Smooth edges** — bilinear. THE DEFAULT, and byte-for-byte the
+    /// only kernel this module had before the row existed: an artist who
+    /// never opens the dropdown must get the pixels they got yesterday.
+    #[default]
+    Bilinear,
+    /// CSP **Clear edges** — bicubic (Catmull-Rom). Keeps more edge contrast
+    /// than bilinear when ENLARGING; on a shrink it rings, which is why it
+    /// is not the manga answer.
+    Bicubic,
+    /// CSP **High accuracy (average colors)** — the exact box area average.
+    /// The reduction kernel. On an enlargement the box is smaller than a
+    /// pixel and there is nothing to average, so it falls through to
+    /// bilinear rather than degenerating into Nearest.
+    HighAccuracy,
+}
+
+impl Interp {
+    pub fn label(self) -> &'static str {
+        match self {
+            Interp::Nearest => "Hard edges",
+            Interp::Bilinear => "Smooth edges",
+            Interp::Bicubic => "Clear edges",
+            Interp::HighAccuracy => "High accuracy",
+        }
+    }
+
+    pub const ALL: [Interp; 4] = [
+        Interp::Bilinear,
+        Interp::Nearest,
+        Interp::Bicubic,
+        Interp::HighAccuracy,
+    ];
+}
+
+/// Nearest neighbour. `x`/`y` are in pixel-INDEX space (integer = the pixel's
+/// centre), the same convention `sample_bilinear` takes.
+fn sample_nearest(tiles: &HashMap<TileIdx, Arc<Tile>>, rect: [i32; 4], x: f32, y: f32) -> [f32; 4] {
+    let (px, py) = (x.round() as i32, y.round() as i32);
+    if px < rect[0] || py < rect[1] || px >= rect[2] || py >= rect[3] {
+        return [0.0; 4];
+    }
+    sample_px(tiles, px, py)
+}
+
+/// Catmull-Rom weights for the four taps around a fractional offset.
+#[inline]
+fn catrom(t: f32) -> [f32; 4] {
+    let t2 = t * t;
+    let t3 = t2 * t;
+    [
+        0.5 * (-t3 + 2.0 * t2 - t),
+        0.5 * (3.0 * t3 - 5.0 * t2 + 2.0),
+        0.5 * (-3.0 * t3 + 4.0 * t2 + t),
+        0.5 * (t3 - t2),
+    ]
+}
+
+/// Bicubic (Catmull-Rom) on premultiplied fix15.
+///
+/// The negative lobes are the point of the filter and also its hazard: they
+/// can push a channel below zero or above its own alpha, and a premultiplied
+/// pixel whose colour exceeds its alpha composites as a bright fringe. So the
+/// result is clamped back into the premultiplied invariant (`0 <= c <= a`)
+/// before it leaves — ringing is allowed to sharpen an edge, not to invent
+/// impossible pixels.
+fn sample_bicubic(tiles: &HashMap<TileIdx, Arc<Tile>>, rect: [i32; 4], x: f32, y: f32) -> [f32; 4] {
+    if x < rect[0] as f32 - 2.0
+        || y < rect[1] as f32 - 2.0
+        || x >= rect[2] as f32 + 1.0
+        || y >= rect[3] as f32 + 1.0
+    {
+        return [0.0; 4];
+    }
+    let x0 = x.floor();
+    let y0 = y.floor();
+    let (wx, wy) = (catrom(x - x0), catrom(y - y0));
+    let (x0, y0) = (x0 as i32, y0 as i32);
+    let mut out = [0.0f32; 4];
+    for (j, wj) in wy.iter().enumerate() {
+        let py = y0 - 1 + j as i32;
+        for (i, wi) in wx.iter().enumerate() {
+            let px = x0 - 1 + i as i32;
+            // The rect edge acts as transparent, exactly as bilinear treats
+            // it — content ends there, it does not smear outward.
+            if px < rect[0] || py < rect[1] || px >= rect[2] || py >= rect[3] {
+                continue;
+            }
+            let p = sample_px(tiles, px, py);
+            let w = wi * wj;
+            for c in 0..4 {
+                out[c] += p[c] * w;
+            }
+        }
+    }
+    let a = out[3].clamp(0.0, FIX15_ONE as f32);
+    [
+        out[0].clamp(0.0, a),
+        out[1].clamp(0.0, a),
+        out[2].clamp(0.0, a),
+        a,
+    ]
+}
+
+/// `I-005` High accuracy: the exact box area average over the source
+/// footprint of one destination pixel, `(x±hx, y±hy)` in pixel-index space.
+///
+/// Fractional edge weights, computed per destination pixel straight off the
+/// tiles — the same shape as `export::comic_downscale`, and for the same
+/// reason: no full-canvas float buffer exists to be reused, and a page-sized
+/// one is exactly what this module refuses to allocate.
+///
+/// Source pixels OUTSIDE the lifted rect count toward the area but
+/// contribute no colour, which is what makes the float's own edge fade out
+/// instead of stopping dead a pixel early.
+fn sample_area(
+    tiles: &HashMap<TileIdx, Arc<Tile>>,
+    rect: [i32; 4],
+    x: f32,
+    y: f32,
+    hx: f32,
+    hy: f32,
+) -> [f32; 4] {
+    let (bx0, bx1) = (x - hx, x + hx);
+    let (by0, by1) = (y - hy, y + hy);
+    // Wholly outside the source? Nothing to integrate.
+    if bx1 < rect[0] as f32 - 0.5
+        || by1 < rect[1] as f32 - 0.5
+        || bx0 >= rect[2] as f32 - 0.5
+        || by0 >= rect[3] as f32 - 0.5
+    {
+        return [0.0; 4];
+    }
+    // Pixel k covers [k-0.5, k+0.5) in index space.
+    let ix0 = (bx0 + 0.5).floor() as i32;
+    let ix1 = (bx1 + 0.5).ceil() as i32;
+    let iy0 = (by0 + 0.5).floor() as i32;
+    let iy1 = (by1 + 0.5).ceil() as i32;
+    let mut acc = [0.0f32; 4];
+    let mut area = 0.0f32;
+    for py in iy0..iy1 {
+        let wy = ((py as f32 + 0.5).min(by1) - (py as f32 - 0.5).max(by0)).max(0.0);
+        if wy <= 0.0 {
+            continue;
+        }
+        for px in ix0..ix1 {
+            let wx = ((px as f32 + 0.5).min(bx1) - (px as f32 - 0.5).max(bx0)).max(0.0);
+            if wx <= 0.0 {
+                continue;
+            }
+            let w = wx * wy;
+            area += w;
+            if px < rect[0] || py < rect[1] || px >= rect[2] || py >= rect[3] {
+                continue; // outside the float: transparent, but it took space
+            }
+            let p = sample_px(tiles, px, py);
+            for c in 0..4 {
+                acc[c] += p[c] * w;
+            }
+        }
+    }
+    if area <= 0.0 {
+        return [0.0; 4];
+    }
+    [
+        acc[0] / area,
+        acc[1] / area,
+        acc[2] / area,
+        acc[3] / area,
+    ]
+}
+
 /// The selection-weighted fraction of one premultiplied fix15 pixel:
 /// `taken = (v·mv + 127)/255`, the exact split `move_selected` cuts with.
 /// Shared by lift and clear so the pair is mass-conserving by construction
@@ -327,7 +530,11 @@ pub fn clear_lifted(layer: &mut Layer, rect: [i32; 4], selection: Option<&Select
 /// pixel buffer with its bounds. No such path exists yet (nothing named
 /// `transform_region` is implemented anywhere); every caller passes `None`
 /// and resamples here on the CPU, under the inverse-map + bilinear
-/// contract a GPU port would have to match.
+/// contract a GPU port would have to match. When it IS `Some`, `interp` has
+/// already been applied by whoever built the buffer and is ignored here.
+///
+/// `interp`: `I-005`'s kernel. [`Interp::Bilinear`] is the default and is
+/// byte-for-byte what this function did before the parameter existed.
 pub fn commit_transform(
     doc: &mut Document,
     src: &FloatSource,
@@ -336,6 +543,7 @@ pub fn commit_transform(
     clear_source: bool,
     mask_to_selection: bool,
     resampled: Option<(&[u16], [i32; 4])>,
+    interp: Interp,
 ) -> bool {
     let Some(inv) = xf.inverse() else {
         return false;
@@ -361,6 +569,28 @@ pub fn commit_transform(
     if dst[0] >= dst[2] || dst[1] >= dst[3] {
         return false;
     }
+
+    // `I-005`: the source-space footprint of ONE destination pixel — the
+    // AXIS-ALIGNED BOUND of it, taken off the inverse matrix's row norms.
+    // This is the only place a scale factor exists in core (the affine is
+    // all we are given), and unlike an `sx`/`sy` pair from the tool it
+    // stays meaningful under rotation and shear.
+    //
+    // A bound, not the exact parallelogram: at 45° it over-covers by up to
+    // √2, so a rotated reduction averages a slightly wider box than a
+    // straight one. That is a hair of extra softness on a path whose whole
+    // job is "do not lose the thin line", and the exact version costs a
+    // per-pixel inside-test on four half-planes. If a future round wants
+    // it, this is the line to change.
+    //
+    // Half-extents at or under 0.5 mean the destination pixel covers less
+    // than one source pixel: an ENLARGEMENT, where there is no area to
+    // average and a box integral degenerates to nearest neighbour. CSP's
+    // high accuracy is a reduction setting; falling through to bilinear
+    // there is the behaviour, not a shortcut.
+    let hx = 0.5 * (inv.m[0][0].abs() + inv.m[0][1].abs());
+    let hy = 0.5 * (inv.m[1][0].abs() + inv.m[1][1].abs());
+    let area_mode = interp == Interp::HighAccuracy && (hx > 0.5 || hy > 0.5);
 
     doc.begin_op();
 
@@ -393,9 +623,18 @@ pub fn commit_transform(
                     }
                     None => {
                         // CPU path: inverse-map the pixel centre into source
-                        // space and bilinear-sample.
+                        // space and filter with `I-005`'s chosen kernel.
                         let sp = inv.apply([cx as f32 + 0.5, cy as f32 + 0.5]);
-                        sample_bilinear(&src.tiles, src.rect, sp[0] - 0.5, sp[1] - 0.5)
+                        let (sx, sy) = (sp[0] - 0.5, sp[1] - 0.5);
+                        match interp {
+                            Interp::Nearest => sample_nearest(&src.tiles, src.rect, sx, sy),
+                            Interp::Bicubic => sample_bicubic(&src.tiles, src.rect, sx, sy),
+                            Interp::HighAccuracy if area_mode => {
+                                sample_area(&src.tiles, src.rect, sx, sy, hx, hy)
+                            }
+                            // Bilinear, and High accuracy on an enlargement.
+                            _ => sample_bilinear(&src.tiles, src.rect, sx, sy),
+                        }
                     }
                 };
                 if px[3] < 0.5 {
@@ -473,7 +712,14 @@ mod tests {
         ];
         let xf = Affine2::scale_rotate_around(pivot, -1.0, 1.0, 0.0, [0.0, 0.0]);
         assert!(commit_transform(
-            &mut doc, &src, &xf, None, true, false, None
+            &mut doc,
+            &src,
+            &xf,
+            None,
+            true,
+            false,
+            None,
+            Interp::Bilinear,
         ));
 
         let read = |x: i32, y: i32| -> [u16; 4] {
@@ -549,7 +795,14 @@ mod tests {
         let mut doc = doc_with_box(10, 10, 20, 20);
         let src = lift_region(&doc.layers[0], [10, 10, 20, 20], None);
         assert!(!commit_transform(
-            &mut doc, &src, &xf, None, true, false, None
+            &mut doc,
+            &src,
+            &xf,
+            None,
+            true,
+            false,
+            None,
+            Interp::Bilinear,
         ));
         assert!(!doc.can_undo(), "refused transform pushes no undo");
     }
@@ -560,7 +813,14 @@ mod tests {
         let src = lift_region(&doc.layers[0], [10, 10, 20, 20], None);
         let xf = Affine2::scale_rotate_around([15.0, 15.0], 1.0, 1.0, 0.0, [100.0, 50.0]);
         assert!(commit_transform(
-            &mut doc, &src, &xf, None, true, false, None
+            &mut doc,
+            &src,
+            &xf,
+            None,
+            true,
+            false,
+            None,
+            Interp::Bilinear,
         ));
 
         assert_eq!(alpha_at(&doc, 15, 15), 0, "source cleared");
@@ -587,7 +847,14 @@ mod tests {
         let src = lift_region(&doc.layers[0], [64, 64, 96, 96], None);
         let xf = Affine2::scale_rotate_around([64.0, 64.0], 2.0, 2.0, 0.0, [0.0, 0.0]);
         assert!(commit_transform(
-            &mut doc, &src, &xf, None, true, false, None
+            &mut doc,
+            &src,
+            &xf,
+            None,
+            true,
+            false,
+            None,
+            Interp::Bilinear,
         ));
         // Pivot corner stays; the far corner is now ~64px out.
         assert_eq!(alpha_at(&doc, 65, 65), FIX15_ONE as u16);
@@ -612,7 +879,14 @@ mod tests {
             [0.0, 0.0],
         );
         assert!(commit_transform(
-            &mut doc, &src, &xf, None, true, false, None
+            &mut doc,
+            &src,
+            &xf,
+            None,
+            true,
+            false,
+            None,
+            Interp::Bilinear,
         ));
         // After 90° cw around (110,105): the box is 10 wide, 20 tall.
         assert_eq!(alpha_at(&doc, 110, 105), FIX15_ONE as u16, "centre stays");
@@ -743,7 +1017,8 @@ mod tests {
             Some(&sel),
             true,
             false,
-            None
+            None,
+            Interp::Bilinear,
         ));
 
         let mut partial = 0;
@@ -774,5 +1049,206 @@ mod tests {
             assert_eq!(alpha_at(&doc, x, 60), FIX15_ONE as u16);
             assert_eq!(alpha_at(&doc, x + 64, 60), 0);
         }
+    }
+
+    // --- `I-005` interpolation method ------------------------------------
+
+    /// A page of 1 px vertical hairlines, 12 px apart across 240 px — 20 of
+    /// them, the pattern a screentone-free background or a hatching block
+    /// actually is.
+    fn hairline_doc() -> (Document, [i32; 4]) {
+        let mut doc = Document::new(256, 256);
+        for k in 0..20 {
+            let x = 6 + 12 * k;
+            for y in 0..60 {
+                let ti = TileIdx::of_pixel(x, y);
+                let lx = (x - ti.x * TILE_SIZE as i32) as usize;
+                let ly = (y - ti.y * TILE_SIZE as i32) as usize;
+                doc.layers[0]
+                    .tile_mut(ti)
+                    .set_pixel(lx, ly, [0, 0, 0, FIX15_ONE as u16]);
+            }
+        }
+        (doc, [0, 0, 240, 60])
+    }
+
+    /// How many separate vertical lines are still readable in `0..w` at row
+    /// `y` — runs of inked columns, so a line that survived as two touching
+    /// pixels still counts once and a line that vanished counts zero.
+    fn surviving_lines(doc: &Document, w: i32, y: i32) -> usize {
+        let mut n = 0;
+        let mut prev = false;
+        for x in 0..w {
+            let on = alpha_at(doc, x, y) > 0;
+            if on && !prev {
+                n += 1;
+            }
+            prev = on;
+        }
+        n
+    }
+
+    /// `I-005`, the whole claim: **High accuracy keeps thin lines that
+    /// bilinear drops.**
+    ///
+    /// The mechanism, and why 0.35× rather than 0.5×: at a half shrink the
+    /// inverse step is exactly 2 source px and bilinear's 2-tap support
+    /// covers it edge to edge, so the two kernels agree and there is nothing
+    /// to see. At 0.35× the step is ~2.86 px and bilinear still reads only
+    /// 2 — the ~0.86 px between consecutive destination pixels is sampled by
+    /// nobody, and a 1 px line that lands in one of those gaps is not faint,
+    /// it is absent. High accuracy integrates the whole step, so the gaps do
+    /// not exist.
+    ///
+    /// Both counts are pinned. If a future kernel change moves either
+    /// number this test says so instead of quietly regressing the reason the
+    /// row was built.
+    #[test]
+    fn a_hairline_survives_the_high_accuracy_shrink() {
+        let count = |interp: Interp| -> usize {
+            let (mut doc, rect) = hairline_doc();
+            let src = lift_region(&doc.layers[0], rect, None);
+            let xf = Affine2::scale_rotate_around([0.0, 0.0], 0.35, 0.35, 0.0, [0.0, 0.0]);
+            assert!(commit_transform(
+                &mut doc, &src, &xf, None, true, false, None, interp
+            ));
+            surviving_lines(&doc, 84, 5)
+        };
+        let bilinear = count(Interp::Bilinear);
+        let high = count(Interp::HighAccuracy);
+        assert_eq!(high, 20, "high accuracy keeps every hairline");
+        // Measured, not chosen: bilinear reads 12 of the 20 lines and drops
+        // 8 outright at this scale. That is the row's whole justification,
+        // in counted lines.
+        assert_eq!(bilinear, 12, "bilinear drops eight of the twenty");
+        assert!(
+            high > bilinear,
+            "high accuracy {high} must beat bilinear {bilinear}"
+        );
+    }
+
+    /// The default kernel is still bilinear, and the enum's default agrees
+    /// with the argument every existing caller was written against — the
+    /// byte-pin that lets the row ship without re-inking anyone's page.
+    #[test]
+    fn bilinear_is_the_default_kernel() {
+        assert_eq!(Interp::default(), Interp::Bilinear);
+        let run = |interp: Interp| -> Vec<u16> {
+            let (mut doc, rect) = hairline_doc();
+            let src = lift_region(&doc.layers[0], rect, None);
+            let xf = Affine2::scale_rotate_around([0.0, 0.0], 0.35, 0.35, 0.0, [0.0, 0.0]);
+            assert!(commit_transform(
+                &mut doc, &src, &xf, None, true, false, None, interp
+            ));
+            (0..84).map(|x| alpha_at(&doc, x, 5)).collect()
+        };
+        assert_eq!(
+            run(Interp::Bilinear),
+            run(Interp::default()),
+            "the default must be byte-identical to the old kernel"
+        );
+    }
+
+    /// Hard edges invents no colour: on a two-tone page every output pixel
+    /// is one of the two inputs, which is what keeps a 1-bit page 1-bit
+    /// through a transform.
+    #[test]
+    fn nearest_makes_no_new_colours() {
+        let (mut doc, rect) = hairline_doc();
+        let src = lift_region(&doc.layers[0], rect, None);
+        let xf = Affine2::scale_rotate_around([0.0, 0.0], 0.35, 0.35, 0.0, [0.0, 0.0]);
+        assert!(commit_transform(
+            &mut doc,
+            &src,
+            &xf,
+            None,
+            true,
+            false,
+            None,
+            Interp::Nearest
+        ));
+        let mut inked = 0;
+        for y in 0..21 {
+            for x in 0..84 {
+                let a = alpha_at(&doc, x, y);
+                assert!(
+                    a == 0 || a == FIX15_ONE as u16,
+                    "nearest produced a mixed alpha {a} at {x},{y}"
+                );
+                inked += (a > 0) as i32;
+            }
+        }
+        assert!(inked > 0, "nearest kept some ink");
+    }
+
+    /// Bicubic's negative lobes must not leave a premultiplied pixel whose
+    /// colour exceeds its own alpha — that composites as a bright fringe,
+    /// and a clamp is the only thing standing between the filter and one.
+    #[test]
+    fn bicubic_never_leaves_colour_above_alpha() {
+        let mut doc = Document::new(256, 256);
+        // A hard white-on-transparent square: the worst ringing case.
+        for y in 20..40 {
+            for x in 20..40 {
+                let ti = TileIdx::of_pixel(x, y);
+                let lx = (x - ti.x * TILE_SIZE as i32) as usize;
+                let ly = (y - ti.y * TILE_SIZE as i32) as usize;
+                doc.layers[0].tile_mut(ti).set_pixel(
+                    lx,
+                    ly,
+                    [FIX15_ONE as u16, FIX15_ONE as u16, FIX15_ONE as u16, FIX15_ONE as u16],
+                );
+            }
+        }
+        let rect = [20, 20, 40, 40];
+        let src = lift_region(&doc.layers[0], rect, None);
+        // A non-integer enlargement, so every tap sits at a fraction.
+        let xf = Affine2::scale_rotate_around([20.0, 20.0], 2.7, 2.7, 0.0, [0.0, 0.0]);
+        assert!(commit_transform(
+            &mut doc,
+            &src,
+            &xf,
+            None,
+            true,
+            false,
+            None,
+            Interp::Bicubic
+        ));
+        for y in 18..76 {
+            for x in 18..76 {
+                let ti = TileIdx::of_pixel(x, y);
+                let Some(t) = doc.layers[0].tile(ti) else {
+                    continue;
+                };
+                let p = t.pixel(
+                    (x - ti.x * TILE_SIZE as i32) as usize,
+                    (y - ti.y * TILE_SIZE as i32) as usize,
+                );
+                for c in 0..3 {
+                    assert!(
+                        p[c] <= p[3],
+                        "premultiplied invariant broken at {x},{y}: {p:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// High accuracy is a REDUCTION kernel. On an enlargement the box is
+    /// smaller than a source pixel, so it hands off to bilinear rather than
+    /// degenerating into nearest — pinned, because the fall-through is easy
+    /// to lose in a refactor and the symptom is stair-stepped upscales.
+    #[test]
+    fn high_accuracy_falls_through_to_bilinear_when_enlarging() {
+        let run = |interp: Interp| -> Vec<u16> {
+            let (mut doc, rect) = hairline_doc();
+            let src = lift_region(&doc.layers[0], rect, None);
+            let xf = Affine2::scale_rotate_around([0.0, 0.0], 1.7, 1.7, 0.0, [0.0, 0.0]);
+            assert!(commit_transform(
+                &mut doc, &src, &xf, None, true, false, None, interp
+            ));
+            (0..250).map(|x| alpha_at(&doc, x, 5)).collect()
+        };
+        assert_eq!(run(Interp::HighAccuracy), run(Interp::Bilinear));
     }
 }

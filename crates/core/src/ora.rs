@@ -279,6 +279,15 @@ pub fn save_to_with<W: Write + Seek>(
             draft: layer.draft,
             through: layer.folder && layer.through,
             escape: !layer.folder && layer.escape_frame,
+            // The prune the stable-id mint's doc comment owes: ids whose
+            // layer is gone are dropped HERE, at the only door out of the
+            // process, so a reloaded document can never carry a reference
+            // to a number the mint is free to reissue.
+            draws_over: if layer.folder || !layer.escape_frame {
+                Vec::new()
+            } else {
+                doc.live_draws_over(i).into_iter().collect()
+            },
             // Screen params ride as private JSON; the PNG above stays the
             // painted SOURCE ink (our loader re-derives the halftone from it).
             tone: layer.tone.and_then(|t| serde_json::to_string(&t).ok()),
@@ -393,6 +402,12 @@ struct LayerEntry {
     through: bool,
     /// FB-overflow: art bursts out of the panel (`mnc-escape`).
     escape: bool,
+    /// FB-overflow part 2: the stable ids this breakout layer draws over,
+    /// ascending, `;`-joined — written as `mnc-draws-over`. Empty = the
+    /// default seat, and the attribute is omitted. PRUNED at save (see
+    /// `Document::live_draws_over`): a dead id must never reach the file,
+    /// because next session's mint can hand that number to another layer.
+    draws_over: Vec<u64>,
     /// TRIAGE 138 p2: the mask PNG's zip path (+ None = unmasked).
     mask_src: Option<String>,
     /// Vector inking: the stroke-record sidecar's zip path
@@ -555,6 +570,15 @@ fn stack_xml(
         }
         if e.escape {
             extra.push_str(" mnc-escape=\"1\"");
+        }
+        if !e.draws_over.is_empty() {
+            let list = e
+                .draws_over
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(";");
+            extra.push_str(&format!(" mnc-draws-over=\"{list}\""));
         }
         if let Some(ss) = &e.strokes_src {
             extra.push_str(&format!(" mnc-strokes=\"{}\"", ss));
@@ -734,6 +758,14 @@ pub fn load_from<R: Read + Seek>(source: R) -> Result<Document, OraError> {
         layer.draft = e.draft;
         layer.through = layer.folder && e.through;
         layer.escape_frame = !layer.folder && e.escape;
+        // Part 2: the set is meaningless without the flag, so it is dropped
+        // rather than kept warm — a hand-edited file cannot smuggle a paint
+        // order onto a layer whose UI would never show it.
+        layer.draws_over = if layer.escape_frame {
+            e.draws_over.iter().copied().collect()
+        } else {
+            Default::default()
+        };
         layer.tone = e.tone;
         // FB-knockout: plain folders carry the effect (the group mat); a
         // FRAME folder cannot (`Document::set_edge` refuses one) — a
@@ -1061,6 +1093,10 @@ struct ParsedLayer {
     mask_unlinked: bool,
     /// FB-overflow (`mnc-escape`): art bursts out of the panel.
     escape: bool,
+    /// FB-overflow part 2 (`mnc-draws-over`): the stable ids this breakout
+    /// layer draws over, `;`-joined. Unparseable entries are dropped, not
+    /// fatal — the worst case is the marker sliding back down.
+    draws_over: Vec<u64>,
     /// Audit H2/M1: the cropped mask image's pixel origin, and the exact
     /// tile set it carries (None = legacy file → old load semantics).
     mask_org: Option<(i32, i32)>,
@@ -1096,6 +1132,12 @@ fn parse_i32_pair(s: &str) -> Option<(i32, i32)> {
 }
 
 /// `"x,y;x,y"` → tile indices (`mnc-mask-tiles`); unparseable entries drop.
+/// `mnc-draws-over`: `;`-joined stable ids. Junk entries are skipped —
+/// a half-readable set still puts the marker somewhere sane.
+fn parse_id_list(s: &str) -> Vec<u64> {
+    s.split(';').filter_map(|p| p.trim().parse().ok()).collect()
+}
+
 fn parse_tile_list(s: &str) -> Vec<TileIdx> {
     s.split(';')
         .filter_map(parse_i32_pair)
@@ -1231,6 +1273,7 @@ fn parse_stack_xml(xml: &str) -> Result<ParsedStack, OraError> {
                         through: get("mnc-through").is_some(),
                         id: get("mnc-id").and_then(|v| v.parse().ok()),
                         escape: false,
+                        draws_over: Vec::new(),
                         tone: get("mnc-tone").and_then(|j| serde_json::from_str(j).ok()),
                         edge: get("mnc-edge").and_then(|j| serde_json::from_str(j).ok()),
                         fill: get("mnc-fill").and_then(|j| serde_json::from_str(j).ok()),
@@ -1286,6 +1329,7 @@ fn parse_stack_xml(xml: &str) -> Result<ParsedStack, OraError> {
                     through: get("mnc-through").is_some(),
                     id: get("mnc-id").and_then(|v| v.parse().ok()),
                     escape: get("mnc-escape").is_some(),
+                    draws_over: get("mnc-draws-over").map(parse_id_list).unwrap_or_default(),
                     tone: get("mnc-tone").and_then(|j| serde_json::from_str(j).ok()),
                     edge: get("mnc-edge").and_then(|j| serde_json::from_str(j).ok()),
                     fill: get("mnc-fill").and_then(|j| serde_json::from_str(j).ok()),
@@ -1978,6 +2022,107 @@ mod tests {
         assert!(
             back.layers.iter().filter(|l| l.escape_frame).count() == 1,
             "and only where it was set"
+        );
+    }
+
+    /// Part 2: the draws-over set and the mask that caps the spill both
+    /// ride the file, under the attribute spelling this test pins.
+    #[test]
+    fn the_draws_over_set_and_its_mask_cap_roundtrip() {
+        let mut doc = Document::new(96, 96);
+        let lo = doc.add_frame_folder(
+            "lower",
+            crate::frame::FrameSet::single_rect([8.0, 48.0, 88.0, 88.0], 2.0),
+        );
+        let burst = lo - 1;
+        // Some ink, so the layer (and its mask) has a tile to save.
+        doc.layers[burst].tile_mut(TileIdx::new(0, 0));
+        assert!(doc.set_layer_escape(burst, true));
+        assert!(doc.mask_selection_blank(burst), "mask created");
+        let up = doc.add_frame_folder(
+            "upper",
+            crate::frame::FrameSet::single_rect([8.0, 8.0, 88.0, 40.0], 2.0),
+        );
+        assert!(doc.set_layer_spill_seat(burst, Some(up)));
+        let want = doc.layers[burst].draws_over.clone();
+        assert!(!want.is_empty(), "something to persist");
+
+        let xml = String::from_utf8(
+            zip::ZipArchive::new(Cursor::new(to_bytes(&doc)))
+                .and_then(|mut z| {
+                    let mut s = Vec::new();
+                    std::io::copy(&mut z.by_name("stack.xml")?, &mut s)?;
+                    Ok(s)
+                })
+                .expect("stack.xml"),
+        )
+        .expect("utf8");
+        assert!(
+            xml.contains("mnc-draws-over=\""),
+            "the attribute spelling is mnc-draws-over: {xml}"
+        );
+
+        let back = roundtrip(&doc);
+        assert_eq!(back.layers[burst].draws_over, want, "the set survived");
+        assert!(
+            back.layers[burst].breakout_mask().is_some(),
+            "the mask cap survived with it"
+        );
+        assert_eq!(
+            back.spill_anchor(burst),
+            doc.spill_anchor(burst),
+            "and it still resolves to the same seat"
+        );
+    }
+
+    /// THE SOFT SPOT the stable-id mint's doc comment named: this is the
+    /// first persisted id cross-reference, and a deleted layer's id can be
+    /// reborn in a later session, so dead ids must not reach the file.
+    #[test]
+    fn a_dead_id_is_pruned_from_draws_over_at_save() {
+        let mut doc = Document::new(96, 96);
+        let lo = doc.add_frame_folder(
+            "lower",
+            crate::frame::FrameSet::single_rect([8.0, 48.0, 88.0, 88.0], 2.0),
+        );
+        let burst = lo - 1;
+        doc.layers[burst].tile_mut(TileIdx::new(0, 0));
+        assert!(doc.set_layer_escape(burst, true));
+        // Above the frame folder header, so both are real seat candidates.
+        let a = doc.add_layer_above(doc.layers.len() - 1, "over me");
+        let b = doc.add_layer_above(doc.layers.len() - 1, "and me");
+        assert!(a > lo && b > a, "both sit above the panel: {a} {b} (hdr {lo})");
+        let (id_a, id_b) = (doc.layers[a].id(), doc.layers[b].id());
+        assert!(doc.set_layer_spill_seat(burst, Some(b)));
+        assert!(doc.layers[burst].draws_over.contains(&id_a));
+
+        // Delete the lower of the two covered layers. The set on the layer
+        // still names it — nothing walks the stack on delete — so the SAVE
+        // is what has to drop it.
+        assert!(doc.remove_layer(a));
+        assert!(
+            doc.layers[burst].draws_over.contains(&id_a),
+            "precondition: the live set still holds the dead id"
+        );
+
+        let back = roundtrip(&doc);
+        let burst = back
+            .layers
+            .iter()
+            .position(|l| l.escape_frame)
+            .expect("the breakout survived");
+        assert!(
+            !back.layers[burst].draws_over.contains(&id_a),
+            "the dead id was pruned at save"
+        );
+        assert!(
+            back.layers[burst].draws_over.contains(&id_b),
+            "the live one stayed"
+        );
+        let live: std::collections::HashSet<u64> = back.layers.iter().map(|l| l.id()).collect();
+        assert!(
+            back.layers[burst].draws_over.iter().all(|i| live.contains(i)),
+            "every reloaded entry names a layer that exists"
         );
     }
 

@@ -375,15 +375,17 @@ fn composite_size(
             }
             folder_alpha.clear();
             if touched {
-                // FB-overflow: escaped layers re-seat above their frame
-                // folder header — `order` is the shared walk, `ed` the
-                // effective depth (the header's own, for an escapee).
-                for &(li, ed) in &order {
+                // FB-overflow: escaped layers re-seat above their anchor —
+                // `order` is the shared walk, `step.depth` the effective
+                // depth (the anchor's own, for an escapee) and `step.part`
+                // which half of a mask-capped spill this step draws.
+                for &step in &order {
+                    let li = step.layer;
                     let layer = &doc.layers[li];
                     if !eff[li] {
                         continue;
                     }
-                    let d = ed as usize;
+                    let d = step.depth as usize;
                     // LF-002 Through: a through-folder's children collapse
                     // onto the folder's own effective accumulator.
                     let cd = collapse[d];
@@ -513,6 +515,15 @@ fn composite_size(
                         .filter(|m| m.enabled)
                         .and_then(|m| m.tiles.get(&idx))
                         .map(|mt| mt.data());
+                    // Breakout mask cap: the IN half is the exact complement
+                    // of the mask, and an absent tile is full coverage — so
+                    // it holds nothing back and the whole tile stays with the
+                    // OUT half at the escaped seat. Skipping the tile outright
+                    // keeps that free.
+                    if step.part == crate::doc::SpillPart::In && mask_cov.is_none() {
+                        continue;
+                    }
+                    let hold_in = step.part == crate::doc::SpillPart::In;
                     for (i, slot) in accs[cd].iter_mut().enumerate() {
                         let o = i * 4;
                         // LP-016/017/022: the per-layer display maths apply to
@@ -530,6 +541,7 @@ fn composite_size(
                         let mut src = scale_opacity(px_to_f32(base_px), layer.opacity);
                         if let Some(md) = mask_cov {
                             let m = md[i * 4 + 3] as f32 / 32768.0;
+                            let m = if hold_in { 1.0 - m } else { m };
                             for c in src.iter_mut() {
                                 *c *= m;
                             }
@@ -1574,6 +1586,163 @@ mod tests {
             !flat.set_layer_escape(0, true),
             "no frame folder above: refuse"
         );
+    }
+
+    /// A layer mask with flat per-TILE coverage. 32768 = "let this out",
+    /// 0 = "hold it inside the panel"; an index absent from `cov` has no
+    /// mask tile at all, which is full coverage by the unmasked rule.
+    fn cap_mask(doc: &mut Document, layer: usize, cov: &[(TileIdx, u16)]) {
+        let mut m = crate::doc::LayerMask {
+            tiles: std::collections::HashMap::new(),
+            enabled: true,
+            revision: crate::tile::next_revision(),
+        };
+        for &(idx, c) in cov {
+            let mut t = crate::tile::Tile::new_transparent();
+            for y in 0..TILE_SIZE {
+                for x in 0..TILE_SIZE {
+                    t.set_pixel(x, y, [c, c, c, c]);
+                }
+            }
+            m.tiles.insert(idx, std::sync::Arc::new(t));
+        }
+        doc.layers[layer].mask = Some(m);
+    }
+
+    /// FB-overflow part 2, item 1: a breakout layer's OWN mask caps the
+    /// spill. Inside the mask the art gets out over the border; outside it
+    /// the art stays exactly where it was, clipped by the panel — the two
+    /// halves are complements, so nothing is drawn twice and nothing is
+    /// lost.
+    #[test]
+    fn a_layer_mask_caps_the_spill_to_the_masked_region() {
+        use crate::frame::FrameSet;
+        // 128² = four 64² tiles; the panel is the middle square, so every
+        // tile has both an inside-the-panel and an outside-the-panel part.
+        let mut doc = Document::new(128, 128);
+        let fs = FrameSet::single_rect([32.0, 32.0, 96.0, 96.0], 4.0);
+        let hi = doc.add_frame_folder("F", fs);
+        let draw = hi - 1;
+        for ty in 0..2 {
+            for tx in 0..2 {
+                fill_tile(&mut doc, draw, TileIdx::new(tx, ty), [0.0, 1.0, 0.0, 1.0]);
+            }
+        }
+        assert!(doc.set_layer_escape(draw, true));
+        // Out through the top-left tile only; the other three are held.
+        cap_mask(
+            &mut doc,
+            draw,
+            &[
+                (TileIdx::new(0, 0), 32768),
+                (TileIdx::new(1, 0), 0),
+                (TileIdx::new(0, 1), 0),
+                (TileIdx::new(1, 1), 0),
+            ],
+        );
+
+        let img = composite(&doc, Background::White);
+        assert_eq!(
+            img.get_pixel(8, 8).0,
+            [0, 255, 0, 255],
+            "inside the mask: the art is out over the paper"
+        );
+        assert_eq!(
+            img.get_pixel(48, 32).0,
+            [0, 255, 0, 255],
+            "inside the mask: over the border ink too"
+        );
+        assert_eq!(
+            img.get_pixel(8, 120).0,
+            [255, 255, 255, 255],
+            "outside the mask: still clipped by the panel"
+        );
+        let border = img.get_pixel(64, 32).0;
+        assert!(
+            border[0] < 40 && border[1] < 40,
+            "outside the mask: the border ink is untouched, got {border:?}"
+        );
+        assert_eq!(
+            img.get_pixel(80, 80).0,
+            [0, 255, 0, 255],
+            "outside the mask: inside the panel the art still draws"
+        );
+
+        // The complement is exact: at half opacity the two halves must land
+        // on the SAME colour inside the panel. A seam here would mean the
+        // spilled half is blending over the held half.
+        doc.set_layer_opacity(draw, 0.5);
+        let img = composite(&doc, Background::White);
+        assert_eq!(
+            img.get_pixel(40, 40).0,
+            img.get_pixel(80, 80).0,
+            "no double blend where the mask changes hands"
+        );
+        assert_eq!(img.get_pixel(40, 40).0, [128, 255, 128, 255]);
+
+        // Disabling the mask puts the all-or-nothing spill back.
+        doc.set_layer_opacity(draw, 1.0);
+        doc.layers[draw].mask.as_mut().unwrap().enabled = false;
+        let img = composite(&doc, Background::White);
+        assert_eq!(
+            img.get_pixel(8, 120).0,
+            [0, 255, 0, 255],
+            "mask off: every side spills again"
+        );
+    }
+
+    /// Item 2: the draws-over set moves WHERE the breakout composites. By
+    /// default it lands just above its own frame folder, so a panel stacked
+    /// above still covers it; naming that panel puts it on top.
+    #[test]
+    fn draws_over_seats_the_breakout_above_the_named_panel() {
+        use crate::frame::FrameSet;
+        let mut doc = Document::new(128, 128);
+        // Lower panel + its escapee (green, whole canvas).
+        let lo = doc.add_frame_folder("lower", FrameSet::single_rect([8.0, 64.0, 120.0, 120.0], 4.0));
+        let burst = lo - 1;
+        for ty in 0..2 {
+            for tx in 0..2 {
+                fill_tile(&mut doc, burst, TileIdx::new(tx, ty), [0.0, 1.0, 0.0, 1.0]);
+            }
+        }
+        assert!(doc.set_layer_escape(burst, true));
+        // Upper panel, ABOVE it in the stack, with opaque red art inside.
+        let up = doc.add_frame_folder("upper", FrameSet::single_rect([8.0, 8.0, 120.0, 56.0], 4.0));
+        let upart = up - 1;
+        for tx in 0..2 {
+            fill_tile(&mut doc, upart, TileIdx::new(tx, 0), [1.0, 0.0, 0.0, 1.0]);
+        }
+
+        // Default: over its own frame folder only — the upper panel wins.
+        let img = composite(&doc, Background::White);
+        assert_eq!(
+            img.get_pixel(64, 30).0,
+            [255, 0, 0, 255],
+            "default seat: the upper panel still covers the burst"
+        );
+
+        // Name the upper panel's ART: the seat lifts out of that sealed
+        // folder to the header, so the burst clears the border too.
+        let id = doc.layers[upart].id();
+        assert!(doc.set_layer_spill_seat(burst, Some(upart)));
+        assert!(doc.layers[burst].draws_over.contains(&id));
+        let img = composite(&doc, Background::White);
+        assert_eq!(
+            img.get_pixel(64, 30).0,
+            [0, 255, 0, 255],
+            "draws over: the burst is on top of the upper panel's art"
+        );
+        assert_eq!(
+            img.get_pixel(64, 8).0,
+            [0, 255, 0, 255],
+            "…and over that panel's border ink, not inside its mask"
+        );
+
+        // Back to the default seat.
+        assert!(doc.set_layer_spill_seat(burst, None));
+        let img = composite(&doc, Background::White);
+        assert_eq!(img.get_pixel(64, 30).0, [255, 0, 0, 255]);
     }
 
     #[test]

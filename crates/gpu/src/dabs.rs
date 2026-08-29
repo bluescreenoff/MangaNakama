@@ -610,7 +610,7 @@ impl crate::Renderer {
         let mut bgs = Vec::with_capacity(dirty.len());
         let mut uni = Vec::with_capacity(dirty.len());
         for &idx in &dirty {
-            let key = (layer, idx, false);
+            let key = (layer, idx, crate::TileVariant::Pixels);
             let cpu_tile = cpu_layer.and_then(|l| l.tile(idx));
             let cpu_rev = cpu_tile.map(|t| t.revision()).unwrap_or(0);
             let seeded = self.tiles.contains_key(&key);
@@ -786,7 +786,7 @@ impl crate::Renderer {
         if self.dabs.is_none() {
             return None;
         }
-        let entry = self.tiles.get(&(layer, idx, false))?;
+        let entry = self.tiles.get(&(layer, idx, crate::TileVariant::Pixels))?;
         let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("mn.dab.rb1"),
             size: TILE_BYTES as u64,
@@ -861,7 +861,7 @@ impl crate::Renderer {
                 label: Some("mn.dab.rb"),
             });
         for (i, &idx) in tiles.iter().enumerate() {
-            let Some(entry) = self.tiles.get(&(layer, idx, false)) else {
+            let Some(entry) = self.tiles.get(&(layer, idx, crate::TileVariant::Pixels)) else {
                 continue;
             };
             enc.copy_texture_to_buffer(
@@ -924,7 +924,7 @@ impl crate::Renderer {
     /// gap (upload-fresh + redraw-required) is exactly what drives the
     /// post-stroke recomposite.
     pub fn mark_dab_tile_clean(&mut self, layer: usize, idx: TileIdx, rev: u64) {
-        if let Some(c) = self.tiles.get_mut(&(layer, idx, false)) {
+        if let Some(c) = self.tiles.get_mut(&(layer, idx, crate::TileVariant::Pixels)) {
             c.revision = rev;
         }
     }

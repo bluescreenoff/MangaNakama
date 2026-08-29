@@ -682,6 +682,26 @@ impl Engine {
         }
     }
 
+    /// CSP Ink ▸ Mixing mode (I-014, rows 58 + 167). Every kind, like the
+    /// rest of the ink group: the twins have to mix the same way the main
+    /// engine does or a symmetry stroke would blend differently on one side.
+    pub fn set_color_mixing(&mut self, m: mn_core::BrushMix) {
+        self.each_kind(|k| {
+            if let EngineKind::My(b) = k {
+                b.set_color_mixing(m);
+            }
+        });
+    }
+
+    /// The mixing mode as the PRESET holds it — Standard for every engine
+    /// kind that has no pigment model at all.
+    pub fn color_mixing(&self) -> mn_core::BrushMix {
+        match &self.main {
+            EngineKind::My(b) => b.color_mixing(),
+            _ => mn_core::BrushMix::Standard,
+        }
+    }
+
     /// CSP Ink ▸ Intensity of blur (I-013). `absolute` pins the width to
     /// canvas px instead of scaling it with the brush.
     pub fn set_blur(&mut self, amount: f32, absolute: bool) {
@@ -1002,6 +1022,12 @@ impl EngineKind {
         if (p.color_stretch - b.color_stretch()).abs() > 1e-3 {
             b.set_color_stretch(p.color_stretch);
         }
+        // I-014 is a MODE, not a number, so it applies unconditionally like
+        // jitter and the rim rather than through a read-back guard: Standard
+        // IS every untouched preset's state, so re-stating it changes
+        // nothing — and it must be re-stated, because it also sets the
+        // GPU-routing flag the stroke dispatch reads.
+        b.set_color_mixing(p.brush_mix);
         let (b_amt, b_abs) = b.blur();
         if (p.blur - b_amt).abs() > 1e-3 || p.blur_abs != b_abs {
             b.set_blur(p.blur, p.blur_abs);

@@ -84,6 +84,59 @@ fn tool_property_body(ui: &mut egui::Ui, app: &mut App) {
 /// the absolute params through `AppCmd::TransformUpdate` — the same
 /// derivation the drag gestures use — so numbers and handles can never
 /// disagree.
+/// `I-005` — CSP Tool Settings ▸ Image settings ▸ **Interpolation method**.
+///
+/// Disabled, with the reason said out loud, while a MESH drag is up: the
+/// mesh path resamples through `warp_buffer`'s own bilinear over the
+/// deformed quads and hands the commit a finished buffer, so the kernel
+/// never reaches those pixels. A live-looking dropdown that cannot change
+/// anything is the export dialog's Resample row problem, and gets the export
+/// dialog's answer.
+fn interp_row(ui: &mut egui::Ui, app: &mut App) {
+    use mn_core::transform::Interp;
+
+    let mesh = app
+        .transform_drag
+        .as_ref()
+        .is_some_and(|d| d.mesh.is_some());
+    let current = app.transform_interp;
+    let mut pick = None;
+    ui.horizontal(|ui| {
+        ui.label("Interpolation");
+        ui.add_enabled_ui(!mesh, |ui| {
+            egui::ComboBox::from_id_salt("mn.transform.interp")
+                .width(120.0)
+                .selected_text(current.label())
+                .show_ui(ui, |ui| {
+                    let mut sel = current;
+                    for i in Interp::ALL {
+                        ui.selectable_value(&mut sel, i, i.label());
+                    }
+                    if sel != current {
+                        pick = Some(sel);
+                    }
+                })
+                .response
+                .on_hover_text(if mesh {
+                    "a mesh warp resamples through its own lattice — this \
+                     kernel only applies to scale/rotate"
+                } else {
+                    "CSP's 補間方法, and it matters most when you SHRINK. \
+                     Smooth edges (bilinear) reads two pixels per step, so \
+                     below about half size a 1 px line can fall between the \
+                     samples and disappear outright. High accuracy averages \
+                     the whole area a pixel covers, so hairlines come through \
+                     grey instead of broken — pick it for reducing lineart. \
+                     Hard edges invents no colours at all (1-bit pages, pixel \
+                     art); Clear edges sharpens an enlargement."
+                });
+        });
+    });
+    if let Some(i) = pick {
+        app.push_cmd(AppCmd::SetTransformInterp(i));
+    }
+}
+
 fn transform_property(ui: &mut egui::Ui, app: &mut App) {
     ui.label(
         egui::RichText::new("Transform")
@@ -158,6 +211,7 @@ fn transform_property(ui: &mut egui::Ui, app: &mut App) {
     {
         app.transform_keep_aspect = keep;
     }
+    interp_row(ui, app);
     group_caption(ui, "Position");
     let c4 = field(ui, "X", &mut px, 1.0, "");
     let c5 = field(ui, "Y", &mut py, 1.0, "");

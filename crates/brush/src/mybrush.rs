@@ -382,6 +382,16 @@ pub struct MyBrush {
     /// colorize, posterize) — stroke routing consults this (`gpu_ready`);
     /// the CPU path is the reference, not a fallback.
     exotic: bool,
+    /// CSP Ink ▸ Mixing mode (I-014, triage rows 58 + 167): additive or
+    /// spectral pigment. Owns `exotic` — see [`MyBrush::set_color_mixing`].
+    mix: crate::BrushMix,
+    /// The preset's `paint_mode` had INPUT MAPPINGS at load, so its spectral
+    /// weight is dynamic and zeroing the base value does not switch it off.
+    /// Such a brush stays `exotic` even on Standard: routing it to the GPU
+    /// would drop a mode the shader cannot express, which is the one thing
+    /// the flag exists to prevent. Nothing in the tree ships one; the field
+    /// is here so an imported MyPaint 2 brush cannot slip through.
+    paint_mapped: bool,
     /// Preset samples the canvas per dab (the `smudge` setting). GPU-routed
     /// since #0.1 part 3: the dabs themselves are ordinary (color computed
     /// engine-side before the record), but the app must serve the smudge
@@ -603,6 +613,7 @@ impl MyBrush {
         }
         let mut exotic = false;
         let mut smudge = false;
+        let mut paint_mapped = false;
         let settings_obj = json
             .get("settings")
             .and_then(Value::as_object)
@@ -625,6 +636,15 @@ impl MyBrush {
         }
         // Stock defaults first, then the preset on top — upstream's order.
         unsafe { ffi::mypaint_brush_from_defaults(brush) };
+        // I-014 (rows 58/167): `paint_mode`'s own default in
+        // brushsettings.json is 1.0 — MyPaint 2 ships spectral mixing ON.
+        // MangaNakama's default is Standard, and until PATCHES.md #21 the
+        // legacy stroke entry forced the weight to 0 so the base value never
+        // mattered. Now that it DOES reach the pixels, zero it explicitly
+        // here: the preset's own `paint_mode` key (if it has one) is applied
+        // by the loop below and wins, which is how an imported MyPaint brush
+        // keeps the mixing it was authored with.
+        unsafe { ffi::mypaint_brush_set_base_value(brush, settings::setting::PAINT_MODE, 0.0) };
 
         for (setting_name, body) in settings_obj {
             let Some(id) = settings::setting_id(setting_name) else {
@@ -648,7 +668,21 @@ impl MyBrush {
             // `colorize`/`posterize` left this list in the P4 round — their
             // stamps are ported (dab.wgsl + cpu_raster mirror); only the
             // spectral `paint` mode remains CPU-bound.
-            if setting_name.as_str() == "paint" {
+            //
+            // BUG, found while wiring rows 58/167 (2026-08-30): this arm
+            // matched `"paint"`, and libmypaint's setting is `"paint_mode"`
+            // (`brushsettings.json` internal_name; SETTING_NAMES[63]). It
+            // could never fire — a `"paint"` key is not a setting at all, so
+            // `setting_id` returns None and the loop `continue`s three lines
+            // above this. `exotic` was therefore ALWAYS false. It never
+            // mis-rendered anything because the legacy stroke entry also
+            // forced the weight to zero (PATCHES.md #21 is what changed
+            // that), but the flag the whole GPU-routing story rests on was
+            // dead. `"paint"` is kept as an accepted alias only because this
+            // file has said that word since round 27 and a preset written
+            // against the old name should still route CPU rather than
+            // silently paint additively.
+            if setting_name.as_str() == "paint_mode" || setting_name.as_str() == "paint" {
                 let base = body
                     .get("base_value")
                     .and_then(Value::as_f64)
@@ -657,6 +691,7 @@ impl MyBrush {
                     .get("inputs")
                     .and_then(Value::as_object)
                     .is_some_and(|m| !m.is_empty());
+                paint_mapped = mapped;
                 if base > 0.0 || mapped {
                     exotic = true;
                 }
@@ -971,6 +1006,12 @@ impl MyBrush {
             record_mode: RecordMode::Off,
             record: DabRecord::default(),
             exotic,
+            // I-014: whatever the preset's own `paint_mode` base value ended
+            // up as after the loop (0.0 for everything in the tree).
+            mix: crate::BrushMix::from_paint_weight(unsafe {
+                ffi::mypaint_brush_get_base_value(brush, settings::setting::PAINT_MODE)
+            }),
+            paint_mapped,
             smudge,
             view_zoom: 1.0,
             view_rotation_rad: 0.0,
@@ -1029,6 +1070,27 @@ impl MyBrush {
     fn push_color(&mut self) {
         let (h, s, v) = self.base_hsv;
         let (dh, ds, dv) = self.jitter_off;
+        // `I-014`'s second clause, stated outright in CSP's manual: the
+        // mixing mode ALSO governs Color Jitter. Under Perceptual the three
+        // offsets are applied in Oklab (`mn_core::mix::shift_oklab`, the
+        // same implementation the gradient's Perceptual ramp uses) instead
+        // of HSV, so a brightness wander does not also wash the colour out
+        // the way an HSV `v +=` does — which is the same "less dulling"
+        // claim the row is sold on.
+        //
+        // Skipped entirely when the jitter is off OR the mode is Standard,
+        // so an untouched preset never even round-trips through Oklab.
+        if self.mix != crate::BrushMix::Standard && (dh, ds, dv) != (0.0, 0.0, 0.0) {
+            let rgb = hsv_to_rgb(h, s, v);
+            let shifted = mn_core::mix::shift_oklab(rgb, dh, ds, dv);
+            let (h, s, v) = rgb_to_hsv(shifted);
+            unsafe {
+                ffi::mypaint_brush_set_base_value(self.brush, setting::COLOR_H, h);
+                ffi::mypaint_brush_set_base_value(self.brush, setting::COLOR_S, s);
+                ffi::mypaint_brush_set_base_value(self.brush, setting::COLOR_V, v);
+            }
+            return;
+        }
         let h = (h + dh).rem_euclid(1.0);
         let s = (s + ds).clamp(0.0, 1.0);
         let v = (v + dv).clamp(0.0, 1.0);
@@ -1398,6 +1460,49 @@ impl MyBrush {
     /// reports its own honest value).
     pub fn paint_density(&self) -> f32 {
         1.0 - self.base_value(setting::SMUDGE)
+    }
+
+    /// CSP Ink ▸ **Mixing mode** (`I-014`, triage rows 58 + 167): how a dab's
+    /// pigment meets the pigment already on the page.
+    ///
+    /// `Standard` is additive sRGB — every preset in the tree, unchanged to
+    /// the byte. `Perceptual` turns on libmypaint's spectral (subtractive)
+    /// mixing: the dab blends through a 10-band spectral upsampling with a
+    /// weighted geometric mean, so blue over yellow goes green instead of
+    /// grey, and the smudge sampler picks colour up the same way. That is
+    /// CSP's claim for the mode and it is why `I-006`'s note says Dynamics
+    /// go away under Blend — the mixing, not the opacity, is doing the work.
+    ///
+    /// # This setter decides the RASTERIZER, not just a colour
+    ///
+    /// The P1 GPU dab shader ports the additive blends only; there is no
+    /// spectral arm in `dab.wgsl` and adding one would be a shader rewrite,
+    /// not a knob. So Perceptual sets [`Self::gpu_ready`]'s `exotic` flag
+    /// with itself and the stroke routes to the CPU dab path — the
+    /// established rule (`set_water_edge`, `set_paint_density`) that a knob
+    /// which decides the path is set where the knob is set. Standard clears
+    /// it again, unless the preset's own `paint_mode` was DYNAMIC at load
+    /// (`paint_mapped`), in which case zeroing a base value would not
+    /// actually switch the mode off and the brush stays CPU-bound.
+    ///
+    /// The base value is written as well as the flag, so a saved preset
+    /// round-trips through the ordinary `settings` path and stays readable
+    /// by MyPaint itself — the `smudge` precedent exactly.
+    pub fn set_color_mixing(&mut self, mix: crate::BrushMix) {
+        self.mix = mix;
+        unsafe {
+            ffi::mypaint_brush_set_base_value(
+                self.brush,
+                settings::setting::PAINT_MODE,
+                mix.paint_weight(),
+            )
+        };
+        self.exotic = self.paint_mapped || mix != crate::BrushMix::Standard;
+    }
+
+    /// The mixing mode as the engine holds it.
+    pub fn color_mixing(&self) -> crate::BrushMix {
+        self.mix
     }
 
     /// CSP Ink ▸ **Color stretch** (I-011): how far the pigment picked up at
@@ -1991,6 +2096,10 @@ impl MyBrush {
         set_radius_random_abs(self.radius_random_abs);
         set_hard_dab_flag(self.hard_dab);
         set_scatter_flag(self.scatter);
+        // I-014 (PATCHES.md #21). Published unconditionally, like every flag
+        // above: Standard publishes 0.0, which is the literal the C used to
+        // hard-code, so the additive path is untouched.
+        set_paint_mode_flag(self.mix.paint_weight());
         set_texture_hook(
             self.texture.as_ref(),
             &mut self.tex_accum,
@@ -2438,6 +2547,11 @@ thread_local! {
     static RADIUS_RANDOM_ABS_PX: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     static HARD_DAB: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     static SCATTER: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// CSP Ink ▸ Mixing mode (I-014, rows 58/167; PATCHES.md #21): the
+    /// spectral-pigment weight for the stroke in flight. 0 = the additive
+    /// path every preset already draws with, bit for bit. Same per-stroke
+    /// arming and same one-brush-per-thread contract as the flags above.
+    static PAINT_MODE: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     /// Texture-tip state (round 26). The accumulator lives in the OWNING
     /// brush — the raw pointer is set per `stroke_to` (never dereferenced
     /// outside one, so it cannot dangle) and advanced by the C-side per-dab
@@ -2701,6 +2815,14 @@ pub extern "C" fn mnc_brush_scatter() -> f32 {
     SCATTER.with(|c| f32::from_bits(c.get()))
 }
 
+/// Called from the patched `mypaint-brush.c` (per dab) and
+/// `mypaint-tiled-surface.c` (per dab, and per smudge sample) — PATCHES.md
+/// #21. The stroke's spectral-pigment weight; 0 = stock additive mixing.
+#[unsafe(no_mangle)]
+pub extern "C" fn mnc_brush_paint_mode() -> f32 {
+    PAINT_MODE.with(|c| f32::from_bits(c.get()))
+}
+
 /// Called from the patched `mypaint-tiled-surface.c` per dab pixel (patch
 /// #10): the active texture's side length, 0 = texture off.
 #[unsafe(no_mangle)]
@@ -2929,6 +3051,10 @@ fn set_scatter_flag(v: f32) {
     SCATTER.with(|c| c.set(v.clamp(0.0, 4.0).to_bits()));
 }
 
+fn set_paint_mode_flag(v: f32) {
+    PAINT_MODE.with(|c| c.set(v.clamp(0.0, 1.0).to_bits()));
+}
+
 /// Evaluate a libmypaint mapping the way `mypaint_mapping_calculate` does,
 /// quirks included: it interpolates the segment containing `x` and extrapolates
 /// along the outer segments, except that a flat segment returns its own `y`.
@@ -2992,6 +3118,30 @@ fn rgb_to_hsv(rgb: [f32; 3]) -> (f32, f32, f32) {
 
     let s = if max <= 0.0 { 0.0 } else { d / max };
     (h, s, max)
+}
+
+/// HSV 0..1 -> sRGB 0..1, the exact inverse of [`rgb_to_hsv`] and the same
+/// convention libmypaint's `hsv_to_rgb_float` uses (hue wraps at 1.0).
+///
+/// Exists for `I-014`'s Perceptual colour jitter, which has to leave the
+/// brush colour's HSV form, shift it in Oklab and come back — the C only
+/// accepts HSV base values, so the round trip is the interface, not a
+/// choice.
+fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [f32; 3] {
+    let h = h.rem_euclid(1.0) * 6.0;
+    let s = s.clamp(0.0, 1.0);
+    let v = v.clamp(0.0, 1.0);
+    let i = h.floor();
+    let f = h - i;
+    let (p, q, t) = (v * (1.0 - s), v * (1.0 - s * f), v * (1.0 - s * (1.0 - f)));
+    match i as i32 % 6 {
+        0 => [v, t, p],
+        1 => [q, v, p],
+        2 => [p, v, t],
+        3 => [p, q, v],
+        4 => [t, p, v],
+        _ => [v, p, q],
+    }
 }
 
 /// Discovery for the brush picker: every `.myb` under a directory tree.

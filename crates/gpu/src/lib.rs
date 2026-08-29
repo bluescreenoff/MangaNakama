@@ -531,11 +531,34 @@ struct LayerSig {
     /// until this round — found while adding the other two.)
     tint: u32,
     fx: u32,
+    /// FB-overflow, both parts: the escape flag, the mask cap, and the
+    /// draws-over set hashed into one word. Every one of these moves the
+    /// layer to a different SEAT in `composite_order` (or splits it in two)
+    /// without touching a single tile revision, so a canvas that did not
+    /// watch them here would keep showing the old paint order until
+    /// something else forced a rebuild.
+    spill: u64,
 }
 
-/// Key of a cached tile texture: layer index, tile index, and whether it is
-/// the layer's coverage mask (frame folders) rather than its pixels.
-type TileKey = (usize, TileIdx, bool);
+/// Which raster of a layer a cached tile texture holds.
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+enum TileVariant {
+    /// The layer's display pixels, with an enabled layer mask already folded
+    /// in (see the upload loop).
+    Pixels,
+    /// A frame folder's derived panel-coverage mask.
+    Coverage,
+    /// FB-overflow mask cap: the display pixels times ONE MINUS the layer
+    /// mask — the half a breakout layer holds INSIDE the panel
+    /// (`SpillPart::In`). Uploaded only for the layers `composite_order`
+    /// splits in two, and only for tiles the mask actually covers (an absent
+    /// mask tile holds nothing back).
+    HeldIn,
+}
+
+/// Key of a cached tile texture: layer index, tile index, and which of the
+/// layer's rasters it is.
+type TileKey = (usize, TileIdx, TileVariant);
 
 struct CachedTile {
     texture: wgpu::Texture,
@@ -2118,7 +2141,8 @@ impl Renderer {
             .layers
             .iter()
             .zip(&vis)
-            .map(|(l, v)| LayerSig {
+            .enumerate()
+            .map(|(li, (l, v))| LayerSig {
                 visible: *v,
                 opacity: l.opacity.to_bits(),
                 blend: blend_slot(l.blend),
@@ -2136,6 +2160,17 @@ impl Renderer {
                         l.expression
                     },
                 ),
+                spill: {
+                    use std::hash::{Hash, Hasher};
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    l.escape_frame.hash(&mut h);
+                    l.draws_over.hash(&mut h);
+                    // The resolved seat, not just the wish: a structural edit
+                    // elsewhere can move it with this layer untouched.
+                    doc.spill_anchor(li).hash(&mut h);
+                    l.breakout_mask().map(|m| m.revision).hash(&mut h);
+                    h.finish()
+                },
             })
             .collect();
         if sig != self.layer_sig {
@@ -2166,18 +2201,31 @@ impl Renderer {
         let mut batch: Vec<(wgpu::Texture, Cow<[u16]>)> = Vec::with_capacity(UPLOAD_BATCH);
 
         for (li, layer) in doc.layers.iter().enumerate() {
+            // FB-overflow mask cap: only a layer the shared walk really does
+            // split needs the complement raster — `breakout_mask` alone would
+            // also fire on a stale flag with no sealed frame folder above it.
+            let cap = layer
+                .breakout_mask()
+                .filter(|_| doc.spill_anchor(li).is_some());
             let pixel_tiles = layer
                 .display_tiles()
                 .iter()
-                .map(|(idx, t)| (*idx, t, false));
+                .map(|(idx, t)| (*idx, t, TileVariant::Pixels));
             let mask_tiles = layer
                 .mask_tiles()
                 .into_iter()
-                .flat_map(|m| m.iter().map(|(idx, t)| (*idx, t, true)));
-            for (idx, tile, is_mask) in pixel_tiles.chain(mask_tiles) {
-                let key: TileKey = (li, idx, is_mask);
+                .flat_map(|m| m.iter().map(|(idx, t)| (*idx, t, TileVariant::Coverage)));
+            let held_tiles = cap.into_iter().flat_map(|m| {
+                layer
+                    .display_tiles()
+                    .iter()
+                    .filter(|(idx, _)| m.tiles.contains_key(idx))
+                    .map(|(idx, t)| (*idx, t, TileVariant::HeldIn))
+            });
+            for (idx, tile, variant) in pixel_tiles.chain(mask_tiles).chain(held_tiles) {
+                let key: TileKey = (li, idx, variant);
                 present.insert(key);
-                if !is_mask && vis[li] && layer.opacity > 0.0 {
+                if variant == TileVariant::Pixels && vis[li] && layer.opacity > 0.0 {
                     regions_all.insert(idx);
                 }
                 // Two independent freshness questions (this split IS the
@@ -2224,27 +2272,35 @@ impl Renderer {
                 // `Cow` because the common case has no mask: those pixels go
                 // to the staging buffer straight from the tile, and the copy
                 // it used to make (964 of them on a page open) is gone.
-                let upload: Cow<[u16]> = if is_mask {
-                    Cow::Borrowed(tile.data())
-                } else {
-                    layer
+                // The HeldIn variant is the same fold against ONE MINUS the
+                // coverage — the exact complement the CPU compositor applies,
+                // so the two halves of a capped spill never double-blend.
+                let fold = |md: &[u16], invert: bool| -> Vec<u16> {
+                    let td = tile.data();
+                    let mut out = vec![0u16; td.len()];
+                    for p in 0..td.len() / 4 {
+                        let a = (md[p * 4 + 3] as u32).min(32768);
+                        let cov = if invert { 32768 - a } else { a };
+                        for c in 0..4 {
+                            out[p * 4 + c] = (td[p * 4 + c] as u32 * cov / 32768) as u16;
+                        }
+                    }
+                    out
+                };
+                let upload: Cow<[u16]> = match variant {
+                    TileVariant::Coverage => Cow::Borrowed(tile.data()),
+                    TileVariant::HeldIn => match cap.and_then(|m| m.tiles.get(&idx)) {
+                        Some(mt) => Cow::Owned(fold(mt.data(), true)),
+                        // Unreachable: `held_tiles` only yields covered tiles.
+                        None => Cow::Borrowed(tile.data()),
+                    },
+                    TileVariant::Pixels => layer
                         .mask
                         .as_ref()
                         .filter(|m| m.enabled)
                         .and_then(|m| m.tiles.get(&idx))
-                        .map(|mt| {
-                            let md = mt.data();
-                            let td = tile.data();
-                            let mut out = vec![0u16; td.len()];
-                            for p in 0..td.len() / 4 {
-                                let cov = md[p * 4 + 3] as u32;
-                                for c in 0..4 {
-                                    out[p * 4 + c] = (td[p * 4 + c] as u32 * cov / 32768) as u16;
-                                }
-                            }
-                            Cow::Owned(out)
-                        })
-                        .unwrap_or(Cow::Borrowed(tile.data()))
+                        .map(|mt| Cow::Owned(fold(mt.data(), false)))
+                        .unwrap_or(Cow::Borrowed(tile.data())),
                 };
                 batch.push((entry.texture.clone(), upload));
                 entry.revision = tile.revision();
@@ -2270,7 +2326,7 @@ impl Renderer {
         // replayable — eviction would lose dabs.
         if let Some(st) = self.dabs.as_ref().and_then(|d| d.stroke.as_ref()) {
             for idx in &st.touched {
-                present.insert((st.layer, *idx, false));
+                present.insert((st.layer, *idx, TileVariant::Pixels));
                 // The live regions stay damaged for the WHOLE stroke, derived
                 // from stroke state: BYPASS freezes the CPU tiles mid-stroke,
                 // so no revision bumps while flushes write the textures ahead.
@@ -2550,14 +2606,20 @@ impl Renderer {
         }
 
         // FB-overflow: the SHARED walk — escaped layers re-seat above their
-        // frame folder header at the header's depth. Disagreeing with the
-        // CPU compositor here is a parity break.
-        for (li, ed) in doc.composite_order() {
+        // anchor at the anchor's depth, and a mask-capped one appears TWICE
+        // (the halves differ only in which texture variant they sample).
+        // Disagreeing with the CPU compositor here is a parity break.
+        for step in doc.composite_order() {
+            let li = step.layer;
             let layer = &doc.layers[li];
             if !vis[li] {
                 continue;
             }
-            let d = ed as usize;
+            let d = step.depth as usize;
+            let variant = match step.part {
+                mn_core::SpillPart::In => TileVariant::HeldIn,
+                _ => TileVariant::Pixels,
+            };
             // LF-002 Through: same collapse mapping as core's composite —
             // a through-folder's children draw into the folder's own
             // effective target (as if loose); normal folders seal.
@@ -2576,7 +2638,7 @@ impl Renderer {
                             pass.draws.push(Draw {
                                 instance: instances.len() as u32,
                                 blend: 0,
-                                kind: DrawKind::Tile((li, *idx, false)),
+                                kind: DrawKind::Tile((li, *idx, TileVariant::Pixels)),
                             });
                             instances.push(QuadInstance {
                                 tint: crate::TINT_NONE,
@@ -2598,7 +2660,7 @@ impl Renderer {
                 // just beneath the group — drawn into the parent target
                 // BEFORE the group blit, scaled by the folder's opacity
                 // (mirrors the CPU compositor's step 0). The mat IS this
-                // folder's display raster, so the (li, idx, false) texture
+                // folder's display raster, so the Pixels texture
                 // key already holds it.
                 if layer.edge.is_some() && layer.opacity > 0.0 {
                     let mat_tiles: Vec<TileIdx> = layer
@@ -2617,7 +2679,7 @@ impl Renderer {
                             pass.draws.push(Draw {
                                 instance: instances.len() as u32,
                                 blend: 0,
-                                kind: DrawKind::Tile((li, *idx, false)),
+                                kind: DrawKind::Tile((li, *idx, TileVariant::Pixels)),
                             });
                             instances.push(QuadInstance {
                                 tint: crate::TINT_NONE,
@@ -2637,7 +2699,7 @@ impl Renderer {
                     if layer.mask_tiles().is_some() {
                         let pass = open_pass!(Target::Group(lvl));
                         for idx in &regions {
-                            let key = (li, *idx, true);
+                            let key = (li, *idx, TileVariant::Coverage);
                             let bind = self.tiles.contains_key(&key).then_some(key);
                             pass.draws.push(Draw {
                                 instance: instances.len() as u32,
@@ -2719,7 +2781,7 @@ impl Renderer {
                         pass.draws.push(Draw {
                             instance: instances.len() as u32,
                             blend: 0,
-                            kind: DrawKind::Tile((li, *idx, false)),
+                            kind: DrawKind::Tile((li, *idx, TileVariant::Pixels)),
                         });
                         instances.push(QuadInstance {
                             tint: crate::TINT_NONE,
@@ -2751,7 +2813,12 @@ impl Renderer {
                 let touched: Vec<TileIdx> = regions
                     .iter()
                     .copied()
-                    .filter(|idx| layer.tile(*idx).is_some())
+                    .filter(|idx| match variant {
+                        // The held-in half only exists where the cap mask
+                        // does; elsewhere the whole tile went out.
+                        TileVariant::HeldIn => self.tiles.contains_key(&(li, *idx, variant)),
+                        _ => layer.tile(*idx).is_some(),
+                    })
                     .collect();
                 if touched.is_empty() {
                     continue;
@@ -2762,7 +2829,7 @@ impl Renderer {
                         pass.draws.push(Draw {
                             instance: instances.len() as u32,
                             blend: 0,
-                            kind: DrawKind::Tile((li, *idx, false)),
+                            kind: DrawKind::Tile((li, *idx, variant)),
                         });
                         instances.push(QuadInstance {
                             tint: crate::TINT_NONE,
@@ -2786,7 +2853,7 @@ impl Renderer {
                                 DrawKind::Mask(None)
                             }
                         } else {
-                            let key = (base, *idx, false);
+                            let key = (base, *idx, TileVariant::Pixels);
                             DrawKind::Mask(self.tiles.contains_key(&key).then_some(key))
                         };
                         pass.draws.push(Draw {
@@ -2846,12 +2913,18 @@ impl Renderer {
                 // throws outline into tiles that hold no source pixels at
                 // all, and those are exactly the tiles the upload loop above
                 // uploaded.
-                if layer.display_tile(*idx).is_none() {
+                if variant == TileVariant::HeldIn {
+                    // The held-in half exists only where the cap mask has a
+                    // tile — everywhere else the whole tile spilled out.
+                    if !self.tiles.contains_key(&(li, *idx, variant)) {
+                        continue;
+                    }
+                } else if layer.display_tile(*idx).is_none() {
                     // A GPU dab flush may have materialised this tile's
                     // texture before any CPU tile exists (BYPASS, live
                     // preview) — the composite samples the TEXTURE, so a
                     // cached entry is drawable too.
-                    if !self.tiles.contains_key(&(li, *idx, false)) {
+                    if !self.tiles.contains_key(&(li, *idx, variant)) {
                         continue;
                     }
                 }
@@ -2859,7 +2932,7 @@ impl Renderer {
                 pass.draws.push(Draw {
                     instance: instances.len() as u32,
                     blend: slot,
-                    kind: DrawKind::Tile((li, *idx, false)),
+                    kind: DrawKind::Tile((li, *idx, variant)),
                 });
                 instances.push(QuadInstance {
                     // LP-016/017/022: the plain-layer draw is the only one
@@ -3145,11 +3218,19 @@ impl Renderer {
         }
         for (li, layer) in doc.layers.iter().enumerate() {
             for (idx, t) in layer.display_tiles() {
-                self.canvas_shown.insert((li, *idx, false), t.revision());
+                self.canvas_shown.insert((li, *idx, TileVariant::Pixels), t.revision());
+                // FB-overflow mask cap: the held-in half rides the same
+                // source revision. Without its own entry the key would read
+                // as never-shown and keep its region damaged every frame.
+                if self.tiles.contains_key(&(li, *idx, TileVariant::HeldIn)) {
+                    self.canvas_shown
+                        .insert((li, *idx, TileVariant::HeldIn), t.revision());
+                }
             }
             if let Some(masks) = layer.mask_tiles() {
                 for (idx, t) in masks.iter() {
-                    self.canvas_shown.insert((li, *idx, true), t.revision());
+                    self.canvas_shown
+                        .insert((li, *idx, TileVariant::Coverage), t.revision());
                 }
             }
         }

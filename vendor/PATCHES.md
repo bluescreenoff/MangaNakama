@@ -619,3 +619,88 @@ angle follows. The Rust side picks per the preset's
 `mn-texture-rotate` (`fixed` / `direction` / `tilt`); a preset that
 says nothing renders bit-identically, and `direction` behaves exactly
 as before.
+
+### 21. Spectral pigment mixing under the legacy stroke entry (`mypaint-brush.c` + `mypaint-tiled-surface.c`, 2026-08-30)
+
+CSP Ink ▸ **Mixing mode** (`I-014`; CSP-TRIAGE rows 58 and 167) is the
+switch between additive sRGB mixing and subtractive *pigment* mixing —
+"Perceptual", the thing that makes blue over yellow go green instead of
+grey. libmypaint 1.6 already ships exactly that math: the `paint_mode`
+setting, `rgb_to_spectral` / `mix_colors` in `helpers.c`, the
+`draw_dab_pixels_BlendMode_*_Paint` family in `brushmodes.c`, and the
+spectral arm of `get_color_internal`. All of it was compiled into our
+build and none of it was reachable.
+
+Three places kept it out, and all three are v1-vs-v2 API artefacts rather
+than decisions:
+
+1. `mypaint-brush.c` forces `paint_factor = 0.0` whenever `legacy` is
+   TRUE, and MangaNakama only ever calls the legacy entry (patch #12's
+   `mypaint_brush_stroke_to_view`, which passes `legacy = TRUE`).
+2. `mypaint-tiled-surface.c`'s v1 `draw_dab` passes a hard-coded `0.0`
+   for `draw_dab_internal`'s `paint` argument — the v1 surface vtable has
+   no paint parameter to carry one.
+3. Its v1 `get_color` passes `-1.0`, `get_color_internal`'s sentinel for
+   "use the legacy (additive) averaging" — so the smudge sampler could
+   not weight spectrally either.
+
+**The patch.** A new Rust-implemented hook, `float mnc_brush_paint_mode(void)`,
+publishes the stroke's spectral weight per `stroke_to` — the same
+mechanism and the same one-brush-per-thread contract as
+`mnc_brush_hard_dab` / `mnc_brush_scatter` (#8/#9). The three sites above
+read it instead of their literals:
+
+- `paint_factor = legacy ? mnc_brush_paint_mode() : SETTING(self, PAINT_MODE)`.
+  `paint_setting_constant` stays TRUE under legacy, which is correct: the
+  row is a two-way switch, not a dynamic, so `legacy_smudge` still
+  resolves to the stock value whenever the weight is 0.
+- v1 `draw_dab`'s `paint` argument (both the normal and the symmetry
+  pass) becomes the published weight.
+- v1 `get_color` passes the weight when it is `> 0`, and the untouched
+  `-1.0` otherwise. `0.0` is a real weight in that API, not "off", which
+  is why the test is `> 0` and not `>= 0`.
+
+**Why not switch to the v2 surface instead.** That is the upstream answer
+and it is the wrong trade here: `MyPaintTiledSurface2` is a separate
+struct with a different roi/symmetry/bbox contract, so `csrc/mn_surface.c`
+would be rewritten; and `legacy = FALSE` also changes dab COUNTING
+(`state_based_dab_count` instead of `legacy_dab_count`), so turning the
+row on would silently change every brush's spacing as well as its
+mixing. Three literals is the whole distance between here and the
+feature.
+
+**Bit-identical when off.** The published weight is `0.0` for
+`BrushMix::Standard`, which is the literal each site used to hold, so the
+additive path is unchanged expression for expression. One companion Rust
+change is load-bearing for that: `MyBrush::load` now zeroes `PAINT_MODE`
+straight after `mypaint_brush_from_defaults`, because `brushsettings.json`
+gives that setting a default of **1.0** — MyPaint 2 ships pigment mixing
+ON, and the base value only became reachable with this patch. A preset
+that carries its own `paint_mode` key still wins, so an imported MyPaint
+brush keeps the mixing it was authored with.
+
+**Bug found while wiring it.** `MyBrush::load`'s `exotic` detection
+matched the setting name `"paint"`; libmypaint's is `"paint_mode"`
+(`brushsettings.json` `internal_name`, `SETTING_NAMES[63]`). The arm also
+sat *after* the `setting_id` lookup that `continue`s on an unknown name,
+so a `"paint"` key could not have reached it either. `exotic` was
+therefore always `false` since round 27. It mis-rendered nothing —
+`paint_factor` was forced to zero anyway — but the flag the whole
+GPU-routing story rests on was dead. Fixed, with `"paint"` kept as an
+accepted alias.
+
+**Upstream-relevant:** no. This exists only because we call the legacy
+entry on purpose (patch #12); upstream's answer is the v2 surface.
+
+**Tests (`crates/brush/tests/brush_feel.rs`):**
+`standard_mixing_leaves_the_stroke_byte_identical` (untouched == explicit
+Standard == Perceptual-and-back, to the byte),
+`perceptual_mixing_changes_the_pixels`,
+`blue_over_yellow_goes_green_under_pigment_mixing` (additive lands on
+grey mud, spectral on a green),
+`the_smudge_sampler_follows_the_mixing_mode`,
+`perceptual_mixing_routes_the_stroke_to_the_cpu_and_back`,
+`a_preset_authored_with_paint_mode_loads_spectral_and_cpu_bound`,
+`stock_presets_do_not_inherit_libmypaints_spectral_default`; plus
+`a_spectral_brush_never_reaches_the_gpu_dab_path` in
+`crates/gpu/tests/dab_parity.rs`.

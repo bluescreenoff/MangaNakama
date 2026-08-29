@@ -894,6 +894,43 @@ pattern is fixed; higher = the grain drifts as you draw, spray-like.",
     }
 }
 
+/// CSP Ink ▸ **Mixing mode** (`I-014`, triage rows 58 + 167): the pigment
+/// model the other rows in this block operate under.
+///
+/// FIRST in the group, above Paint density, because it is the only row here
+/// that changes what mixing MEANS — the sliders are amounts, this is the
+/// model. It is also the only Tool Property in the panel that reroutes the
+/// stroke off the GPU, and the tooltip says so: an artist who notices their
+/// big brush got heavier deserves to know which switch did it rather than
+/// filing it under "the app got slow today".
+fn mix_mode_row(ui: &mut egui::Ui, app: &mut App) {
+    use mn_core::BrushMix;
+
+    let current = app.props_current.brush_mix;
+    let mut pick = None;
+    ui.horizontal(|ui| {
+        ui.weak("Mixing");
+        for m in BrushMix::ALL {
+            if ui.selectable_label(current == m, m.label()).clicked() && current != m {
+                pick = Some(m);
+            }
+        }
+    })
+    .response
+    .on_hover_text(
+        "CSP's Mixing mode. Standard mixes colours the way a screen adds \
+light, which is why blending two strong colours drifts toward grey mud. \
+Paint mixes them the way pigment does — blue over yellow makes green, and a \
+blend keeps its colour instead of dulling. It also changes the colour a \
+smudge picks up off the canvas, and it steers Color jitter.\n\nPaint is \
+drawn on the CPU (the GPU brush path has no pigment model), so a very large \
+brush can feel heavier in this mode.",
+    );
+    if let Some(m) = pick {
+        app.push_cmd(AppCmd::SetBrushMix(m));
+    }
+}
+
 /// CSP Ink ▸ Density of paint / Color stretch / Intensity of blur
 /// (I-010/011/013) — the three knobs of colour mixing, which is one
 /// behaviour and reads as one block.
@@ -902,6 +939,7 @@ pattern is fixed; higher = the grain drifts as you draw, spray-like.",
 /// itself states: with neat paint nothing is picked up, so there is nothing
 /// to stretch or blur and two live-looking sliders would be lying.
 pub(crate) fn mixing_rows(ui: &mut egui::Ui, app: &mut App) {
+    mix_mode_row(ui, app);
     let mut density = app.props_current.paint_density * 100.0;
     let d_resp = ValueBar::new("Paint", 0.0, 100.0)
         .suffix("%")

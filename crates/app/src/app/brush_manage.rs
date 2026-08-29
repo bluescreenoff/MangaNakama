@@ -194,6 +194,15 @@ impl App {
         // states it, as the picked-up share.
         set(settings, "smudge", (1.0 - props.paint_density) as f64);
         set(settings, "smudge_length", props.color_stretch as f64);
+        // I-014 rides the settings for the same reason: `paint_mode` is
+        // libmypaint's own spectral-mixing setting, so a brush saved with
+        // Perceptual mixing reloads through the normal preset path AND is
+        // still what MyPaint calls "Pigment".
+        set(
+            settings,
+            "paint_mode",
+            props.brush_mix.paint_weight() as f64,
+        );
         // Same px→multiple conversion the engine does, against the size
         // this preset is being saved AT: a pinned width has to be re-read
         // as a multiple to survive a file that has no idea it was pinned.

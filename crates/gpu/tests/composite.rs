@@ -577,6 +577,76 @@ fn cpu_matches_gpu_with_an_escaped_frame_child() {
     assert_agrees(&mut r, &doc, "escape removed: clipped shape again");
 }
 
+/// FB-overflow part 2 on BOTH compositors: the layer's own mask caps the
+/// spill (the GPU folds `1 − mask` into a second texture variant, the CPU
+/// scales at composite time), and the draws-over set moves the escaped seat.
+/// The seat/cap changes are made WITHOUT `invalidate()` on purpose — they
+/// move no tile revision, so `LayerSig` is the only thing that can notice.
+#[test]
+fn cpu_matches_gpu_with_a_mask_capped_breakout() {
+    let _serial = gpu_guard();
+    let Some(mut r) = renderer() else { return };
+
+    let mut doc = Document::new(128, 128);
+    for ty in 0..2 {
+        for tx in 0..2 {
+            fill(&mut doc, 0, TileIdx::new(tx, ty), [0.9, 0.2, 0.2, 1.0]);
+        }
+    }
+    // Lower panel + a half-alpha escapee spanning the whole page, so the
+    // two halves of the cap exercise the ordinary blend path (a double
+    // blend at the mask's edge would show up as a seam here).
+    let lo = doc.add_frame_folder("lower", mn_core::FrameSet::single_rect([8.0, 64.0, 120.0, 120.0], 5.0));
+    let burst = lo - 1;
+    for ty in 0..2 {
+        for tx in 0..2 {
+            fill_ramp(&mut doc, burst, TileIdx::new(tx, ty), [0.2, 0.7, 0.3]);
+        }
+    }
+    assert!(doc.set_layer_escape(burst, true));
+    assert_agrees(&mut r, &doc, "breakout, no cap");
+
+    // Cap it: out through the top-left tile, held everywhere else.
+    let mut m = mn_core::doc::LayerMask {
+        tiles: std::collections::HashMap::new(),
+        enabled: true,
+        revision: 1,
+    };
+    for (tx, ty, cov) in [(0, 0, 32768u16), (1, 0, 0), (0, 1, 0), (1, 1, 12000)] {
+        let mut t = mn_core::tile::Tile::new_transparent();
+        for y in 0..TILE_SIZE {
+            for x in 0..TILE_SIZE {
+                t.set_pixel(x, y, [cov, cov, cov, cov]);
+            }
+        }
+        m.tiles.insert(TileIdx::new(tx, ty), std::sync::Arc::new(t));
+    }
+    doc.layers[burst].mask = Some(m);
+    // Mask edits go through invalidate() in the app (see the upload loop's
+    // note); poking the field here is not the thing under test.
+    r.invalidate();
+    assert_agrees(&mut r, &doc, "breakout capped by its own mask");
+
+    // An upper panel above it in the stack, then the draws-over move — no
+    // invalidate(), so this also pins the LayerSig spill word.
+    let up = doc.add_frame_folder("upper", mn_core::FrameSet::single_rect([8.0, 8.0, 120.0, 56.0], 5.0));
+    for tx in 0..2 {
+        fill(&mut doc, up - 1, TileIdx::new(tx, 0), [0.2, 0.3, 0.9, 1.0]);
+    }
+    r.invalidate();
+    assert_agrees(&mut r, &doc, "upper panel added");
+
+    assert!(doc.set_layer_spill_seat(burst, Some(up - 1)));
+    assert_agrees(&mut r, &doc, "capped spill re-seated over the upper panel");
+
+    assert!(doc.set_layer_spill_seat(burst, None));
+    assert_agrees(&mut r, &doc, "back to the default seat");
+
+    doc.layers[burst].mask.as_mut().unwrap().enabled = false;
+    r.invalidate();
+    assert_agrees(&mut r, &doc, "cap off: all-or-nothing spill again");
+}
+
 /// docs/CLIPPING-SCENARIOS.md 2a, clip-to-folder: the CPU captures the
 /// group alpha at the folder's close, the GPU copies the group texture
 /// into the clip-base capture — the two must agree, including the

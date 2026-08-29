@@ -11,7 +11,7 @@
 //! }
 //! ```
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -314,6 +314,38 @@ pub struct LayerMask {
     pub revision: u64,
 }
 
+/// Which half of a mask-capped breakout a composite step draws. Only a
+/// breakout layer carrying an ENABLED layer mask is ever split; everything
+/// else in the stack is [`SpillPart::All`].
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum SpillPart {
+    /// The whole layer — the ordinary case, and an uncapped breakout.
+    All,
+    /// What the mask lets OUT, drawn at the escaped seat: the source scaled
+    /// by the mask coverage `m`.
+    Out,
+    /// What the mask holds IN, drawn at the layer's own seat where the panel
+    /// still clips it: the source scaled by `1 − m`. An ABSENT mask tile is
+    /// full coverage (the unmasked rule every compositor shares), so it
+    /// holds nothing back — an untouched mask spills exactly like no mask.
+    In,
+}
+
+/// One step of the shared compositor walk: which layer, at which effective
+/// depth, drawing which half of a mask-capped spill.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct CompositeStep {
+    pub layer: usize,
+    pub depth: u8,
+    pub part: SpillPart,
+}
+
+impl CompositeStep {
+    fn new(layer: usize, depth: u8, part: SpillPart) -> Self {
+        Self { layer, depth, part }
+    }
+}
+
 /// Stable-identity mint (the automation round). Process-global and monotonic
 /// (the `tile::REVISION` idiom): a fresh id is greater than every id any open
 /// document has ever seen, so within one session an id is never reissued —
@@ -323,10 +355,14 @@ pub struct LayerMask {
 ///
 /// Deliberately NOT persisted as a counter: uniqueness only matters within a
 /// document, and [`bump_ids_past`] at load lifts the mint above everything
-/// the file holds. The known soft spot — a persisted cross-reference to an id
-/// whose layer was deleted in an EARLIER session could see that id reborn in
-/// a later one — belongs to whichever round first persists cross-references
-/// (breakout part 2), which must prune dead ids at save.
+/// the file holds. The soft spot this left — a persisted cross-reference to
+/// an id whose layer was deleted in an EARLIER session could see that id
+/// reborn in a later one — is PAID OFF: breakout part 2 is the first (and so
+/// far only) persisted cross-reference, [`Layer::draws_over`], and
+/// `ora::save` writes `mnc-draws-over` through
+/// [`Document::live_draws_over`], which drops every id the document no
+/// longer holds. Any FUTURE persisted id cross-reference owes the same
+/// prune at save — the debt is per-reference, not paid once for all time.
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// A fresh, never-before-seen stable id.
@@ -400,6 +436,19 @@ pub struct Layer {
     /// border ink — while still living inside the folder for organisation.
     /// Meaningless (and ignored) anywhere else. See `composite_order`.
     pub escape_frame: bool,
+    /// FB-overflow part 2: the OTHER layers this breakout layer draws over,
+    /// by STABLE ID. Empty = the shipped default, "over my own frame folder
+    /// and nothing else". Paint order is a stack, so the set is always
+    /// downward-closed — over a layer implies over everything below it —
+    /// which is why it is only ever written through
+    /// [`Document::set_layer_spill_seat`] and why the UI presents it as one
+    /// insertion marker rather than N independent ticks.
+    ///
+    /// Ids, not indices, so the set survives reorder and delete. It is the
+    /// document's ONLY persisted id cross-reference: `ora::save` prunes dead
+    /// entries through [`Document::live_draws_over`] (see the mint's doc).
+    /// Meaningless without `escape_frame`, and ignored there.
+    pub draws_over: BTreeSet<u64>,
     /// Edit lock: strokes/fill/clear refuse. Presentation still composites.
     pub lock: bool,
     /// Layer mask (TRIAGE 138 v1): None = unmasked. Runtime-only until
@@ -489,6 +538,7 @@ impl Layer {
             open: true,
             clip: false,
             escape_frame: false,
+            draws_over: BTreeSet::new(),
             lock: false,
             mask: None,
             mask_linked: true,
@@ -517,6 +567,22 @@ impl Layer {
     /// ORA load / heal only: everyone else keeps the minted id.
     pub(crate) fn set_id(&mut self, id: u64) {
         self.id = id;
+    }
+
+    /// The mask that CAPS this layer's spill, if it has one: an enabled
+    /// layer mask on a layer that is bursting out of its panel. `Some` is
+    /// exactly the condition that splits the layer into two composite steps
+    /// ([`SpillPart`]) — the mask stops scaling alpha and starts naming the
+    /// region allowed out. `None` = spill on every side, the shipped
+    /// all-or-nothing behaviour.
+    ///
+    /// It does NOT check the enclosing frame folder: only `composite_order`
+    /// knows whether the escape is real, and it asks this after deciding.
+    pub fn breakout_mask(&self) -> Option<&LayerMask> {
+        if !self.escape_frame || self.folder {
+            return None;
+        }
+        self.mask.as_ref().filter(|m| m.enabled)
     }
 
     /// The frame folder's derived coverage mask, if any.
@@ -4450,49 +4516,218 @@ impl Document {
         None
     }
 
-    /// The order both compositors walk the stack in, each entry with its
-    /// EFFECTIVE depth. Identity except FB-overflow: a non-folder layer with
-    /// `escape_frame` inside a SEALED frame folder re-seats immediately
-    /// after that folder's header, at the header's own depth — so its ink
-    /// lands in the accumulator the group was just blended into, above the
-    /// panel mask and the border ink. Escapees keep their stack order. A
-    /// through frame folder never clips, so its escapees stay in place.
+    /// The breakout layer at `index` re-seated: the composite step it is
+    /// emitted immediately AFTER. `None` = not a breakout layer (the walk is
+    /// the identity for it).
+    ///
+    /// The default seat is the layer's own frame folder header — today's
+    /// shipped behaviour, and the floor: `draws_over` can only push the seat
+    /// UP. Every covered layer is lifted out of any sealed folder the
+    /// escapee's own seat is not already inside (see [`Self::lift_seat`]),
+    /// then the highest of them wins.
+    pub fn spill_anchor(&self, index: usize) -> Option<usize> {
+        let l = self.layers.get(index)?;
+        if l.folder || !l.escape_frame {
+            return None;
+        }
+        let ff = self.enclosing_frame_folder(index)?;
+        if self.layers[ff].through {
+            return None; // a through frame folder never clipped it anyway
+        }
+        let mut seat = ff;
+        if !l.draws_over.is_empty() {
+            for (j, other) in self.layers.iter().enumerate().skip(ff + 1) {
+                // At or below the header is already covered by the default
+                // seat, so only the layers above it can move anything.
+                if l.draws_over.contains(&other.id) {
+                    seat = seat.max(self.lift_seat(j, ff));
+                }
+            }
+        }
+        Some(seat)
+    }
+
+    /// Lift a covered layer out of every SEALED folder that does not also
+    /// enclose the escapee's own seat: inside one, the escapee would join
+    /// that group's isolation — and, for a frame folder, be clipped by the
+    /// very panel mask it is trying to spill over. Hopping to the folder's
+    /// header instead draws it over the whole finished group, which is what
+    /// "draws over the art in that panel" has to mean. A Through folder has
+    /// no seal to escape, so it is walked past without moving the seat.
+    fn lift_seat(&self, target: usize, ff: usize) -> usize {
+        // The folders enclosing the escapee's own seat: the escapee already
+        // composites inside these, so they are not walls.
+        let mut open: Vec<usize> = Vec::new();
+        let mut p = ff;
+        while let Some(f) = self.enclosing_folder(p) {
+            open.push(f);
+            p = f;
+        }
+        let mut seat = target;
+        let mut probe = target;
+        while let Some(f) = self.enclosing_folder(probe) {
+            if open.contains(&f) {
+                break;
+            }
+            if !self.layers[f].through {
+                seat = f;
+            }
+            probe = f;
+        }
+        seat
+    }
+
+    /// The order both compositors walk the stack in, each step with its
+    /// EFFECTIVE depth and which half of a mask-capped spill it draws.
+    /// Identity except FB-overflow: a non-folder layer with `escape_frame`
+    /// inside a SEALED frame folder re-seats immediately after its
+    /// [`Self::spill_anchor`], at that anchor's own depth — so its ink lands
+    /// in the accumulator the walk has open right there, above the panel
+    /// mask and the border ink. Escapees keep their stack order. A through
+    /// frame folder never clips, so its escapees stay in place.
+    ///
+    /// **The mask cap** (part 2, item 1): when a breakout layer carries an
+    /// ENABLED layer mask, the mask stops being an alpha mask and becomes
+    /// the allowed breakout REGION, so the layer composites TWICE — the
+    /// masked-in part ([`SpillPart::Out`]) at the escaped seat, the rest
+    /// ([`SpillPart::In`]) at the layer's own seat where the panel still
+    /// clips it. The two halves are exact complements (`m` and `1 − m`), so
+    /// a half-opacity layer does not double-blend anywhere.
     ///
     /// Both compositors (export.rs and gpu) MUST walk this, not
     /// `self.layers` — a disagreement here is a CPU/GPU parity break.
-    pub fn composite_order(&self) -> Vec<(usize, u8)> {
-        let mut order: Vec<(usize, u8)> = Vec::with_capacity(self.layers.len());
-        let mut pending: Vec<(usize, usize, u8)> = Vec::new(); // (frame hdr, layer, depth)
+    pub fn composite_order(&self) -> Vec<CompositeStep> {
+        let mut order: Vec<CompositeStep> = Vec::with_capacity(self.layers.len());
+        // (anchor, escapee, mask-capped)
+        let mut pending: Vec<(usize, usize, bool)> = Vec::new();
         for (li, l) in self.layers.iter().enumerate() {
-            if !l.folder && l.escape_frame {
-                if let Some(ff) = self.enclosing_frame_folder(li) {
-                    if !self.layers[ff].through {
-                        pending.push((ff, li, self.layers[ff].depth));
-                        continue;
+            match self.spill_anchor(li) {
+                Some(anchor) => {
+                    let capped = l.breakout_mask().is_some();
+                    if capped {
+                        // The half the mask holds IN stays exactly where it
+                        // always was, panel clip and all.
+                        order.push(CompositeStep::new(li, l.depth, SpillPart::In));
                     }
+                    pending.push((anchor, li, capped));
+                    // No release here: anything anchored to THIS layer waits
+                    // for its escaped seat below.
+                    continue;
                 }
+                None => order.push(CompositeStep::new(li, l.depth, SpillPart::All)),
             }
-            order.push((li, l.depth));
-            if l.folder {
-                // Children walk before their header; everything stashed for
-                // this header bursts out right after it closes.
-                let mut k = 0;
-                while k < pending.len() {
-                    if pending[k].0 == li {
-                        let (_, e, d) = pending.remove(k);
-                        order.push((e, d));
-                    } else {
-                        k += 1;
-                    }
-                }
-            }
+            // Children walk before their header, so everything stashed for
+            // this anchor bursts out right after it — folder header or
+            // ordinary layer alike.
+            Self::release_spills(&mut order, &mut pending, li, l.depth);
         }
-        // Unreachable orphans (a stale flag outrunning a structure edit):
-        // walk them in place rather than dropping their art.
-        for (_, e, d) in pending {
-            order.push((e, d));
+        // Unreachable orphans (a stale anchor outrunning a structure edit, or
+        // two escapees anchored to each other): walk them in place rather
+        // than dropping their art.
+        for (_, e, capped) in pending {
+            let part = if capped { SpillPart::Out } else { SpillPart::All };
+            order.push(CompositeStep::new(e, self.layers[e].depth, part));
         }
         order
+    }
+
+    /// Emit every spill anchored at `anchor` (and, transitively, everything
+    /// anchored at those), all at the anchor's own effective depth.
+    fn release_spills(
+        order: &mut Vec<CompositeStep>,
+        pending: &mut Vec<(usize, usize, bool)>,
+        anchor: usize,
+        depth: u8,
+    ) {
+        let mut queue = std::collections::VecDeque::from([anchor]);
+        while let Some(a) = queue.pop_front() {
+            let mut k = 0;
+            while k < pending.len() {
+                if pending[k].0 == a {
+                    let (_, e, capped) = pending.remove(k);
+                    let part = if capped { SpillPart::Out } else { SpillPart::All };
+                    order.push(CompositeStep::new(e, depth, part));
+                    queue.push_back(e);
+                } else {
+                    k += 1;
+                }
+            }
+        }
+    }
+
+    /// Every layer the breakout at `index` could be told to draw over: the
+    /// stack ABOVE its frame folder header (bottom-first, like `layers`).
+    /// Anything at or below that header is covered by the default seat, so
+    /// offering it would be a switch that does nothing.
+    pub fn spill_candidates(&self, index: usize) -> Vec<usize> {
+        match self.spill_anchor(index) {
+            Some(_) => {
+                let ff = self.enclosing_frame_folder(index).unwrap_or(0);
+                ((ff + 1)..self.layers.len()).filter(|&j| j != index).collect()
+            }
+            None => Vec::new(),
+        }
+    }
+
+    /// The topmost layer the breakout at `index` currently draws over, i.e.
+    /// where the insertion marker sits. `None` = the default seat.
+    pub fn spill_seat(&self, index: usize) -> Option<usize> {
+        let l = self.layers.get(index)?;
+        if l.draws_over.is_empty() {
+            return None;
+        }
+        let ff = self.enclosing_frame_folder(index)?;
+        ((ff + 1)..self.layers.len())
+            .filter(|&j| l.draws_over.contains(&self.layers[j].id))
+            .next_back()
+    }
+
+    /// The cascade made explicit: "draws over the layer at `top`" means
+    /// "draws over everything from the frame folder header up to `top`",
+    /// because paint order is a stack and there is no drawing a layer twice.
+    /// `None` = back to the default seat (the empty set).
+    pub fn draws_over_cascade(&self, index: usize, top: Option<usize>) -> BTreeSet<u64> {
+        let (Some(top), Some(ff)) = (top, self.enclosing_frame_folder(index)) else {
+            return BTreeSet::new();
+        };
+        ((ff + 1)..=top.min(self.layers.len().saturating_sub(1)))
+            .filter(|&j| j != index)
+            .map(|j| self.layers[j].id)
+            .collect()
+    }
+
+    /// Move the breakout layer's insertion marker (item 3's one control).
+    /// Refuses anything that is not a breakout layer, so a stale set can
+    /// never be written onto a layer that would silently ignore it. One
+    /// undo press: the Structure snapshot carries the whole stack, and the
+    /// set lives on `Layer`.
+    pub fn set_layer_spill_seat(&mut self, index: usize, top: Option<usize>) -> bool {
+        if self.spill_anchor(index).is_none() {
+            return false;
+        }
+        let want = self.draws_over_cascade(index, top);
+        if self.layers[index].draws_over == want {
+            return false;
+        }
+        let before = self.stack_snapshot();
+        let active_before = self.active;
+        self.layers[index].draws_over = want;
+        self.record_structure("Breakout draws over", before, active_before);
+        self.touch();
+        true
+    }
+
+    /// `draws_over` with every dead id dropped — the SAVE-TIME prune the
+    /// stable-id mint's doc comment owes. A layer deleted in one session
+    /// frees its id; the mint restarts next session and `ensure_ids` can
+    /// hand that number to somebody else, so a cross-reference to it must
+    /// never reach the file.
+    pub fn live_draws_over(&self, index: usize) -> BTreeSet<u64> {
+        let live: std::collections::HashSet<u64> = self.layers.iter().map(|l| l.id).collect();
+        self.layers
+            .get(index)
+            .map(|l| l.draws_over.iter().copied().filter(|id| live.contains(id)).collect())
+            .unwrap_or_default()
     }
 
     /// Per-layer draft state with ancestor folders folded in — a draft
@@ -6096,6 +6331,172 @@ mod tests {    use super::*;
             iids[1] > 9 && iids[2] > 9,
             "duplicate and zero healed from past the file's max (9): {iids:?}"
         );
+    }
+
+    /// A frame folder with one child, plus `n` loose layers stacked above
+    /// it. Returns `(escapee, header, the loose indices bottom-first)`.
+    fn breakout_stack(n: usize) -> (Document, usize, usize, Vec<usize>) {
+        let mut doc = Document::new(64, 64);
+        let hdr = doc.add_frame_folder(
+            "panel",
+            crate::frame::FrameSet::single_rect([8.0, 8.0, 56.0, 56.0], 2.0),
+        );
+        let burst = hdr - 1;
+        assert!(doc.set_layer_escape(burst, true));
+        let above: Vec<usize> = (0..n)
+            .map(|k| doc.add_layer_above(doc.layers.len() - 1, format!("up{k}")))
+            .collect();
+        (doc, burst, hdr, above)
+    }
+
+    /// Item 3, the invariant: paint order is a stack, so "draws over layer
+    /// N" HAS to mean "over everything below N". The set is stored, and the
+    /// resolved seat is the topmost member — never a hole in the middle.
+    #[test]
+    fn the_draws_over_set_only_ever_fills_downward() {
+        let (mut doc, burst, hdr, up) = breakout_stack(3);
+        assert_eq!(doc.spill_anchor(burst), Some(hdr), "default seat");
+        assert_eq!(doc.spill_candidates(burst), up, "only the stack above");
+
+        // Marking the TOP one covers the two below it as well.
+        assert!(doc.set_layer_spill_seat(burst, Some(up[2])));
+        let set = doc.layers[burst].draws_over.clone();
+        for &j in &up {
+            assert!(
+                set.contains(&doc.layers[j].id()),
+                "over {j} is implied by over {}",
+                up[2]
+            );
+        }
+        assert_eq!(doc.spill_anchor(burst), Some(up[2]));
+        assert_eq!(doc.spill_seat(burst), Some(up[2]), "the marker's position");
+
+        // Moving it down drops the ones above — the set is exactly the run.
+        assert!(doc.set_layer_spill_seat(burst, Some(up[0])));
+        assert_eq!(
+            doc.layers[burst].draws_over,
+            BTreeSet::from([doc.layers[up[0]].id()])
+        );
+        assert_eq!(doc.spill_anchor(burst), Some(up[0]));
+
+        // …and back to the default seat.
+        assert!(doc.set_layer_spill_seat(burst, None));
+        assert!(doc.layers[burst].draws_over.is_empty());
+        assert_eq!(doc.spill_anchor(burst), Some(hdr));
+
+        // A layer that is not bursting out has no seat to move.
+        assert!(!doc.set_layer_spill_seat(up[0], Some(up[2])));
+    }
+
+    /// The set is keyed on STABLE IDS, so a reorder or a delete leaves the
+    /// marker on the same art — the whole reason part 2 waited for ids.
+    #[test]
+    fn the_draws_over_set_survives_reorder_and_delete() {
+        let (mut doc, burst, hdr, up) = breakout_stack(3);
+        assert!(doc.set_layer_spill_seat(burst, Some(up[1])));
+        let kept = doc.layers[up[1]].id();
+
+        // Delete the layer between the marker and the panel: the marker
+        // stays on the same art, one row lower.
+        // (`burst` sits BELOW everything removed here, so its own index
+        // never moves — the ids are what has to do the work.)
+        assert!(doc.remove_layer(up[0]));
+        let now = doc.layer_index_of(kept).expect("still there");
+        assert_eq!(doc.spill_anchor(burst), Some(now), "same art, new index");
+        assert!(now < up[1], "and it really did move");
+
+        // Delete the marker itself: the seat falls back, never dangles.
+        assert!(doc.remove_layer(now));
+        assert!(doc.layer_index_of(kept).is_none());
+        let seat = doc.spill_anchor(burst).expect("still a breakout");
+        assert!(seat < doc.layers.len(), "the seat is a live index");
+        assert_ne!(seat, hdr + 99, "sanity");
+    }
+
+    /// A covered layer living inside somebody ELSE's sealed folder lifts to
+    /// that folder's header: inside the group the burst would be clipped by
+    /// the very panel it is spilling over.
+    #[test]
+    fn a_covered_layer_inside_a_sealed_folder_lifts_to_its_header() {
+        let mut doc = Document::new(64, 64);
+        let hdr = doc.add_frame_folder(
+            "lower",
+            crate::frame::FrameSet::single_rect([8.0, 32.0, 56.0, 56.0], 2.0),
+        );
+        let burst = hdr - 1;
+        assert!(doc.set_layer_escape(burst, true));
+        let up = doc.add_frame_folder(
+            "upper",
+            crate::frame::FrameSet::single_rect([8.0, 8.0, 56.0, 24.0], 2.0),
+        );
+        let inside = up - 1;
+        assert!(doc.set_layer_spill_seat(burst, Some(inside)));
+        assert_eq!(
+            doc.spill_anchor(burst),
+            Some(up),
+            "lifted out of the upper panel's seal to its header"
+        );
+    }
+
+    /// One toggle, one undo press — the set lives on `Layer`, so the
+    /// Structure snapshot carries it.
+    #[test]
+    fn a_draws_over_toggle_is_one_undo_press() {
+        let (mut doc, burst, hdr, up) = breakout_stack(2);
+        assert!(doc.set_layer_spill_seat(burst, Some(up[0])));
+        assert!(doc.set_layer_spill_seat(burst, Some(up[1])));
+        assert_eq!(doc.spill_anchor(burst), Some(up[1]));
+
+        doc.undo();
+        assert_eq!(doc.spill_anchor(burst), Some(up[0]), "one press, one step");
+        doc.undo();
+        assert!(doc.layers[burst].draws_over.is_empty());
+        assert_eq!(doc.spill_anchor(burst), Some(hdr), "back to the default");
+        doc.redo();
+        assert_eq!(doc.spill_anchor(burst), Some(up[0]), "redo restores it");
+
+        // Setting the value it already has is not a step.
+        let before = doc.spill_anchor(burst);
+        assert!(!doc.set_layer_spill_seat(burst, Some(up[0])));
+        assert_eq!(doc.spill_anchor(burst), before);
+    }
+
+    /// The shared walk: a mask-capped breakout appears TWICE (held-in at
+    /// its own seat, spilled at the anchor's), an uncapped one once, and
+    /// every other layer exactly once.
+    #[test]
+    fn composite_order_splits_only_a_mask_capped_breakout() {
+        let (mut doc, burst, hdr, up) = breakout_stack(1);
+        let steps = doc.composite_order();
+        assert_eq!(steps.len(), doc.layers.len(), "uncapped: one step each");
+        let seat = steps.iter().position(|s| s.layer == burst).unwrap();
+        let hdr_at = steps.iter().position(|s| s.layer == hdr).unwrap();
+        assert_eq!(seat, hdr_at + 1, "right after its frame folder header");
+        assert_eq!(steps[seat].depth, doc.layers[hdr].depth);
+        assert!(steps.iter().all(|s| s.part == SpillPart::All));
+
+        // Give it a mask: now it is two steps, and only two.
+        doc.layers[burst].tile_mut(TileIdx::new(0, 0));
+        assert!(doc.mask_selection_blank(burst));
+        let steps = doc.composite_order();
+        assert_eq!(steps.len(), doc.layers.len() + 1);
+        let parts: Vec<SpillPart> = steps
+            .iter()
+            .filter(|s| s.layer == burst)
+            .map(|s| s.part)
+            .collect();
+        assert_eq!(parts, vec![SpillPart::In, SpillPart::Out]);
+        let held = steps.iter().position(|s| s.part == SpillPart::In).unwrap();
+        let out = steps.iter().position(|s| s.part == SpillPart::Out).unwrap();
+        assert!(held < out, "the held half walks in place, first");
+        assert_eq!(steps[held].depth, doc.layers[burst].depth, "its own depth");
+
+        // And the seat still moves with the set.
+        assert!(doc.set_layer_spill_seat(burst, Some(up[0])));
+        let steps = doc.composite_order();
+        let out = steps.iter().position(|s| s.part == SpillPart::Out).unwrap();
+        let anchor = steps.iter().position(|s| s.layer == up[0]).unwrap();
+        assert_eq!(out, anchor + 1, "right after the layer it draws over");
     }
 
     /// Item ids: the commit doors mint fresh (id 0) and cloned (duplicate

@@ -39,6 +39,7 @@ pub mod gradient;
 pub mod liquify;
 pub mod mesh;
 pub mod magnetic;
+pub mod mix;
 pub mod ora;
 pub mod page;
 pub mod palette;
@@ -66,7 +67,8 @@ pub use balloon::{
 pub use blend::{Rgba, blend_premul, expression_reduce, layer_colour_tint, scale_opacity};
 pub use curve::PressureCurve;
 pub use doc::{
-    Blend, DEFAULT_SIZE, Document, Layer, LayerExpression, LayerKind, Paper, ResizeAnchor,
+    Blend, CompositeStep, DEFAULT_SIZE, Document, Layer, LayerExpression, LayerKind, Paper,
+    ResizeAnchor, SpillPart,
 };
 pub use edge::EdgeParams;
 pub use export::Background;
@@ -80,6 +82,7 @@ pub use genlines::{FocusLinesParams, SpeedLinesParams, render_focus, render_spee
 pub use gradient::{
     EdgeProcess, GradStop, GradientSet, MidStops, MixMode, NamedRamp, Ramp, RampOpts,
 };
+pub use mix::BrushMix;
 pub use page::PageSetup;
 pub use preflight::{PreflightFinding, PreflightLevel, run_page, run_work};
 pub use project::{Expression, Project, ProjectMeta};
@@ -97,5 +100,5 @@ pub use tile::{
     FIX15_ONE, TILE_CHANNELS, TILE_LEN, TILE_PIXELS, TILE_SIZE, Tile, TileIdx, next_revision,
 };
 pub use tone::{ToneDensity, ToneParams, TonePattern};
-pub use transform::{Affine2, FloatSource};
+pub use transform::{Affine2, FloatSource, Interp};
 pub use undo::{UNDO_LIMIT, UndoGroup};

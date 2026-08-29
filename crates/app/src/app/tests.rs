@@ -2208,6 +2208,48 @@ fn generator_material_places_live_effect_lines_in_one_undo_press() {
     assert_eq!(app.doc.layers.len(), layers_before, "the layer went away");
 }
 
+/// FB-overflow part 2 through the app: the insertion marker is one command,
+/// one undo press, and it refuses a layer that is not bursting out.
+#[test]
+fn the_breakout_insertion_marker_is_one_command_and_one_undo() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    let hdr = app.doc.add_frame_folder(
+        "panel",
+        mn_core::FrameSet::single_rect([8.0, 8.0, 200.0, 200.0], 3.0),
+    );
+    let burst = hdr - 1;
+    assert!(app.doc.set_layer_escape(burst, true));
+    let above = app
+        .doc
+        .add_layer_above(app.doc.layers.len() - 1, "over me");
+    let id = app.doc.layers[above].id();
+
+    // A layer that is not a breakout has no seat to move.
+    crate::cmd::dispatch(
+        &mut app,
+        crate::cmd::AppCmd::SetLayerSpillSeat(above, Some(above)),
+    );
+    assert!(app.doc.layers[above].draws_over.is_empty());
+
+    crate::cmd::dispatch(
+        &mut app,
+        crate::cmd::AppCmd::SetLayerSpillSeat(burst, Some(above)),
+    );
+    assert!(app.doc.layers[burst].draws_over.contains(&id));
+    assert_eq!(app.doc.spill_anchor(burst), Some(above));
+
+    assert!(app.doc.undo(), "one press undoes the whole toggle");
+    assert!(app.doc.layers[burst].draws_over.is_empty());
+    assert_eq!(
+        app.doc.spill_anchor(burst),
+        Some(hdr),
+        "back to over its own panel"
+    );
+}
+
 /// RF-001 (owner spec): reference flags are a SET — toggles are
 /// independent, a FOLDER row toggles its whole child run as one unit,
 /// solo clears the others, and the status line counts the set.
@@ -10859,4 +10901,121 @@ fn the_watercolour_rim_is_not_doubled_by_a_mirror_twin() {
             assert_eq!(px(&plain), px(&mirrored), "({x},{y}): the rim was run twice");
         }
     }
+}
+
+/// Rows 58 + 167 (`I-014`): the mixing mode travels the same rail the rest
+/// of the ink group does — Tool Property command → `props_current` → the
+/// engine — and, unlike the rest of the group, it also has to move the
+/// stroke off the GPU dab path on the way.
+///
+/// The routing half is the one that fails silently: a mode the shader
+/// cannot express, left GPU-routed, does not error — it draws the WRONG
+/// blend and looks like the row not working.
+#[test]
+fn brush_mixing_mode_reaches_the_engine_and_reroutes_the_stroke() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (400, 300), 1.0);
+    if app.selected_preset.is_none() {
+        println!("[test] SKIP: no brush presets on disk");
+        return;
+    }
+    assert_eq!(
+        app.props_current.brush_mix,
+        mn_core::BrushMix::Standard,
+        "an untouched panel must read Standard"
+    );
+
+    crate::cmd::dispatch(
+        &mut app,
+        AppCmd::SetBrushMix(mn_core::BrushMix::Perceptual),
+    );
+    assert_eq!(app.props_current.brush_mix, mn_core::BrushMix::Perceptual);
+    assert_eq!(
+        app.engine().color_mixing(),
+        mn_core::BrushMix::Perceptual,
+        "stored in the panel but never pushed: the row would read right and \
+         draw additively"
+    );
+
+    crate::cmd::dispatch(&mut app, AppCmd::SetBrushMix(mn_core::BrushMix::Standard));
+    assert_eq!(app.engine().color_mixing(), mn_core::BrushMix::Standard);
+}
+
+/// `I-005`: the interpolation row is not decoration — the kernel it picks
+/// has to reach `commit_transform`, and the whole point of the row is that
+/// the choice changes which thin lines survive a reduction.
+///
+/// End to end through the app: same page of 1 px hairlines, same 0.35×
+/// scale, twice, and the surviving-line counts must differ in the
+/// documented direction. The core test
+/// (`a_hairline_survives_the_high_accuracy_shrink`) pins the exact numbers;
+/// this one pins that the DROPDOWN is wired to them.
+#[test]
+fn the_interpolation_row_reaches_the_transform_commit() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let shrink = |interp: mn_core::transform::Interp| -> usize {
+        let Some(renderer) = headless_renderer() else {
+            return 0;
+        };
+        let mut app = App::new(renderer, (600, 400), 1.0);
+        for k in 0..20 {
+            let x = 6 + 12 * k;
+            for y in 0..60 {
+                let ti = TileIdx::of_pixel(x, y);
+                app.doc.active_layer_mut().tile_mut(ti).set_pixel(
+                    (x - ti.origin().0) as usize,
+                    (y - ti.origin().1) as usize,
+                    [0, 0, 0, 32768],
+                );
+            }
+        }
+        crate::cmd::dispatch(&mut app, AppCmd::SetTransformInterp(interp));
+        assert_eq!(app.transform_interp, interp, "the command sets the field");
+        crate::cmd::dispatch(&mut app, AppCmd::TransformStart);
+        assert!(app.transform_drag.is_some(), "the float opened");
+        // Scale about the lift's own reference point, then commit.
+        app.transform_drag
+            .as_mut()
+            .unwrap()
+            .set_params(0.35, 0.35, 0.0, 0.0, 0.0);
+        crate::cmd::dispatch(&mut app, AppCmd::TransformCommit);
+        // Count runs of inked columns across the shrunk band.
+        let l = app.doc.active_layer();
+        let alpha = |x: i32, y: i32| -> u16 {
+            let ti = TileIdx::of_pixel(x, y);
+            l.tile(ti)
+                .map(|t| {
+                    t.pixel(
+                        (x - ti.origin().0) as usize,
+                        (y - ti.origin().1) as usize,
+                    )[3]
+                })
+                .unwrap_or(0)
+        };
+        let (mut runs, mut prev) = (0usize, false);
+        for x in 0..300 {
+            let on = (0..40).any(|y| alpha(x, y) > 0);
+            if on && !prev {
+                runs += 1;
+            }
+            prev = on;
+        }
+        runs
+    };
+    let bilinear = shrink(mn_core::transform::Interp::Bilinear);
+    let high = shrink(mn_core::transform::Interp::HighAccuracy);
+    if bilinear == 0 && high == 0 {
+        println!("[test] SKIP: no adapter");
+        return;
+    }
+    assert!(
+        high > bilinear,
+        "the row is not reaching the commit: high accuracy {high} vs \
+         bilinear {bilinear}"
+    );
+    let _ = renderer;
 }

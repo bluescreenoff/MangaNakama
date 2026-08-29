@@ -176,40 +176,14 @@ impl EdgeProcess {
     ];
 }
 
-/// `G-009` — the space two stops are mixed in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub enum MixMode {
-    /// Straight lerp of the sRGB-encoded channels. What shipped first, and
-    /// what every other paint program calls "normal".
-    #[default]
-    Standard,
-    /// Lerp in Oklab. Decides whether a blue→yellow ramp goes through a
-    /// muddy grey or keeps its lightness across the middle — the difference
-    /// shows up worst on the long soft ramps that get printed.
-    Perceptual,
-    /// Lerp in LINEAR light, which is what Photoshop does with "Blend RGB
-    /// Colors Using Gamma 1.00" — the physically-correct mix, and the one
-    /// that makes a black→white ramp read mid-grey at the halfway point
-    /// rather than dark. CSP calls it "Linear (PS compat)".
-    Linear,
-}
-
-impl MixMode {
-    pub fn label(self) -> &'static str {
-        match self {
-            MixMode::Standard => "Standard",
-            MixMode::Perceptual => "Perceptual",
-            MixMode::Linear => "Linear (PS compat)",
-        }
-    }
-
-    pub const ALL: [MixMode; 3] = [MixMode::Standard, MixMode::Perceptual, MixMode::Linear];
-}
-
-/// `G-010` — how hard Perceptual mixing fights the lightness dip in the
-/// middle of a ramp between two saturated colours. Five levels, and it does
-/// nothing outside [`MixMode::Perceptual`], exactly as in CSP.
-pub const MAX_BRIGHT: u8 = 4;
+/// `G-009` — the space two stops are mixed in, and `G-010`'s brightness
+/// correction beside it.
+///
+/// Both LIVE in [`crate::mix`] now (triage row 167): the brush needed the
+/// same choice and a second copy of Oklab was the wrong way to give it one.
+/// Re-exported here because `G-009` is a gradient row and every caller in
+/// the tree names it `gradient::MixMode`.
+pub use crate::mix::{MAX_BRIGHT, MixMode};
 
 /// Everything about a ramp that is not a colour stop. Every field's default
 /// is the pre-existing behaviour — see the module docs.
@@ -359,53 +333,7 @@ impl Ramp {
             return c1;
         }
         let s = bias((t - p0) / (p1 - p0), self.opts.curve);
-        match self.opts.mix {
-            // Written as `a + (b - a) * s` deliberately: it is the exact
-            // expression the two-colour ramp used before stops existed, so
-            // an unedited gradient reloads bit-for-bit.
-            MixMode::Standard => [
-                c0[0] + (c1[0] - c0[0]) * s,
-                c0[1] + (c1[1] - c0[1]) * s,
-                c0[2] + (c1[2] - c0[2]) * s,
-                c0[3] + (c1[3] - c0[3]) * s,
-            ],
-            MixMode::Perceptual => {
-                let a = srgb_to_oklab([c0[0], c0[1], c0[2]]);
-                let b = srgb_to_oklab([c1[0], c1[1], c1[2]]);
-                let mut lab = [
-                    a[0] + (b[0] - a[0]) * s,
-                    a[1] + (b[1] - a[1]) * s,
-                    a[2] + (b[2] - a[2]) * s,
-                ];
-                // `G-010`. The hump is `4s(1-s)`: exactly 0 at both ends, so
-                // no correction level can move the authored stop colours —
-                // it only lifts the sag in between.
-                let level = self.opts.bright.min(MAX_BRIGHT);
-                if level > 0 {
-                    let peak = a[0].max(b[0]);
-                    let k = level as f32 / MAX_BRIGHT as f32;
-                    lab[0] += (peak - lab[0]).max(0.0) * k * 4.0 * s * (1.0 - s);
-                }
-                let rgb = oklab_to_srgb(lab);
-                // Alpha has no perceptual space — it stays a plain lerp.
-                [rgb[0], rgb[1], rgb[2], c0[3] + (c1[3] - c0[3]) * s]
-            }
-            MixMode::Linear => {
-                let f = |x: f32, y: f32| {
-                    let (x, y) = (
-                        srgb_to_linear(x.clamp(0.0, 1.0)),
-                        srgb_to_linear(y.clamp(0.0, 1.0)),
-                    );
-                    linear_to_srgb(x + (y - x) * s)
-                };
-                [
-                    f(c0[0], c1[0]),
-                    f(c0[1], c1[1]),
-                    f(c0[2], c1[2]),
-                    c0[3] + (c1[3] - c0[3]) * s,
-                ]
-            }
-        }
+        crate::mix::mix_rgba(self.opts.mix, c0, c1, s, self.opts.bright)
     }
 
     /// Projection → colour at canvas pixel `(x, y)`, dithering included.
@@ -440,48 +368,6 @@ fn bias(s: f32, k: f32) -> f32 {
         1.0 / (1.0 - k * 3.0)
     };
     s.powf(e)
-}
-
-fn srgb_to_linear(c: f32) -> f32 {
-    if c <= 0.04045 {
-        c / 12.92
-    } else {
-        ((c + 0.055) / 1.055).powf(2.4)
-    }
-}
-
-fn linear_to_srgb(c: f32) -> f32 {
-    if c <= 0.0031308 {
-        c * 12.92
-    } else {
-        1.055 * c.powf(1.0 / 2.4) - 0.055
-    }
-}
-
-/// sRGB-encoded 0..1 → Oklab (Björn Ottosson's matrices).
-fn srgb_to_oklab(c: [f32; 3]) -> [f32; 3] {
-    let r = srgb_to_linear(c[0].clamp(0.0, 1.0));
-    let g = srgb_to_linear(c[1].clamp(0.0, 1.0));
-    let b = srgb_to_linear(c[2].clamp(0.0, 1.0));
-    let l = (0.412_221_5 * r + 0.536_332_54 * g + 0.051_445_995 * b).cbrt();
-    let m = (0.211_903_5 * r + 0.680_699_5 * g + 0.107_396_96 * b).cbrt();
-    let s = (0.088_302_46 * r + 0.281_718_85 * g + 0.629_978_7 * b).cbrt();
-    [
-        0.210_454_26 * l + 0.793_617_8 * m - 0.004_072_047 * s,
-        1.977_998_5 * l - 2.428_592_2 * m + 0.450_593_7 * s,
-        0.025_904_037 * l + 0.782_771_77 * m - 0.808_675_77 * s,
-    ]
-}
-
-fn oklab_to_srgb(lab: [f32; 3]) -> [f32; 3] {
-    let l = (lab[0] + 0.396_337_78 * lab[1] + 0.215_803_76 * lab[2]).powi(3);
-    let m = (lab[0] - 0.105_561_346 * lab[1] - 0.063_854_17 * lab[2]).powi(3);
-    let s = (lab[0] - 0.089_484_18 * lab[1] - 1.291_485_5 * lab[2]).powi(3);
-    [
-        linear_to_srgb((4.076_741_7 * l - 3.307_711_6 * m + 0.230_969_94 * s).clamp(0.0, 1.0)),
-        linear_to_srgb((-1.268_438 * l + 2.609_757_4 * m - 0.341_319_38 * s).clamp(0.0, 1.0)),
-        linear_to_srgb((-0.004_196_086_3 * l - 0.703_418_6 * m + 1.707_614_7 * s).clamp(0.0, 1.0)),
-    ]
 }
 
 // --- the gradient SET (`G-011`/`G-012`/`G-016`) --------------------------
@@ -839,7 +725,7 @@ mod tests {
             [0.2, 0.6, 0.9],
             [0.9, 0.1, 0.4],
         ] {
-            let back = oklab_to_srgb(srgb_to_oklab(c));
+            let back = crate::mix::oklab_to_srgb(crate::mix::srgb_to_oklab(c));
             for k in 0..3 {
                 assert!((back[k] - c[k]).abs() < 2e-3, "{c:?} -> {back:?}");
             }

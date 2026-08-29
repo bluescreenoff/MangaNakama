@@ -197,10 +197,23 @@ The recurring failure shapes, in order of how often they have shipped:
 - **Both compositors walk `Document::composite_order()`, never
   `doc.layers` directly.** The order is identity except FB-overflow
   ("Burst out of the panel"): an escaped child re-seats just above its
-  frame folder header at the header's depth. A new walk that iterates
-  the raw layer list re-clips escaped art on one path only — a parity
-  break that only shows on pages using the feature
-  (`cpu_matches_gpu_with_an_escaped_frame_child`).
+  `spill_anchor` — its own frame folder header by default, or higher
+  when the layer's `draws_over` set (stable ids) names something above.
+  A `CompositeStep` also carries a `SpillPart`: a breakout layer with an
+  ENABLED layer mask appears TWICE, `In` (× `1 − mask`) at its own seat
+  where the panel still clips it and `Out` (× mask) at the escaped seat.
+  The GPU serves the `In` half from a third tile-texture variant
+  (`TileVariant::HeldIn`) because it folds masks into uploads. A new
+  walk that iterates the raw layer list re-clips escaped art on one path
+  only — a parity break that only shows on pages using the feature
+  (`cpu_matches_gpu_with_an_escaped_frame_child`,
+  `cpu_matches_gpu_with_a_mask_capped_breakout`).
+- **`LayerSig` must carry anything that moves a layer's SEAT.** The
+  escape flag, the draws-over set and the resolved anchor move no tile
+  revision at all, so `LayerSig::spill` is the only thing that damages
+  the canvas when they change; without it the hardware path serves a
+  stale composite (verified by disabling the field — the re-seat step of
+  the parity test then fails on hardware).
 - The laptop's 2020 Intel DX12 driver randomly drops one draw per
   rebuild frame. This is NOT a regression; agreement tests auto-verify
   on WARP, and the dab path has a canary counter + CPU-replay repair.
@@ -261,6 +274,26 @@ The recurring failure shapes, in order of how often they have shipped:
   float (Transform, Flip) would erase the selection's own art the moment it
   moved. The mask reads the LIVE selection at commit, not a lift-time
   snapshot; only the source CLEAR needs to mirror the lift.
+- **Colour mixing has ONE home: `core/src/mix.rs`** (rows 58 + 167).
+  `MixMode` (gradient `G-009`) and the Oklab conversions live there and
+  `gradient.rs` re-exports them; the brush's `BrushMix` (`I-014`) lives
+  there too. They are not the same math on purpose — interpolating two
+  authored colours is a lerp in a chosen space, mixing WET PIGMENT is
+  subtractive, and the brush hands the second one to libmypaint's vendored
+  spectral code (`paint_mode`, PATCHES.md #21) rather than re-deriving it.
+  Do not add a third copy of Oklab.
+- **`BrushMix::Perceptual` reroutes the stroke.** `dab.wgsl` has no
+  pigment model, so `MyBrush::set_color_mixing` sets the `exotic` flag with
+  the mode and `gpu_ready()` goes false. Any future brush mode the shader
+  cannot express must do the same, in its own setter — routing decided
+  anywhere else is a wrong blend that never errors.
+- **`I-005` interpolation is scoped to the TRANSFORM commit.**
+  `transform::Interp` reaches `commit_transform` only. The mesh/puppet path
+  resamples through `mesh::warp_buffer`'s own bilinear and the Tool
+  Property row disables itself there; export has its own kernel row
+  (`export::Resample`, Comic/Photo) and `import_image_layer` is fixed at
+  Lanczos3. Three resample seams, three separate choices — deliberately,
+  because they answer to different dialogs.
 
 ## Text (`crates/text`)
 

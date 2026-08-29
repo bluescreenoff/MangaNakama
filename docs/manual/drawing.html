@@ -379,6 +379,15 @@ so the four levels change nothing you can see while it is on — the row says
 so instead of showing a pixel figure that is not being used.</div>
 
 <h2>Color mixing, jitter, tip flip, dot pen</h2>
+<div class="quirk"><b>Mixing: Standard blends like light, Paint blends like
+paint.</b> Standard adds colours the way a screen does, which is why mixing
+two strong colours drifts toward grey. Paint mixes them subtractively, the
+way pigment does — blue over yellow makes green, and a blend keeps its
+colour instead of dulling. It also changes the colour a smudge picks up off
+the canvas, and it steers Color jitter. <span class="why">Paint is drawn on
+the processor rather than the graphics card (there is no pigment model in
+the GPU brush path), so a very large brush can feel heavier in this mode —
+that is the switch, not the app slowing down.</span></div>
 <div class="quirk"><b>Stretch and Blur only appear once Paint is below
 100 %.</b> Paint (CSP's "density of paint") is how much of YOUR colour a dab
 lays down against how much it picks up off the canvas, and at 100 % — where
@@ -575,6 +584,17 @@ of the transformation.</div>
 content.</b> The pivot is not cosmetic: moving it re-derives the
 transform from the same scale/rotation values around the new pivot, so
 the preview moves. The honest recomputation, not a pinned preview.</div>
+<div class="quirk"><b>Interpolation only matters when you SHRINK, and
+"High accuracy" is the one for lineart.</b> Smooth edges (the default,
+bilinear) reads two pixels per step, so below about half size a 1&nbsp;px
+line can fall between the samples and vanish outright — not faint, gone,
+and the line reads as broken. High accuracy averages the whole area each
+output pixel covers, so hairlines come through grey instead of missing.
+On a test page of twenty 1&nbsp;px lines shrunk to 35&nbsp;%, Smooth edges
+kept twelve and High accuracy kept all twenty. <span class="why">Hard
+edges invents no new colours at all (pixel art, 1-bit pages); Clear edges
+sharpens an enlargement. The row is greyed out during a mesh warp, which
+resamples through its own lattice instead.</span></div>
 <div class="quirk"><b>The magnetic lasso only re-aims while the pen is
 down.</b> Press and drag and the outline snaps to the lineart as you
 go. Lift the pen and the line to the cursor goes straight and stays

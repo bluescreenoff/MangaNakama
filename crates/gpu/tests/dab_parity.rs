@@ -611,3 +611,45 @@ fn anchored_stamp_mask_is_the_coverage() {
     // One px outside the square on the axis: over.
     assert_eq!(alpha_at(117, 100), 0, "outside the stamp square is dry");
 }
+
+/// Rows 58 + 167 (`I-014`): the GPU dab shader has no pigment model, so a
+/// brush in Perceptual mixing must never reach this path at all.
+///
+/// Deliberately a ROUTING test rather than a parity one. Every other test in
+/// this file asserts that two rasterizers agree; this one asserts that they
+/// are never asked to, because they cannot: `dab.wgsl` implements the
+/// additive Normal / Normal-and-Eraser / LockAlpha blends and there is no
+/// spectral arm to compare against. If a later round ports one, this test is
+/// what should be deleted and replaced by a real parity run.
+///
+/// The recorded dabs are checked too: a `DabParams.paint` above zero handed
+/// to `rasterize_dabs` would be silently ignored by the shader, so the fact
+/// that the record carries zero for every GPU-eligible brush is the second
+/// half of the guarantee.
+#[test]
+fn a_spectral_brush_never_reaches_the_gpu_dab_path() {
+    let mut b = pen();
+    assert!(b.gpu_ready(), "the stock pen is the GPU path's own brush");
+    b.set_color_mixing(mn_brush::BrushMix::Perceptual);
+    assert!(
+        !b.gpu_ready(),
+        "spectral mixing must route the stroke to the CPU rasterizer"
+    );
+
+    // And the dabs a GPU-eligible brush records carry no spectral weight,
+    // so nothing the shader consumes can be quietly wrong.
+    let mut doc = Document::default();
+    let mut rec = pen();
+    rec.set_dab_recording(RecordMode::Tap);
+    rec.begin(&mut doc);
+    for s in stroke_samples() {
+        rec.sample(&mut doc, s);
+    }
+    rec.end(&mut doc);
+    let dabs = rec.take_dab_record().dabs;
+    assert!(!dabs.is_empty(), "the reference stroke recorded no dabs");
+    assert!(
+        dabs.iter().all(|d| d.paint == 0.0),
+        "a GPU-eligible brush recorded a dab with a spectral weight"
+    );
+}

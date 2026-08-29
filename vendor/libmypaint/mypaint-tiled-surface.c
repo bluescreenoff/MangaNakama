@@ -41,6 +41,13 @@ float mnc_brush_hard_dab(void);
 int mnc_dab_tile_budget(void);
 void mnc_notify_dab_clamped(void);
 
+/* mnc (PATCHES.md #21, 2026-08-30): the stroke's spectral-pigment weight
+ * (CSP Ink > Mixing mode, I-014). 0.0 = stock additive behaviour, bit for
+ * bit. Declared and documented in mypaint-brush.c; the two v1 entry points
+ * below are where it reaches the pixels, because the v1 surface vtable has
+ * no paint argument to carry it and this engine never calls the v2 one. */
+float mnc_brush_paint_mode(void);
+
 /* mnc (round 26, 2026-08-16): Krita-style TEXTURE tips, also implemented in
  * Rust — see vendor/PATCHES.md #10. When mnc_brush_texture_size() returns
  * > 0, each dab's opacity is multiplied by a grayscale mask sampled in
@@ -860,16 +867,22 @@ int draw_dab (MyPaintSurface *surface, float x, float y,
                float colorize)
 {
     MyPaintTiledSurface* self = (MyPaintTiledSurface*)surface;
+    /* mnc (PATCHES.md #21): the last argument was a hard-coded 0.0 — the v1
+     * vtable has no paint parameter, so the weight arrives out of band. The
+     * op struct, process_op's (1 - paint)/(paint) split and the whole
+     * BlendMode_*_Paint family were already compiled and reachable; only
+     * this literal stood between them and the row. 0.0 = unchanged. */
+    const float mn_paint = mnc_brush_paint_mode();
     // Normal pass
     gboolean surface_modified = (draw_dab_internal(
         self->operation_queue, x, y, radius, r, g, b, opaque, hardness, color_a, aspect_ratio, angle, lock_alpha,
-        colorize, 0.0, 0.0, 0.0, &self->dirty_bbox));
+        colorize, 0.0, 0.0, mn_paint, &self->dirty_bbox));
     // Symmetry pass
     if (surface_modified && self->surface_do_symmetry) {
         const float symm_x = self->surface_center_x + (self->surface_center_x - x);
         draw_dab_internal(
             self->operation_queue, symm_x, y, radius, r, g, b, opaque, hardness, color_a, aspect_ratio, -angle,
-            lock_alpha, colorize, 0.0, 0.0, 0.0, &self->dirty_bbox);
+            lock_alpha, colorize, 0.0, 0.0, mn_paint, &self->dirty_bbox);
     }
     return surface_modified;
 }
@@ -1044,9 +1057,17 @@ get_color(
     float* color_a)
 {
     MyPaintTiledSurface* self = (MyPaintTiledSurface*)surface;
+    /* mnc (PATCHES.md #21): this is the SMUDGE sampler — the "colour picked
+     * up off the canvas" half of CSP's colour mixing. get_color_internal
+     * reads a NEGATIVE paint factor as "use the legacy averaging", which is
+     * what the -1.0 literal here always meant; with the row on, the sampler
+     * has to weight spectrally or the dab would mix pigment with a colour
+     * that was averaged additively. 0.0 is a real weight, not "off", so the
+     * test is > 0 and the off case keeps the exact -1.0 it had. */
+    const float mn_paint = mnc_brush_paint_mode();
     get_color_internal(
       surface, tsf1_request_start, tsf1_request_end, self->threadsafe_tile_requests, self->operation_queue, x, y,
-      radius, color_r, color_g, color_b, color_a, -1.0);
+      radius, color_r, color_g, color_b, color_a, mn_paint > 0.0f ? mn_paint : -1.0f);
 }
 
 

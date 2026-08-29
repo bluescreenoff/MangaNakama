@@ -155,6 +155,15 @@ pub fn warp_buffer(src: &FloatSource, pts: &[[f32; 2]], n: usize) -> ([i32; 4], 
 
 /// Bilinear sample of the float at a fractional position, premultiplied
 /// fix15 (correct at alpha edges without unpremultiplying).
+///
+/// Deliberately NOT wired to [`crate::transform::Interp`] (`I-005`, row
+/// 167). That row's kernels are chosen against a destination pixel's source
+/// FOOTPRINT, which a single affine gives you for free and a deformed
+/// lattice does not — every quad has its own local scale, so "high
+/// accuracy" here would mean a per-quad Jacobian, not a shared half-extent.
+/// CSP does not offer the choice on a mesh warp either. The Tool Property
+/// row disables itself while a mesh drag is up and says why, rather than
+/// looking live over this function.
 fn sample_frac(src: &FloatSource, fx: f32, fy: f32) -> [f32; 4] {
     if fx < src.rect[0] as f32 - 1.0
         || fy < src.rect[1] as f32 - 1.0

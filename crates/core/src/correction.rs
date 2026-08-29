@@ -94,6 +94,9 @@ fn below_props_key(doc: &Document, i: usize) -> u64 {
         l.through.hash(&mut h);
         l.clip.hash(&mut h);
         l.escape_frame.hash(&mut h);
+        // Part 2: the breakout's seat and its mask cap both change WHERE the
+        // layer lands in the composite without moving a tile.
+        l.draws_over.hash(&mut h);
         l.draft.hash(&mut h);
         if let Some(m) = &l.mask {
             m.enabled.hash(&mut h);
