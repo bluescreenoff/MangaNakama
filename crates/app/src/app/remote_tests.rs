@@ -17,6 +17,16 @@ fn item(pos: [f32; 2], s: &str) -> mn_core::TextItem {
     t
 }
 
+fn bubble(cx: f32, cy: f32) -> mn_core::Balloon {
+    mn_core::Balloon {
+        shape: mn_core::BalloonShape::Ellipse {
+            center: [cx, cy],
+            radii: [60.0, 40.0],
+        },
+        ..Default::default()
+    }
+}
+
 fn call(app: &mut crate::app::App, method: &str, params: Value) -> Value {
     let req = Request {
         id: json!(1),
@@ -272,4 +282,225 @@ fn remote_layers_list_and_page_render() {
     // And the extension gate refuses anything but .png.
     let resp = call(&mut app, "page.render", json!({"path": "C:/nope.exe"}));
     assert_eq!(resp["error"]["code"], -32602);
+}
+
+/// Balloons get the text items' deal (tier-3 leftover): list carries the
+/// geometry, patch/add/remove address items by stable id, one request is
+/// one `set_balloons` commit = ONE undo press, a stale id is skipped.
+#[test]
+fn remote_balloon_batch_by_id_lands_and_undoes_as_one_press() {
+    let Some(mut app) = super::new_document_tests::headless() else {
+        return;
+    };
+    let li = app.doc.add_balloon_layer(
+        "ふきだし",
+        mn_core::BalloonSet {
+            balloons: vec![bubble(200.0, 200.0), bubble(400.0, 200.0)],
+            border_px: 4.0,
+            pressure_width: false,
+        },
+    );
+    let lid = app.doc.layers[li].id();
+    let ids: Vec<u64> = app.doc.layers[li]
+        .balloons()
+        .unwrap()
+        .balloons
+        .iter()
+        .map(|b| b.id)
+        .collect();
+    assert!(ids.iter().all(|&i| i != 0), "the commit door minted ids");
+
+    // balloons.list: the ids it always spoke, plus the geometry a script
+    // needs to aim (shape, tails, bbox) and the layer's shared border.
+    let resp = call(&mut app, "balloons.list", json!({"layer": lid}));
+    let listed: Vec<u64> = resp["result"]["ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i.as_u64().unwrap())
+        .collect();
+    assert_eq!(listed, ids);
+    let row = &resp["result"]["items"][0];
+    assert_eq!(row["id"].as_u64().unwrap(), ids[0]);
+    assert_eq!(row["shape"]["Ellipse"]["center"][0], 200.0, "{resp}");
+    assert_eq!(row["bbox"], json!([140.0, 160.0, 260.0, 240.0]));
+    assert_eq!(resp["result"]["border_px"], 4.0);
+
+    // One batch: reshape + kill the fill on the first, hang a thought tail
+    // on the second, and a stale id that must be skipped, not error.
+    let resp = call(
+        &mut app,
+        "balloons.patch",
+        json!({"layer": lid, "items": [
+            {"id": ids[0],
+             "shape": {"Ellipse": {"center": [250.0, 260.0], "radii": [70.0, 50.0]}},
+             "fill_opacity": 0.0},
+            {"id": ids[1], "tails": [
+                {"base": [400.0, 230.0], "tip": [430.0, 320.0], "width": 18.0, "kind": "Thought"}
+            ]},
+            {"id": 999_999, "width_scale": 2.0},
+        ]}),
+    );
+    assert_eq!(resp["result"]["patched"], 2, "{resp}");
+    let bs = app.doc.layers[li].balloons().unwrap();
+    assert_eq!(
+        bs.balloons[0].shape,
+        mn_core::BalloonShape::Ellipse {
+            center: [250.0, 260.0],
+            radii: [70.0, 50.0]
+        }
+    );
+    assert_eq!(bs.balloons[0].fill_opacity, 0.0);
+    assert_eq!(bs.balloons[1].tails.len(), 1);
+    assert_eq!(bs.balloons[1].tails[0].kind, mn_core::TailKind::Thought);
+
+    // A patch that would leave a degenerate bubble is skipped the same way
+    // an absent id is — the count is the honest answer, and nothing commits.
+    let rev = app.doc.revision;
+    let resp = call(
+        &mut app,
+        "balloons.patch",
+        json!({"layer": lid, "items": [
+            {"id": ids[0], "shape": {"Ellipse": {"center": [250.0, 260.0], "radii": [1.0, 1.0]}}}
+        ]}),
+    );
+    assert_eq!(resp["result"]["patched"], 0, "{resp}");
+    assert_eq!(app.doc.revision, rev, "a skipped batch commits nothing");
+
+    // The batch was one commit: one Ctrl+Z takes BOTH edits back.
+    dispatch(&mut app, AppCmd::Undo);
+    let bs = app.doc.layers[li].balloons().unwrap();
+    assert_eq!(
+        bs.balloons[0].shape,
+        mn_core::BalloonShape::Ellipse {
+            center: [200.0, 200.0],
+            radii: [60.0, 40.0]
+        },
+        "one undo press reverts the batch"
+    );
+    assert_eq!(bs.balloons[0].fill_opacity, 1.0);
+    assert!(bs.balloons[1].tails.is_empty());
+    assert_eq!(
+        bs.balloons.iter().map(|b| b.id).collect::<Vec<_>>(),
+        ids,
+        "undo restores the same identities"
+    );
+
+    // balloons.add with only a shape: the balloon tool's fresh-bubble
+    // defaults fill in, the commit door mints and reports the id.
+    let resp = call(
+        &mut app,
+        "balloons.add",
+        json!({"layer": lid, "items": [
+            {"shape": {"Ellipse": {"center": [600.0, 300.0], "radii": [50.0, 30.0]}}}
+        ]}),
+    );
+    let new_ids: Vec<u64> = resp["result"]["ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i.as_u64().unwrap())
+        .collect();
+    assert_eq!(new_ids.len(), 1, "{resp}");
+    assert!(!ids.contains(&new_ids[0]), "a fresh mint, not a reuse");
+    let bs = app.doc.layers[li].balloons().unwrap();
+    assert_eq!(bs.balloons.len(), 3);
+    assert_eq!(bs.balloons[2].line_color, [0, 0, 0], "tool ink default");
+    assert_eq!(bs.balloons[2].fill_color, [255, 255, 255]);
+    assert_eq!(bs.balloons[2].width_scale, 1.0);
+    assert!(bs.balloons[2].tails.is_empty());
+
+    // A degenerate ADD is a client bug, not a race: refused outright.
+    let resp = call(
+        &mut app,
+        "balloons.add",
+        json!({"layer": lid, "items": [
+            {"shape": {"Ellipse": {"center": [600.0, 300.0], "radii": [1.0, 1.0]}}}
+        ]}),
+    );
+    assert_eq!(resp["error"]["code"], -32602, "{resp}");
+
+    // balloons.remove by id; the stale id in the list is skipped.
+    let resp = call(
+        &mut app,
+        "balloons.remove",
+        json!({"layer": lid, "ids": [new_ids[0], 424242]}),
+    );
+    assert_eq!(resp["result"]["removed"], 1, "{resp}");
+    assert_eq!(app.doc.layers[li].balloons().unwrap().balloons.len(), 2);
+
+    // Wrong layer kind still errors the way texts.list does.
+    let raster_id = app.doc.layers[0].id();
+    let resp = call(&mut app, "balloons.patch", json!({"layer": raster_id, "items": []}));
+    assert_eq!(resp["error"]["code"], -32602, "{resp}");
+}
+
+/// Pages keep their index on the wire (back-compat) but now also carry the
+/// runtime `uid`, so a script that reorders pages — or races the artist
+/// doing it — can re-find the page it was working on.
+#[test]
+fn remote_pages_are_findable_by_uid_across_a_reorder() {
+    let Some(mut app) = super::new_document_tests::headless() else {
+        return;
+    };
+    super::new_document_tests::small_draft(&mut app, 3, "");
+    dispatch(&mut app, AppCmd::NewComicCreate);
+    assert_eq!(app.pages.len(), 3, "a three-page draft");
+
+    let resp = call(&mut app, "pages.list", json!({}));
+    let rows = resp["result"]["pages"].as_array().unwrap().clone();
+    assert_eq!(rows.len(), 3, "{resp}");
+    let uids: Vec<u64> = rows.iter().map(|r| r["uid"].as_u64().unwrap()).collect();
+    assert!(uids.iter().all(|&u| u != 0), "every page has a uid");
+    let mut sorted = uids.clone();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(sorted.len(), 3, "uids are distinct");
+    assert_eq!(rows[0]["index"], 0);
+    assert_eq!(
+        rows.iter().filter(|r| r["current"] == true).count(),
+        1,
+        "exactly one current page"
+    );
+
+    // doc.info speaks the same uid for the page it reports the index of.
+    let resp = call(&mut app, "doc.info", json!({}));
+    let cur = resp["result"]["page"].as_u64().unwrap() as usize;
+    assert_eq!(resp["result"]["page_uid"].as_u64().unwrap(), uids[cur]);
+
+    // Index addressing still works, and answers with the uid.
+    let resp = call(&mut app, "pages.select", json!({"page": 2}));
+    assert_eq!(resp["result"]["page"], 2, "{resp}");
+    assert_eq!(resp["result"]["uid"].as_u64().unwrap(), uids[2]);
+
+    // The artist reorders. The index the script remembered now names a
+    // DIFFERENT page; the uid still names its own.
+    dispatch(&mut app, AppCmd::MovePage { from: 2, to: 0 });
+    let resp = call(&mut app, "pages.select", json!({"uid": uids[2]}));
+    assert_eq!(resp["result"]["page"], 0, "{resp}");
+    assert_eq!(resp["result"]["uid"].as_u64().unwrap(), uids[2]);
+
+    let resp = call(&mut app, "pages.select", json!({"uid": 777_777}));
+    assert_eq!(resp["error"]["code"], -32003, "{resp}");
+}
+
+/// A plain canvas has no dpi — `PageSetup::dpi == 0` is core's own "no mm
+/// geometry" sentinel, and 0 on the wire is a number a script would divide
+/// by. Absent means absent (tier-3 leftover: doc.info reported 0).
+#[test]
+fn doc_info_reports_no_dpi_on_a_plain_canvas() {
+    let Some(mut app) = super::new_document_tests::headless() else {
+        return;
+    };
+    let resp = call(&mut app, "doc.info", json!({}));
+    assert!(
+        resp["result"]["dpi"].is_null(),
+        "a pixel canvas has no dpi: {resp}"
+    );
+
+    // A comic page does have one, and reports the number.
+    super::new_document_tests::small_draft(&mut app, 1, "");
+    dispatch(&mut app, AppCmd::NewComicCreate);
+    let resp = call(&mut app, "doc.info", json!({}));
+    assert_eq!(resp["result"]["dpi"], 72, "{resp}");
 }

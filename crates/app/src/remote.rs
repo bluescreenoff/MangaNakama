@@ -46,7 +46,7 @@ use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
 
 use crate::app::App;
-use crate::cmd::{self, AppCmd, TextPatch};
+use crate::cmd::{self, AppCmd, BalloonPatch, TextPatch};
 
 /// The wndproc message that says "remote requests are waiting". `WM_APP`
 /// range = never collides with system or egui messages.
@@ -255,6 +255,16 @@ fn layer_arg(app: &App, params: &Value) -> Result<usize, HandleErr> {
         .ok_or((-32003, format!("no layer with id {id}")))
 }
 
+/// `layer_arg` + the kind check every balloon method opens with, so the
+/// error a script gets is the same one from all four.
+fn balloon_layer_arg(app: &App, params: &Value) -> Result<usize, HandleErr> {
+    let li = layer_arg(app, params)?;
+    if app.doc.layers[li].balloons().is_none() {
+        return Err((-32602, "not a balloon layer".to_owned()));
+    }
+    Ok(li)
+}
+
 /// Mutations refuse while the app is mid-something: a live text-editor
 /// session holds an uncommitted item the whole-set commit would clobber,
 /// and a non-empty command queue means we were woken from inside a modal
@@ -276,9 +286,18 @@ fn handle(app: &mut App, method: &str, params: &Value) -> Result<Value, HandleEr
         "doc.info" => Ok(json!({
             "path": app.doc_path.as_ref().map(|p| p.display().to_string()),
             "page": app.page_index,
+            "page_uid": app.pages.get(app.page_index).map(|p| p.uid),
             "pages": app.pages.len(),
             "size": [app.doc.size.0, app.doc.size.1],
-            "dpi": app.doc_dpi(),
+            // A plain canvas has NO dpi. `PageSetup::dpi == 0` is core's own
+            // "pixel preset, no mm geometry" sentinel (core::page), and a 0
+            // on the wire is a number a script would happily divide by —
+            // mm→px on a pixel canvas would silently come out zero-sized.
+            // Absent means absent: null, and the client decides.
+            "dpi": match app.doc_dpi() {
+                0 => Value::Null,
+                d => json!(d),
+            },
         })),
         "layers.list" => {
             let rows: Vec<Value> = app
@@ -331,12 +350,98 @@ fn handle(app: &mut App, method: &str, params: &Value) -> Result<Value, HandleEr
             Ok(json!({"items": items}))
         }
         "balloons.list" => {
-            let li = layer_arg(app, params)?;
-            let Some(bs) = app.doc.layers[li].balloons() else {
-                return invalid("not a balloon layer");
-            };
+            let li = balloon_layer_arg(app, params)?;
+            let bs = app.doc.layers[li].balloons().expect("checked");
             let ids: Vec<u64> = bs.balloons.iter().map(|b| b.id).collect();
+            let items: Vec<Value> = bs
+                .balloons
+                .iter()
+                .map(|b| {
+                    json!({
+                        "id": b.id,
+                        "shape": serde_json::to_value(&b.shape).unwrap_or(Value::Null),
+                        "tails": serde_json::to_value(&b.tails).unwrap_or(Value::Null),
+                        // Derived, read-only: body grown by the tails. It is
+                        // what a script aims lettering at without having to
+                        // re-derive an ellipse's extents itself.
+                        "bbox": b.bbox(),
+                        "width_scale": b.width_scale,
+                        "line_color": b.line_color,
+                        "fill_color": b.fill_color,
+                        "line_opacity": b.line_opacity,
+                        "fill_opacity": b.fill_opacity,
+                        "fill_tone": serde_json::to_value(b.fill_tone).unwrap_or(Value::Null),
+                    })
+                })
+                .collect();
+            // `ids` stays for the clients written against the first spec.
+            // `border_px`/`pressure_width` are the SET's, not any one
+            // balloon's — readable here, not patchable (see the doc).
+            Ok(json!({
+                "ids": ids,
+                "items": items,
+                "border_px": bs.border_px,
+                "pressure_width": bs.pressure_width,
+            }))
+        }
+        "balloons.patch" => {
+            if let Some(e) = busy(app) {
+                return Err(e);
+            }
+            let li = balloon_layer_arg(app, params)?;
+            let patches: Vec<BalloonPatch> =
+                serde_json::from_value(params.get("items").cloned().unwrap_or_default())
+                    .map_err(|e| (-32602, format!("params.items: {e}")))?;
+            let n = cmd::balloons_patch(app, li, &patches);
+            if n > 0 {
+                app.set_status(format!("automation: {n} balloon(s) updated"));
+                app.mark_dirty();
+            }
+            Ok(json!({"patched": n}))
+        }
+        "balloons.add" => {
+            if let Some(e) = busy(app) {
+                return Err(e);
+            }
+            let li = balloon_layer_arg(app, params)?;
+            let adds: Vec<NewBalloon> =
+                serde_json::from_value(params.get("items").cloned().unwrap_or_default())
+                    .map_err(|e| (-32602, format!("params.items: {e}")))?;
+            if adds.is_empty() {
+                return invalid("params.items is empty");
+            }
+            let ink = app.balloon_ink;
+            let items: Vec<mn_core::Balloon> = adds.into_iter().map(|a| a.build(ink)).collect();
+            // Geometry is checked BEFORE anything commits: a bubble too
+            // small to ink is a client bug, not a race, and half a batch is
+            // a worse answer than none of it. (The tool refuses the same
+            // drag with "draw a closed bubble shape".)
+            if let Some(i) = items.iter().position(|b| !b.is_valid()) {
+                return invalid(&format!(
+                    "items[{i}]: the shape is too small or not closed to be a balloon"
+                ));
+            }
+            let ids = cmd::balloons_add(app, li, items);
+            if !ids.is_empty() {
+                app.set_status(format!("automation: {} balloon(s) added", ids.len()));
+                app.mark_dirty();
+            }
             Ok(json!({"ids": ids}))
+        }
+        "balloons.remove" => {
+            if let Some(e) = busy(app) {
+                return Err(e);
+            }
+            let li = balloon_layer_arg(app, params)?;
+            let ids: Vec<u64> =
+                serde_json::from_value(params.get("ids").cloned().unwrap_or_default())
+                    .map_err(|e| (-32602, format!("params.ids: {e}")))?;
+            let n = cmd::balloons_remove(app, li, &ids);
+            if n > 0 {
+                app.set_status(format!("automation: {n} balloon(s) removed"));
+                app.mark_dirty();
+            }
+            Ok(json!({"removed": n}))
         }
         "layers.add_text" => {
             // Script-driven typesetting from scratch needs somewhere to
@@ -404,20 +509,58 @@ fn handle(app: &mut App, method: &str, params: &Value) -> Result<Value, HandleEr
             }
             Ok(json!({"removed": n}))
         }
+        "pages.list" => {
+            let rows: Vec<Value> = app
+                .pages
+                .iter()
+                .enumerate()
+                .map(|(i, p)| {
+                    json!({
+                        "index": i,
+                        "uid": p.uid,
+                        // The work-folder file identity (`pNNN.ora`), 0 until
+                        // a folder save assigns one — the only page number
+                        // that survives a restart.
+                        "file_id": p.id,
+                        "current": i == app.page_index,
+                        "spread": p.spread,
+                    })
+                })
+                .collect();
+            Ok(json!({"pages": rows}))
+        }
         "pages.select" => {
             if let Some(e) = busy(app) {
                 return Err(e);
             }
-            let page = params
-                .get("page")
-                .and_then(Value::as_u64)
-                .ok_or((-32602, "params.page (an index) is required".to_owned()))?
-                as usize;
-            if page >= app.pages.len() {
-                return Err((-32003, format!("no page {page} ({} exist)", app.pages.len())));
-            }
+            // `uid` wins when both are sent: it is the more specific answer
+            // to "which page", and a client that learned uids has no reason
+            // to also mean the index.
+            let page = match params.get("uid").and_then(Value::as_u64) {
+                Some(uid) => app
+                    .pages
+                    .iter()
+                    .position(|p| p.uid == uid)
+                    .ok_or((-32003, format!("no page with uid {uid}")))?,
+                None => {
+                    let page = params.get("page").and_then(Value::as_u64).ok_or((
+                        -32602,
+                        "params.page (an index) or params.uid is required".to_owned(),
+                    ))? as usize;
+                    if page >= app.pages.len() {
+                        return Err((
+                            -32003,
+                            format!("no page {page} ({} exist)", app.pages.len()),
+                        ));
+                    }
+                    page
+                }
+            };
             cmd::dispatch(app, AppCmd::SelectPage(page));
-            Ok(json!({"page": app.page_index}))
+            Ok(json!({
+                "page": app.page_index,
+                "uid": app.pages.get(app.page_index).map(|p| p.uid),
+            }))
         }
         "page.render" => {
             let path = params
@@ -527,6 +670,52 @@ impl NewText {
             t.outline_px = o.max(0.0);
         }
         t
+    }
+}
+
+/// The wire shape for a NEW balloon — everything optional but the shape.
+/// Unsupplied fields follow the balloon TOOL's fresh bubble: `Balloon`'s
+/// own defaults (no tails, width_scale 1.0) repainted with the Tool
+/// Property ink, which is exactly what `canvas_input` builds on a drag.
+#[derive(serde::Deserialize)]
+struct NewBalloon {
+    shape: mn_core::BalloonShape,
+    tails: Option<Vec<mn_core::Tail>>,
+    width_scale: Option<f32>,
+    line_color: Option<[u8; 3]>,
+    fill_color: Option<[u8; 3]>,
+    line_opacity: Option<f32>,
+    fill_opacity: Option<f32>,
+    fill_tone: Option<mn_core::BalloonTone>,
+}
+
+impl NewBalloon {
+    fn build(self, ink: mn_core::BalloonInk) -> mn_core::Balloon {
+        let mut b = mn_core::Balloon {
+            shape: self.shape,
+            tails: self.tails.unwrap_or_default(),
+            ..Default::default()
+        };
+        b.set_ink(ink);
+        if let Some(w) = self.width_scale {
+            b.width_scale = w.clamp(0.25, 4.0);
+        }
+        if let Some(c) = self.line_color {
+            b.line_color = c;
+        }
+        if let Some(c) = self.fill_color {
+            b.fill_color = c;
+        }
+        if let Some(o) = self.line_opacity {
+            b.line_opacity = o.clamp(0.0, 1.0);
+        }
+        if let Some(o) = self.fill_opacity {
+            b.fill_opacity = o.clamp(0.0, 1.0);
+        }
+        if let Some(t) = self.fill_tone {
+            b.fill_tone = Some(t);
+        }
+        b
     }
 }
 

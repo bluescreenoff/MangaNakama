@@ -3210,6 +3210,159 @@ pub(crate) fn texts_remove(app: &mut App, layer: usize, ids: &[u64]) -> usize {
     gone
 }
 
+/// One balloon's field patch — [`TextPatch`]'s twin for the bubbles, every
+/// field optional, absent = keep. Serde because this IS the wire shape the
+/// automation socket receives (`remote.rs`, `balloons.patch`).
+///
+/// Deliberately NO `AppCmd` variant beside [`AppCmd::TextsPatch`] & co: the
+/// text variants exist as the future auto-action surface and are dead-code-
+/// allowed until one produces them, and adding three more dead variants to
+/// mirror a mirror is bookkeeping, not code. `remote.rs` calls the three
+/// door fns directly (it wants their counts anyway); the day a queued
+/// balloon batch has a producer, the variant is six lines away.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct BalloonPatch {
+    pub id: u64,
+    /// Position, size AND kind in one field — an ellipse's centre, a rect's
+    /// corners and a drawn polygon's points all live inside the shape, so a
+    /// move is a whole-shape send. Externally tagged, exactly the JSON
+    /// `balloons.list` prints back.
+    pub shape: Option<mn_core::BalloonShape>,
+    /// The whole tail list, replaced. Tails carry no ids of their own (they
+    /// are a short ordered list on one balloon), and half-patching one by
+    /// index is the addressing this round exists to get away from.
+    pub tails: Option<Vec<mn_core::Tail>>,
+    /// CSP's "correct line width" multiplier; the Tool Property bar's range.
+    pub width_scale: Option<f32>,
+    pub line_color: Option<[u8; 3]>,
+    pub fill_color: Option<[u8; 3]>,
+    pub line_opacity: Option<f32>,
+    pub fill_opacity: Option<f32>,
+    /// Screened fill. Double option on purpose: absent = keep, explicit
+    /// `null` = back to a flat fill. Without it "un-tone this bubble" would
+    /// be a state the wire cannot say.
+    #[serde(default, deserialize_with = "present_option")]
+    pub fill_tone: Option<Option<mn_core::BalloonTone>>,
+}
+
+/// Serde's documented double-option idiom: a field that is present decodes
+/// to `Some(_)` even when its value is `null`; `#[serde(default)]` covers
+/// absent.
+fn present_option<'de, T, D>(d: D) -> Result<Option<T>, D::Error>
+where
+    T: serde::Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    T::deserialize(d).map(Some)
+}
+
+/// The balloon batch doors — `texts_patch`/`add`/`remove`'s twins, same
+/// contract: clone the set, mutate, commit once through
+/// `Document::set_balloons` (one undo press for the whole batch), and
+/// return how many items the mutation actually reached. Absent ids are
+/// skipped rather than an error: a remote batch may race the artist
+/// deleting a bubble, and "3 of 4 landed" is the honest answer.
+///
+/// No cache warming, unlike the text doors: a balloon layer's raster is
+/// derived from the vectors inside `set_balloons`, there is no per-item
+/// sprite to keep alive.
+pub(crate) fn balloons_patch(app: &mut App, layer: usize, patches: &[BalloonPatch]) -> usize {
+    let Some(bs) = app.doc.layers.get(layer).and_then(|l| l.balloons()) else {
+        return 0;
+    };
+    let mut bs = bs.clone();
+    let mut hit = 0;
+    for p in patches {
+        let Some(i) = bs.index_of_id(p.id) else {
+            continue;
+        };
+        let mut b = bs.balloons[i].clone();
+        if let Some(s) = &p.shape {
+            b.shape = s.clone();
+        }
+        if let Some(t) = &p.tails {
+            b.tails = t.clone();
+        }
+        if let Some(w) = p.width_scale {
+            b.width_scale = w.clamp(0.25, 4.0);
+        }
+        if let Some(c) = p.line_color {
+            b.line_color = c;
+        }
+        if let Some(c) = p.fill_color {
+            b.fill_color = c;
+        }
+        if let Some(o) = p.line_opacity {
+            b.line_opacity = o.clamp(0.0, 1.0);
+        }
+        if let Some(o) = p.fill_opacity {
+            b.fill_opacity = o.clamp(0.0, 1.0);
+        }
+        if let Some(t) = p.fill_tone {
+            b.fill_tone = t;
+        }
+        // A patch that would leave a bubble too small to ink is skipped like
+        // an absent id — the same refusal the balloon tool gives a stray
+        // drag, and the count tells the client it did not land.
+        if !b.is_valid() {
+            continue;
+        }
+        bs.balloons[i] = b;
+        hit += 1;
+    }
+    if hit > 0 {
+        app.doc.set_balloons(layer, bs);
+    }
+    hit
+}
+
+/// Append balloons (id 0; the commit door mints). Callers build the items
+/// from the balloon tool's own fresh-bubble defaults — see `remote.rs`'s
+/// `NewBalloon` — and are the ones that validate geometry: a degenerate
+/// shape arriving here is a caller bug, not a race, so it is refused up
+/// front rather than half-committed.
+pub(crate) fn balloons_add(app: &mut App, layer: usize, items: Vec<mn_core::Balloon>) -> Vec<u64> {
+    let Some(bs) = app.doc.layers.get(layer).and_then(|l| l.balloons()) else {
+        return Vec::new();
+    };
+    if items.is_empty() {
+        return Vec::new();
+    }
+    let mut bs = bs.clone();
+    let start = bs.balloons.len();
+    for mut b in items {
+        b.id = 0;
+        bs.balloons.push(b);
+    }
+    if !app.doc.set_balloons(layer, bs) {
+        return Vec::new();
+    }
+    app.doc.layers[layer]
+        .balloons()
+        .map(|bs| bs.balloons[start..].iter().map(|b| b.id).collect())
+        .unwrap_or_default()
+}
+
+pub(crate) fn balloons_remove(app: &mut App, layer: usize, ids: &[u64]) -> usize {
+    let Some(bs) = app.doc.layers.get(layer).and_then(|l| l.balloons()) else {
+        return 0;
+    };
+    let mut bs = bs.clone();
+    let before = bs.balloons.len();
+    bs.balloons.retain(|b| !ids.contains(&b.id));
+    let gone = before - bs.balloons.len();
+    if gone > 0 {
+        app.doc.set_balloons(layer, bs);
+        // The Object tool's selection is an INDEX pair; leaving it after a
+        // removal would silently re-point it at whichever bubble slid down
+        // into the slot. `BalloonDelete` clears it for the same reason.
+        if app.balloon_sel.map(|(l, _)| l) == Some(layer) {
+            app.balloon_sel = None;
+        }
+    }
+    gone
+}
+
 pub fn dispatch(app: &mut App, cmd: AppCmd) {
     // FB-039: the last-frame delete confirmation is one-shot — any other
     // command disarms it.

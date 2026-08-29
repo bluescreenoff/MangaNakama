@@ -129,7 +129,7 @@ const TOOLS: &[(&str, &str, &str)] = &[
     (
         "doc_info",
         "doc.info",
-        "Current document: path, page index, page count, canvas size [w,h] in px, dpi.",
+        "Current document: path, page index, page uid, page count, canvas size [w,h] in px, dpi (null on a plain pixel canvas — it has no physical size).",
     ),
     (
         "layers_list",
@@ -144,7 +144,7 @@ const TOOLS: &[(&str, &str, &str)] = &[
     (
         "balloons_list",
         "balloons.list",
-        "Balloon ids of a balloon layer. Args: {layer: <layer id>}.",
+        "Balloons of a balloon layer: stable id, shape ({Ellipse:{center,radii}} | {RoundRect:{rect,corner}} | {Polygon:{points,widths,corners}}), tails, bbox [x0,y0,x1,y1] (aim lettering with this), width_scale, line/fill colour and opacity, fill_tone — plus the layer's border_px and pressure_width. Args: {layer: <layer id>}.",
     ),
     (
         "layers_add_text",
@@ -167,9 +167,29 @@ const TOOLS: &[(&str, &str, &str)] = &[
         "Remove text items by id. Args: {layer: <layer id>, ids: [..]}. Returns how many were removed.",
     ),
     (
+        "balloons_patch",
+        "balloons.patch",
+        "Batch-edit balloons BY ID on one layer; one undo press for the whole batch. Args: {layer: <layer id>, items: [{id, shape?, tails?, width_scale?, line_color?, fill_color?, line_opacity?, fill_opacity?, fill_tone?}]}. Position, size and kind all live in shape, so a move sends the whole shape. A patch that would leave a bubble too small to ink is skipped. Returns how many landed.",
+    ),
+    (
+        "balloons_add",
+        "balloons.add",
+        "Add balloons to a balloon layer; unspecified fields follow the balloon tool's fresh bubble (no tails, black line, white fill). Args: {layer: <layer id>, items: [{shape, tails?, width_scale?, line_color?, fill_color?, line_opacity?, fill_opacity?, fill_tone?}]}. Returns the minted ids.",
+    ),
+    (
+        "balloons_remove",
+        "balloons.remove",
+        "Remove balloons by id. Args: {layer: <layer id>, ids: [..]}. Returns how many were removed.",
+    ),
+    (
+        "pages_list",
+        "pages.list",
+        "Every page of the open work: index, uid (stable for this session, survives reorders), file_id (pNNN.ora, 0 until saved to a work folder), current, spread.",
+    ),
+    (
         "pages_select",
         "pages.select",
-        "Switch the app to another page (pages are index-addressed). Args: {page: <index>}.",
+        "Switch the app to another page. Args: {uid: <page uid from pages.list>} — survives a reorder — or {page: <index>}. Returns the new index and uid.",
     ),
     (
         "page_render",
@@ -308,7 +328,30 @@ mod tests {
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), TOOLS.len(), "duplicate tool names");
+        // One tool per socket method, never two spellings of one method.
+        let mut methods: Vec<_> = TOOLS.iter().map(|t| t.1).collect();
+        methods.sort_unstable();
+        methods.dedup();
+        assert_eq!(methods.len(), TOOLS.len(), "two tools on one method");
         assert_eq!(tool_table().len(), TOOLS.len());
+
+        // The id-addressed batch doors are the reason this shim exists —
+        // both families complete (list/patch/add/remove), plus the page
+        // table that makes uid addressing usable.
+        for want in [
+            "texts.list",
+            "texts.patch",
+            "texts.add",
+            "texts.remove",
+            "balloons.list",
+            "balloons.patch",
+            "balloons.add",
+            "balloons.remove",
+            "pages.list",
+            "pages.select",
+        ] {
+            assert!(methods.contains(&want), "no tool for {want}");
+        }
     }
 
     /// The MCP surface: initialize echoes the client's protocol version,
