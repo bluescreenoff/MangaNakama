@@ -330,32 +330,54 @@ pub(super) fn prefs_window(ctx: &egui::Context, app: &mut App) {
 
             ui.add_space(4.0);
             // --- rail + body -------------------------------------------
-            ui.horizontal_top(|ui| {
-                ui.vertical(|ui| {
-                    ui.set_width(110.0);
-                    for (i, t) in TABS.iter().enumerate() {
-                        if ui.selectable_label(app.prefs_tab == i, *t).clicked() {
-                            app.prefs_tab = i;
-                            app.prefs_focus = None;
+            // The divider between them is painted AFTER the row, over the
+            // row's real rect. A vertical `ui.separator()` here is a
+            // feedback loop: the widget stretches to available_height —
+            // which in this auto-sized window is last frame's height — and
+            // the footer below then adds to it, so the window grew ~50pt
+            // every frame until it ran off the desktop (owner report
+            // 2026-08-29; latent since T3, masked while content was short).
+            let mut divider_x = 0.0;
+            let row = ui
+                .horizontal_top(|ui| {
+                    ui.vertical(|ui| {
+                        ui.set_width(110.0);
+                        for (i, t) in TABS.iter().enumerate() {
+                            if ui.selectable_label(app.prefs_tab == i, *t).clicked() {
+                                app.prefs_tab = i;
+                                app.prefs_focus = None;
+                            }
                         }
-                    }
-                });
-                ui.separator();
-                ui.vertical(|ui| {
-                    ui.set_min_width(390.0);
-                    ui.set_min_height(230.0);
-                    let focus = app.prefs_focus;
-                    match TABS[app.prefs_tab.min(TABS.len() - 1)] {
-                        "Saving" => tab_saving(ui, app, focus, &mut fx),
-                        "Drawing" => tab_drawing(ui, app, focus, &mut fx),
-                        "Canvas & view" => tab_canvas(ui, app, focus, &preset_now, &mut fx),
-                        "Interface" => tab_interface(ui, app, focus, &mut fx),
-                        "Text" => tab_text(ui, app, focus, &mut fx),
-                        "History" => tab_history(ui, app, focus, &mut fx),
-                        _ => tab_performance(ui, app, focus, &mut fx, &gpu_line),
-                    }
-                });
-            });
+                    });
+                    // The lane the Separator widget used to occupy — width
+                    // only, so it cannot feed height back into the window.
+                    let (lane, _) =
+                        ui.allocate_exact_size(egui::vec2(6.0, 0.0), egui::Sense::hover());
+                    divider_x = lane.center().x;
+                    ui.vertical(|ui| {
+                        ui.set_min_width(390.0);
+                        ui.set_min_height(230.0);
+                        let focus = app.prefs_focus;
+                        match TABS[app.prefs_tab.min(TABS.len() - 1)] {
+                            "Saving" => tab_saving(ui, app, focus, &mut fx),
+                            "Drawing" => tab_drawing(ui, app, focus, &mut fx),
+                            "Canvas & view" => {
+                                tab_canvas(ui, app, focus, &preset_now, &mut fx)
+                            }
+                            "Interface" => tab_interface(ui, app, focus, &mut fx),
+                            "Text" => tab_text(ui, app, focus, &mut fx),
+                            "History" => tab_history(ui, app, focus, &mut fx),
+                            _ => tab_performance(ui, app, focus, &mut fx, &gpu_line),
+                        }
+                    });
+                })
+                .response
+                .rect;
+            ui.painter().vline(
+                divider_x,
+                row.y_range(),
+                ui.visuals().widgets.noninteractive.bg_stroke,
+            );
             footer(ui, app, &mut fx);
         });
 
@@ -837,6 +859,60 @@ fn tab_performance(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Preferences window must settle, not grow. A vertical
+    /// `ui.separator()` between the rail and the body stretched to
+    /// available_height — last frame's window height in an auto-sized
+    /// window — and the footer added below it, so the window gained ~50pt
+    /// every frame until it ran off the desktop (owner report 2026-08-29).
+    /// Every tab pumps a few real frames; the window rect must stop moving
+    /// and stay inside the screen.
+    #[test]
+    fn prefs_window_settles_on_screen_every_tab() {
+        let Some(renderer) = crate::app::headless_renderer() else {
+            return;
+        };
+        let (w, h) = (1280u32, 860u32);
+        let mut app = crate::app::App::new(renderer, (w, h), 1.0);
+        app.prefs_open = true;
+        let ctx = app.shell.ctx.clone();
+        // The window is the only Middle-order area this frame builds.
+        let window_rect = |ctx: &egui::Context| -> egui::Rect {
+            ctx.memory(|m| {
+                m.areas()
+                    .visible_layer_ids()
+                    .iter()
+                    .filter(|l| l.order == egui::Order::Middle)
+                    .filter_map(|l| m.area_rect(l.id))
+                    .next()
+                    .expect("the Preferences window is visible")
+            })
+        };
+        for tab in 0..TABS.len() {
+            app.prefs_tab = tab;
+            let mut last = egui::Rect::NOTHING;
+            for i in 0..6 {
+                let raw = app.shell.begin((w, h));
+                let mut out = ctx.run_ui(raw, |ui| crate::ui::build(ui, &mut app));
+                out.textures_delta.clear();
+                let r = window_rect(&ctx);
+                // Two frames to settle (anchor + first auto-size), then still.
+                if i >= 3 {
+                    assert_eq!(
+                        r, last,
+                        "tab {tab} ({}) frame {i}: the window is still moving",
+                        TABS[tab]
+                    );
+                }
+                last = r;
+            }
+            assert!(
+                last.top() >= 0.0 && last.bottom() <= h as f32,
+                "tab {tab} ({}) settled off-screen: {last:?}",
+                TABS[tab]
+            );
+        }
+    }
 
     /// The registry is the single spell-out: ids unique, every tab real,
     /// every description carrying catch terms (ends with a parenthetical).
