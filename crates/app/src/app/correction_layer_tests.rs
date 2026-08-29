@@ -69,8 +69,8 @@ fn the_command_makes_a_windowed_live_layer_and_opens_its_dialog() {
 }
 
 /// Slider moves reach the LAYER through the sync; Cancel restores the
-/// opening params exactly; nothing is ever an undo step (the live-layer
-/// convention, like `SetFillParams`).
+/// opening params exactly, and leaves no undo residue (the pre-image is
+/// only recorded on Apply — see `param_undo_tests`).
 #[test]
 fn cancel_restores_the_opening_parameters() {
     let Some(mut app) = super::new_document_tests::headless() else {
@@ -100,8 +100,9 @@ fn cancel_restores_the_opening_parameters() {
     assert!(app.adjust_draft.is_none() && app.adjust_live.is_none());
 }
 
-/// Apply keeps the edited params; the dialog closes; nothing baked, no
-/// undo step consumed for the param change.
+/// Apply keeps the edited params; the dialog closes; nothing is baked into
+/// pixels. The param change itself IS one undo step (`param_undo_tests`
+/// owns that assertion); here we only pin that it is exactly one.
 #[test]
 fn apply_keeps_the_new_parameters_without_baking() {
     let Some(mut app) = super::new_document_tests::headless() else {
@@ -125,8 +126,8 @@ fn apply_keeps_the_new_parameters_without_baking() {
     assert!(app.adjust_draft.is_none() && app.adjust_live.is_none());
     assert_eq!(
         app.doc.undo_labels().len(),
-        steps,
-        "param edits push no undo step (the SetFillParams convention)"
+        steps + 1,
+        "the whole dialog session is ONE undo step"
     );
     assert_eq!(
         app.doc.layers[li].tiles().count(),

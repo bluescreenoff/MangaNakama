@@ -1935,7 +1935,11 @@ impl Document {
     /// open op's recording scrubbed (a snapshot must never inherit one —
     /// the same rule `duplicate_layer` follows). Taken at the TOP of every
     /// structural op, before the first mutation.
-    fn stack_snapshot(&self) -> Vec<Layer> {
+    ///
+    /// Public because the app records structure too: a live-layer parameter
+    /// edit and the correction dialog both snapshot the stack before they
+    /// touch it, and both need the same scrub.
+    pub fn stack_snapshot(&self) -> Vec<Layer> {
         let mut v = self.layers.clone();
         for l in &mut v {
             l.recording = None;

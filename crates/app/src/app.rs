@@ -257,6 +257,18 @@ pub struct App {
     /// Row 105: the dialog is open ON a correction layer — params-only
     /// mode, no pixels touched. Exclusive with `adjust_preview`.
     pub adjust_live: Option<adjust::AdjustLive>,
+    /// The open live-layer param-edit SESSION: which layer's parameters a
+    /// Tool Property drag is currently rewriting. Those sliders emit one
+    /// `SetFillParams` per frame so the canvas re-derives live; the first
+    /// tick records the undo pre-image and the panel then reports the drag
+    /// through [`crate::cmd::AppCmd::ParamEditSession`], so the rest of it
+    /// costs no history and Ctrl+Z takes the whole drag back in one press.
+    ///
+    /// `None` — the common case — means every param edit records its own
+    /// step, which is what a finished one-shot gesture (preset click,
+    /// lattice nudge) wants. Cleared by the pointer's release and, belt
+    /// and braces, by any other command at the dispatch head.
+    pub param_session: Option<usize>,
     /// PM-022: the Go to Page dialog state (1-based draft number).
     pub goto_page_open: bool,
     pub goto_page_value: i32,
@@ -1403,6 +1415,7 @@ impl App {
             adjust_draft: None,
             adjust_preview: None,
             adjust_live: None,
+            param_session: None,
             goto_page_open: false,
             goto_page_value: 1,
             spread_op: None,
@@ -4608,6 +4621,11 @@ mod tone_round_tests;
 mod tone_gesture_tests;
 #[cfg(test)]
 mod correction_layer_tests;
+
+/// One undo press per live-layer parameter-edit session — fill, tone
+/// lattice and correction dialog through the same door.
+#[cfg(test)]
+mod param_undo_tests;
 
 #[cfg(test)]
 mod view_reset_and_tool_lock_tests;

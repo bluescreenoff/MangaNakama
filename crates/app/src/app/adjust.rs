@@ -28,6 +28,15 @@ pub struct AdjustLive {
     pub layer: usize,
     /// The params when the dialog opened — Cancel's restore point.
     pub orig: mn_core::Adjust,
+    /// The layer stack when the dialog opened — Apply's undo pre-image.
+    /// `Arc`-cheap (the same clone `comp_apply` takes), and it carries the
+    /// derived correction raster along with the params, so one Ctrl+Z puts
+    /// back both. Cancel drops it unused: restoring `orig` in place is not
+    /// an edit, and must leave no undo residue.
+    pub before: Vec<mn_core::Layer>,
+    /// The active row when the dialog opened — the other half of the
+    /// `record_structure` pre-image.
+    pub active_before: usize,
     /// The dialog's Preview checkbox: off shows the ORIGINAL params (the
     /// "before"), without closing the dialog.
     pub live: bool,
@@ -66,6 +75,8 @@ impl App {
         self.adjust_live = Some(AdjustLive {
             layer: li,
             orig: cur,
+            before: self.doc.stack_snapshot(),
+            active_before: self.doc.active,
             live: true,
         });
         self.mark_dirty();
@@ -185,6 +196,15 @@ impl App {
         if let Some(lv) = self.adjust_live.take() {
             if let Some(adj) = self.adjust_draft.take() {
                 self.adjust_live_write(lv.layer, adj);
+                // ONE undo step for the whole dialog session. The sliders
+                // wrote the layer live (that IS the preview), so the
+                // pre-image had to be taken at open — record it now that
+                // the edit is committed. An untouched dialog records
+                // nothing: Apply on unchanged params is not an edit.
+                if adj != lv.orig {
+                    self.doc
+                        .record_structure("Correction parameters", lv.before, lv.active_before);
+                }
                 self.set_status(format!(
                     "{} layer updated — parameters only, nothing baked",
                     adj.label()

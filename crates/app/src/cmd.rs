@@ -2823,7 +2823,22 @@ pub enum AppCmd {
     NewLiveFill(mn_core::FillKind),
     /// Edit a live layer's parameters (Tool Property). Re-derives only —
     /// never structural, no history clear.
+    ///
+    /// ONE undo step per edit SESSION, not per slider tick: an edit with
+    /// no session open records the whole stack as the pre-image, and the
+    /// rest of the session only re-derives. See
+    /// [`AppCmd::ParamEditSession`].
     SetFillParams(usize, mn_core::FillKind),
+    /// The Tool Property panel reporting whether a pointer drag is live on
+    /// a live layer's parameters: `Some(layer)` while the button is down,
+    /// `None` when it comes up.
+    ///
+    /// Coalescing is opt-IN, and a drag is the only thing that opts in.
+    /// Everything else that sets parameters — a gradient preset click, the
+    /// Fill tool's live switch, the Object tool's lattice nudge — is one
+    /// finished gesture and records its own step, so nudging the tone
+    /// lattice twice takes two presses to unwind.
+    ParamEditSession(Option<usize>),
     /// Row 105: new correction LAYER — the params live on the layer, the
     /// corrected page is derived, nothing below is baked. The current
     /// selection cuts the window mask; no selection = the whole canvas.
@@ -3456,6 +3471,14 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
         AppCmd::AdjustOpen(_) | AppCmd::AdjustApply | AppCmd::AdjustCancel | AppCmd::AdjustNow(_)
     ) {
         app.adjust_preview_revert();
+    }
+    // A live-layer param drag emits one `SetFillParams` per frame so the
+    // canvas re-derives while the slider moves; only the first records an
+    // undo pre-image. ANY other command means the drag cannot still be
+    // running, so the next param edit starts a fresh session — the belt to
+    // `ParamEditSession(None)`'s braces.
+    if !matches!(cmd, AppCmd::SetFillParams(..) | AppCmd::ParamEditSession(_)) {
+        app.param_session = None;
     }
     // docs/CLIPPING-SCENARIOS.md 5b: a structure edit that silences or
     // re-attaches someone's clip should SAY so, not just change the
@@ -6416,10 +6439,24 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             app.mark_dirty();
         }
         AppCmd::SetFillParams(li, kind) => {
-            if let Some(l) = app.doc.layers.get_mut(li)
-                && matches!(l.kind, mn_core::LayerKind::Fill(_))
+            if let Some(l) = app.doc.layers.get(li)
+                && matches!(l.kind, mn_core::LayerKind::Fill(cur) if cur != kind)
             {
-                l.kind = mn_core::LayerKind::Fill(kind);
+                // ONE undo step for the whole drag. The params live in
+                // `Layer.kind` and the derived raster beside them, so the
+                // stack snapshot `record_structure` takes carries BOTH —
+                // undo restores the old numbers and the old dots in one
+                // swap, no re-derive needed. Ticks inside an open session
+                // skip this: the pre-image already on the stack is the
+                // pre-SESSION state, which is exactly what Ctrl+Z owes the
+                // user. (The drag's FIRST tick lands before the panel has
+                // reported the session, so it is the one that records.)
+                if app.param_session != Some(li) {
+                    let before = app.doc.stack_snapshot();
+                    let active = app.doc.active;
+                    app.doc.record_structure("Layer parameters", before, active);
+                }
+                app.doc.layers[li].kind = mn_core::LayerKind::Fill(kind);
                 // Persisted state (`mnc-fill`): without the touch, a retint
                 // as the session's last action was discarded with no
                 // unsaved-changes prompt.
@@ -6429,6 +6466,7 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 app.mark_dirty();
             }
         }
+        AppCmd::ParamEditSession(s) => app.param_session = s,
         AppCmd::NewCorrectionLayer(adj) => {
             let from_sel = app.doc.selection.is_some();
             app.doc.add_correction_layer(adj, from_sel);

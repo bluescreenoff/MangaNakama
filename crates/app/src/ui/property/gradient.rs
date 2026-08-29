@@ -664,6 +664,23 @@ pub(crate) fn sec_live_fill(ui: &mut egui::Ui, app: &mut App) {
     if changed {
         app.push_cmd(AppCmd::SetFillParams(li, kind));
     }
+    // These sliders are the one param source that fires every frame, so
+    // they are the one that opts into coalescing. The session opens when a
+    // control MOVED with the pointer held (pointer-down alone would also
+    // catch a canvas gradient drag, whose single release-time edit must
+    // keep its own undo step) and closes when the pointer comes up — a
+    // pause mid-drag holds it open. Queued as a command, not written
+    // straight into `param_session`, so it lands AFTER this frame's
+    // `SetFillParams`: that ordering is what makes the drag's FIRST tick
+    // the one that records the pre-image.
+    let down = ui.ctx().input(|i| i.pointer.any_down());
+    if changed && down {
+        if app.param_session != Some(li) {
+            app.push_cmd(AppCmd::ParamEditSession(Some(li)));
+        }
+    } else if !down && app.param_session.is_some() {
+        app.push_cmd(AppCmd::ParamEditSession(None));
+    }
 }
 
 pub(crate) fn sec_gradient_guide(ui: &mut egui::Ui, app: &mut App) {
