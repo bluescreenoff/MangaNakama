@@ -56,6 +56,7 @@ text items and balloons are addressed by their stable ids from
 | `texts.list`    | `{layer}`                       | items: id, text, vertical, align, frame_align, font, size_pt, pos, size, rotation, auto_size, color, outline_px |
 | `balloons.list` | `{layer}`                       | ids; items: id, shape, tails, bbox, width_scale, line_color, fill_color, line_opacity, fill_opacity, fill_tone; border_px, pressure_width |
 | `layers.add_text` | `{name?}`                     | `{id, index}` — a fresh empty text layer, undoable |
+| `layers.add_balloon` | `{name?, border_px?}`      | `{id, index, border_px}` — a fresh empty balloon layer, undoable |
 | `texts.patch`   | `{layer, items:[{id, …fields}]}`| `{patched}` — absent ids are skipped |
 | `texts.add`     | `{layer, items:[{text, …}]}`    | `{ids}` minted by the commit door |
 | `texts.remove`  | `{layer, ids}`                  | `{removed}` |
@@ -107,6 +108,14 @@ the same refusal the tool gives a stray drag.
 Read-only in the reply, and deliberately not patchable: `bbox` (the body
 grown by its tails — aim lettering with it) is derived, and `border_px` /
 `pressure_width` belong to the LAYER's balloon set, not to any one bubble.
+
+`layers.add_balloon` is where a page with no balloons starts: it makes the
+empty layer `balloons.add` then fills. Its `border_px` defaults to Tool
+Property's balloon border at the page's dpi — the same number the balloon
+tool gives a hand-drawn bubble, so scripted and drawn balloons on one page
+come out the same weight. Pass `border_px` only to override that. The whole
+letter-from-zero run is four calls: `layers.add_balloon` → `balloons.add` →
+`layers.add_text` → `texts.add`.
 
 ### Pages
 

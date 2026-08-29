@@ -284,6 +284,89 @@ fn remote_layers_list_and_page_render() {
     assert_eq!(resp["error"]["code"], -32602);
 }
 
+/// `layers.add_balloon` (tier-3 leftover): the socket could letter INTO
+/// balloons but never make one, so a script lettering a page from zero
+/// needed a human to click the balloon tool first. The door mirrors
+/// `layers.add_text` — one structural undo press — and its border comes
+/// from Tool Property, so a scripted bubble is the same weight as a drawn
+/// one on the same page.
+#[test]
+fn remote_layers_add_balloon_lets_a_script_letter_from_zero() {
+    let Some(mut app) = super::new_document_tests::headless() else {
+        return;
+    };
+    let n_before = app.doc.layers.len();
+    let steps = app.doc.undo_labels().len();
+    let want_border = app.mm_to_px(app.balloon_border_mm).max(2.0);
+
+    let resp = call(&mut app, "layers.add_balloon", json!({"name": "ふきだし"}));
+    let lid = resp["result"]["id"].as_u64().unwrap();
+    assert!(lid != 0, "{resp}");
+    assert!(
+        (resp["result"]["border_px"].as_f64().unwrap() as f32 - want_border).abs() < 1e-3,
+        "the border is Tool Property's, not an invented one: {resp}"
+    );
+    assert_eq!(app.doc.layers.len(), n_before + 1);
+    assert_eq!(
+        app.doc.undo_labels().len(),
+        steps + 1,
+        "one structural press, like add_text"
+    );
+    let li = app.doc.layers.len() - 1;
+    assert!(app.doc.layers[li].is_balloon(), "it really is a balloon layer");
+    assert_eq!(
+        app.doc.layers[li].balloons().unwrap().border_px,
+        want_border
+    );
+    let resp = call(&mut app, "layers.list", json!({}));
+    assert!(
+        resp["result"]["layers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["name"] == "ふきだし" && r["kind"] == "balloon"),
+        "{resp}"
+    );
+
+    // The whole point: the very next call can fill it, no hand click in
+    // between. Before this method existed `balloons.add` had no layer to
+    // aim at and the run stopped here.
+    let resp = call(
+        &mut app,
+        "balloons.add",
+        json!({"layer": lid, "items": [
+            {"shape": {"Ellipse": {"center": [300.0, 200.0], "radii": [80.0, 50.0]}}}
+        ]}),
+    );
+    assert_eq!(resp["result"]["ids"].as_array().unwrap().len(), 1, "{resp}");
+
+    // An explicit border overrides Tool Property, floored the same way the
+    // tool floors it (a sub-2 px border is a hairline that vanishes in
+    // print).
+    let resp = call(
+        &mut app,
+        "layers.add_balloon",
+        json!({"name": "thin", "border_px": 0.1}),
+    );
+    assert!((resp["result"]["border_px"].as_f64().unwrap() - 2.0).abs() < 1e-6, "{resp}");
+
+    // One press per add, all the way back.
+    dispatch(&mut app, AppCmd::Undo); // the thin layer
+    dispatch(&mut app, AppCmd::Undo); // the balloon add
+    dispatch(&mut app, AppCmd::Undo); // the layer itself
+    assert_eq!(
+        app.doc.layers.len(),
+        n_before,
+        "structural undo covers the layer"
+    );
+
+    // The busy guard is the same one every commit door uses.
+    app.push_cmd(AppCmd::Undo);
+    let resp = call(&mut app, "layers.add_balloon", json!({}));
+    assert_eq!(resp["error"]["code"], -32000, "{resp}");
+    app.cmds.clear();
+}
+
 /// Balloons get the text items' deal (tier-3 leftover): list carries the
 /// geometry, patch/add/remove address items by stable id, one request is
 /// one `set_balloons` commit = ONE undo press, a stale id is skipped.

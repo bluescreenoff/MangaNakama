@@ -218,9 +218,16 @@ built-in chord.</b> They are palette commands (<i>Layer colour on/off</i>,
 <i>Clip to layer below</i>) that act on the layer selected when you press
 the key, so bind them yourself if you came from CSP's
 <kbd>Ctrl+B</kbd> / <kbd>Ctrl+Alt+G</kbd>. <b>Merge selected layers</b>
-and <b>Release folder</b> do not exist yet at all, so
-<kbd>Shift+Alt+E</kbd> and <kbd>Ctrl+Shift+G</kbd> have nothing to point
-at.</div>
+and <b>Release folder</b> are the same shape — they act on the palette's
+selection, so they too are palette commands without a built-in chord.
+Add these two lines to <code>keys.json</code> for CSP's own chords:
+<pre>"shift+alt+e": "Merge selected layers (combine the palette selection)",
+"ctrl+shift+g": "Release folder (ungroup, children step out)"</pre>
+Merge selected takes the rows you <kbd>Ctrl</kbd>- or
+<kbd>Shift</kbd>-clicked in the palette (the refusals are Merge-down's:
+no folders, frames, balloons, text, vector, locked or clipped rows, and
+nothing spanning a folder edge). Release folder works from the folder
+row <i>or</i> from any layer inside it.</div>
 <div class="quirk"><b><kbd>Ctrl+K</kbd> is itself rebindable.</b> The
 command palette opens through a command like everything else
 (<i>Command palette</i>), so it can move — including onto CSP's

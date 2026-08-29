@@ -1499,7 +1499,9 @@ impl Default for DustOpts {
     fn default() -> Self {
         Self {
             // CSP ships ゴミ取り at a small default and so does our menu
-            // filter (`quick.rs` opens LC-001 at 5 px).
+            // filter — the same 5, spelled once more here because a tool's
+            // Tool Property and a menu seed are separate promises
+            // (`mn_core::Filter::REMOVE_DUST` is the menu's).
             max_px: 5,
             mode: mn_core::DustMode::default(),
             select: false,
@@ -2532,6 +2534,12 @@ pub enum AppCmd {
     OpenPageSize,
     /// Apply the canvas-size draft: new size + the anchor the content pins to.
     ResizeCanvasApply,
+    /// Open the Change Work Resolution dialog (`IO-060`, workflow audit
+    /// §10). The verb CSP separates from Change Canvas Size: same paper,
+    /// every pixel re-made at a new resolution.
+    OpenResampleWork,
+    /// Apply it — every page of the work, atomically, not undoable.
+    ResampleWorkApply,
     /// Crop the canvas to the selection's bounding box (Edit ▸ Crop /
     /// Selection Launcher). Destructive: clears the undo history.
     CropSelection,
@@ -2590,6 +2598,12 @@ pub enum AppCmd {
     /// `doc_path`.
     ExportMnc,
     ExportMncPath(PathBuf),
+    /// `IO-003` File ▸ Save Duplicate…: a copy of the work on disk, and you
+    /// stay in the original — `doc_path` and the dirty flag never move
+    /// (`app/save_duplicate.rs`). Resolved to the `*Path` form by the
+    /// message loop, like every other picker command.
+    SaveDuplicate,
+    SaveDuplicatePath(PathBuf),
     // --- path-resolved forms, issued by `main::pump_commands` --------------
     OpenOraPath(PathBuf),
     SaveOraPath(PathBuf),
@@ -2636,6 +2650,12 @@ pub enum AppCmd {
     VectorDelete {
         stroke: usize,
     },
+    /// Row 169 (`E-001`…`E-007`, `VL-021`…`VL-027`): open/close Layer ▸ Line
+    /// correction….
+    LineCorrectOpen,
+    /// Run one line-correction pass over the active vector layer's whole
+    /// record — one undo press (`app/vector_edit.rs`).
+    LineCorrect(crate::app::vector_edit::LineCorrect),
     /// New empty folder above the active layer (CSP layer-palette button).
     AddFolder,
     /// Expand/collapse a folder row in the Layers palette.
@@ -2689,6 +2709,10 @@ pub enum AppCmd {
     /// `LP-001`: drop the saved default for the active layer's type, so new
     /// layers of it start stock again.
     ForgetLayerDefaults,
+    /// Owner ruling 2026-08-30: whether saving a default for the active
+    /// layer's TYPE carries an applied screentone with it. Remembered per
+    /// type in `layer_defaults.txt`.
+    SetLayerDefaultsIncludeTone(bool),
     /// TN-011 View ▸ Show Tone Area: tint every toned region on the canvas so
     /// leftover scraps of tone are visible before print. A view toggle — it
     /// touches no pixels and is never exported.
@@ -2963,6 +2987,15 @@ pub enum AppCmd {
     /// Stamp every visible layer onto a new layer above the active one
     /// (CSP Merge visible to new layer, Ctrl+Shift+E).
     StampVisible,
+    /// Flatten the palette's multi-selection into one raster layer (CSP
+    /// Merge selected layers, Shift+Alt+E). Index-free — it reads
+    /// `Document::multi_targets` at dispatch time, so `keys.json` can bind
+    /// it like any other chord.
+    MergeSelected,
+    /// Dissolve the folder the palette is pointing at: children step out,
+    /// the header goes (CSP Release folder, Ctrl+Shift+G). Index-free for
+    /// the same reason.
+    ReleaseFolder,
     /// Move the active-layer cursor up/down the stack (Alt+] / Alt+[).
     LayerAbove,
     LayerBelow,
@@ -4758,6 +4791,65 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 app.set_status(s);
             }
         }
+        AppCmd::OpenResampleWork => {
+            app.resample_work_draft = crate::app::ResampleWorkDraft {
+                dpi: app.work_dpi().unwrap_or(600),
+                ..crate::app::ResampleWorkDraft::default()
+            };
+            app.work_settings_open = false;
+            app.resample_work_open = true;
+            app.mark_dirty();
+        }
+        AppCmd::ResampleWorkApply => {
+            let d = app.resample_work_draft;
+            // THE DOOR THAT STANDS IN FOR UNDO. A whole-work resample is
+            // not an undo step (see `App::resample_work`), so the file on
+            // disk has to be the way back — which means there has to BE
+            // one AND it has to be current. Both halves are load-bearing: a
+            // freshly created comic reads as NOT dirty (the create path
+            // syncs the saved revision) while having no file at all, so a
+            // dirty-only guard would wave through exactly the case with
+            // nothing to fall back to. One Ctrl+S and the artist proceeds.
+            let saved = app.doc_path.clone().filter(|_| !app.dirty());
+            if saved.is_none() {
+                app.set_error(
+                    "save the work first — changing the resolution cannot be undone, \
+                     and the saved file is the only way back"
+                        .to_string(),
+                );
+            } else {
+                let back = saved
+                    .as_ref()
+                    .map(|p| format!(" — the {} on disk is still at the old resolution", {
+                        p.file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| p.display().to_string())
+                    }))
+                    .unwrap_or_default();
+                app.resample_work_open = false;
+                app.end_stroke();
+                app.commit_text_edit();
+                app.transform_drag = None;
+                app.last_selection = None;
+                match app.resample_work(d.dpi, d.interp) {
+                    Ok(n) => {
+                        // Structural: the texture changes size and every
+                        // cached thumb is stale (the canvas-resize rule).
+                        app.renderer.invalidate();
+                        app.layer_thumbs.clear();
+                        app.set_status(format!(
+                            "work resampled to {} dpi ({}) — {n} page(s), {}×{} — history cleared{back}",
+                            d.dpi,
+                            d.interp.label(),
+                            app.doc.size.0,
+                            app.doc.size.1,
+                        ));
+                    }
+                    Err(e) => app.set_error(format!("resolution unchanged: {e}")),
+                }
+            }
+            app.mark_dirty();
+        }
         AppCmd::CropSelection => {
             let bbox = app.doc.selection.as_ref().and_then(selection_bbox);
             match bbox {
@@ -4828,12 +4920,28 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                     None => None,
                 };
                 let total = last.saturating_sub(first) + 1;
-                let dpi = app.tone_dpi();
-                // Print finishing. The tone screen still rasterizes at the
-                // WORK's dpi above and is resampled with everything else —
-                // deriving it at the output dpi instead would change the
-                // dot pitch the page was drawn against.
+                // Print finishing.
                 let scale = mn_core::export::finish_scale(app.export_all_dpi, app.work_dpi());
+                // Runner-up 13 (`IO-030`): the artist's call, not ours.
+                // `Frequency` (the default) derives the screen at the
+                // WORK's dpi and lets it be resampled with everything else,
+                // so 60 lpi prints as 60 lpi and the reduction may moiré.
+                // `Dots` derives it at `work / scale`, so the reduction
+                // lands each cell back at its work-pixel size — no beat,
+                // and a printed screen coarsened to `lpi × scale`.
+                // The exact-height fit derives its own per-page scale after
+                // the crop, which this cannot see, so the dialog refuses
+                // the choice there rather than screening against a number
+                // that is not the one being applied.
+                let dpi = mn_core::export::tone_export_dpi(
+                    app.tone_dpi(),
+                    if app.export_all_px_height > 0 {
+                        1.0
+                    } else {
+                        scale
+                    },
+                    app.export_all_tone,
+                );
                 let colour = app.export_all_colour;
                 // M2: crop + exact-height ride the finish when asked for;
                 // Paper + 0 takes the exact old path, byte-identical.
@@ -5282,7 +5390,8 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
         | AppCmd::SaveOra
         | AppCmd::SaveOraAs
         | AppCmd::ExportPng
-        | AppCmd::ExportMnc => {
+        | AppCmd::ExportMnc
+        | AppCmd::SaveDuplicate => {
             // Unreachable in practice: `main::pump_commands` turns these into
             // their `*Path` forms. Reaching here means a path was not chosen.
         }
@@ -5585,6 +5694,20 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 }
             }
         }
+        AppCmd::SaveDuplicatePath(p) => {
+            // IO-003. Note what is NOT here, next to `SaveOraPath`: no
+            // `set_doc_path`, no `mark_saved`, no `note_recent`, and no
+            // autosave clearing. You are still in the original, still
+            // dirty if you were, still crash-netted.
+            let dirty = app.dirty();
+            let path = app.doc_path.clone();
+            match app.save_duplicate(&p) {
+                Ok(msg) => app.set_status(msg),
+                Err(e) => app.set_error(e),
+            }
+            debug_assert_eq!(app.doc_path, path, "a duplicate never moves the work");
+            debug_assert_eq!(app.dirty(), dirty, "…and never marks it saved");
+        }
         AppCmd::ExportPsd => {
             // Resolved to ExportPsdPath by `main::pump_commands`.
         }
@@ -5720,6 +5843,13 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             app.set_status("stroke deleted");
             app.mark_dirty();
         }
+        AppCmd::LineCorrectOpen => {
+            app.line_correct_open = !app.line_correct_open;
+        }
+        AppCmd::LineCorrect(op) => {
+            app.commit_text_edit();
+            app.line_correct(op);
+        }
         AppCmd::AddFolder => {
             app.commit_text_edit();
             let n = app.doc.layers.iter().filter(|l| l.folder).count() + 1;
@@ -5800,6 +5930,80 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 app.mark_dirty();
             } else if app.doc.layers.get(i).is_some_and(|l| l.is_frame()) {
                 app.set_status("frame layers keep their vectors — they never merge");
+            }
+        }
+        AppCmd::MergeSelected => {
+            app.commit_text_edit();
+            let targets = app.doc.multi_targets();
+            if targets.len() < 2 {
+                app.set_status(
+                    "select the layers first — Ctrl+click or Shift+click rows in the palette",
+                );
+                return;
+            }
+            // The same refusal Merge-down gives, checked first so the
+            // status can say WHICH thing stopped it (a tone layer is
+            // non-destructive; converting it back is one click).
+            if targets
+                .iter()
+                .any(|&i| app.doc.layers[i].tone.is_some())
+            {
+                app.set_status(
+                    "merge refuses tone layers — remove the tone first (it is non-destructive)",
+                );
+            } else if app.doc.merge_selected(&targets) {
+                app.object_sel = None;
+                app.vector_sel = None;
+                // Layers left the stack; the active index moved (H1).
+                app.disarm_mask_edit_if_unmasked();
+                app.renderer.invalidate();
+                app.layer_thumbs.clear();
+                app.set_status(format!("{} layers merged into one", targets.len()));
+                app.mark_dirty();
+            } else {
+                app.set_status(
+                    "that selection will not merge — folders, frames, balloons, text, \
+                     vector layers, locked or clipped rows, and rows in different folders \
+                     all refuse (same rule as merge down)",
+                );
+            }
+        }
+        AppCmd::ReleaseFolder => {
+            app.commit_text_edit();
+            // Target: the active layer when it IS a folder, else the folder
+            // holding it — the same walk the frame-folder commands use, so
+            // "release" works from a child row without hunting for the
+            // header.
+            let a = app.doc.active;
+            let target = if app.doc.layers[a].folder {
+                Some(a)
+            } else {
+                enclosing_folder(&app.doc, a)
+            };
+            let Some(li) = target else {
+                app.set_status("no folder to release");
+                return;
+            };
+            let lossless = app.doc.folder_release_is_lossless(li);
+            if app.doc.release_folder(li) {
+                app.object_sel = None;
+                app.vector_sel = None;
+                app.disarm_mask_edit_if_unmasked();
+                app.renderer.invalidate();
+                app.layer_thumbs.clear();
+                app.set_status(if lossless {
+                    "folder released — its layers stepped out, order kept (one undo)"
+                } else {
+                    "folder released — its own opacity/blend/mask could not come with it, \
+                     so the page looks different; Ctrl+Z if that was not what you wanted"
+                });
+                app.mark_dirty();
+            } else if app.doc.layers[li].is_frame() {
+                app.set_status(
+                    "a frame folder's header holds the panel — use Layer ▸ Rasterize frame folder",
+                );
+            } else {
+                app.set_status("that folder will not release (locked, or it is the last layer)");
             }
         }
         // --- frames (koma) --------------------------------------------------
@@ -7754,6 +7958,27 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             app.layer_defaults.forget(key);
             app.layer_defaults.save_if_dirty();
             app.set_status(format!("new {} start stock again", ld::kind_label(key)));
+        }
+        AppCmd::SetLayerDefaultsIncludeTone(on) => {
+            use crate::app::layer_defaults as ld;
+            let i = app.doc.active;
+            let Some(l) = app.doc.layers.get(i) else {
+                return;
+            };
+            let key = ld::kind_key(l);
+            app.layer_defaults.set_include_tone(key, on);
+            app.layer_defaults.save_if_dirty();
+            app.set_status(if on {
+                format!(
+                    "saving a {} default will include its screentone",
+                    ld::kind_label(key).trim_end_matches('s')
+                )
+            } else {
+                format!(
+                    "saving a {} default will leave the screentone out",
+                    ld::kind_label(key).trim_end_matches('s')
+                )
+            });
         }
         AppCmd::ToneShowArea => {
             app.tone_show_area = !app.tone_show_area;

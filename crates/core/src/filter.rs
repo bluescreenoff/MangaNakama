@@ -206,6 +206,46 @@ pub enum Filter {
 }
 
 impl Filter {
+    /// Menu SEEDS — the values a parameterised filter's dialog opens on.
+    ///
+    /// One definition each, because there are three doors onto the same
+    /// dialog (the Filter menu in `ui::top`, the command palette in
+    /// `ui::quick`, and the palette's own test) and every one of them used
+    /// to spell the numbers out. Three hand-kept copies of "Ripple starts
+    /// at 8 px every 48" is a drift waiting to happen: change the menu and
+    /// Ctrl+K quietly opens a different dialog. `Adjust`'s own menu-default
+    /// block (`adjust.rs`) solved this for the Correction menu already;
+    /// this is the same block for the Filter one.
+    pub const GAUSSIAN: Self = Self::Gaussian { sigma: 4.0 };
+    pub const MOTION: Self = Self::Motion {
+        angle: 0.0,
+        length: 20.0,
+        dir: MotionDir::Both,
+        mode: MotionMode::Uniform,
+    };
+    pub const RADIAL_BLUR: Self = Self::RadialBlur { strength: 0.3 };
+    pub const SPIN_BLUR: Self = Self::SpinBlur { angle_deg: 20.0 };
+    pub const UNSHARP: Self = Self::Unsharp {
+        radius: 2.0,
+        amount: 1.0,
+    };
+    pub const PINCH: Self = Self::Pinch { amount: 0.4 };
+    pub const RIPPLE: Self = Self::Ripple {
+        amplitude: 8.0,
+        wavelength: 48.0,
+    };
+    pub const WAVE: Self = Self::Wave {
+        amplitude: 8.0,
+        wavelength: 48.0,
+        dir: WaveDir::Horizontal,
+    };
+    pub const TWIRL: Self = Self::Twirl { angle_deg: 90.0 };
+    pub const LINE_WIDTH: Self = Self::LineWidth { delta: 1 };
+    /// `LC-001`. The same 5 px the dust TOOL starts at (`DustOpts::default`,
+    /// `cmd.rs`) — CSP ships ゴミ取り small in both places.
+    pub const REMOVE_DUST: Self = Self::RemoveDust { max_px: 5 };
+    pub const MOSAIC: Self = Self::Mosaic { cell: 8 };
+
     /// Undo-stack label, and the dialog title.
     pub fn label(self) -> &'static str {
         match self {

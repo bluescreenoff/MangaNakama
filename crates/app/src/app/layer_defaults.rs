@@ -110,6 +110,18 @@ const FIELDS: [&str; 8] = [
     "fill",
 ];
 
+/// The footer's "Include tone" switch, per layer type (owner ruling
+/// 2026-08-30). NOT one of [`FIELDS`]: it is not part of the default, it is
+/// a preference about what saving one MEANS — so `has`, `summary` and
+/// `forget` all ignore it, and unchecking it does not make the panel claim
+/// a default exists.
+///
+/// Downgrade-safe by construction: ON (the shipped CSP behaviour) is stored
+/// as an ABSENCE, so every `layer_defaults.txt` written before this switch
+/// existed already says "on", and a build without this key writes the
+/// `=0` line straight back out (the unknown-key round trip).
+const INCLUDE_TONE: &str = "include_tone";
+
 /// Saved per-type layer defaults: `type.field` → value, verbatim.
 ///
 /// A raw string map rather than a struct per type, on purpose: unknown keys
@@ -184,6 +196,21 @@ impl LayerDefaults {
         FIELDS.iter().any(|f| self.get(key, f).is_some())
     }
 
+    /// Does saving a default for this type carry an applied tone with it?
+    /// See [`INCLUDE_TONE`] — missing means yes, which is what every file
+    /// written before the switch existed means.
+    pub fn include_tone(&self, key: &str) -> bool {
+        self.get(key, INCLUDE_TONE) != Some("0")
+    }
+
+    /// Flip the switch and remember the flip. Turning it back ON removes
+    /// the line rather than writing `=1`: the file carries the choices you
+    /// changed, nothing else.
+    pub fn set_include_tone(&mut self, key: &str, on: bool) {
+        self.put(key, INCLUDE_TONE, (!on).then(|| "0".to_owned()));
+        self.dirty = true;
+    }
+
     fn get(&self, key: &str, field: &str) -> Option<&str> {
         self.map
             .get(&format!("{key}.{field}"))
@@ -211,7 +238,18 @@ impl LayerDefaults {
             "expression",
             l.expression.ora_name().map(str::to_owned),
         );
-        self.put(k, "tone", l.tone.as_ref().and_then(json));
+        // Owner ruling 2026-08-30: an APPLIED tone rides the default by
+        // default (CSP semantics — that is what the checkbox ships on),
+        // but with "Include tone" off the saved default records none, so
+        // "new raster layers start at 40 % multiply" stops also meaning
+        // "…and screened at 60 LPI". Off CLEARS any tone already saved for
+        // the type, which is the only reading of the click that leaves the
+        // panel's readout honest.
+        let tone = self
+            .include_tone(k)
+            .then(|| l.tone.as_ref().and_then(json))
+            .flatten();
+        self.put(k, "tone", tone);
         self.put(k, "edge", l.edge.as_ref().and_then(json));
         // Only the two fill kinds whose parameters are STYLE. A gradient's
         // are the drag that made it, and a correction's belong to its
@@ -497,6 +535,90 @@ mod tests {
         // Identity and safety fields are NOT part of the deal.
         assert_eq!(fresh.name, "Layer 1");
         assert!(fresh.visible && !fresh.lock && !fresh.clip && !fresh.draft);
+    }
+
+    /// Owner ruling 2026-08-30: the footer's "Include tone" switch. ON is
+    /// the shipped behaviour and stays it; OFF saves the same default with
+    /// no tone in it, and the CHOICE itself survives the file.
+    #[test]
+    fn the_include_tone_switch_round_trips_in_both_states() {
+        let mut src = raster();
+        src.opacity = 0.4;
+        src.blend = Blend::Multiply;
+        src.tone = Some(ToneParams {
+            lpi: 72.5,
+            ..ToneParams::default()
+        });
+
+        // ON: unset, and the shipped behaviour — the tone rides along.
+        let mut on = LayerDefaults::default();
+        assert!(on.include_tone("raster"), "missing means on");
+        on.capture(&src);
+        let on = LayerDefaults::parse(&on.to_body());
+        let mut fresh = raster();
+        on.apply(&mut fresh);
+        assert_eq!(fresh.tone.expect("the tone rode along").lpi, 72.5);
+        assert!(on.include_tone("raster"), "…and the switch is still on");
+
+        // OFF: the same capture, blend and opacity kept, no tone saved.
+        let mut off = LayerDefaults::default();
+        off.set_include_tone("raster", false);
+        off.capture(&src);
+        let body = off.to_body();
+        assert!(body.contains("raster.include_tone=0"), "{body}");
+        assert!(!body.contains("raster.tone="), "{body}");
+        let off = LayerDefaults::parse(&body);
+        assert!(!off.include_tone("raster"), "the choice survived the file");
+        let mut fresh = raster();
+        off.apply(&mut fresh);
+        assert_eq!(fresh.tone, None, "no tone in the default");
+        assert_eq!(fresh.blend, Blend::Multiply, "the rest of it still is");
+        assert!((fresh.opacity - 0.4).abs() < 1e-4);
+        // The switch is not the default: unchecking it must not make the
+        // panel claim a default exists, or say "saved for raster layers:".
+        let mut bare = LayerDefaults::default();
+        bare.set_include_tone("raster", false);
+        assert!(!bare.has("raster"), "a preference is not a default");
+        assert_eq!(bare.summary("raster"), None);
+
+        // Turning it back ON removes the line rather than writing =1, and
+        // re-capturing brings the tone back — the switch is a decision
+        // about the NEXT save, never a one-way door.
+        let mut back = LayerDefaults::parse(&body);
+        back.set_include_tone("raster", true);
+        let body = back.to_body();
+        assert!(!body.contains("include_tone"), "on is an absence: {body}");
+        back.capture(&src);
+        let mut fresh = raster();
+        LayerDefaults::parse(&back.to_body()).apply(&mut fresh);
+        assert_eq!(fresh.tone.expect("the tone is back").lpi, 72.5);
+    }
+
+    /// The downgrade half of the ruling: a build that predates the switch
+    /// reads a file carrying it, saves over it, and the choice is still
+    /// there afterwards — the same unknown-key round trip every future key
+    /// gets, checked for this one because it changes what SAVING means.
+    #[test]
+    fn the_include_tone_choice_survives_a_downgrade() {
+        // What an older build does with the file: parse, capture (which
+        // touches only FIELDS), write back.
+        let mut old = LayerDefaults::parse("raster.include_tone=0\nraster.opacity=0.5\n");
+        let mut src = raster();
+        src.tone = Some(ToneParams::default());
+        // Simulate the old capture exactly: it wrote the tone unconditionally.
+        old.put("raster", "tone", json(&src.tone.unwrap()));
+        old.put("raster", "opacity", Some("0.2500".into()));
+        let body = old.to_body();
+        assert!(body.contains("raster.include_tone=0"), "{body}");
+
+        // This build reads it back and still honours the choice.
+        let now = LayerDefaults::parse(&body);
+        assert!(!now.include_tone("raster"));
+        // …and the next capture through THIS build clears the tone the old
+        // one left behind, so the readout and the file agree again.
+        let mut now = now;
+        now.capture(&src);
+        assert!(!now.to_body().contains("raster.tone="), "{}", now.to_body());
     }
 
     /// The default is keyed by TYPE: a raster default must not land on a

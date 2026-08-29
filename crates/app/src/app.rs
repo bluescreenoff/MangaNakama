@@ -44,6 +44,8 @@ pub mod promote;
 pub mod prefs;
 pub(crate) mod print;
 pub(crate) mod reader;
+/// `IO-003` File ▸ Save Duplicate… — a copy on disk, the original untouched.
+mod save_duplicate;
 mod session;
 mod story;
 mod sut_import;
@@ -59,7 +61,8 @@ pub use prefs::Prefs;
 
 pub use crate::cmd::RulerKind;
 pub use pages::{
-    BatchImportDraft, CanvasSizeDraft, NewComicDraft, PageEntry, SpreadOp, WorkSettingsDraft,
+    BatchImportDraft, CanvasSizeDraft, NewComicDraft, PageEntry, ResampleWorkDraft, SpreadOp,
+    WorkSettingsDraft, mono_resample_warning,
 };
 pub use promote::PromoteDraft;
 pub use session::{DocSession, unsaved_autosave_folder_for, unsaved_autosave_path_for};
@@ -243,6 +246,12 @@ pub struct App {
     pub work_settings_draft: WorkSettingsDraft,
     /// Change Canvas Size dialog (Edit menu): new size + CSP anchor.
     pub canvas_size_open: bool,
+    /// Change Work Resolution dialog (`IO-060`, workflow audit §10): the
+    /// target dpi + the resample kernel. Separate window from Change Canvas
+    /// Size because CSP separates the two verbs and so do we — that one
+    /// re-frames, this one re-makes every pixel.
+    pub resample_work_open: bool,
+    pub resample_work_draft: ResampleWorkDraft,
     /// Batch Import dialog (workflow audit #4): N roughs -> N page underlays.
     pub batch_import_open: bool,
     /// "New work from this work…" dialog (workflow audit §11): the ネーム
@@ -325,6 +334,10 @@ pub struct App {
     /// the default and only bites on a MONO finish — see
     /// `mn_core::export::Resample`.
     pub export_all_resample: mn_core::export::Resample,
+    /// Runner-up 13 (`IO-030`): what a REDUCED export does to a screentone
+    /// — keep the layer's frequency and let the dots resample with the art,
+    /// or re-screen for the export scale. See `mn_core::export::ToneScale`.
+    pub export_all_tone: mn_core::export::ToneScale,
     /// Finding 9: PNG (入稿) or JPEG (提出), and the JPEG quality the
     /// proof ships at. Quality is kept across a format flip.
     pub export_all_format: mn_core::export::ExportFormat,
@@ -539,6 +552,18 @@ pub struct App {
     pub outline_width: f32,
     pub outline_border: mn_core::filter::OutlineBorder,
     pub outline_round: bool,
+    /// Row 169 — Layer ▸ Line correction…: the window and its four
+    /// thresholds. Lengths are MILLIMETRES (`App::mm_to_px` at the page's
+    /// dpi) because "shorter than 2 mm is a stub" survives a resample and
+    /// "shorter than 47 px" does not; the simplify tolerance stays in canvas
+    /// px, where the eye judges it.
+    pub line_correct_open: bool,
+    pub line_correct_short_mm: f32,
+    pub line_correct_gap_mm: f32,
+    /// `E-006`: join lines with different colour/tip too.
+    pub line_correct_across: bool,
+    pub line_correct_simplify_px: f32,
+    pub line_correct_width: f32,
     /// The Liquify tool (row 55): mode/strength/radius are tool state
     /// (session-scoped v1); the drag is the live gesture — one op
     /// bracket per drag, so one undo per gesture.
@@ -1470,6 +1495,8 @@ impl App {
             work_settings_open: false,
             work_settings_draft: WorkSettingsDraft::default(),
             canvas_size_open: false,
+            resample_work_open: false,
+            resample_work_draft: ResampleWorkDraft::default(),
             batch_import_open: false,
             promote_open: false,
             promote: PromoteDraft::default(),
@@ -1499,6 +1526,7 @@ impl App {
             export_all_crop: mn_core::export::ExportCrop::Paper,
             export_all_px_height: 0,
             export_all_resample: mn_core::export::Resample::default(),
+            export_all_tone: mn_core::export::ToneScale::default(),
             export_all_format: mn_core::export::ExportFormat::default(),
             export_all_quality: mn_core::export::PROOF_JPEG_QUALITY,
             print_open: false,
@@ -1578,6 +1606,12 @@ impl App {
             outline_width: 8.0,
             outline_border: mn_core::filter::OutlineBorder::Outside,
             outline_round: true,
+            line_correct_open: false,
+            line_correct_short_mm: 1.0,
+            line_correct_gap_mm: 0.5,
+            line_correct_across: false,
+            line_correct_simplify_px: 2.0,
+            line_correct_width: 1.0,
             liquify_mode: mn_core::liquify::LiquifyMode::Push,
             liquify_strength: 0.5,
             liquify_radius: 40.0,
@@ -2411,6 +2445,7 @@ impl App {
             colour: self.export_all_colour,
             split_spreads: self.export_all_split,
             resample: self.export_all_resample,
+            tone: self.export_all_tone,
             format: self.export_all_format,
             quality: self.export_all_quality,
         }
@@ -2424,6 +2459,7 @@ impl App {
         self.export_all_colour = f.colour;
         self.export_all_split = f.split_spreads;
         self.export_all_resample = f.resample;
+        self.export_all_tone = f.tone;
         self.export_all_format = f.format;
         self.export_all_quality = f.quality;
     }
@@ -4762,6 +4798,20 @@ mod view_flip_tests;
 #[cfg(test)]
 mod vector_layer_tests;
 
+/// Row 169: line correction over a whole recorded layer — the four passes'
+/// geometry, and that each re-derives the raster for one undo press.
+#[cfg(test)]
+mod line_correct_tests;
+
+/// Wave 1's two missing layer commands: Merge selected layers and Release
+/// folder — one undo press each, and the page composites the same after.
+#[cfg(test)]
+mod merge_release_tests;
+
+/// `IO-003` Save Duplicate: the copy lands, the original does not move.
+#[cfg(test)]
+mod save_duplicate_tests;
+
 /// E-014/E-016: the eyedropper's referent and its averaging box, driven
 /// through `dispatch` the way a click drives them. `cmd.rs` has no test
 /// module of its own, so command behaviour is tested from here.
@@ -4824,6 +4874,13 @@ mod batch_import_tests;
 /// holds. Same frugality rule as `new_document_tests`: 72 dpi drafts.
 #[cfg(test)]
 mod promote_tests;
+
+/// Workflow audit §10 (`IO-060`): Edit ▸ Change work resolution — every
+/// page rebuilt at a new dpi on the same paper, atomically, plus the export
+/// half of runner-up 13 (`IO-030`, the tone-vs-export-scale choice). Same
+/// frugality rule as `new_document_tests`: 72 dpi drafts, one App at a time.
+#[cfg(test)]
+mod resample_work_tests;
 
 /// ROADMAP good-first-issue: ruler creation/move/clear on the document's
 /// one undo history — and the two things that must NOT be steps (the

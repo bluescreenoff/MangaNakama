@@ -1320,6 +1320,33 @@ fn resolve_dialog(hwnd: HWND, cmd: AppCmd) -> Option<AppCmd> {
                 .save_file()
                 .map(AppCmd::ExportMncPath)
         }
+        AppCmd::SaveDuplicate => {
+            // IO-003: the COPY takes the work's own shape, so the picker is
+            // the same one Save As opens — a comic asks for a folder (the
+            // native work folder), a single page for a file. Named from the
+            // current path where there is one, so "chapter.mnc" suggests
+            // "chapter copy.mnc" rather than the story title again.
+            let stem = current()
+                .and_then(|p| {
+                    if p.file_name()
+                        .is_some_and(|n| n.eq_ignore_ascii_case("work.mnc"))
+                    {
+                        p.parent()?.file_name()?.to_str().map(str::to_owned)
+                    } else {
+                        p.file_stem()?.to_str().map(str::to_owned)
+                    }
+                })
+                .unwrap_or_else(|| default_save_name().replace(".ora", "").replace(".mnc", ""));
+            if is_comic() {
+                rfd::FileDialog::new()
+                    .set_title(&format!("Save Duplicate of \"{stem}\" — pick an empty folder"))
+                    .pick_folder()
+                    .map(|d| AppCmd::SaveDuplicatePath(d.join(mn_core::project::WORKFOLDER_INDEX)))
+            } else {
+                save_comic_dialog("Save Duplicate", &format!("{stem} copy.ora"))
+                    .map(AppCmd::SaveDuplicatePath)
+            }
+        }
         // Workflow audit finding 8. Two steps, in this order for one reason:
         // the composite needs `&mut App` (renderer + document) and `PrintDlgW`
         // must NOT have one alive — it runs a modal loop that re-enters the

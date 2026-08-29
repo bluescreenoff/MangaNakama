@@ -831,6 +831,139 @@ pub(super) fn canvas_size_window(ctx: &egui::Context, app: &mut App) {
     }
 }
 
+/// `IO-060` (workflow audit §10) — Edit ▸ **Change work resolution…**
+///
+/// CSP's *Change image resolution*, at WORK scope. The dialog's whole job
+/// is to make the consequence visible before it happens, because the
+/// consequence is irreversible and the JP manuscript guides warn about it
+/// specifically: モノクロ2階調 art degrades when it is resized, so the
+/// operation has to be a decision rather than an accident.
+///
+/// Three things are therefore on screen and not hidden behind a tooltip:
+/// the page size in px this dpi produces, the kernel (the reduction case
+/// is where a hairline lives or dies), and — on a mono work — the warning
+/// itself.
+pub(super) fn resample_work_window(ctx: &egui::Context, app: &mut App) {
+    if !app.resample_work_open {
+        return;
+    }
+    let mut open = app.resample_work_open;
+    let (mut apply, mut cancel) = (false, false);
+    let Some(setup) = app.page.clone().filter(|s| s.has_guides()) else {
+        app.resample_work_open = false;
+        return;
+    };
+    egui::Window::new("Change Work Resolution")
+        .open(&mut open)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, -30.0))
+        .show(ctx, |ui| {
+            let cur_px = setup.paper_px();
+            let d = &mut app.resample_work_draft;
+            egui::Grid::new("mn.resamplework")
+                .num_columns(2)
+                .spacing([10.0, 5.0])
+                .show(ui, |ui| {
+                    ui.label("Current");
+                    ui.weak(format!(
+                        "{} dpi — {} × {} px",
+                        setup.dpi, cur_px.0, cur_px.1
+                    ));
+                    ui.end_row();
+
+                    ui.label("New resolution");
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut d.dpi)
+                                .range(30..=1200)
+                                .suffix(" dpi")
+                                .speed(1.0),
+                        );
+                        // The two numbers every JP submission spec names.
+                        for p in [350u32, 600] {
+                            if ui.small_button(format!("{p}")).clicked() {
+                                d.dpi = p;
+                            }
+                        }
+                    });
+                    ui.end_row();
+
+                    ui.label("Interpolation");
+                    egui::ComboBox::from_id_salt("mn.resamplework.interp")
+                        .selected_text(d.interp.label())
+                        .show_ui(ui, |ui| {
+                            for k in mn_core::transform::Interp::ALL {
+                                ui.selectable_value(&mut d.interp, k, k.label());
+                            }
+                        });
+                    ui.end_row();
+                });
+
+            let dpi = d.dpi.max(1);
+            let interp = d.interp;
+            // The px consequence, stated for THIS work's own paper. The
+            // page size is derived, never typed: a work has as many pixel
+            // sizes as it has pages (a spread is double width), and the dpi
+            // is the one number that means the same thing on all of them.
+            let mut probe = setup.clone();
+            probe.dpi = dpi;
+            let new_px = probe.paper_px();
+            ui.weak(format!(
+                "{:.0} × {:.0} mm stays {:.0} × {:.0} mm — the page is the same paper.",
+                setup.paper_mm.0, setup.paper_mm.1, setup.paper_mm.0, setup.paper_mm.1
+            ));
+            ui.label(format!(
+                "{} × {} px  →  {} × {} px",
+                cur_px.0, cur_px.1, new_px.0, new_px.1
+            ));
+            if dpi < setup.dpi && interp != mn_core::transform::Interp::HighAccuracy {
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    "Reducing: High accuracy is the kernel that keeps a 1 px hairline \
+                     (as grey) instead of dropping it.",
+                );
+            }
+            // The JP-guide honesty, said where the decision is made.
+            if let Some(w) =
+                crate::app::mono_resample_warning(app.expression, setup.dpi, dpi)
+            {
+                ui.colored_label(ui.visuals().warn_fg_color, w);
+            }
+            ui.weak(format!(
+                "Every page of the work ({}) is rebuilt in one step, spreads included \
+                 — a full chapter at print resolution takes a while, and the app will \
+                 not respond while it runs. This cannot be undone and clears the history.",
+                app.pages.len()
+            ));
+            ui.add_space(2.0);
+            ui.separator();
+            ui.horizontal(|ui| {
+                let ok = dpi != setup.dpi;
+                if ui
+                    .add_enabled(ok, egui::Button::new("  Apply  "))
+                    .on_disabled_hover_text("that is already the work's resolution")
+                    .clicked()
+                {
+                    apply = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+                if app.dirty() || app.doc_path.is_none() {
+                    ui.colored_label(
+                        ui.visuals().warn_fg_color,
+                        "save first (Ctrl+S) — the saved file is the way back",
+                    );
+                }
+            });
+        });
+    if apply {
+        app.push_cmd(AppCmd::ResampleWorkApply);
+    } else {
+        app.resample_work_open = open && !cancel;
+    }
+}
+
 /// Row 89 (BR-014–016): the global pen-pressure wizard. It listens to
 /// the RAW pressures of strokes drawn while it is open (`push_batch`
 /// copies them), graphs them grey, overlays the Stronger/Weaker
@@ -1952,6 +2085,55 @@ pub(super) fn export_all_window(ctx: &egui::Context, app: &mut App) {
                             });
                     });
                     ui.end_row();
+
+                    // Runner-up 13 (`IO-030`): what the reduction does to
+                    // the screen. Only a REDUCTION has the question, and
+                    // only when the dpi finish is what drives it — the
+                    // exact-height fit computes its own scale per page,
+                    // after the crop, which the tone derive cannot see.
+                    let scale =
+                        mn_core::export::finish_scale(app.export_all_dpi, app.work_dpi());
+                    let tone_live = scale < 1.0 && app.export_all_px_height == 0;
+                    ui.label("Tone");
+                    ui.add_enabled_ui(tone_live, |ui| {
+                        egui::ComboBox::from_id_salt("mn.exportall.tone")
+                            .width(160.0)
+                            .selected_text(app.export_all_tone.label())
+                            .show_ui(ui, |ui| {
+                                for t in [
+                                    mn_core::export::ToneScale::Frequency,
+                                    mn_core::export::ToneScale::Dots,
+                                ] {
+                                    ui.selectable_value(&mut app.export_all_tone, t, t.label());
+                                }
+                            })
+                            .response
+                            .on_hover_text(if !tone_live {
+                                if app.export_all_px_height > 0 {
+                                    "the exact-height fit sizes each page after its own \
+                                     crop, so the screen cannot be derived against it — \
+                                     clear the height to choose"
+                                } else {
+                                    "nothing is being reduced, so the screen is untouched \
+                                     either way"
+                                }
+                            } else {
+                                "CSP asks this at export. Keep frequency: 60 lpi prints \
+                                 as 60 lpi, and the dots are resampled with the art — \
+                                 which is where moiré comes from. Re-screen: the dots \
+                                 keep their pixel size, so nothing beats against the \
+                                 sample grid, and the printed screen coarsens."
+                            });
+                    });
+                    ui.end_row();
+                    if tone_live && app.export_all_tone == mn_core::export::ToneScale::Dots {
+                        ui.label("");
+                        ui.weak(format!(
+                            "a 60 lpi layer prints as {:.0} lpi at this scale",
+                            60.0 * scale
+                        ));
+                        ui.end_row();
+                    }
 
                     // Finding 9: 入稿 vs 提出. The quality knob keeps its
                     // value while PNG is picked; it just has nothing to do.

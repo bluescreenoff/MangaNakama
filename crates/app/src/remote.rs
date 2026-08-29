@@ -459,6 +459,39 @@ fn handle(app: &mut App, method: &str, params: &Value) -> Result<Value, HandleEr
             app.mark_dirty();
             Ok(json!({"id": app.doc.layers[li].id(), "index": li}))
         }
+        "layers.add_balloon" => {
+            // `layers.add_text`'s missing twin: without it a script could
+            // letter into balloons but never make the balloons, so
+            // lettering a page from zero needed a human click first.
+            // `Document::add_balloon_layer` is the same kind of commit
+            // door — one structure undo, ids minted.
+            if let Some(e) = busy(app) {
+                return Err(e);
+            }
+            let name = params
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("Balloons");
+            // The border comes from Tool Property in mm, exactly as the
+            // balloon tool's own fresh-layer path resolves it — a script's
+            // balloons must not come out a different weight from a hand-drawn
+            // one on the same page.
+            let border = params
+                .get("border_px")
+                .and_then(Value::as_f64)
+                .map_or_else(
+                    || app.mm_to_px(app.balloon_border_mm),
+                    |v| v as f32,
+                )
+                .max(2.0);
+            let li = app
+                .doc
+                .add_balloon_layer(name, mn_core::BalloonSet::new(border));
+            app.renderer.invalidate();
+            app.set_status(format!("automation: balloon layer \"{name}\" added"));
+            app.mark_dirty();
+            Ok(json!({"id": app.doc.layers[li].id(), "index": li, "border_px": border}))
+        }
         "texts.patch" => {
             if let Some(e) = busy(app) {
                 return Err(e);

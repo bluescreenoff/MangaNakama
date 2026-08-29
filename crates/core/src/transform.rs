@@ -398,6 +398,132 @@ fn sample_area(
     ]
 }
 
+/// Resample a WHOLE sparse tile map about the canvas origin — the raster
+/// half of `IO-060` (Edit ▸ Change work resolution).
+///
+/// Unlike [`commit_transform`], which scatters a lifted float back onto one
+/// layer of a fixed-size document, this rebuilds an entire tile map at a new
+/// scale and is bounded by the CONTENT, not by the canvas: art parked
+/// off-page (a sketch in the margin, a balloon half outside the trim) scales
+/// with everything else instead of being clipped away. The caller trims to
+/// the new canvas if it wants to.
+///
+/// The kernel is `I-005`'s ([`Interp`]), reached through the same samplers
+/// the Transform tool uses, so a work resample and a hand-scaled selection
+/// cannot drift apart. [`Interp::HighAccuracy`] is the one that matters
+/// here: a page shrunk from 600 to 350 dpi is exactly the "do not lose the
+/// 1 px hairline" case the area kernel exists for.
+///
+/// The scan is per DESTINATION tile, and a destination tile whose source
+/// footprint holds no tile at all is skipped before a single pixel is
+/// sampled — a page is mostly empty tiles, and without that test this walks
+/// the full bounding box of every layer.
+pub fn resample_tile_map(
+    tiles: &HashMap<TileIdx, Arc<Tile>>,
+    sx: f32,
+    sy: f32,
+    interp: Interp,
+) -> HashMap<TileIdx, Arc<Tile>> {
+    let mut out: HashMap<TileIdx, Arc<Tile>> = HashMap::new();
+    if tiles.is_empty() || !(sx > 0.0) || !(sy > 0.0) {
+        return out;
+    }
+    // Source bounds in canvas px, from the populated tiles.
+    let ts = TILE_SIZE as i32;
+    let (mut x0, mut y0, mut x1, mut y1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+    for ti in tiles.keys() {
+        let (ox, oy) = ti.origin();
+        x0 = x0.min(ox);
+        y0 = y0.min(oy);
+        x1 = x1.max(ox + ts);
+        y1 = y1.max(oy + ts);
+    }
+    let rect = [x0, y0, x1, y1];
+
+    // The source-space half-extent of one destination pixel (the scale is
+    // axis-aligned here, so this is exact rather than the affine's bound).
+    let hx = 0.5 / sx;
+    let hy = 0.5 / sy;
+    let area_mode = interp == Interp::HighAccuracy && (hx > 0.5 || hy > 0.5);
+
+    let dst = [
+        (x0 as f32 * sx).floor() as i32,
+        (y0 as f32 * sy).floor() as i32,
+        (x1 as f32 * sx).ceil() as i32,
+        (y1 as f32 * sy).ceil() as i32,
+    ];
+    let (tx0, ty0) = (dst[0].div_euclid(ts), dst[1].div_euclid(ts));
+    let (tx1, ty1) = ((dst[2] - 1).div_euclid(ts), (dst[3] - 1).div_euclid(ts));
+    // The filter apron, in source px — bicubic reaches two pixels out.
+    let apron = if interp == Interp::Bicubic { 2.0 } else { 1.0 };
+    for ty in ty0..=ty1 {
+        for tx in tx0..=tx1 {
+            let di = TileIdx::new(tx, ty);
+            let (dox, doy) = di.origin();
+            // Does any SOURCE tile feed this destination tile?
+            let sfx0 = (dox as f32 / sx - hx - apron).floor() as i32;
+            let sfy0 = (doy as f32 / sy - hy - apron).floor() as i32;
+            let sfx1 = ((dox + ts) as f32 / sx + hx + apron).ceil() as i32;
+            let sfy1 = ((doy + ts) as f32 / sy + hy + apron).ceil() as i32;
+            let mut fed = false;
+            'probe: for sty in sfy0.div_euclid(ts)..=(sfy1 - 1).div_euclid(ts) {
+                for stx in sfx0.div_euclid(ts)..=(sfx1 - 1).div_euclid(ts) {
+                    if tiles.contains_key(&TileIdx::new(stx, sty)) {
+                        fed = true;
+                        break 'probe;
+                    }
+                }
+            }
+            if !fed {
+                continue;
+            }
+            let mut tile = Tile::default();
+            let mut any = false;
+            for ly in 0..TILE_SIZE {
+                let cy = doy + ly as i32;
+                if cy < dst[1] || cy >= dst[3] {
+                    continue;
+                }
+                let syf = (cy as f32 + 0.5) / sy - 0.5;
+                for lx in 0..TILE_SIZE {
+                    let cx = dox + lx as i32;
+                    if cx < dst[0] || cx >= dst[2] {
+                        continue;
+                    }
+                    let sxf = (cx as f32 + 0.5) / sx - 0.5;
+                    let px = match interp {
+                        Interp::Nearest => sample_nearest(tiles, rect, sxf, syf),
+                        Interp::Bicubic => sample_bicubic(tiles, rect, sxf, syf),
+                        Interp::HighAccuracy if area_mode => {
+                            sample_area(tiles, rect, sxf, syf, hx, hy)
+                        }
+                        _ => sample_bilinear(tiles, rect, sxf, syf),
+                    };
+                    if px[3] < 0.5 {
+                        continue;
+                    }
+                    let a = px[3].round().min(FIX15_ONE as f32) as u16;
+                    tile.set_pixel(
+                        lx,
+                        ly,
+                        [
+                            (px[0].round().min(FIX15_ONE as f32) as u16).min(a),
+                            (px[1].round().min(FIX15_ONE as f32) as u16).min(a),
+                            (px[2].round().min(FIX15_ONE as f32) as u16).min(a),
+                            a,
+                        ],
+                    );
+                    any = true;
+                }
+            }
+            if any {
+                out.insert(di, Arc::new(tile));
+            }
+        }
+    }
+    out
+}
+
 /// The selection-weighted fraction of one premultiplied fix15 pixel:
 /// `taken = (v·mv + 127)/255`, the exact split `move_selected` cuts with.
 /// Shared by lift and clear so the pair is mass-conserving by construction

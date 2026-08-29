@@ -91,6 +91,29 @@ pub fn command_index() -> Vec<(&'static str, &'static str, AppCmd)> {
             "Layer (Ctrl+Shift+E)",
             StampVisible,
         ),
+        // Wave 1's two missing layer commands. Named for what people
+        // search: "combine" finds the merge, "ungroup" finds the release.
+        // No built-in chord on purpose — they are index-free commands
+        // acting on the palette's selection, so `keys.json` is the door
+        // (CSP's own Shift+Alt+E / Ctrl+Shift+G, if you want them).
+        (
+            "Merge selected layers (combine the palette selection)",
+            "Layer",
+            MergeSelected,
+        ),
+        (
+            "Release folder (ungroup, children step out)",
+            "Layer",
+            ReleaseFolder,
+        ),
+        // Row 169: the vector layer's tidy-up window (delete short lines,
+        // connect, simplify, adjust width). The four passes take their
+        // thresholds from the window, so the palette door is the window.
+        (
+            "Line correction (simplify, connect, delete short lines)…",
+            "Layer",
+            LineCorrectOpen,
+        ),
         (
             "Straight line ruler",
             "Layer ▸ Ruler",
@@ -257,77 +280,62 @@ pub fn command_index() -> Vec<(&'static str, &'static str, AppCmd)> {
         (
             "Gaussian blur…",
             "Filter ▸ Blur",
-            FilterOpen(Some(mn_core::Filter::Gaussian { sigma: 4.0 })),
+            FilterOpen(Some(mn_core::Filter::GAUSSIAN)),
         ),
         (
             "Motion blur…",
             "Filter ▸ Blur",
-            FilterOpen(Some(mn_core::Filter::Motion {
-                angle: 0.0,
-                length: 20.0,
-                dir: mn_core::MotionDir::Both,
-                mode: mn_core::MotionMode::Uniform,
-            })),
+            FilterOpen(Some(mn_core::Filter::MOTION)),
         ),
         (
             "Radial blur…",
             "Filter ▸ Blur",
-            FilterOpen(Some(mn_core::Filter::RadialBlur { strength: 0.3 })),
+            FilterOpen(Some(mn_core::Filter::RADIAL_BLUR)),
         ),
         (
             "Spin blur…",
             "Filter ▸ Blur",
-            FilterOpen(Some(mn_core::Filter::SpinBlur { angle_deg: 20.0 })),
+            FilterOpen(Some(mn_core::Filter::SPIN_BLUR)),
         ),
         (
             "Unsharp mask…",
             "Filter ▸ Sharpen",
-            FilterOpen(Some(mn_core::Filter::Unsharp {
-                radius: 2.0,
-                amount: 1.0,
-            })),
+            FilterOpen(Some(mn_core::Filter::UNSHARP)),
         ),
         (
             "Pinch…",
             "Filter ▸ Distort",
-            FilterOpen(Some(mn_core::Filter::Pinch { amount: 0.4 })),
+            FilterOpen(Some(mn_core::Filter::PINCH)),
         ),
         (
             "Ripple…",
             "Filter ▸ Distort",
-            FilterOpen(Some(mn_core::Filter::Ripple {
-                amplitude: 8.0,
-                wavelength: 48.0,
-            })),
+            FilterOpen(Some(mn_core::Filter::RIPPLE)),
         ),
         (
             "Wave…",
             "Filter ▸ Distort",
-            FilterOpen(Some(mn_core::Filter::Wave {
-                amplitude: 8.0,
-                wavelength: 48.0,
-                dir: mn_core::WaveDir::Horizontal,
-            })),
+            FilterOpen(Some(mn_core::Filter::WAVE)),
         ),
         (
             "Twirl…",
             "Filter ▸ Distort",
-            FilterOpen(Some(mn_core::Filter::Twirl { angle_deg: 90.0 })),
+            FilterOpen(Some(mn_core::Filter::TWIRL)),
         ),
         (
             "Adjust line width…",
             "Filter ▸ Line correction",
-            FilterOpen(Some(mn_core::Filter::LineWidth { delta: 1 })),
+            FilterOpen(Some(mn_core::Filter::LINE_WIDTH)),
         ),
         (
             "Remove dust…",
             "Filter ▸ Line correction",
-            FilterOpen(Some(mn_core::Filter::RemoveDust { max_px: 5 })),
+            FilterOpen(Some(mn_core::Filter::REMOVE_DUST)),
         ),
         (
             "Mosaic…",
             "Filter ▸ Effect",
-            FilterOpen(Some(mn_core::Filter::Mosaic { cell: 8 })),
+            FilterOpen(Some(mn_core::Filter::MOSAIC)),
         ),
         ("First page", "Page (Ctrl+Home)", PageFirst),
         ("Previous page", "Page (Ctrl+PageUp)", PagePrev),
@@ -369,6 +377,10 @@ pub fn command_index() -> Vec<(&'static str, &'static str, AppCmd)> {
         ("Export Text (script)…", "File", ExportText),
         ("Save", "File (Ctrl+S)", SaveOra),
         ("Save As…", "File (Ctrl+Shift+S)", SaveOraAs),
+        // IO-003: the send-it move — a copy on disk, you stay in the file
+        // you were in. "Copy" in the label because that is what people
+        // search for.
+        ("Save Duplicate (a copy, stay in this file)…", "File", SaveDuplicate),
         ("Open…", "File (Ctrl+O)", OpenOra),
         ("New…", "File (Ctrl+N)", NewDoc),
         ("Zoom fit", "View (Ctrl+0)", ZoomFit),
@@ -1147,6 +1159,12 @@ mod tests {
             );
         }
         // The parameterised ones open the shared dialog on the menu's seed.
+        //
+        // These stay written OUT, deliberately, now that the seeds are
+        // `Filter`'s own consts: comparing a const against itself would
+        // assert nothing. Spelled here, this loop is the byte-pin — the one
+        // place that says what the numbers ARE, so a slipped decimal in
+        // `filter.rs` fails a test instead of shipping a different dialog.
         for (label, wher, want) in [
             ("Gaussian blur…", "Filter ▸ Blur", F::Gaussian { sigma: 4.0 }),
             (

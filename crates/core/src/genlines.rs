@@ -1311,6 +1311,40 @@ fn recolor(map: &mut HashMap<TileIdx, Arc<Tile>>, color: [u8; 3]) {
 }
 
 impl GenLinesSpec {
+    /// Scale the generator's px geometry about the canvas origin —
+    /// `IO-060`'s share. The rendered raster resamples with the layer; this
+    /// keeps the re-editable spec pointing at the same place on the paper,
+    /// so reopening the dialog after a resolution change does not re-burst
+    /// the page from the old centre at the old radius.
+    ///
+    /// `a`..`d` mean different things per generator (see the field docs):
+    /// radial kinds hold `(cx, cy, r_in, r_out)`, speed lines hold
+    /// `(angle_deg, len_min, len_max, —)`. An ANGLE must not be scaled,
+    /// which is why this branches instead of multiplying all four.
+    pub fn scale(&mut self, sx: f32, sy: f32, s: f32) {
+        if self.radial() {
+            self.a *= sx;
+            self.b *= sy;
+            self.c *= s;
+            self.d *= s;
+        } else {
+            // a = angle_deg: dimensionless.
+            self.b *= s;
+            self.c *= s;
+        }
+        self.width *= s;
+        self.gap_px *= s;
+        self.group_gap *= s;
+        if let Some(c) = &mut self.converge {
+            c[0] *= sx;
+            c[1] *= sy;
+        }
+        if let Some(a) = &mut self.anchor {
+            a[0] *= sx;
+            a[1] *= sy;
+        }
+    }
+
     /// The layer name a fresh generation gets — one place, so the app,
     /// the Materials bank and the dialog cannot disagree.
     pub fn layer_name(&self) -> &'static str {

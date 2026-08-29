@@ -129,6 +129,41 @@ pub struct StrokeSet {
 }
 
 impl StrokeSet {
+    /// Scale every recorded stroke about the canvas origin — `IO-060`.
+    ///
+    /// The RASTER of a vector-inking layer resamples with every other tile
+    /// map, so the page looks right the instant the work changes
+    /// resolution. This keeps the RECORDS honest with those pixels: without
+    /// it the first Object-tool nudge would re-derive the whole layer at
+    /// the old dpi's coordinates and the ink would jump back to where it
+    /// used to be.
+    ///
+    /// A replay is deliberately NOT run here. Re-inking needs the app's
+    /// brush engine (presets, stabilizer, taper — `rederive_vector_layer`),
+    /// which core cannot reach; and a replay would also re-ink the layer
+    /// with today's preset rather than reproducing the artist's pixels. The
+    /// resampled raster is the truth until the artist edits a stroke, at
+    /// which point the replay runs against these scaled records.
+    ///
+    /// Pressure, opacity and the 0..1 shaping minima are dimensionless and
+    /// stay; every px length scales by `s`.
+    pub fn scale(&mut self, sx: f32, sy: f32, s: f32) {
+        for st in &mut self.strokes {
+            for p in &mut st.points {
+                p.0 *= sx;
+                p.1 *= sy;
+            }
+            st.size_px *= s;
+            if let Some(cfg) = &mut st.settings {
+                cfg.taper_px *= s;
+                cfg.correct.start_px *= s;
+                cfg.correct.end_px *= s;
+                cfg.water_edge.px *= s;
+                cfg.water_edge.blur_px *= s;
+            }
+        }
+    }
+
     /// The vector eraser's TRIM (docs/VECTOR-INKING.md phase 3, Clip
     /// Studio's "erase up to intersection"): every stroke the eraser path
     /// touches (within `radius`) loses the touched span EXTENDED to the

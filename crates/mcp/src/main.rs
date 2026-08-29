@@ -152,6 +152,11 @@ const TOOLS: &[(&str, &str, &str)] = &[
         "Create a new (empty, undoable) text layer on the current page for lettering. Args: {name?}. Returns its stable id.",
     ),
     (
+        "layers_add_balloon",
+        "layers.add_balloon",
+        "Create a new (empty, undoable) balloon layer on the current page, so a script can letter a page from zero: add_balloon → balloons.add → layers.add_text → texts.add. Args: {name?, border_px?} — border_px defaults to the app's Tool Property balloon border. Returns {id, index, border_px}.",
+    ),
+    (
         "texts_patch",
         "texts.patch",
         "Batch-edit text items BY ID on one layer; one undo press for the whole batch. Args: {layer: <layer id>, items: [{id, text?, vertical?, align?: Leading|Center|Trailing, frame_align?: Near|Center|Far, font?, size_pt?, pos?, size?}]}. Changing text clears style runs; setting size turns auto_size off. Returns how many landed.",
@@ -349,6 +354,10 @@ mod tests {
             "balloons.remove",
             "pages.list",
             "pages.select",
+            // Lettering a page from ZERO needs both layer doors — with
+            // only add_text a script could write but never bubble.
+            "layers.add_text",
+            "layers.add_balloon",
         ] {
             assert!(methods.contains(&want), "no tool for {want}");
         }

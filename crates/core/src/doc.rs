@@ -1333,6 +1333,173 @@ impl Layer {
             LayerKind::Raster => {}
         }
     }
+
+    /// Scale every PIXEL-space number the layer owns by `(sx, sy)` — the
+    /// geometry half of `IO-060` (Edit ▸ Change work resolution), and the
+    /// exact counterpart of [`Self::translate_vectors`].
+    ///
+    /// # What scales and what deliberately does not
+    ///
+    /// Anything stored in canvas px scales: positions, radii, corner radii,
+    /// stroke widths, the tone lattice ORIGIN, a balloon's screen cell
+    /// (`BalloonTone::cell_px` is px by design, not LPI).
+    ///
+    /// Anything stored PHYSICALLY does not, because the whole point of the
+    /// op is that the paper stays the same size:
+    /// * `ToneParams::lpi` — lines per INCH. 60 lpi is still 60 lpi at 350
+    ///   dpi; the cell is `dpi / lpi`, so the screen re-flows by itself the
+    ///   moment `refresh_derived` runs at the new dpi. Scaling it here would
+    ///   change the printed screen, which is the bug this op exists to avoid.
+    /// * `TextItem::size_pt` and every other `*_pt` — a point is 1/72 inch.
+    ///   Same argument: 12 pt prints 12 pt at either dpi. The BOX around the
+    ///   type is px and does scale, and the shaped sprite cache is dropped so
+    ///   the next shape pass rebuilds it at the new dpi.
+    /// * Angles, opacities, pressure widths (0..1), `Tail::bend` (a fraction
+    ///   of the tail's own length) — all dimensionless.
+    ///
+    /// `s` is the width scale for numbers that are not tied to one axis;
+    /// callers pass the mean, and on a dpi change `sx == sy` anyway.
+    fn scale_vectors(&mut self, sx: f32, sy: f32, s: f32) {
+        if let Some(t) = &mut self.tone {
+            // LP-014's lattice origin is canvas px; lpi is physical.
+            t.offset[0] *= sx;
+            t.offset[1] *= sy;
+        }
+        if let Some(e) = &mut self.edge {
+            e.width_px *= s;
+        }
+        if let Some(g) = &mut self.genlines {
+            g.scale(sx, sy, s);
+        }
+        if let Some(st) = &mut self.strokes {
+            st.scale(sx, sy, s);
+        }
+        match &mut self.kind {
+            LayerKind::Fill(crate::fill_layer::FillKind::Gradient { a, b, .. }) => {
+                a[0] *= sx;
+                a[1] *= sy;
+                b[0] *= sx;
+                b[1] *= sy;
+            }
+            LayerKind::Fill(crate::fill_layer::FillKind::Tone { tone, .. }) => {
+                tone.offset[0] *= sx;
+                tone.offset[1] *= sy;
+            }
+            LayerKind::Fill(_) => {}
+            LayerKind::Correction(_) => {}
+            LayerKind::Frame(fs) => {
+                for f in &mut fs.frames {
+                    for p in &mut f.points {
+                        p[0] *= sx;
+                        p[1] *= sy;
+                    }
+                }
+                fs.border_px *= s;
+                if let Some(sl) = &mut fs.slot {
+                    sl[0] *= sx;
+                    sl[1] *= sy;
+                    sl[2] *= sx;
+                    sl[3] *= sy;
+                }
+            }
+            LayerKind::Balloon(bs) => {
+                use crate::balloon::BalloonShape;
+                for b in &mut bs.balloons {
+                    match &mut b.shape {
+                        BalloonShape::Ellipse { center, radii } => {
+                            center[0] *= sx;
+                            center[1] *= sy;
+                            radii[0] *= sx;
+                            radii[1] *= sy;
+                        }
+                        BalloonShape::RoundRect { rect, corner } => {
+                            rect[0] *= sx;
+                            rect[1] *= sy;
+                            rect[2] *= sx;
+                            rect[3] *= sy;
+                            *corner *= s;
+                        }
+                        BalloonShape::Polygon { points, .. } => {
+                            for p in points.iter_mut() {
+                                p[0] *= sx;
+                                p[1] *= sy;
+                            }
+                        }
+                    }
+                    for tail in &mut b.tails {
+                        tail.base[0] *= sx;
+                        tail.base[1] *= sy;
+                        tail.tip[0] *= sx;
+                        tail.tip[1] *= sy;
+                        tail.width *= s;
+                    }
+                    if let Some(t) = &mut b.fill_tone {
+                        // Stored in canvas px (balloon.rs says so out loud),
+                        // so unlike a tone LAYER it will not re-flow itself.
+                        t.cell_px *= s;
+                    }
+                }
+                bs.border_px *= s;
+            }
+            LayerKind::Text(ts) => {
+                for item in &mut ts.texts {
+                    item.pos[0] *= sx;
+                    item.pos[1] *= sy;
+                    item.size[0] *= sx;
+                    item.size[1] *= sy;
+                    item.outline_px *= s;
+                    // pt sizes are physical and stay; the SPRITE was shaped
+                    // at the old dpi, so it must be re-shaped, not scaled.
+                    item.cache = None;
+                }
+            }
+            // A file object's geometry is its raster (resampled with every
+            // other tile map). `fit` is the box the source was scaled into,
+            // in canvas px, so it moves with the canvas or the next refresh
+            // re-derives at the OLD pixel size.
+            LayerKind::FileObject(fo) => {
+                fo.fit = (
+                    ((fo.fit.0 as f32 * sx).round() as u32).max(1),
+                    ((fo.fit.1 as f32 * sy).round() as u32).max(1),
+                );
+            }
+            LayerKind::Raster => {}
+        }
+    }
+
+    /// Resample every raster this layer owns and scale its geometry —
+    /// `IO-060`'s per-layer half. Derived rasters are DROPPED rather than
+    /// resampled: a tone screen, a border effect, a live fill and a frame
+    /// mat all re-derive from sources that just scaled, and re-deriving is
+    /// both crisper and cheaper than filtering a lattice (the moiré the
+    /// runner-up 13 export choice is also about).
+    fn resample_content(&mut self, sx: f32, sy: f32, interp: crate::transform::Interp) {
+        self.tiles = crate::transform::resample_tile_map(&self.tiles, sx, sy, interp);
+        self.resample_meta(sx, sy, interp);
+    }
+
+    /// Everything [`Self::resample_content`] does EXCEPT the layer's own
+    /// tiles — the mask, the derived caches, the geometry. Split out for
+    /// the paper case: a canvas-filling sheet of uniform white is re-laid
+    /// rather than resampled (a full page of solid white through the box
+    /// filter buys only a half-alpha fringe at the edges, at the cost of
+    /// the most expensive resample on the page), but it still owns a mask
+    /// and caches that have to move with everything else.
+    fn resample_meta(&mut self, sx: f32, sy: f32, interp: crate::transform::Interp) {
+        let s = 0.5 * (sx + sy);
+        if let Some(m) = &mut self.mask {
+            m.tiles = crate::transform::resample_tile_map(&m.tiles, sx, sy, interp);
+            m.revision = crate::tile::next_revision();
+        }
+        self.mask_tiles = None;
+        self.tone_tiles = None;
+        self.edge_tiles = None;
+        self.edge_stamp = None;
+        self.fill_tiles = None;
+        self.fill_stamp = None;
+        self.corr = None;
+        self.scale_vectors(sx, sy, s);
+    }
 }
 
 impl Default for Layer {
@@ -3793,6 +3960,32 @@ impl Document {
         true
     }
 
+    /// Re-blit a text layer from the sprites it already holds — no undo
+    /// step, no reshaping, no change to the vector state.
+    ///
+    /// `IO-060`'s text half: a work resample drops every sprite (they were
+    /// shaped at the old dpi) and leaves the RESAMPLED pixels standing so
+    /// the page is never blank. Once the app has re-warmed the caches at
+    /// the new dpi this lays the crisp sprites down over them. Pushing an
+    /// undo step here would be a lie — the step before it is a text layer
+    /// with no sprites, which rasterizes to nothing.
+    pub fn reraster_text(&mut self, index: usize) -> bool {
+        let size = self.size;
+        let Some(l) = self.layers.get_mut(index) else {
+            return false;
+        };
+        let LayerKind::Text(cur) = &l.kind else {
+            return false;
+        };
+        if cur.texts.iter().all(|t| t.cache.is_none()) {
+            return false;
+        }
+        let raster = cur.rasterize(size);
+        l.replace_tiles(raster);
+        self.touch();
+        true
+    }
+
     pub fn set_texts(&mut self, index: usize, mut texts: TextSet) -> bool {
         // Same contract as `set_balloons`: the commit mints new identities.
         texts.mint_ids();
@@ -3849,7 +4042,6 @@ impl Document {
     /// Vector layers (frames, balloons) refuse to merge — baking the derived
     /// raster into art would destroy both the vectors and the pixels under it.
     pub fn merge_down(&mut self, index: usize) -> bool {
-        use crate::blend::{blend_premul, f32_to_fix15, fix15_to_f32, scale_opacity};
         if index == 0 || index >= self.layers.len() {
             return false;
         }
@@ -3877,47 +4069,132 @@ impl Document {
         }
         let (before, active_before) = (self.stack_snapshot(), self.active);
         let upper = self.layers[index].clone();
-        if upper.visible {
-            let lower = &mut self.layers[index - 1];
-            for (idx, tile) in upper.tiles() {
-                if tile.is_blank() {
-                    continue;
-                }
-                let dst = lower.tile_mut(idx);
-                let dd = dst.data_mut();
-                let sd = tile.data();
-                for p in 0..crate::tile::TILE_PIXELS {
-                    let i = p * 4;
-                    if sd[i + 3] == 0 && upper.blend == Blend::Normal {
-                        continue;
-                    }
-                    let s = scale_opacity(
-                        [
-                            fix15_to_f32(sd[i]),
-                            fix15_to_f32(sd[i + 1]),
-                            fix15_to_f32(sd[i + 2]),
-                            fix15_to_f32(sd[i + 3]),
-                        ],
-                        upper.opacity,
-                    );
-                    let d = [
-                        fix15_to_f32(dd[i]),
-                        fix15_to_f32(dd[i + 1]),
-                        fix15_to_f32(dd[i + 2]),
-                        fix15_to_f32(dd[i + 3]),
-                    ];
-                    let out = blend_premul(upper.blend, s, d);
-                    for c in 0..4 {
-                        dd[i + c] = f32_to_fix15(out[c]);
-                    }
-                }
-            }
-        }
+        bake_layer_into(&mut self.layers[index - 1], &upper);
         self.layers.remove(index);
         self.active = index - 1;
         self.record_structure("Merge down", before, active_before);
         self.touch();
         true
+    }
+
+    /// CSP "Merge selected layers" (選択中のレイヤーを結合, the owner's
+    /// Shift+Alt+E): flatten the palette's multi-selection into ONE raster
+    /// layer at the LOWEST selected position, bottom-up, honouring each
+    /// layer's blend, opacity and visibility. ONE structural undo step.
+    ///
+    /// Same refusals as [`Self::merge_down`], for the same reasons, applied
+    /// to the whole set: folders, vector kinds and stroke-recording
+    /// destinations never merge, a locked layer refuses edits, a clipped
+    /// layer's raw pixels are not what it shows, and a set spanning a folder
+    /// boundary would smuggle pixels in or out of a mask. The lowest
+    /// selected layer MAY be clipped — it keeps its clip and the merge lands
+    /// inside it, exactly as merging down into a clipped layer does.
+    ///
+    /// Unselected layers sitting BETWEEN selected ones are skipped, not
+    /// preserved in order: the merged result lands at the lowest selected
+    /// position with the rest of the sandwich still above it. That is CSP's
+    /// behaviour and it only shows when an interleaved layer blends
+    /// non-Normally — for the ordinary contiguous selection the page
+    /// composites identically before and after.
+    pub fn merge_selected(&mut self, indices: &[usize]) -> bool {
+        let mut idx: Vec<usize> = indices
+            .iter()
+            .copied()
+            .filter(|&i| i < self.layers.len())
+            .collect();
+        idx.sort_unstable();
+        idx.dedup();
+        if idx.len() < 2 {
+            return false;
+        }
+        let depth = self.layers[idx[0]].depth;
+        let refuses = |l: &Layer| {
+            l.folder || l.is_vector() || l.records_strokes() || l.lock || l.depth != depth
+        };
+        if idx.iter().any(|&i| refuses(&self.layers[i]))
+            || idx[1..].iter().any(|&i| self.layers[i].clip)
+        {
+            return false;
+        }
+        let (before, active_before) = (self.stack_snapshot(), self.active);
+        let dst = idx[0];
+        for &i in &idx[1..] {
+            let upper = self.layers[i].clone();
+            bake_layer_into(&mut self.layers[dst], &upper);
+        }
+        // Top-down, so the indices below each removal stay valid.
+        for &i in idx[1..].iter().rev() {
+            self.layers.remove(i);
+        }
+        self.active = dst;
+        self.record_structure("Merge selected layers", before, active_before);
+        self.touch();
+        true
+    }
+
+    /// CSP "Release folder" (レイヤーフォルダーを解除, the owner's
+    /// Ctrl+Shift+G): dissolve the folder at `index` — every descendant
+    /// rises one level (nested folders keep their own nesting), the header
+    /// goes, order is untouched. ONE structural undo step.
+    ///
+    /// Refused on a FRAME folder: its header carries the panel vectors AND
+    /// the coverage mask its children are clipped by, so dropping it would
+    /// quietly un-clip the art. [`Self::rasterize_frame_folder`] is that
+    /// folder's release — it hands the mask down first. Also refused on a
+    /// locked header, and on the last layer standing (a document always has
+    /// a layer).
+    ///
+    /// The header's own rendering state — opacity, blend, mask, border
+    /// effect, and the isolation a non-Through folder gives its children —
+    /// cannot come with it, because no per-child value reproduces a group
+    /// effect over overlapping children. A neutral folder therefore
+    /// composites identically afterwards and a dressed one does not;
+    /// [`Self::folder_release_is_lossless`] is the door callers warn from.
+    pub fn release_folder(&mut self, index: usize) -> bool {
+        let Some(h) = self.layers.get(index) else {
+            return false;
+        };
+        if !h.folder || h.is_frame() || h.lock || self.layers.len() <= 1 {
+            return false;
+        }
+        let (before, active_before) = (self.stack_snapshot(), self.active);
+        for k in self.children_range(index).collect::<Vec<_>>() {
+            // Every descendant is at least one deeper than the header, so
+            // this is a plain rise; nesting between them is preserved.
+            self.layers[k].depth = self.layers[k].depth.saturating_sub(1);
+        }
+        self.layers.remove(index);
+        self.active = match self.active.cmp(&index) {
+            std::cmp::Ordering::Greater => self.active - 1,
+            std::cmp::Ordering::Equal => index.saturating_sub(1),
+            std::cmp::Ordering::Less => self.active,
+        }
+        .min(self.layers.len() - 1);
+        self.normalize_depths();
+        self.record_structure("Release folder", before, active_before);
+        self.touch();
+        true
+    }
+
+    /// Whether releasing the folder at `index` leaves the page compositing
+    /// the same — i.e. the header dresses nothing its children can inherit.
+    /// `false` is not a refusal, it is the warning the command says out
+    /// loud before doing it anyway (the artist can undo).
+    pub fn folder_release_is_lossless(&self, index: usize) -> bool {
+        let Some(h) = self.layers.get(index) else {
+            return false;
+        };
+        let isolates = !h.through
+            && self
+                .children_range(index)
+                .any(|k| self.layers[k].blend != Blend::Normal);
+        h.visible
+            && h.opacity >= 1.0
+            && h.blend == Blend::Normal
+            && h.mask.is_none()
+            && h.edge.is_none()
+            && h.tone.is_none()
+            && !isolates
     }
 
     /// Batch: one tone change across many layers as ONE undo step
@@ -4897,6 +5174,77 @@ impl Document {
         self.touch();
     }
 
+    /// CSP's Image ▸ **Change image resolution** (`IO-060`), the other half
+    /// of the pair whose first half is [`Self::resize_canvas`]: the paper
+    /// stays the same PHYSICAL page and every pixel is re-made at a new
+    /// resolution. Nothing is re-framed and nothing is cropped.
+    ///
+    /// Returns `false` (document untouched) for a degenerate target.
+    ///
+    /// # Why this is not "scale everything by the same number"
+    ///
+    /// * RASTER content resamples through `interp` — [`Interp::HighAccuracy`]
+    ///   is the reduction kernel and the reason a 1 px hairline comes through
+    ///   grey instead of missing.
+    /// * DERIVED content does not resample: a tone layer's dots, a live
+    ///   fill, a border effect and a frame folder's mat are all dropped here
+    ///   and rebuilt by `refresh_derived(new_dpi)` / the re-derive below.
+    ///   That is the whole tone-awareness the JP guides ask for — the screen
+    ///   re-flows at the new dpi at the SAME lpi rather than being filtered
+    ///   like a photograph.
+    /// * VECTOR geometry scales and re-derives (`Layer::scale_vectors`).
+    /// * PHYSICAL numbers — lpi, pt — do not move at all.
+    ///
+    /// The caller owns `PageSetup`: `dpi` changes, `paper_mm` does not.
+    ///
+    /// Like every structural op the history is cleared — a whole-work
+    /// resample is not an undo step, it is a decision (see `resize_to`).
+    pub fn resample_to(&mut self, new_w: u32, new_h: u32, interp: crate::transform::Interp) -> bool {
+        let old = self.size;
+        let new = (new_w.max(1), new_h.max(1));
+        if old.0 == 0 || old.1 == 0 {
+            return false;
+        }
+        if new == old {
+            return true;
+        }
+        let sx = new.0 as f32 / old.0 as f32;
+        let sy = new.1 as f32 / old.1 as f32;
+        for l in &mut self.layers {
+            // A canvas-filling uniform-white layer is a frame folder's White
+            // base (and a new page's paper): re-lay it at the new size
+            // rather than resampling a page of solid white, which would only
+            // buy a fringe of half-alpha along the edges.
+            if l.covers_canvas(old) && l.is_uniform_white() {
+                l.tiles.clear();
+                l.extend_white(new);
+                l.resample_meta(sx, sy, interp);
+                continue;
+            }
+            l.resample_content(sx, sy, interp);
+        }
+        // Vector rasters rebuild from the geometry that just scaled — the
+        // resampled blit `resample_content` produced is discarded here.
+        // Text is the exception: its sprites are shaped by the APP at a dpi
+        // the core cannot reach, so a re-raster now would blank the layer.
+        // The resampled pixels stand in until the app re-warms the caches.
+        for l in &mut self.layers {
+            if l.is_frame() {
+                Self::derive_frame_raster(l, new);
+            } else if let Some(bs) = l.balloons().cloned() {
+                let raster = bs.rasterize(new);
+                l.replace_tiles(raster);
+            }
+        }
+        self.rulers.scale(sx, sy);
+        self.size = new;
+        self.selection = None;
+        self.sel_scratch = LayerMask::default();
+        self.clear_history();
+        self.touch();
+        true
+    }
+
     /// CSP "Change canvas size": pin content to `anchor` while the canvas
     /// becomes `new_w × new_h`.
     pub fn resize_canvas(&mut self, new_w: u32, new_h: u32, anchor: ResizeAnchor) {
@@ -5177,6 +5525,52 @@ impl Layer {
         let white = Arc::new(t);
         for ti in tile_range(size) {
             self.tiles.entry(ti).or_insert_with(|| white.clone());
+        }
+    }
+}
+
+/// Bake `upper` down onto `dst`, honouring the upper layer's blend mode and
+/// opacity — the pixel half of every merge. A hidden upper layer contributes
+/// nothing (CSP: it merges as if it were not there).
+///
+/// One definition on purpose: [`Document::merge_down`] and
+/// [`Document::merge_selected`] must agree pixel for pixel, or merging a
+/// two-row selection would come out different from merging down.
+fn bake_layer_into(dst: &mut Layer, upper: &Layer) {
+    use crate::blend::{blend_premul, f32_to_fix15, fix15_to_f32, scale_opacity};
+    if !upper.visible {
+        return;
+    }
+    for (idx, tile) in upper.tiles() {
+        if tile.is_blank() {
+            continue;
+        }
+        let sd = tile.data();
+        let dd = dst.tile_mut(idx).data_mut();
+        for p in 0..crate::tile::TILE_PIXELS {
+            let i = p * 4;
+            if sd[i + 3] == 0 && upper.blend == Blend::Normal {
+                continue;
+            }
+            let s = scale_opacity(
+                [
+                    fix15_to_f32(sd[i]),
+                    fix15_to_f32(sd[i + 1]),
+                    fix15_to_f32(sd[i + 2]),
+                    fix15_to_f32(sd[i + 3]),
+                ],
+                upper.opacity,
+            );
+            let d = [
+                fix15_to_f32(dd[i]),
+                fix15_to_f32(dd[i + 1]),
+                fix15_to_f32(dd[i + 2]),
+                fix15_to_f32(dd[i + 3]),
+            ];
+            let out = blend_premul(upper.blend, s, d);
+            for c in 0..4 {
+                dd[i + c] = f32_to_fix15(out[c]);
+            }
         }
     }
 }

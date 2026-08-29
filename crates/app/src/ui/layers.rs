@@ -684,6 +684,32 @@ fn defaults_section(ui: &mut egui::Ui, app: &mut App, i: usize) {
         {
             app.push_cmd(AppCmd::ForgetLayerDefaults);
         }
+        // Owner ruling 2026-08-30. Only where a tone can land at all — on
+        // a folder or a vector layer `apply` refuses tones outright, so the
+        // switch would be a control over nothing.
+        let toneable = app
+            .doc
+            .layers
+            .get(i)
+            .is_some_and(|l| !l.folder && !l.is_vector());
+        if toneable {
+            let mut inc = app.layer_defaults.include_tone(key);
+            if ui
+                .checkbox(&mut inc, "Include tone")
+                .on_hover_text(format!(
+                    "on: an applied screentone is part of the saved default, so new {0} \
+                     come out already screened (Clip Studio's behaviour).\n\
+                     off: the default is blend, opacity and effects only — the tone stays \
+                     on this layer.\n\
+                     Remembered per layer type, in {1}",
+                    ld::kind_label(key),
+                    ld::path_hint()
+                ))
+                .changed()
+            {
+                app.push_cmd(AppCmd::SetLayerDefaultsIncludeTone(inc));
+            }
+        }
     });
     match saved {
         Some(what) => ui.weak(format!("saved for {}: {what}", ld::kind_label(key))),

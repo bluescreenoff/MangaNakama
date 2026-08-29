@@ -111,6 +111,10 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 app.push_cmd(AppCmd::SaveOraAs);
                 ui.close();
             }
+            if item(ui, "Save Duplicate…", "") {
+                app.push_cmd(AppCmd::SaveDuplicate);
+                ui.close();
+            }
             if item(ui, "Export Single File (.mnc)…", "") {
                 app.push_cmd(AppCmd::ExportMnc);
                 ui.close();
@@ -260,6 +264,20 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 app.push_cmd(AppCmd::OpenCanvasSize);
                 ui.close();
             }
+            // `IO-060`. Directly under Change canvas size because CSP puts
+            // the pair together and the names only make sense as a pair:
+            // that one re-frames the paper, this one re-makes the pixels.
+            if ui
+                .add_enabled(
+                    app.work_dpi().is_some(),
+                    egui::Button::new("Change work resolution…").shortcut_text(""),
+                )
+                .on_disabled_hover_text("this work is a pixel canvas — it has no resolution")
+                .clicked()
+            {
+                app.push_cmd(AppCmd::OpenResampleWork);
+                ui.close();
+            }
             let has_sel = app.doc.selection.as_ref().is_some_and(|s| !s.is_empty());
             if ui
                 .add_enabled(
@@ -307,6 +325,10 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
             }
             if item(ui, "New vector layer", "") {
                 app.push_cmd(AppCmd::AddVectorLayer);
+                ui.close();
+            }
+            if item(ui, "Line correction…", "") {
+                app.push_cmd(AppCmd::LineCorrectOpen);
                 ui.close();
             }
             if item(ui, "Batch operations…", "") {
@@ -616,8 +638,16 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 app.push_cmd(AppCmd::MergeDown);
                 ui.close();
             }
+            if item(ui, "Merge selected layers", "") {
+                app.push_cmd(AppCmd::MergeSelected);
+                ui.close();
+            }
             if item(ui, "Merge visible to new layer", "Ctrl+Shift+E") {
                 app.push_cmd(AppCmd::StampVisible);
+                ui.close();
+            }
+            if item(ui, "Release folder", "") {
+                app.push_cmd(AppCmd::ReleaseFolder);
                 ui.close();
             }
             ui.separator();
@@ -679,30 +709,19 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 ui.separator();
                 // FL-011 / FL-015: the two with parameters.
                 if item(ui, "Gaussian blur…", "") {
-                    app.push_cmd(AppCmd::FilterOpen(Some(mn_core::Filter::Gaussian {
-                        sigma: 4.0,
-                    })));
+                    app.push_cmd(AppCmd::FilterOpen(Some(mn_core::Filter::GAUSSIAN)));
                     ui.close();
                 }
                 if item(ui, "Motion blur…", "") {
-                    app.push_cmd(AppCmd::FilterOpen(Some(mn_core::Filter::Motion {
-                        angle: 0.0,
-                        length: 20.0,
-                        dir: mn_core::MotionDir::Both,
-                        mode: mn_core::MotionMode::Uniform,
-                    })));
+                    app.push_cmd(AppCmd::FilterOpen(Some(mn_core::Filter::MOTION)));
                     ui.close();
                 }
                 if item(ui, "Radial blur…", "") {
-                    app.push_cmd(AppCmd::FilterOpen(Some(mn_core::Filter::RadialBlur {
-                        strength: 0.3,
-                    })));
+                    app.push_cmd(AppCmd::FilterOpen(Some(mn_core::Filter::RADIAL_BLUR)));
                     ui.close();
                 }
                 if item(ui, "Spin blur…", "") {
-                    app.push_cmd(AppCmd::FilterOpen(Some(mn_core::Filter::SpinBlur {
-                        angle_deg: 20.0,
-                    })));
+                    app.push_cmd(AppCmd::FilterOpen(Some(mn_core::Filter::SPIN_BLUR)));
                     ui.close();
                 }
                 ui.separator();
@@ -715,10 +734,7 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
             ui.menu_button("Sharpen", |ui| {
                 // FL-014.
                 if item(ui, "Unsharp mask…", "") {
-                    app.push_cmd(AppCmd::FilterOpen(Some(mn_core::Filter::Unsharp {
-                        radius: 2.0,
-                        amount: 1.0,
-                    })));
+                    app.push_cmd(AppCmd::FilterOpen(Some(mn_core::Filter::UNSHARP)));
                     ui.close();
                 }
             });
@@ -728,54 +744,37 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
             // and spin blurs wait on.
             ui.menu_button("Distort", |ui| {
                 if item(ui, "Pinch…", "") {
-                    app.push_cmd(AppCmd::FilterOpen(Some(mn_core::Filter::Pinch {
-                        amount: 0.4,
-                    })));
+                    app.push_cmd(AppCmd::FilterOpen(Some(mn_core::Filter::PINCH)));
                     ui.close();
                 }
                 if item(ui, "Ripple…", "") {
-                    app.push_cmd(AppCmd::FilterOpen(Some(mn_core::Filter::Ripple {
-                        amplitude: 8.0,
-                        wavelength: 48.0,
-                    })));
+                    app.push_cmd(AppCmd::FilterOpen(Some(mn_core::Filter::RIPPLE)));
                     ui.close();
                 }
                 if item(ui, "Wave…", "") {
-                    app.push_cmd(AppCmd::FilterOpen(Some(mn_core::Filter::Wave {
-                        amplitude: 8.0,
-                        wavelength: 48.0,
-                        dir: mn_core::WaveDir::Horizontal,
-                    })));
+                    app.push_cmd(AppCmd::FilterOpen(Some(mn_core::Filter::WAVE)));
                     ui.close();
                 }
                 if item(ui, "Twirl…", "") {
-                    app.push_cmd(AppCmd::FilterOpen(Some(mn_core::Filter::Twirl {
-                        angle_deg: 90.0,
-                    })));
+                    app.push_cmd(AppCmd::FilterOpen(Some(mn_core::Filter::TWIRL)));
                     ui.close();
                 }
             });
             // LC-001/002 — CSP's ライン修正, the two that clean up a scan.
             ui.menu_button("Line correction", |ui| {
                 if item(ui, "Adjust line width…", "") {
-                    app.push_cmd(AppCmd::FilterOpen(Some(mn_core::Filter::LineWidth {
-                        delta: 1,
-                    })));
+                    app.push_cmd(AppCmd::FilterOpen(Some(mn_core::Filter::LINE_WIDTH)));
                     ui.close();
                 }
                 if item(ui, "Remove dust…", "") {
-                    app.push_cmd(AppCmd::FilterOpen(Some(mn_core::Filter::RemoveDust {
-                        max_px: 5,
-                    })));
+                    app.push_cmd(AppCmd::FilterOpen(Some(mn_core::Filter::REMOVE_DUST)));
                     ui.close();
                 }
             });
             ui.menu_button("Effect", |ui| {
                 // FL-033.
                 if item(ui, "Mosaic…", "") {
-                    app.push_cmd(AppCmd::FilterOpen(Some(mn_core::Filter::Mosaic {
-                        cell: 8,
-                    })));
+                    app.push_cmd(AppCmd::FilterOpen(Some(mn_core::Filter::MOSAIC)));
                     ui.close();
                 }
             });

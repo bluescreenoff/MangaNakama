@@ -698,6 +698,63 @@ impl ExportFormat {
     }
 }
 
+/// `IO-030` — what a REDUCED export does to a screentone (CSP asks this at
+/// export time, and the workflow audit's runner-up 13 is that it is a
+/// CHOICE, not a bug to avoid).
+///
+/// # The two honest answers
+///
+/// A tone layer is derived at the work's dpi and then resampled with
+/// everything else, so a 600 → 350 dpi finish shrinks the dots along with
+/// the art. That keeps the printed screen at the layer's own frequency —
+/// 60 lpi stays 60 lpi — and it is what this app has always done. The price
+/// is moiré: a lattice whose period lands on a fractional number of output
+/// pixels beats against the sample grid, and 60 lpi at a 0.583 scale is
+/// exactly such a period.
+///
+/// The other answer is to screen for the EXPORT instead: derive the tone
+/// against `work_dpi / scale`, so that after the reduction each cell is the
+/// size it was in the work — a whole number of output pixels, no beat. The
+/// printed screen coarsens to `lpi × scale` (60 lpi at half size prints as
+/// 30 lpi), which is a real change to how the page reads and is why this is
+/// the artist's call and not ours.
+///
+/// [`Self::Frequency`] is the default and is byte-for-byte the old
+/// behaviour.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ToneScale {
+    /// Keep the layer's frequency; the dots resample with the art.
+    #[default]
+    Frequency,
+    /// Re-screen for the export scale; the dots keep their pixel size and
+    /// the printed frequency drops with the reduction.
+    Dots,
+}
+
+impl ToneScale {
+    pub fn label(self) -> &'static str {
+        match self {
+            ToneScale::Frequency => "Keep frequency (dots rescale)",
+            ToneScale::Dots => "Re-screen for the export scale",
+        }
+    }
+}
+
+/// The dpi a page's tone screens should be DERIVED at for an export that
+/// finishes at `scale` — [`ToneScale`]'s one line of consequence.
+///
+/// `Frequency` derives at the work's own dpi (the screen is then reduced
+/// with the page). `Dots` derives at `work / scale`, so the reduction lands
+/// the cell back at its work-pixel size. Both clamp to a sane dpi: a scale
+/// of 0 or a missing work dpi means "no reduction is happening", and the
+/// tone dpi is then just the tone dpi.
+pub fn tone_export_dpi(tone_dpi: u32, scale: f32, mode: ToneScale) -> u32 {
+    if mode == ToneScale::Frequency || !(scale > 0.0) || scale >= 1.0 {
+        return tone_dpi;
+    }
+    ((tone_dpi as f32 / scale).round() as u32).clamp(tone_dpi, 20_000)
+}
+
 /// The finishing decisions a submission target fixes: output resolution,
 /// expression colour, resample kernel and container. `dpi == 0` means "the
 /// work's own resolution, no resample" — the same `0 = no dpi` convention
@@ -711,6 +768,10 @@ pub struct ExportFinish {
     pub colour: crate::doc::LayerExpression,
     pub split_spreads: bool,
     pub resample: Resample,
+    /// `IO-030`: what a REDUCED export does to a screentone. Part of the
+    /// finish because it is a submission decision — the printer's screen
+    /// frequency — not a rendering taste.
+    pub tone: ToneScale,
     pub format: ExportFormat,
     /// JPEG quality, 1..=100. Carried even when the format is PNG so the
     /// knob keeps its value across a format flip; ignored by the PNG
@@ -733,6 +794,7 @@ impl Default for ExportFinish {
             colour: crate::doc::LayerExpression::Colour,
             split_spreads: false,
             resample: Resample::Comic,
+            tone: ToneScale::Frequency,
             format: ExportFormat::Png,
             quality: PROOF_JPEG_QUALITY,
         }
@@ -770,6 +832,7 @@ pub const PRINT_PRESETS: &[ExportPreset] = &[
             colour: crate::doc::LayerExpression::Mono,
             split_spreads: true,
             resample: Resample::Comic,
+            tone: ToneScale::Frequency,
             format: ExportFormat::Png,
             quality: PROOF_JPEG_QUALITY,
         },
@@ -783,6 +846,7 @@ pub const PRINT_PRESETS: &[ExportPreset] = &[
             colour: crate::doc::LayerExpression::Grey,
             split_spreads: true,
             resample: Resample::Comic,
+            tone: ToneScale::Frequency,
             format: ExportFormat::Png,
             quality: PROOF_JPEG_QUALITY,
         },
@@ -796,6 +860,7 @@ pub const PRINT_PRESETS: &[ExportPreset] = &[
             colour: crate::doc::LayerExpression::Colour,
             split_spreads: true,
             resample: Resample::Comic,
+            tone: ToneScale::Frequency,
             format: ExportFormat::Png,
             quality: PROOF_JPEG_QUALITY,
         },
@@ -809,6 +874,7 @@ pub const PRINT_PRESETS: &[ExportPreset] = &[
             colour: crate::doc::LayerExpression::Colour,
             split_spreads: false,
             resample: Resample::Comic,
+            tone: ToneScale::Frequency,
             format: ExportFormat::Png,
             quality: PROOF_JPEG_QUALITY,
         },
@@ -823,6 +889,7 @@ pub const PRINT_PRESETS: &[ExportPreset] = &[
             colour: crate::doc::LayerExpression::Colour,
             split_spreads: false,
             resample: Resample::Comic,
+            tone: ToneScale::Frequency,
             format: ExportFormat::Jpeg,
             quality: PROOF_JPEG_QUALITY,
         },

@@ -59,6 +59,11 @@ pub mod tone;
 pub mod transform;
 pub mod undo;
 
+/// `IO-060` — the whole-work resample, tested at document level (its own
+/// file so the two 8 000-line modules it spans stay out of each other's way).
+#[cfg(test)]
+mod resample_work_tests;
+
 pub use adjust::{Adjust, TONE_CURVE_MAX};
 pub use balloon::{
     Balloon, BalloonHandle, BalloonInk, BalloonSet, BalloonShape, BalloonTone, Tail, TailGeom,

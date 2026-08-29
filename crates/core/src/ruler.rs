@@ -323,6 +323,39 @@ impl Ruler {
         }
     }
 
+    /// Scale the ruler's geometry about the canvas origin — `IO-060`'s
+    /// share of the work resample. Ruler geometry is canvas px throughout,
+    /// so this is a straight multiply; the ANGLES (`angle0`) and the ray
+    /// counts are dimensionless and stay, which is right for the uniform
+    /// scale a dpi change is.
+    pub fn scale(&mut self, sx: f32, sy: f32, s: f32) {
+        let p = |q: &mut [f32; 2]| {
+            q[0] *= sx;
+            q[1] *= sy;
+        };
+        match self {
+            Ruler::Line { a, b } | Ruler::Parallel { a, b } | Ruler::Perspective { a, b } => {
+                p(a);
+                p(b);
+            }
+            Ruler::VanishingPoint { c, .. } | Ruler::Symmetric { c, .. } => p(c),
+            Ruler::Concentric { c, dr } => {
+                p(c);
+                *dr *= s;
+            }
+            Ruler::Guide { horizontal, pos } => *pos *= if *horizontal { sy } else { sx },
+            Ruler::Perspective1 { vp, h } => {
+                p(vp);
+                p(h);
+            }
+            Ruler::Perspective3 { a, b, z } => {
+                p(a);
+                p(b);
+                p(z);
+            }
+        }
+    }
+
     /// Squared distance from `p` to the ruler's DRAWN geometry, canvas px².
     /// For every snapping kind this is exactly the snap distance (same
     /// math — what you grab is what you draw against). The two that never
@@ -532,6 +565,22 @@ fn yes() -> bool {
 }
 
 impl Rulers {
+    /// Scale every ruler and curve ruler — `IO-060`. A perspective grid
+    /// built for the page must still land on the page after the work
+    /// changes resolution.
+    pub fn scale(&mut self, sx: f32, sy: f32) {
+        let s = 0.5 * (sx + sy);
+        for r in &mut self.items {
+            r.scale(sx, sy, s);
+        }
+        for c in &mut self.curves {
+            for p in &mut c.pts {
+                p[0] *= sx;
+                p[1] *= sy;
+            }
+        }
+    }
+
     /// Is this ruler's family currently snappable? (`Symmetric` is not a
     /// snap source at all, but the app gates its mirroring on the same
     /// special-family switch.)
