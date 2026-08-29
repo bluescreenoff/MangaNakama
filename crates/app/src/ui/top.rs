@@ -143,6 +143,15 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 ui.close();
             }
             ui.separator();
+            // Workflow audit finding 8. Paper is a review tool, not an
+            // output format: printing at actual size is how tone density
+            // and 級数 legibility get judged, and the red-pen mark-up pass
+            // needs a sheet in a hand.
+            if item(ui, "Print…", "") {
+                app.push_cmd(AppCmd::Print);
+                ui.close();
+            }
+            ui.separator();
             // CSP keeps Preferences under File; ours moved here from Edit
             // with the T3 rework (owner order 2026-08-21).
             if item(ui, "Preferences…", "") {
@@ -955,6 +964,31 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
             }
             if item(ui, "Zoom 100%", "Ctrl+1") {
                 app.push_cmd(AppCmd::Zoom100);
+                ui.close();
+            }
+            // Workflow audit finding 8. Zoom 100% is one DOCUMENT pixel per
+            // screen pixel, which on a 600 dpi page is nothing like the
+            // printed size; this is one page millimetre per screen
+            // millimetre. Greyed on a pixel canvas — there is no dpi to
+            // measure against, and a number invented here would be trusted.
+            let has_dpi = app.work_dpi().is_some();
+            if ui
+                .add_enabled(
+                    has_dpi,
+                    egui::Button::new("Print size (1:1 on paper)").shortcut_text(""),
+                )
+                .on_hover_text(
+                    "Sets the zoom so the page is its real printed size on this \
+                     monitor — the check for tone density and type legibility.",
+                )
+                .on_disabled_hover_text(
+                    "This canvas is measured in pixels only: there is no page dpi \
+                     to map onto millimetres. Give the work a page setup in \
+                     File ▸ Work settings.",
+                )
+                .clicked()
+            {
+                app.push_cmd(AppCmd::ZoomPrintSize);
                 ui.close();
             }
             ui.separator();

@@ -40,7 +40,12 @@ windows-sys = { workspace = true, features = [
   # GetTickCount — the clock POINTER_INFO::dwTime uses, so the HUD's input
   # latency row can subtract the two without a second time base.
   "Win32_System_SystemInformation",
+  # StartDocW/StartPage/EndPage/EndDoc/AbortDoc + DOCINFOW. They are gdi32
+  # exports, but the metadata files them under Storage::Xps — see app/print.rs.
+  "Win32_Storage_Xps",
   "Win32_UI_Controls",
+  # PrintDlgW + PRINTDLGW: File ▸ Print…'s printer picker.
+  "Win32_UI_Controls_Dialogs",
   "Win32_UI_HiDpi",
   "Win32_UI_Input_Ime",
   "Win32_UI_Input_KeyboardAndMouse",

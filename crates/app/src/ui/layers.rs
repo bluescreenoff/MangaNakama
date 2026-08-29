@@ -8,7 +8,7 @@ use super::theme;
 use super::theme::ValueBar;
 use super::widgets::{group_caption, icon_btn, icon_btn_tint, paint_icon, px_mm_text};
 use crate::app::{App, LayerFilterKind};
-use crate::cmd::AppCmd;
+use crate::cmd::{AppCmd, Tool};
 use mn_core::{Blend, FillKind, LayerKind};
 
 // The picker order is OURS, not CSP's: parts 1, 2 and 3 in the order they
@@ -50,6 +50,89 @@ pub(super) const BLENDS: [Blend; 27] = [
     Blend::Luminosity,
 ];
 
+/// `LP-025` Tool navigation: the tools that MEAN something on this layer
+/// type, in the order a page is made. Every entry is one the layer will
+/// actually accept — the mapping is the guards read forwards:
+/// `Layer::paintable` for the paint family, `App::live_fill_active` for the
+/// two live kinds (a brush there edits the layer's window mask), and
+/// `App::guard_frame_layer`'s refusals for the vector kinds, each of which
+/// keeps its own editor plus the Object tool.
+///
+/// **Layer-agnostic tools are deliberately absent** — Select, Wand,
+/// Eyedropper and Pan work the same on every layer in the stack, so listing
+/// them here would put four cells in every list and teach nothing. This bar
+/// answers "what is different about THIS layer", which is the only question
+/// a per-type bar can answer.
+pub(super) fn tools_for_layer(l: &mn_core::Layer) -> &'static [Tool] {
+    if l.folder {
+        // A frame folder is still divisible and still an object; a plain
+        // folder holds no pixels at all.
+        return if l.is_frame() {
+            &[Tool::Frame, Tool::Object]
+        } else {
+            &[]
+        };
+    }
+    match l.kind {
+        LayerKind::Text(_) => &[Tool::Text, Tool::Object],
+        // The balloon's text is edited in place, so T belongs here too.
+        LayerKind::Balloon(_) => &[Tool::Balloon, Tool::Text, Tool::Object],
+        LayerKind::Frame(_) => &[Tool::Frame, Tool::Object],
+        // Live layers: a brush edits the WINDOW, and the parameters live in
+        // Tool Property rather than in a tool of their own.
+        LayerKind::Fill(_) | LayerKind::Correction(_) => &[Tool::Pen, Tool::Eraser],
+        // Vector inking: strokes are captured (inking does not ask
+        // `paintable`), and Object is what edits the control points. The
+        // pixel ops that `paintable` refuses are correctly absent.
+        LayerKind::Raster if l.records_strokes() => &[Tool::Pen, Tool::Eraser, Tool::Object],
+        LayerKind::Raster => &[
+            Tool::Pen,
+            Tool::Eraser,
+            Tool::Fill,
+            Tool::Gradient,
+            Tool::Tone,
+            Tool::Figure,
+            Tool::Liquify,
+        ],
+    }
+}
+
+/// The strip icon for a tool — the same table the tool palette draws from,
+/// so a tool never wears two glyphs.
+fn tool_icon(t: Tool) -> Option<Icon> {
+    super::tools::STRIP_TOOLS
+        .iter()
+        .find(|(tool, _)| *tool == t)
+        .map(|(_, icon)| *icon)
+}
+
+/// `LP-025`'s bar. Clicking pushes the same `SetTool` the tool palette
+/// pushes, so sub-tool memory (each tool's remembered brush) behaves
+/// identically whichever surface you reach the tool from.
+fn tool_nav(ui: &mut egui::Ui, app: &mut App) {
+    let Some(l) = app.doc.layers.get(app.doc.active) else {
+        return;
+    };
+    let tools = tools_for_layer(l);
+    if tools.is_empty() {
+        ui.weak("folders organise layers — pick a layer inside to draw");
+        return;
+    }
+    let cur = app.tool;
+    let mut pick = None;
+    ui.horizontal(|ui| {
+        for &t in tools {
+            let Some(icon) = tool_icon(t) else { continue };
+            if icon_btn(ui, icon, 20.0, cur == t, true, t.label()).clicked() {
+                pick = Some(t);
+            }
+        }
+    });
+    if let Some(t) = pick {
+        app.push_cmd(AppCmd::SetTool(t));
+    }
+}
+
 /// CSP's Layer Property: what the *active layer* is. Frame layers expose the
 /// border thickness (one undo step per drag); raster layers get blend +
 /// opacity, handy when the Layers palette is collapsed or floated away.
@@ -70,6 +153,8 @@ pub(super) fn layer_property(ui: &mut egui::Ui, app: &mut App) {
             .color(theme::c().text_strong),
     );
     let (mut reference, mut draft) = (l.reference, l.draft);
+    // LP-025, first thing under the name: what this layer type is for.
+    tool_nav(ui, app);
     match (frames, balloons) {
         (Some(fs), _) => {
             group_caption(ui, "Frame border");
@@ -559,6 +644,57 @@ pub(super) fn layer_property(ui: &mut egui::Ui, app: &mut App) {
     if let Some(e) = expr_pick {
         app.push_cmd(AppCmd::SetLayerExpression(i, e));
     }
+
+    // LP-001 Save as default. CSP files this under the Layer Properties
+    // palette MENU; we have no palette-level menu (the ≡ in this app is a
+    // per-ROW popup in the stack list, and putting a whole-type action
+    // there would read as "this row"), so it lives at the foot of the panel
+    // whose contents it saves — visible state instead of a hidden item,
+    // with what is stored spelled out under the buttons.
+    defaults_section(ui, app, i);
+}
+
+/// The `LP-001` footer: save, forget, and a line saying what is stored for
+/// this layer type. Only for the types whose creation path reads a default
+/// (`layer_defaults::applies_to`) — offering it on a text or balloon layer
+/// would save something nothing ever reads.
+fn defaults_section(ui: &mut egui::Ui, app: &mut App, i: usize) {
+    use crate::app::layer_defaults as ld;
+    let Some(key) = app.doc.layers.get(i).map(ld::kind_key) else {
+        return;
+    };
+    if !ld::applies_to(key) {
+        return;
+    }
+    let saved = app.layer_defaults.summary(key);
+    ui.add_space(3.0);
+    group_caption(ui, "New-layer defaults");
+    ui.horizontal(|ui| {
+        if ui
+            .small_button("Save as default")
+            .on_hover_text(format!(
+                "new {} start with this layer's blend, opacity and effects.\n\
+                 Not its name, visibility, locks, clipping, reference or draft flag.\n{}",
+                ld::kind_label(key),
+                ld::path_hint()
+            ))
+            .clicked()
+        {
+            app.push_cmd(AppCmd::SaveLayerDefaults);
+        }
+        if saved.is_some()
+            && ui
+                .small_button("Forget")
+                .on_hover_text(format!("new {} start stock again", ld::kind_label(key)))
+                .clicked()
+        {
+            app.push_cmd(AppCmd::ForgetLayerDefaults);
+        }
+    });
+    match saved {
+        Some(what) => ui.weak(format!("saved for {}: {what}", ld::kind_label(key))),
+        None => ui.weak(format!("new {} start stock", ld::kind_label(key))),
+    };
 }
 
 /// A row of colour chips; returns the one clicked. The chip currently in use
@@ -2453,6 +2589,144 @@ mod tests {
             (0..d.layers.len()).filter(|&i| f.passes(&d, i)).count(),
             0,
             "no red rows anywhere"
+        );
+    }
+
+    fn empty_balloons() -> mn_core::BalloonSet {
+        mn_core::BalloonSet {
+            balloons: Vec::new(),
+            border_px: 4.0,
+            pressure_width: false,
+        }
+    }
+
+    /// One layer of every kind the bar has to answer for.
+    fn one_of_each() -> Vec<(&'static str, mn_core::Layer)> {
+        let l = |k: LayerKind| {
+            let mut l = mn_core::Layer::new("x");
+            l.kind = k;
+            l
+        };
+        let mut folder = mn_core::Layer::new("folder");
+        folder.folder = true;
+        let mut frame_folder = l(LayerKind::Frame(FrameSet::single_rect(
+            [0.0, 0.0, 8.0, 8.0],
+            2.0,
+        )));
+        frame_folder.folder = true;
+        let mut vector = mn_core::Layer::new("vector");
+        vector.strokes = Some(Default::default());
+        vec![
+            ("raster", mn_core::Layer::new("raster")),
+            ("vector", vector),
+            ("folder", folder),
+            ("frame-folder", frame_folder),
+            (
+                "frame",
+                l(LayerKind::Frame(FrameSet::single_rect(
+                    [0.0, 0.0, 8.0, 8.0],
+                    2.0,
+                ))),
+            ),
+            ("balloon", l(LayerKind::Balloon(empty_balloons()))),
+            ("text", l(LayerKind::Text(TextSet::default()))),
+            (
+                "fill",
+                l(LayerKind::Fill(FillKind::Flat { color: [0.0; 4] })),
+            ),
+            (
+                "tone",
+                l(LayerKind::Fill(FillKind::Tone {
+                    tone: mn_core::ToneParams::default(),
+                    density: 0.4,
+                })),
+            ),
+            (
+                "correction",
+                l(LayerKind::Correction(mn_core::Adjust::Invert)),
+            ),
+        ]
+    }
+
+    /// LP-025: the bar's contents per layer type. The table is asserted
+    /// where it is a taste call, but the load-bearing half is the invariant
+    /// underneath it — a tool is listed only where the app would actually
+    /// take it, so the bar can never advertise a tool the guards refuse.
+    #[test]
+    fn tool_nav_lists_only_tools_the_layer_accepts() {
+        for (name, l) in one_of_each() {
+            let tools = tools_for_layer(&l);
+            let mut seen = tools.to_vec();
+            seen.sort_by_key(|t| format!("{t:?}"));
+            seen.dedup();
+            assert_eq!(seen.len(), tools.len(), "{name}: a tool listed twice");
+            for &t in tools {
+                assert!(
+                    tool_icon(t).is_some(),
+                    "{name}: {t:?} has no strip icon to draw"
+                );
+            }
+
+            // Brushes: exactly the three cases that take one — a plain
+            // raster (`paintable`), a stroke-recording raster (inking is
+            // captured), and the live kinds (the brush edits the window).
+            let live = matches!(l.kind, LayerKind::Fill(_) | LayerKind::Correction(_));
+            let takes_brush = l.paintable() || l.records_strokes() || live;
+            assert_eq!(
+                tools.contains(&Tool::Pen),
+                takes_brush,
+                "{name}: the pen must be listed exactly where a stroke lands"
+            );
+            assert_eq!(tools.contains(&Tool::Eraser), takes_brush, "{name}");
+
+            // The raster-edit family is `paintable`'s own list: everything
+            // else re-derives its pixels and would lose the edit.
+            for t in [Tool::Fill, Tool::Gradient, Tool::Tone, Tool::Liquify] {
+                assert!(
+                    !tools.contains(&t) || l.paintable(),
+                    "{name}: {t:?} needs a paintable layer"
+                );
+            }
+            // Object edits geometry, so it is offered exactly where there
+            // is geometry to edit.
+            let has_geometry = l.is_vector() || l.records_strokes();
+            assert!(
+                !tools.contains(&Tool::Object) || has_geometry,
+                "{name}: nothing for the Object tool to grab"
+            );
+            // Text only where text lives.
+            assert!(
+                !tools.contains(&Tool::Text) || l.is_text() || l.is_balloon(),
+                "{name}: the text tool would make a new layer here"
+            );
+            // Layer-agnostic tools are never listed (see the doc comment).
+            for t in [Tool::Select, Tool::Wand, Tool::Eyedrop, Tool::Pan] {
+                assert!(!tools.contains(&t), "{name}: {t:?} works everywhere");
+            }
+            // Only a plain folder gets an empty bar; every other type has
+            // at least one tool to offer.
+            assert_eq!(
+                tools.is_empty(),
+                name == "folder",
+                "{name}: {tools:?} — only a plain folder holds nothing"
+            );
+        }
+
+        // The two taste calls worth pinning by name.
+        let mut balloon = mn_core::Layer::new("b");
+        balloon.kind = LayerKind::Balloon(empty_balloons());
+        assert_eq!(
+            tools_for_layer(&balloon).to_vec(),
+            vec![Tool::Balloon, Tool::Text, Tool::Object],
+            "a balloon's text is edited in place, so T belongs on its bar"
+        );
+        let mut ff = mn_core::Layer::new("ff");
+        ff.folder = true;
+        ff.kind = LayerKind::Frame(FrameSet::single_rect([0.0, 0.0, 8.0, 8.0], 2.0));
+        assert_eq!(
+            tools_for_layer(&ff).to_vec(),
+            vec![Tool::Frame, Tool::Object],
+            "a frame folder is still divisible"
         );
     }
 

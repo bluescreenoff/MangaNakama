@@ -26,12 +26,16 @@ mod kpp_import;
 /// grow another 200 lines of test.
 #[cfg(test)]
 mod lasso_tests;
+/// `LP-001` Save as default: per-layer-type creation defaults, in
+/// `layer_defaults.txt` beside the exe.
+pub mod layer_defaults;
 mod layout;
 mod make_brush;
 pub mod materials;
 mod pages;
 pub mod pattern;
 pub mod prefs;
+pub(crate) mod print;
 pub(crate) mod reader;
 mod session;
 mod story;
@@ -313,6 +317,11 @@ pub struct App {
     /// proof ships at. Quality is kept across a format flip.
     pub export_all_format: mn_core::export::ExportFormat,
     pub export_all_quality: u8,
+    /// Workflow audit finding 8: File ▸ Print…'s size-policy pre-dialog is
+    /// open. The POLICY itself lives in `prefs.print_size` — it is a habit,
+    /// not a per-run decision, and re-picking "actual size" before every
+    /// proof print is the annoyance the preference exists to remove.
+    pub print_open: bool,
     /// TRIAGE 144: the Story Editor window + its per-page decoded docs
     /// (None = the active page, which edits the live document).
     pub story_open: bool,
@@ -703,6 +712,10 @@ pub struct App {
     /// User preferences (`prefs.txt` beside the exe — deliberately NOT
     /// `ui.txt`, which is the file people delete to fix a wrecked dock).
     pub prefs: Prefs,
+    /// `LP-001` per-layer-type creation defaults (`layer_defaults.txt`
+    /// beside the exe). Written on the Save-as-default click, read by the
+    /// layer-creation commands. See `app::layer_defaults`.
+    pub layer_defaults: layer_defaults::LayerDefaults,
     /// User key bindings (`keys.json` beside the exe) — consulted before
     /// the built-in shortcut table. See `crate::keymap`.
     pub keymap: crate::keymap::Keymap,
@@ -1435,6 +1448,7 @@ impl App {
             export_all_resample: mn_core::export::Resample::default(),
             export_all_format: mn_core::export::ExportFormat::default(),
             export_all_quality: mn_core::export::PROOF_JPEG_QUALITY,
+            print_open: false,
             mask_show_area: false,
             tone_show_area: false,
             mask_edit: false,
@@ -1741,6 +1755,7 @@ impl App {
             recent_fonts: layout.recent_fonts.clone(),
             layout,
             prefs,
+            layer_defaults: layer_defaults::LayerDefaults::load(),
             keymap: crate::keymap::Keymap::load_beside_exe(),
             batch: batch::BatchOps::default(),
             pattern: pattern::PatternStudio::default(),
@@ -4626,6 +4641,10 @@ mod correction_layer_tests;
 /// lattice and correction dialog through the same door.
 #[cfg(test)]
 mod param_undo_tests;
+
+/// `LP-001` Save as default through the real creation commands.
+#[cfg(test)]
+mod layer_defaults_tests;
 
 #[cfg(test)]
 mod view_reset_and_tool_lock_tests;

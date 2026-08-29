@@ -486,6 +486,41 @@ to show. The threshold is fixed at 50&nbsp;%.</div>
 <kbd>Ctrl+Z</kbd> steps through border-effect changes; layer colour, sub
 colour and the preview mode are presentation switches with no undo step,
 like the eye — click them back. All four are saved with the file.</div>
+<h2>New-layer defaults</h2>
+<div class="quirk"><b>"Save as default" bakes the layer you are on into
+the next one of its <i>type</i>.</b> At the foot of Layer Property: it
+stores this layer's blend mode, opacity, tone effect and lattice, border
+effect, layer/sub colour and the preview mode, and every new layer of the
+same type starts wearing them. Types are kept apart — a raster default
+never lands on a tone layer, a folder default never lands on a raster one
+— and the line under the buttons always says what is stored, with
+<b>Forget</b> to go back to stock.</div>
+<div class="quirk"><b>What it deliberately does not save:</b> the name,
+where the layer sits in the stack, and anything that could make a new
+layer look broken — visibility, the two locks, clipping, and the
+reference and draft flags. A new layer that arrived hidden or locked
+reads as a bug, not a preference. Gradient and correction parameters are
+also left out: those are the drag and the dialog that made them, not a
+style.</div>
+<div class="quirk"><b>It is one undo press, as always.</b> The default is
+applied while the layer is being created, so <kbd>Ctrl+Z</kbd> takes the
+whole thing away in one press and redo brings it back still wearing the
+default. The settings live in <code>layer_defaults.txt</code> beside the
+exe; delete it and every type is stock again.</div>
+<h2>The tool bar in Layer Property</h2>
+<div class="quirk"><b>The icons under the layer name are the tools that
+mean something on <i>this</i> layer.</b> A raster layer offers the pen,
+eraser, fill, gradient, tone, figure and liquify; a text layer offers the
+text and object tools; a balloon layer adds the text tool because its
+words are edited in place; a live fill or correction layer offers only
+the brushes, which there paint the layer's window rather than ink. A
+plain folder holds no pixels, so it offers nothing and says so. Clicking
+one is exactly the same as clicking it in the Tool palette, remembered
+brush and all.</div>
+<div class="quirk"><b>Select, the wand, the eyedropper and the hand are
+never listed.</b> They behave the same on every layer in the stack, so
+putting them in a per-layer bar would add four cells to every list and
+teach nothing. The bar answers "what is different about this layer".</div>
 <h2>Paper</h2>
 <div class="quirk"><b>The paper is not a layer, and it is under all of
 them.</b> View ▸ Paper. There is exactly one per page, you cannot draw

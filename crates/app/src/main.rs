@@ -1313,6 +1313,22 @@ fn resolve_dialog(hwnd: HWND, cmd: AppCmd) -> Option<AppCmd> {
                 .save_file()
                 .map(AppCmd::ExportMncPath)
         }
+        // Workflow audit finding 8. Two steps, in this order for one reason:
+        // the composite needs `&mut App` (renderer + document) and `PrintDlgW`
+        // must NOT have one alive — it runs a modal loop that re-enters the
+        // wndproc. So the pixels are made inside `with_app`, the dialog and
+        // the spool run outside it, and the verdict goes back as a command.
+        AppCmd::PrintGo => {
+            let job = with_app(hwnd, |a| a.print_job())?;
+            let (msg, warn) = match job {
+                Err(e) => (e, true),
+                Ok(job) => match app::print::run(hwnd, &job) {
+                    Ok(m) => (m, false),
+                    Err(e) => (e, true),
+                },
+            };
+            Some(AppCmd::PrintResult { msg, warn })
+        }
         AppCmd::ExportAllPagesGo => rfd::FileDialog::new()
             .set_title("Export All Pages (numbered PNGs)")
             .pick_folder()

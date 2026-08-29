@@ -2287,6 +2287,22 @@ pub enum AppCmd {
     /// back to the identity) and persist it in prefs — it then bends
     /// every tool's input before any per-tool curve.
     PenPressureCurveSet(Vec<[f32; 2]>),
+    /// Workflow audit finding 8, File ▸ Print… — opens the size-policy
+    /// pre-dialog; the Windows printer dialog comes on `PrintGo`.
+    Print,
+    /// The pre-dialog's Print button: composite the active page and hand it
+    /// to `PrintDlgW`. Resolved by `main::resolve_dialog`, like every other
+    /// command that opens a modal Win32 dialog, and it comes back as
+    /// `PrintResult` — a print dialog pumps the message queue and no
+    /// `&mut App` may be alive while it does.
+    PrintGo,
+    /// What the printer pipeline had to say, straight to the status bar.
+    PrintResult { msg: String, warn: bool },
+    /// Workflow audit finding 8, View ▸ Print size: set the viewport zoom so
+    /// one page millimetre is one screen millimetre. A one-shot set, not a
+    /// mode — it is a measurement, and the next wheel notch is allowed to
+    /// end it.
+    ZoomPrintSize,
     /// PM-053: write every text item in the chapter to a `.txt` in
     /// reading order (the translator/letterer handoff).
     ExportText,
@@ -2374,6 +2390,14 @@ pub enum AppCmd {
     /// tone layer, `None` converts it back. Non-destructive either way (the
     /// painted pixels are the ink source and survive).
     SetTone(Option<mn_core::ToneParams>),
+    /// `LP-001` Layer Property ▸ Save as default: bake the ACTIVE layer's
+    /// presentation properties as the starting point for newly created
+    /// layers of its TYPE. Written straight to `layer_defaults.txt` beside
+    /// the exe — see `app::layer_defaults` for what is and is not saved.
+    SaveLayerDefaults,
+    /// `LP-001`: drop the saved default for the active layer's type, so new
+    /// layers of it start stock again.
+    ForgetLayerDefaults,
     /// TN-011 View ▸ Show Tone Area: tint every toned region on the canvas so
     /// leftover scraps of tone are visible before print. A view toggle — it
     /// touches no pixels and is never exported.
@@ -4837,6 +4861,45 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 "pen pressure correction applied to every tool"
             });
         }
+        AppCmd::Print => {
+            app.print_open = true;
+        }
+        // Resolved to `PrintResult` by `main::pump_commands`; reaching here
+        // means the shell never got the chance (headless, scripts).
+        AppCmd::PrintGo => {}
+        AppCmd::PrintResult { msg, warn } => {
+            if warn {
+                app.set_error(msg);
+            } else {
+                app.set_status(msg);
+            }
+        }
+        AppCmd::ZoomPrintSize => {
+            let mon = app.monitor_dpi();
+            match crate::app::print::print_zoom(app.work_dpi(), mon) {
+                Some(z) => {
+                    let c = app.canvas_center();
+                    let cur = app.viewport.zoom;
+                    if cur > 0.0 {
+                        app.viewport.zoom_around(c, z / cur);
+                    }
+                    app.set_status(format!(
+                        "print size: 1 page mm = 1 screen mm ({}% — {} dpi page on a {:.0} dpi display)",
+                        (z * 100.0).round() as i32,
+                        app.work_dpi().unwrap_or(0),
+                        mon
+                    ));
+                    app.mark_dirty();
+                }
+                // The honest refusal. Inventing 96 or 600 here would put a
+                // page on screen at a size the owner would then measure
+                // tone density against.
+                None => app.set_error(
+                    "print size needs a page dpi — this canvas is measured in pixels only \
+                     (give the work a page setup in File ▸ Work settings)",
+                ),
+            }
+        }
         AppCmd::ExportText => {}
         AppCmd::ExportTextPath(p) => {
             // A half-typed balloon is still the document's text: land it
@@ -5197,15 +5260,20 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             // CSP: a new layer lands *inside* the active folder, else above
             // the active layer as its sibling.
             let active = app.doc.active;
-            if app
+            let made = if app
                 .doc
                 .layers
                 .get(active)
                 .is_some_and(|l| l.folder && l.open)
             {
-                app.doc.add_layer_in_folder(active, name);
+                app.doc.add_layer_in_folder(active, name)
             } else {
-                app.doc.add_layer(name);
+                Some(app.doc.add_layer(name))
+            };
+            // LP-001: the type's saved default, inside the add's own undo
+            // step (see `App::apply_layer_defaults`).
+            if let Some(li) = made {
+                app.apply_layer_defaults(li);
             }
             app.renderer.invalidate();
             app.mark_dirty();
@@ -5221,6 +5289,9 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 + 1;
             let li = app.doc.add_layer(format!("Vector {n}"));
             app.doc.layers[li].strokes = Some(mn_core::StrokeSet::default());
+            // After the strokes set, so `kind_key` reads "vector" and not
+            // "raster" — the type is what the default is filed under.
+            app.apply_layer_defaults(li);
             app.doc.set_active(li);
             app.renderer.invalidate();
             app.set_status("vector layer: strokes record as editable geometry");
@@ -5271,8 +5342,13 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
         AppCmd::AddFolder => {
             app.commit_text_edit();
             let n = app.doc.layers.iter().filter(|l| l.folder).count() + 1;
-            app.doc
+            let li = app
+                .doc
                 .add_folder_above(app.doc.active, format!("Folder {n}"));
+            // LP-001, before the Through preference below: both are the
+            // same idea (a new layer of this type starts like this), and
+            // both ride inside the add's single undo step.
+            app.apply_layer_defaults(li);
             // LF-003 (row 19): the preference makes Through the default.
             // Set on the fresh folder directly — presentation state, the
             // same door the palette's Through checkbox uses.
@@ -6433,7 +6509,13 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
         }
         AppCmd::NewLiveFill(kind) => {
             let from_sel = app.doc.selection.is_some();
-            app.doc.add_fill_layer(kind, from_sel);
+            // LP-001: a saved fill/tone default is creation INPUT, not a
+            // patch afterwards — the layer's derived-raster stamp is taken
+            // inside `add_fill_layer`, so changing the parameters after it
+            // would leave the stamp describing a picture nobody asked for.
+            let kind = app.layer_defaults.fill_kind(kind);
+            let li = app.doc.add_fill_layer(kind, from_sel);
+            app.apply_layer_defaults(li);
             app.refresh_tones();
             app.set_status("live layer — any brush edits its window; parameters in Tool Property");
             app.mark_dirty();
@@ -6469,7 +6551,10 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
         AppCmd::ParamEditSession(s) => app.param_session = s,
         AppCmd::NewCorrectionLayer(adj) => {
             let from_sel = app.doc.selection.is_some();
-            app.doc.add_correction_layer(adj, from_sel);
+            let li = app.doc.add_correction_layer(adj, from_sel);
+            // LP-001: presentation only — the Adjust itself is dialog
+            // state, not a style default (see `app::layer_defaults`).
+            app.apply_layer_defaults(li);
             app.refresh_tones();
             app.set_status(
                 "correction layer — everything below renders through it; any brush edits its window",
@@ -7217,6 +7302,41 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                     }
                 }
             }
+        }
+        AppCmd::SaveLayerDefaults => {
+            use crate::app::layer_defaults as ld;
+            let i = app.doc.active;
+            let Some(l) = app.doc.layers.get(i) else {
+                return;
+            };
+            let key = ld::kind_key(l);
+            if !ld::applies_to(key) {
+                return app.set_status(format!(
+                    "{} are made by their own tool, out of that tool's settings — there is no new-layer default to save",
+                    ld::kind_label(key)
+                ));
+            }
+            app.layer_defaults.capture(l);
+            app.layer_defaults.save_if_dirty();
+            let what = app.layer_defaults.summary(key).unwrap_or_default();
+            app.set_status(format!(
+                "new {} will start like this one — {what}",
+                ld::kind_label(key)
+            ));
+        }
+        AppCmd::ForgetLayerDefaults => {
+            use crate::app::layer_defaults as ld;
+            let i = app.doc.active;
+            let Some(l) = app.doc.layers.get(i) else {
+                return;
+            };
+            let key = ld::kind_key(l);
+            if !app.layer_defaults.has(key) {
+                return;
+            }
+            app.layer_defaults.forget(key);
+            app.layer_defaults.save_if_dirty();
+            app.set_status(format!("new {} start stock again", ld::kind_label(key)));
         }
         AppCmd::ToneShowArea => {
             app.tone_show_area = !app.tone_show_area;

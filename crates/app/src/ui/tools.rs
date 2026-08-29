@@ -16,7 +16,7 @@ use super::widgets::icon_btn;
 /// icon"): CSP files 選択ペン / 選択消し as SUB tools of the Selection tool
 /// with a fixed create-type, and so do we — they live in `ui/subtool.rs`'s
 /// Selection list, reachable there, from Ctrl+K, and from the `,`/`.` cycle.
-const STRIP_TOOLS: [(Tool, Icon); 15] = [
+pub(super) const STRIP_TOOLS: [(Tool, Icon); 15] = [
     (Tool::Pen, Icon::Pen),
     (Tool::Eraser, Icon::Eraser),
     (Tool::Figure, Icon::Figure),

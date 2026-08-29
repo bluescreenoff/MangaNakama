@@ -135,6 +135,13 @@ pub struct Prefs {
     /// output. Empty = identity (no correction; byte-stable with every
     /// older file). A value is stored only when it parses.
     pub pressure_curve: String,
+    /// Workflow audit finding 8: File ▸ Print…'s size policy, by
+    /// `print::PrintSize::key` (`actual` / `fit` / `pixel`). Same rule as
+    /// `theme` — an unknown name resolves to the default at READ time and is
+    /// written back verbatim, so a policy added in a newer build survives a
+    /// downgrade. Actual size is the default: it is the only one of the
+    /// three that answers "is this tone readable on paper".
+    pub print_size: String,
     /// `k=v` lines this build does not recognise, kept so saving here does
     /// not delete a newer build's settings.
     unknown: Vec<String>,
@@ -165,6 +172,7 @@ impl Default for Prefs {
             automation: false,
             theme_save_name: String::new(),
             pressure_curve: String::new(),
+            print_size: crate::app::print::PrintSize::default().key().to_owned(),
             unknown: Vec::new(),
             dirty: false,
         }
@@ -293,6 +301,10 @@ impl Prefs {
             u8::from(self.new_folder_through),
         );
         body.push_str(&format!("automation={}\n", u8::from(self.automation)));
+        body.push_str(&format!(
+            "print_size={}\n",
+            self.print_size.replace('\n', "")
+        ));
         for line in &self.unknown {
             body.push_str(line);
             body.push('\n');
@@ -381,6 +393,15 @@ impl Prefs {
                 }
             }
             "ui_scale" => self.ui_scale = v.parse().unwrap_or(self.ui_scale),
+            // Not validated here, exactly like `theme`: an unknown policy is
+            // one a newer build added, and rewriting it to `actual` would
+            // delete it. Blank is the one refusal — that is a mangled line,
+            // not a choice.
+            "print_size" => {
+                if !v.is_empty() {
+                    self.print_size = v.to_owned();
+                }
+            }
             // The honest-bool rule matters MORE here than anywhere else:
             // gibberish must never read as ON — that would open a command
             // socket the user did not ask for.
@@ -427,6 +448,10 @@ impl Prefs {
         // (see `apply_kv`); it simply paints `dark`.
         if self.theme.trim().is_empty() {
             self.theme = THEME.to_owned();
+        }
+        // Same one clamp, same reason (an unknown NAME is left alone).
+        if self.print_size.trim().is_empty() {
+            self.print_size = crate::app::print::PrintSize::default().key().to_owned();
         }
     }
 
@@ -795,6 +820,41 @@ mod tests {    /// Row 19: the Through-default preference round-trips and takes 
         let on = from_body("icon_colours=1\n");
         assert!(on.icon_colours);
         assert!(on.to_body().contains("icon_colours=1\n"));
+    }
+
+    /// Finding 8: the print size policy persists (re-picking it before every
+    /// proof print is the annoyance the key exists to remove), ships as
+    /// Actual, and follows the `theme` rule — an unknown policy survives a
+    /// downgrade instead of being rewritten.
+    #[test]
+    fn print_size_round_trips_and_keeps_an_unknown_policy() {
+        use crate::app::print::PrintSize;
+        let d = Prefs::default();
+        assert_eq!(d.print_size, "actual");
+        assert_eq!(PrintSize::from_pref(&d.print_size), PrintSize::Actual);
+        assert!(d.to_body().contains("print_size=actual\n"));
+
+        let mut me = Prefs::default();
+        me.print_size = "pixel".to_owned();
+        let back = from_body(&me.to_body());
+        assert_eq!(back.print_size, "pixel");
+        assert_eq!(PrintSize::from_pref(&back.print_size), PrintSize::Pixel);
+
+        let future = from_body("print_size=n-up-4\n");
+        assert_eq!(future.print_size, "n-up-4", "kept verbatim");
+        assert_eq!(
+            PrintSize::from_pref(&future.print_size),
+            PrintSize::Actual,
+            "…and painted as the default meanwhile"
+        );
+        assert!(future.to_body().contains("print_size=n-up-4\n"));
+        assert_eq!(
+            future.to_body().matches("print_size=").count(),
+            1,
+            "and NOT also kept as an unknown key"
+        );
+        // A mangled line keeps the default rather than writing a blank key.
+        assert_eq!(from_body("print_size=\n").print_size, "actual");
     }
 
     /// Row 89: the pressure curve round-trips through prefs.txt, empty

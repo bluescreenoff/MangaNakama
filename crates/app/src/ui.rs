@@ -151,6 +151,7 @@ pub fn build(ui: &mut egui::Ui, app: &mut App) {
     goto_page_window(ui.ctx(), app);
     spread_window(ui.ctx(), app);
     export_all_window(ui.ctx(), app);
+    crate::app::print::print_window(ui.ctx(), app);
     story_window(ui.ctx(), app);
     gen_lines_window(ui.ctx(), app);
     filter_window(ui.ctx(), app);
