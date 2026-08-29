@@ -1478,6 +1478,37 @@ fn apply_cursor(app: &App) {
     unsafe { SetCursor(LoadCursorW(std::ptr::null_mut(), id)) };
 }
 
+/// The WM_KEYDOWN half of the app-shortcut path: the `shortcut` table,
+/// plus the spring-load arm around it (workflow-audit #6 — CSP's hold-a-
+/// tool-key-to-borrow habit). Arming is detected by what the press QUEUED
+/// rather than by hooking every SetTool arm: the table has a dozen of
+/// them, and one chokepoint cannot drift. A press that queued a tool
+/// switch — or flipped the Move tool's pan/rotate sub mode, which H/R do
+/// as a side effect without changing `app.tool` — arms the spring;
+/// `App::spring_release` decides on the keyup whether it was a borrow
+/// (restore) or a tap (today's latch, exactly).
+fn key_down(app: &mut App, vk: u16, repeat: bool) {
+    let queued = app.cmds.len();
+    let (tool0, pan0) = (app.tool, app.pan_mode);
+    shortcut(app, vk, repeat);
+    if repeat || app.spring.is_some() || app.cmds.len() <= queued {
+        return;
+    }
+    if let Some(AppCmd::SetTool(t)) = app.cmds.back() {
+        let t = *t;
+        if t != tool0 || app.pan_mode != pan0 {
+            app.spring = Some(crate::app::SpringLoad {
+                vk,
+                saved: tool0,
+                saved_pan: pan0,
+                borrowed: t,
+                at: std::time::Instant::now(),
+                pointer_seen: false,
+            });
+        }
+    }
+}
+
 /// Keyboard shortcuts that belong to the app, not to egui. Returns true when
 /// the key was consumed.
 ///
@@ -2368,7 +2399,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             // App shortcuts stand down while egui has a focused text field.
             if pressed && !app.shell.wants_keyboard() {
-                shortcut(app, vk, repeat);
+                key_down(app, vk, repeat);
+            } else if !pressed {
+                // The spring's own keyup must fire even if egui grabbed
+                // the keyboard mid-hold — a borrow that survives its
+                // release is a latch by accident.
+                app.spring_release(vk);
             }
             app.shell.on_key(vk, pressed, repeat);
             app.mark_dirty();

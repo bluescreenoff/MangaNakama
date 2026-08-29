@@ -126,6 +126,20 @@ pub struct FrameOutput {
 pub use engine::{DabStrokeApp, Engine, EngineKind, preset_engine};
 use engine::{StrokeTwin, TwinAxis, smudge_tile_oracle, symmetric_affines};
 
+/// One armed spring-loaded tool borrow (workflow-audit #6): what the held
+/// key switched away from, what it switched to, and whether the borrow
+/// was used. `saved_pan` rides along because H/R pick the Move tool's
+/// sub mode as a side effect of the same keydown — restoring the tool
+/// without the sub mode would return a Rotate borrow to the wrong Hand.
+pub struct SpringLoad {
+    pub vk: u16,
+    pub saved: crate::cmd::Tool,
+    pub saved_pan: crate::cmd::PanMode,
+    pub borrowed: crate::cmd::Tool,
+    pub at: std::time::Instant,
+    pub pointer_seen: bool,
+}
+
 pub struct App {
     pub doc: Document,
     /// The brush, behind the stabilizer and the entry taper. Both decorators
@@ -1074,6 +1088,12 @@ pub struct App {
     /// Client-pixel anchor + viewport pan at the start of a pan drag.
     pan_drag: Option<([f32; 2], [f32; 2])>,
     pub space_down: bool,
+    /// Workflow-audit #6: a HELD tool key borrows the tool (CSP's
+    /// spring-loaded switch) — release restores what you had; a quick tap
+    /// keeps today's latch. Armed by the keydown that queued a tool
+    /// switch (`main.rs::key_down`), fired by its own keyup
+    /// (`spring_release`). The `space_down` pattern, generalized.
+    pub spring: Option<SpringLoad>,
     /// Set when something changed and a WM_PAINT should be requested.
     needs_redraw: bool,
     /// Monotonic clock feeding per-page content revisions (work-folder
@@ -1710,6 +1730,7 @@ impl App {
             touch_probe: TouchProbe::default(),
             pan_drag: None,
             space_down: false,
+            spring: None,
             page_clock: 0,
             folder_next_id: 0,
             docs: Vec::new(),
@@ -2805,6 +2826,26 @@ impl App {
         }
     }
 
+    /// The keyup half of the spring-loaded tool switch (workflow-audit
+    /// #6). Fires only for the arming key's own release. "Held" means
+    /// the tap threshold passed OR canvas input arrived while down — a
+    /// fast drag under 250 ms is still a borrow, not a latch. The
+    /// `borrowed` guard: a palette click or another tool key while held
+    /// means the user chose a tool on purpose; restoring over that
+    /// choice would be the spring fighting the hand.
+    pub fn spring_release(&mut self, vk: u16) {
+        if self.spring.as_ref().is_none_or(|s| s.vk != vk) {
+            return;
+        }
+        let s = self.spring.take().expect("checked above");
+        let held =
+            s.pointer_seen || s.at.elapsed() >= std::time::Duration::from_millis(250);
+        if held && self.tool == s.borrowed {
+            self.pan_mode = s.saved_pan;
+            self.push_cmd(crate::cmd::AppCmd::SetTool(s.saved));
+        }
+    }
+
     /// Open the undo op *and* the brush stroke. Both halves are mandatory:
     /// `begin_op` is what makes the stroke undoable (every `tile_mut` in between
     /// snapshots itself), and `StrokeSink::begin` is what snaps libmypaint's
@@ -2812,6 +2853,12 @@ impl App {
     /// in from wherever the previous stroke ended (see `MyBrush`'s
     /// `FIRST_SAMPLE_DTIME`).
     pub fn begin_stroke(&mut self, kind: PointerKind) {
+        // Canvas input while a tool key is held = the borrow is being
+        // USED — the release restores even under the tap threshold
+        // (hold R, one fast drag, release must not latch Rotate).
+        if let Some(s) = &mut self.spring {
+            s.pointer_seen = true;
+        }
         if self.stroke.is_some() {
             self.end_stroke();
         }
@@ -4348,6 +4395,10 @@ mod document_tab_tests;
 
 #[cfg(test)]
 mod page_switch_park_tests;
+
+/// Workflow audit #6: the spring-loaded (hold-to-borrow) tool switch.
+#[cfg(test)]
+mod spring_tests;
 
 #[cfg(test)]
 mod text_editor_undo_tests;

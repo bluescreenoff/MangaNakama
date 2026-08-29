@@ -71,6 +71,11 @@ impl App {
     // --- navigation ------------------------------------------------------
 
     pub fn begin_pan(&mut self, client_x: f32, client_y: f32) {
+        // See `begin_stroke`: input while a tool key is held marks the
+        // spring-loaded borrow as used.
+        if let Some(s) = &mut self.spring {
+            s.pointer_seen = true;
+        }
         self.pan_drag = Some(([client_x, client_y], self.viewport.pan));
     }
 
@@ -82,6 +87,10 @@ impl App {
     }
 
     pub fn begin_rotate(&mut self, x: f32, y: f32) {
+        // See `begin_stroke`: the borrow is being used.
+        if let Some(s) = &mut self.spring {
+            s.pointer_seen = true;
+        }
         self.rotate_drag = Some(self.pointer_angle(x, y));
     }
 
