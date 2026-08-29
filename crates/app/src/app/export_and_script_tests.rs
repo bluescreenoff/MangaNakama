@@ -201,6 +201,16 @@ fn export_preset_fills_the_draft_and_an_edit_reads_as_custom() {
     crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::ExportAllPreset(0));
     app.export_all_split = !app.export_all_split;
     assert_eq!(finish(&app), None, "split edit -> Custom");
+    // Findings 7 and 9 joined the draft: they must behave like the rest.
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::ExportAllPreset(0));
+    app.export_all_resample = mn_core::export::Resample::Photo;
+    assert_eq!(finish(&app), None, "resample edit -> Custom");
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::ExportAllPreset(0));
+    app.export_all_format = mn_core::export::ExportFormat::Jpeg;
+    assert_eq!(finish(&app), None, "format edit -> Custom");
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::ExportAllPreset(0));
+    app.export_all_quality -= 1;
+    assert_eq!(finish(&app), None, "quality edit -> Custom");
 
     // An index the preset list does not have leaves the draft alone.
     crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::ExportAllPreset(0));
@@ -257,6 +267,72 @@ fn export_finish_resamples_then_thresholds() {
     );
     let img = image::open(dir.join("page-p001.png")).unwrap().to_rgba8();
     assert_eq!(img.dimensions(), (64, 64), "0 dpi = the work's own size");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// FINDING 9 (the 提出 step): picking the Proof JPEG preset makes the run
+/// write `.jpg` files, and the names the dialog previews are the names on
+/// disk. Before this, Export All Pages could only write PNG.
+///
+/// Also pins the recorded mono+JPEG decision end to end: a 1-bit finish
+/// asked for JPEG comes back as a single-channel grey proof rather than
+/// refusing, because refusing would break the one workflow it is for.
+#[test]
+fn export_all_can_write_a_jpeg_proof() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    app.doc = mn_core::Document::new(64, 64);
+    app.page = Some(mn_core::PageSetup::presets().remove(1)); // B4 600 dpi
+    let li = app.doc.add_layer("ink");
+    let tile = app.doc.layers[li].tile_mut(mn_core::TileIdx::new(0, 0));
+    for y in 0..64u32 {
+        for x in 0..32u32 {
+            tile.set_pixel(x as usize, y as usize, [0, 0, 0, mn_core::FIX15_ONE as u16]);
+        }
+    }
+
+    let dir = std::env::temp_dir().join(format!("mn-proof-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // The preset is the door: one pick sets format, dpi and split.
+    let i = mn_core::export::PRINT_PRESETS
+        .iter()
+        .position(|p| p.finish.format == mn_core::export::ExportFormat::Jpeg)
+        .expect("a Proof JPEG preset");
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::ExportAllPreset(i));
+    assert_eq!(app.export_all_format, mn_core::export::ExportFormat::Jpeg);
+    crate::cmd::dispatch(
+        &mut app,
+        crate::cmd::AppCmd::ExportAllPagesPath(dir.clone()),
+    );
+    assert!(
+        dir.join("page-p001.jpg").exists(),
+        "the proof run writes .jpg, not .png"
+    );
+    assert!(!dir.join("page-p001.png").exists(), "and only .jpg");
+    assert!(app.status.contains("jpeg"), "the status names the format");
+
+    // Mono + JPEG: a grey proof of the thresholded page.
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    app.export_all_colour = mn_core::LayerExpression::Mono;
+    crate::cmd::dispatch(
+        &mut app,
+        crate::cmd::AppCmd::ExportAllPagesPath(dir.clone()),
+    );
+    let back = image::open(dir.join("page-p001.jpg")).unwrap();
+    assert!(
+        matches!(back, image::DynamicImage::ImageLuma8(_)),
+        "a 1-bit finish ships as a ONE-channel jpeg"
+    );
+    let back = back.to_luma8();
+    assert!(
+        back.pixels().any(|p| p.0[0] < 64) && back.pixels().any(|p| p.0[0] > 192),
+        "the ink and the paper both survived the encode"
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 

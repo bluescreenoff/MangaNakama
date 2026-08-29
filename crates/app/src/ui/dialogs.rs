@@ -1655,6 +1655,22 @@ fn colour_label(e: mn_core::LayerExpression) -> &'static str {
     }
 }
 
+/// Finding 7: CSP calls this 処理方法; the labels say what each kernel is
+/// FOR, because "Lanczos" tells a mangaka nothing about his hairlines.
+fn resample_label(r: mn_core::export::Resample) -> &'static str {
+    match r {
+        mn_core::export::Resample::Comic => "Comic (keep hairlines)",
+        mn_core::export::Resample::Photo => "Photo (smooth)",
+    }
+}
+
+fn format_label(f: mn_core::export::ExportFormat) -> &'static str {
+    match f {
+        mn_core::export::ExportFormat::Png => "PNG (入稿 — lossless)",
+        mn_core::export::ExportFormat::Jpeg => "JPEG (提出 — light)",
+    }
+}
+
 fn crop_label(c: mn_core::export::ExportCrop) -> &'static str {
     match c {
         mn_core::export::ExportCrop::Paper => "Whole paper",
@@ -1818,6 +1834,78 @@ pub(super) fn export_all_window(ctx: &egui::Context, app: &mut App) {
                         );
                     ui.end_row();
 
+                    // Finding 7: the kernel only bites on a MONO finish, so
+                    // the control is dead unless the finish is mono — and
+                    // it says WHY rather than just greying out.
+                    let mono = app.export_all_colour == mn_core::LayerExpression::Mono;
+                    ui.label("Resample");
+                    ui.add_enabled_ui(mono, |ui| {
+                        egui::ComboBox::from_id_salt("mn.exportall.resample")
+                            .width(160.0)
+                            .selected_text(resample_label(app.export_all_resample))
+                            .show_ui(ui, |ui| {
+                                for r in [
+                                    mn_core::export::Resample::Comic,
+                                    mn_core::export::Resample::Photo,
+                                ] {
+                                    ui.selectable_value(
+                                        &mut app.export_all_resample,
+                                        r,
+                                        resample_label(r),
+                                    );
+                                }
+                            })
+                            .response
+                            .on_hover_text(if mono {
+                                "CSP's 処理方法. Comic area-averages the ink and \
+                                 re-thresholds so a 1 px line survives the shrink; \
+                                 Photo is the smooth filter, which dissolves \
+                                 hairlines into grey and then loses them at the \
+                                 1-bit threshold."
+                            } else {
+                                "only a 1-bit finish has a threshold to bias — \
+                                 grey and colour always resample smoothly"
+                            });
+                    });
+                    ui.end_row();
+
+                    // Finding 9: 入稿 vs 提出. The quality knob keeps its
+                    // value while PNG is picked; it just has nothing to do.
+                    ui.label("Format");
+                    ui.horizontal(|ui| {
+                        egui::ComboBox::from_id_salt("mn.exportall.format")
+                            .width(160.0)
+                            .selected_text(format_label(app.export_all_format))
+                            .show_ui(ui, |ui| {
+                                for f in [
+                                    mn_core::export::ExportFormat::Png,
+                                    mn_core::export::ExportFormat::Jpeg,
+                                ] {
+                                    ui.selectable_value(
+                                        &mut app.export_all_format,
+                                        f,
+                                        format_label(f),
+                                    );
+                                }
+                            })
+                            .response
+                            .on_hover_text(
+                                "PNG is the file a printer gets. JPEG is the copy \
+                                 you send an editor — small, phone-openable; a \
+                                 1-bit finish becomes a GREY jpeg of the \
+                                 thresholded page, since JPEG cannot hold 1 bit.",
+                            );
+                        ui.add_enabled(
+                            app.export_all_format == mn_core::export::ExportFormat::Jpeg,
+                            egui::DragValue::new(&mut app.export_all_quality)
+                                .range(1..=100)
+                                .speed(1)
+                                .prefix("q"),
+                        )
+                        .on_hover_text("85 is the 提出 norm: no visible ringing at reading size");
+                    });
+                    ui.end_row();
+
                     // M2: what rectangle leaves the building. Needs a page
                     // setup — a pixel canvas has no trim to cut to.
                     let has_setup = app.page.is_some();
@@ -1866,10 +1954,14 @@ pub(super) fn export_all_window(ctx: &egui::Context, app: &mut App) {
                     p.to_owned()
                 }
             };
+            // One source for the extension: `ExportFormat::ext` is what the
+            // writer uses too, so the preview cannot promise `.png` and
+            // deliver `.jpg`.
+            let ext = app.export_all_format.ext();
             let sample = if app.export_all_split {
-                format!("{prefix}-p001.png · a spread: {prefix}-p003a.png + {prefix}-p003b.png")
+                format!("{prefix}-p001.{ext} · a spread: {prefix}-p003a.{ext} + {prefix}-p003b.{ext}")
             } else {
-                format!("{prefix}-p001.png, {prefix}-p002.png, …")
+                format!("{prefix}-p001.{ext}, {prefix}-p002.{ext}, …")
             };
             ui.label(egui::RichText::new(sample).weak().size(11.0));
             // Say the finish in pixels. "350 dpi" means nothing until you

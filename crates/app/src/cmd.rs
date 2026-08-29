@@ -4222,6 +4222,13 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 // Paper + 0 takes the exact old path, byte-identical.
                 let crop = app.export_all_crop;
                 let px_h = app.export_all_px_height;
+                // Finding 7/9: the resample kernel and the container ride
+                // the finish like everything else above. Photo + PNG is
+                // the byte-identical old path.
+                let resample = app.export_all_resample;
+                let format = app.export_all_format;
+                let quality = app.export_all_quality;
+                let ext = format.ext();
                 let setup = app.page.clone();
                 let finish = |img: image::RgbaImage| {
                     let full = [0, 0, img.width(), img.height()];
@@ -4232,10 +4239,15 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                         None => full,
                     };
                     if r != full || px_h > 0 {
-                        mn_core::export::finish_image_cropped(img, r, scale, px_h, colour)
+                        mn_core::export::finish_image_cropped(
+                            img, r, scale, px_h, colour, resample,
+                        )
                     } else {
-                        mn_core::export::finish_image(img, scale, colour)
+                        mn_core::export::finish_image(img, scale, colour, resample)
                     }
+                };
+                let write = |img: &image::RgbaImage, path: &std::path::Path| {
+                    mn_core::export::save_finished(img, path, format, quality, colour).is_ok()
                 };
                 let mut ok = 0usize;
                 let mut files = 0usize;
@@ -4274,8 +4286,9 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                                         half,
                                         d.paper_export_background(),
                                     ));
-                                    let path = dir.join(format!("{prefix}-p{:03}{tag}.png", i + 1));
-                                    if img.save(&path).is_ok() {
+                                    let path =
+                                        dir.join(format!("{prefix}-p{:03}{tag}.{ext}", i + 1));
+                                    if write(&img, &path) {
                                         files += 1;
                                     }
                                 }
@@ -4287,8 +4300,8 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                                     &d,
                                     d.paper_export_background(),
                                 ));
-                                let path = dir.join(format!("{prefix}-p{:03}.png", i + 1));
-                                if img.save(&path).is_ok() {
+                                let path = dir.join(format!("{prefix}-p{:03}.{ext}", i + 1));
+                                if write(&img, &path) {
                                     ok += 1;
                                     files += 1;
                                     exported.push(i);
@@ -4315,9 +4328,17 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 // looking at the file names.
                 if scale < 1.0 {
                     extra.push_str(&format!(" @{}%", (scale * 100.0).round() as i32));
+                    // Which kernel ran is invisible in a file listing and
+                    // decides whether the hairlines are still there.
+                    if resample.is_comic(colour) {
+                        extra.push_str(" comic");
+                    }
                 }
                 if let Some(n) = colour.ora_name() {
                     extra.push_str(&format!(" {n}"));
+                }
+                if format == mn_core::export::ExportFormat::Jpeg {
+                    extra.push_str(&format!(" jpeg q{quality}"));
                 }
                 if want_text {
                     let body = app.script_dump();

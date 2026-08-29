@@ -293,6 +293,14 @@ pub struct App {
     pub export_all_crop: mn_core::export::ExportCrop,
     /// Exact output height in px, 0 = off. Wins over dpi; never upsamples.
     pub export_all_px_height: u32,
+    /// Finding 7 (CSP 処理方法): which kernel a downscale uses. Comic is
+    /// the default and only bites on a MONO finish — see
+    /// `mn_core::export::Resample`.
+    pub export_all_resample: mn_core::export::Resample,
+    /// Finding 9: PNG (入稿) or JPEG (提出), and the JPEG quality the
+    /// proof ships at. Quality is kept across a format flip.
+    pub export_all_format: mn_core::export::ExportFormat,
+    pub export_all_quality: u8,
     /// TRIAGE 144: the Story Editor window + its per-page decoded docs
     /// (None = the active page, which edits the live document).
     pub story_open: bool,
@@ -1395,6 +1403,9 @@ impl App {
             export_all_colour: mn_core::LayerExpression::Colour,
             export_all_crop: mn_core::export::ExportCrop::Paper,
             export_all_px_height: 0,
+            export_all_resample: mn_core::export::Resample::default(),
+            export_all_format: mn_core::export::ExportFormat::default(),
+            export_all_quality: mn_core::export::PROOF_JPEG_QUALITY,
             mask_show_area: false,
             tone_show_area: false,
             mask_edit: false,
@@ -2260,13 +2271,16 @@ impl App {
         self.page.as_ref().map(|p| p.dpi).filter(|d| *d > 0)
     }
 
-    /// The export-all window's finishing draft, gathered from the three
-    /// fields that hold it. The picker derives its selection from this.
+    /// The export-all window's finishing draft, gathered from the fields
+    /// that hold it. The picker derives its selection from this.
     pub fn export_finish(&self) -> mn_core::export::ExportFinish {
         mn_core::export::ExportFinish {
             dpi: self.export_all_dpi,
             colour: self.export_all_colour,
             split_spreads: self.export_all_split,
+            resample: self.export_all_resample,
+            format: self.export_all_format,
+            quality: self.export_all_quality,
         }
     }
 
@@ -2277,6 +2291,9 @@ impl App {
         self.export_all_dpi = f.dpi;
         self.export_all_colour = f.colour;
         self.export_all_split = f.split_spreads;
+        self.export_all_resample = f.resample;
+        self.export_all_format = f.format;
+        self.export_all_quality = f.quality;
     }
 
     /// Re-derive every tone layer's halftone raster. The render loop calls

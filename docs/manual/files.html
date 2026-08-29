@@ -23,8 +23,9 @@ app never reads .psd back, and your working file stays
 
 <h2>Export finish (print presets)</h2>
 <div class="quirk"><b>Export never upsamples.</b> The Finish picker in
-Export All Pages bundles output dpi and colour mode (mono 1-bit /
-grayscale / full colour). Asking 600 dpi of a 350 dpi work exports at
+Export All Pages bundles output dpi, colour mode (mono 1-bit /
+grayscale / full colour), resample kernel and file format. Asking 600
+dpi of a 350 dpi work exports at
 350 — the dialog says so before you pick a folder, because inventing
 detail to hit a printer's number is a lie in a file.</div>
 <div class="quirk"><b>Mono thresholds AFTER the resample.</b> A 1-bit
@@ -264,7 +265,7 @@ cannot open .ora.</div>
 <div class="quirk"><b>File ▸ Export All Pages… asks for its options
 first, then for a folder.</b> Leave the options alone and you get what
 you always got: <code>&lt;work name&gt;-p001.png</code>,
-<code>-p002.png</code> and so on, full resolution, PNG only. An unnamed
+<code>-p002.png</code> and so on, full resolution, PNG. An unnamed
 work exports as <code>page-p001.png</code>. Clearing the file prefix
 does not produce files called <code>-p001.png</code> — an empty prefix
 falls back to the work name.</div>
@@ -285,6 +286,29 @@ in the work — the second test is what still works after the work has
 been closed and reopened, because the first is only remembered until
 you quit. In a work where every page is the same width nothing is
 treated as a spread.</div>
+
+<div class="quirk"><b>Resample: Comic keeps hairlines, Photo smooths —
+and only a 1-bit finish can tell the difference.</b> This is CSP's
+処理方法 (イラスト向き / コミック向き). A smooth photographic filter
+averages a 1&nbsp;px black line into grey on the way down, and the 1-bit
+threshold that runs afterwards then throws that grey away — the line is
+simply gone from the file. <b>Comic</b> averages the page's ink coverage
+instead and re-thresholds low, so a thin dark line survives the shrink.
+It is the default, and it does nothing at all to a grey or full-colour
+finish (there is no threshold there to bias), which is why the control
+greys out unless the Colour box says Monochrome. Pick <b>Photo</b> if
+you want the old behaviour back.</div>
+
+<div class="quirk"><b>Format: PNG is the file a printer gets, JPEG is
+the copy you send an editor.</b> 入稿 and 提出 are different jobs.
+The <b>Proof JPEG 150 dpi</b> finish is the second one ready-made:
+small files a phone opens, spreads kept whole so the reading order
+survives, page numbers still in the filenames. The quality box (85 out
+of the box) only applies to JPEG; it keeps its value while PNG is
+picked. A <em>monochrome</em> finish written as JPEG comes out as a
+grey JPEG of the thresholded page — JPEG cannot hold 1 bit, and the
+useful answer for a proof is the page you actually drew, not a
+refusal. Never send that file to a printer.</div>
 
 <h2>Sending the text to a translator</h2>
 <div class="quirk"><b>File ▸ Export Text (script)… writes every balloon

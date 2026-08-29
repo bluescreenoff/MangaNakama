@@ -98,11 +98,13 @@ preflight; and a chapter reader with right-to-left spreads, fullscreen, and an
 edit-and-return round trip.
 
 **Files.** OpenRaster (`.ora`) as the native layered format, a single-file
-`.mnc` for a whole comic, full-resolution PNG export per page or for the whole
-chapter with print-finishing presets (600 dpi mono-bind, 350 dpi grayscale
-or colour, web — output dpi and colour mode in one pick, resampled first
-and thresholded last so a 1-bit file really is 1-bit, and never
-upsampled), layered PSD export for the studio hand-off (groups, all 27 blend
+`.mnc` for a whole comic, full-resolution PNG or JPEG export per page or for
+the whole chapter with print-finishing presets (600 dpi mono-bind, 350 dpi
+grayscale or colour, web, and a 提出 proof JPEG — output dpi, colour mode,
+resample kernel and format in one pick, resampled first and thresholded last
+so a 1-bit file really is 1-bit, never upsampled, and with a threshold-aware
+"comic" downscale so hairlines survive a shrink instead of dissolving),
+layered PSD export for the studio hand-off (groups, all 27 blend
 modes, clipping, Japanese layer names), crash recovery and autosave.
 
 **Infrastructure.** 500+ tests. GPU tests run against the software adapter when
@@ -167,6 +169,14 @@ tenth (undo for ruler creation and moves — rulers moved onto the `Document`
 so the one undo history owns them). New ones are noted here as the work
 that finds them lands; each comes with the written reason it was deferred,
 and asking in an issue gets you that reason with the answer.
+
+- **Contact sheet for the proof export.** Export All Pages can now write a
+  light JPEG proof for the 提出 step, but not a single sheet with every page
+  tiled on it in reading order — the artifact an editor actually marks up.
+  Deferred because the tiling renderer is a second layout problem (page
+  order, spreads, per-cell page numbers) and the proof JPEG already solved
+  the thing that blocked sending anything at all. The reader already
+  composites spreads in right-to-left order, so the ordering half exists.
 
 ## Picking something up
 

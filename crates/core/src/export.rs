@@ -626,9 +626,70 @@ pub fn save_png(doc: &Document, path: &Path, background: Background) -> image::I
 
 // --- print finishing ---------------------------------------------------------
 
-/// The finishing decisions a submission target fixes: output resolution and
-/// expression colour. `dpi == 0` means "the work's own resolution, no
-/// resample" — the same `0 = no dpi` convention `PageSetup::dpi` uses.
+/// Which kernel a downscaling export resamples with — CSP's 処理方法
+/// (イラスト向き / コミック向き), and it is not cosmetic.
+///
+/// `Photo` is a general-purpose photographic filter (Lanczos): correct for
+/// colour and greyscale, and *wrong* for 1-bit line art, because a hairline
+/// it averages into grey is then killed outright by the 50 % mono
+/// threshold. `Comic` area-averages the page's INK COVERAGE and re-thresholds
+/// at a biased level ([`COMIC_INK_BIAS`]) so a thin dark line survives the
+/// shrink instead of dissolving.
+///
+/// **Only a MONO finish resamples differently.** Comic is a decision about
+/// where to put a threshold, and grey/colour output has no threshold to
+/// bias — so `Comic` on a non-mono finish is `Photo`, which is why `Comic`
+/// can be the default without changing a single colour or grey export.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Resample {
+    /// Threshold-aware downscale for 1-bit manga line art. The default:
+    /// this application's whole identity is mono pages, and the old
+    /// behaviour dissolved their hairlines silently.
+    #[default]
+    Comic,
+    /// The pre-2026-08-29 kernel, unchanged, byte for byte — and the right
+    /// answer for anything continuous-tone.
+    Photo,
+}
+
+impl Resample {
+    /// Does this policy actually take the comic path for `colour`?
+    ///
+    /// The one place the "mono only" rule is written down; the dialog's
+    /// enable/disable and the pixels agree because they ask this.
+    pub fn is_comic(self, colour: crate::doc::LayerExpression) -> bool {
+        self == Resample::Comic && colour == crate::doc::LayerExpression::Mono
+    }
+}
+
+/// What an Export All run writes to disk.
+///
+/// PNG is 入稿 (the printer's copy, lossless, big). JPEG is 提出 — the light
+/// copy you hand an editor twice a chapter: small enough to mail, openable
+/// on a phone. They are different jobs, not different tastes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ExportFormat {
+    #[default]
+    Png,
+    Jpeg,
+}
+
+impl ExportFormat {
+    /// The filename extension, without the dot. The dialog's name preview
+    /// and the writer read the SAME function — a preview that could
+    /// disagree with the files is worse than no preview.
+    pub fn ext(self) -> &'static str {
+        match self {
+            ExportFormat::Png => "png",
+            ExportFormat::Jpeg => "jpg",
+        }
+    }
+}
+
+/// The finishing decisions a submission target fixes: output resolution,
+/// expression colour, resample kernel and container. `dpi == 0` means "the
+/// work's own resolution, no resample" — the same `0 = no dpi` convention
+/// `PageSetup::dpi` uses.
 ///
 /// Whether a spread leaves as two files lives on the export dialog
 /// (`export_all_split`) and is NOT duplicated here: one value, one home.
@@ -637,15 +698,31 @@ pub struct ExportFinish {
     pub dpi: u32,
     pub colour: crate::doc::LayerExpression,
     pub split_spreads: bool,
+    pub resample: Resample,
+    pub format: ExportFormat,
+    /// JPEG quality, 1..=100. Carried even when the format is PNG so the
+    /// knob keeps its value across a format flip; ignored by the PNG
+    /// writer.
+    pub quality: u8,
 }
 
+/// The JPEG quality a proof ships at. High enough that 1-bit edges do not
+/// visibly mosquito-ring at reading size, low enough that a 20-page chapter
+/// mails: the 85 every JP 書き出し guide names for 提出用.
+pub const PROOF_JPEG_QUALITY: u8 = 85;
+
 impl Default for ExportFinish {
-    /// Today's untouched Export All Pages run, byte for byte.
+    /// Today's untouched Export All Pages run, byte for byte. (The
+    /// resample default is `Comic`, which is a no-op here: the default
+    /// colour is full colour, and comic only bites on mono.)
     fn default() -> Self {
         Self {
             dpi: 0,
             colour: crate::doc::LayerExpression::Colour,
             split_spreads: false,
+            resample: Resample::Comic,
+            format: ExportFormat::Png,
+            quality: PROOF_JPEG_QUALITY,
         }
     }
 }
@@ -680,6 +757,9 @@ pub const PRINT_PRESETS: &[ExportPreset] = &[
             dpi: 600,
             colour: crate::doc::LayerExpression::Mono,
             split_spreads: true,
+            resample: Resample::Comic,
+            format: ExportFormat::Png,
+            quality: PROOF_JPEG_QUALITY,
         },
     },
     ExportPreset {
@@ -690,6 +770,9 @@ pub const PRINT_PRESETS: &[ExportPreset] = &[
             dpi: 350,
             colour: crate::doc::LayerExpression::Grey,
             split_spreads: true,
+            resample: Resample::Comic,
+            format: ExportFormat::Png,
+            quality: PROOF_JPEG_QUALITY,
         },
     },
     ExportPreset {
@@ -700,6 +783,9 @@ pub const PRINT_PRESETS: &[ExportPreset] = &[
             dpi: 350,
             colour: crate::doc::LayerExpression::Colour,
             split_spreads: true,
+            resample: Resample::Comic,
+            format: ExportFormat::Png,
+            quality: PROOF_JPEG_QUALITY,
         },
     },
     ExportPreset {
@@ -710,6 +796,23 @@ pub const PRINT_PRESETS: &[ExportPreset] = &[
             dpi: 150,
             colour: crate::doc::LayerExpression::Colour,
             split_spreads: false,
+            resample: Resample::Comic,
+            format: ExportFormat::Png,
+            quality: PROOF_JPEG_QUALITY,
+        },
+    },
+    ExportPreset {
+        name: "Proof JPEG 150 dpi (提出用)",
+        note: "the light copy an editor gets twice a chapter: small JPEGs a \
+               phone opens, spreads kept whole so the reading order survives \
+               — never the file you send a printer",
+        finish: ExportFinish {
+            dpi: 150,
+            colour: crate::doc::LayerExpression::Colour,
+            split_spreads: false,
+            resample: Resample::Comic,
+            format: ExportFormat::Jpeg,
+            quality: PROOF_JPEG_QUALITY,
         },
     },
 ];
@@ -756,6 +859,146 @@ fn reduce_u8(p: [u8; 4], e: crate::doc::LayerExpression) -> [u8; 4] {
             let a = if p[3] >= 128 { 255 } else { 0 };
             let v = if sum * 2 >= 255 * 3 { a } else { 0 };
             [v, v, v, a]
+        }
+    }
+}
+
+/// How much of an output pixel must be covered by INK before the comic
+/// downscale calls it black.
+///
+/// Picked by test, not by feel (`a_hairline_survives_the_comic_shrink`).
+/// The number that matters: a 1 px line shrunk by 0.5 lands as exactly 50 %
+/// coverage, so anything at or under 0.5 keeps it — but 0.5 is the knife
+/// edge that float rounding decides, so the bias sits clear of it. 0.35
+/// also keeps a 1 px line down to a 0.35× shrink, while a light 25 % tone
+/// still drops to paper instead of blotting solid. Going much lower fattens
+/// the whole page: every stray dark pixel would print.
+pub const COMIC_INK_BIAS: f32 = 0.35;
+
+/// One straight-RGBA8 pixel as `(alpha, ink)` in 0..1, where ink is
+/// alpha-weighted darkness.
+///
+/// Darkness is `1 - mean(rgb)`, the SAME mean-of-channels rule `reduce_u8`
+/// thresholds on — if the downscale and the reduction disagreed about what
+/// "dark" means, the comic path would be biasing against the wrong axis.
+fn ink_of(p: &image::Rgba<u8>) -> (f32, f32) {
+    let a = p.0[3] as f32 / 255.0;
+    let v = (p.0[0] as f32 + p.0[1] as f32 + p.0[2] as f32) / (3.0 * 255.0);
+    (a, a * (1.0 - v))
+}
+
+/// CSP's コミック向き: area-average the ink, then re-threshold at
+/// [`COMIC_INK_BIAS`]. Output is already 1-bit black-on-white (or fully
+/// transparent), so the `reduce_u8` pass that follows is a no-op on it.
+///
+/// Exact box weights, computed per output pixel straight off the source —
+/// no full-canvas float buffer. A 600 dpi B4 page is ~23 M pixels and this
+/// module's whole memory discipline (see the file header) is about not
+/// materialising one of those as f32.
+fn comic_downscale(img: &image::RgbaImage, ow: u32, oh: u32) -> image::RgbaImage {
+    let (iw, ih) = img.dimensions();
+    let mut out = image::RgbaImage::new(ow, oh);
+    let sx = iw as f64 / ow as f64;
+    let sy = ih as f64 / oh as f64;
+    for oy in 0..oh {
+        let y0 = oy as f64 * sy;
+        let y1 = ((oy + 1) as f64 * sy).min(ih as f64);
+        for ox in 0..ow {
+            let x0 = ox as f64 * sx;
+            let x1 = ((ox + 1) as f64 * sx).min(iw as f64);
+            let (mut area, mut acov, mut ink) = (0.0f32, 0.0f32, 0.0f32);
+            for y in (y0.floor() as u32)..(y1.ceil() as u32).min(ih) {
+                let wy = (((y + 1) as f64).min(y1) - (y as f64).max(y0)).max(0.0) as f32;
+                if wy <= 0.0 {
+                    continue;
+                }
+                for x in (x0.floor() as u32)..(x1.ceil() as u32).min(iw) {
+                    let wx = (((x + 1) as f64).min(x1) - (x as f64).max(x0)).max(0.0) as f32;
+                    if wx <= 0.0 {
+                        continue;
+                    }
+                    let (a, i) = ink_of(img.get_pixel(x, y));
+                    let w = wx * wy;
+                    area += w;
+                    acov += w * a;
+                    ink += w * i;
+                }
+            }
+            // Alpha keeps `reduce_u8`'s own 50 % rule — the bias is a
+            // statement about ink, not about coverage of the page.
+            let px = if area <= 0.0 || acov / area < 0.5 {
+                [0, 0, 0, 0]
+            } else if ink / acov >= COMIC_INK_BIAS {
+                [0, 0, 0, 255]
+            } else {
+                [255, 255, 255, 255]
+            };
+            out.put_pixel(ox, oy, image::Rgba(px));
+        }
+    }
+    out
+}
+
+/// Downscale by the policy: comic where it applies, else the untouched
+/// Lanczos path. `(w, h)` are already the output size.
+fn resample_to(
+    img: &image::RgbaImage,
+    w: u32,
+    h: u32,
+    colour: crate::doc::LayerExpression,
+    resample: Resample,
+) -> image::RgbaImage {
+    if resample.is_comic(colour) {
+        comic_downscale(img, w, h)
+    } else {
+        image::imageops::resize(img, w, h, image::imageops::FilterType::Lanczos3)
+    }
+}
+
+/// Write a finished page.
+///
+/// **Mono + JPEG (decision, 2026-08-29).** JPEG cannot hold 1 bit, and
+/// refusing the combination would break the one workflow it exists for —
+/// showing an editor the real, thresholded page in a file he can open on a
+/// phone. So a mono (or grey) finish writes an 8-bit GREYSCALE JPEG of the
+/// already-thresholded pixels: the page you see is the page that prints,
+/// minus the container's promise of exactness. The PNG path is untouched
+/// and stays the one you send a printer.
+pub fn save_finished(
+    img: &image::RgbaImage,
+    path: &Path,
+    format: ExportFormat,
+    quality: u8,
+    colour: crate::doc::LayerExpression,
+) -> image::ImageResult<()> {
+    match format {
+        ExportFormat::Png => img.save(path),
+        ExportFormat::Jpeg => {
+            let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
+            let mut enc =
+                image::codecs::jpeg::JpegEncoder::new_with_quality(&mut w, quality.clamp(1, 100));
+            // JPEG has no alpha: a transparent-background export is
+            // composited onto paper white here rather than having its
+            // alpha silently dropped (which would print the ink's
+            // premultiplied black over black).
+            if colour == crate::doc::LayerExpression::Colour {
+                let mut rgb = image::RgbImage::new(img.width(), img.height());
+                for (o, p) in rgb.pixels_mut().zip(img.pixels()) {
+                    let a = p.0[3] as u32;
+                    o.0 = std::array::from_fn(|c| {
+                        ((p.0[c] as u32 * a + 255 * (255 - a) + 127) / 255).min(255) as u8
+                    });
+                }
+                enc.encode_image(&rgb)
+            } else {
+                let mut grey = image::GrayImage::new(img.width(), img.height());
+                for (o, p) in grey.pixels_mut().zip(img.pixels()) {
+                    let a = p.0[3] as u32;
+                    let v = (p.0[0] as u32 + p.0[1] as u32 + p.0[2] as u32 + 1) / 3;
+                    o.0[0] = ((v * a + 255 * (255 - a) + 127) / 255).min(255) as u8;
+                }
+                enc.encode_image(&grey)
+            }
         }
     }
 }
@@ -830,6 +1073,7 @@ pub fn finish_image_cropped(
     scale: f32,
     px_height: u32,
     colour: crate::doc::LayerExpression,
+    resample: Resample,
 ) -> image::RgbaImage {
     let [x0, y0, x1, y1] = crop_px;
     let img = if x1 > x0 && y1 > y0 && (x1 - x0 < img.width() || y1 - y0 < img.height()) {
@@ -850,22 +1094,22 @@ pub fn finish_image_cropped(
         // crop asked for 2048 stays 1200 (the dialog says so, not us).
         let w =
             ((img.width() as f32 * px_height as f32 / img.height() as f32).round() as u32).max(1);
-        let img =
-            image::imageops::resize(&img, w, px_height, image::imageops::FilterType::Lanczos3);
-        return finish_image(img, 1.0, colour);
+        let img = resample_to(&img, w, px_height, colour, resample);
+        return finish_image(img, 1.0, colour, resample);
     }
-    finish_image(img, scale, colour)
+    finish_image(img, scale, colour, resample)
 }
 
 pub fn finish_image(
     img: image::RgbaImage,
     scale: f32,
     colour: crate::doc::LayerExpression,
+    resample: Resample,
 ) -> image::RgbaImage {
     let mut img = if scale < 1.0 {
         let w = ((img.width() as f32 * scale).round() as u32).max(1);
         let h = ((img.height() as f32 * scale).round() as u32).max(1);
-        image::imageops::resize(&img, w, h, image::imageops::FilterType::Lanczos3)
+        resample_to(&img, w, h, colour, resample)
     } else {
         img
     };
@@ -1493,7 +1737,7 @@ mod finish_tests {
             let v = (x * 4) as u8; // a soft ramp across the threshold
             px.0 = [v, v, v, 255];
         }
-        let out = finish_image(img.clone(), 0.5, E::Mono);
+        let out = finish_image(img.clone(), 0.5, E::Mono, Resample::Photo);
         assert_eq!(out.dimensions(), (32, 32));
         for px in out.pixels() {
             assert!(
@@ -1503,10 +1747,10 @@ mod finish_tests {
             );
         }
         // Grey keeps its ramp; colour and an up-scale are both no-ops.
-        let grey = finish_image(img.clone(), 1.0, E::Grey);
+        let grey = finish_image(img.clone(), 1.0, E::Grey, Resample::Photo);
         assert!(grey.pixels().any(|p| p.0[0] != 0 && p.0[0] != 255));
         assert_eq!(
-            finish_image(img.clone(), 2.0, E::Colour).dimensions(),
+            finish_image(img.clone(), 2.0, E::Colour, Resample::Photo).dimensions(),
             (64, 64)
         );
     }
@@ -1519,6 +1763,175 @@ mod finish_tests {
         assert_eq!(finish_scale(600, Some(350)), 1.0, "no invented detail");
         assert_eq!(finish_scale(0, Some(600)), 1.0, "0 = the work's own");
         assert_eq!(finish_scale(350, None), 1.0, "a pixel canvas has no dpi");
+    }
+
+    /// A page of 1 px hairlines, white paper, `n` lines five pixels apart.
+    /// The worst case a mono export meets: the ink is one pixel wide, so
+    /// any kernel that averages it into grey hands it straight to the 50 %
+    /// threshold to be killed.
+    fn hairline_page(w: u32, h: u32, step: u32) -> (image::RgbaImage, Vec<u32>) {
+        let mut img = image::RgbaImage::from_pixel(w, h, image::Rgba([255, 255, 255, 255]));
+        let xs: Vec<u32> = (1..w).step_by(step as usize).collect();
+        for &x in &xs {
+            for y in 0..h {
+                img.put_pixel(x, y, image::Rgba([0, 0, 0, 255]));
+            }
+        }
+        (img, xs)
+    }
+
+    /// Which of `xs` still have ink in the shrunk page, columns mapped by
+    /// the same scale.
+    fn surviving(out: &image::RgbaImage, xs: &[u32], scale: f32) -> usize {
+        xs.iter()
+            .filter(|&&x| {
+                let ox = ((x as f32 * scale) as u32).min(out.width() - 1);
+                // A one-pixel slop either side: which side of a box the
+                // line lands on is arithmetic, not survival.
+                (ox.saturating_sub(1)..=(ox + 1).min(out.width() - 1))
+                    .any(|c| out.get_pixel(c, out.height() / 2).0[0] == 0)
+            })
+            .count()
+    }
+
+    /// FINDING 7 (audit `IO-029`, CSP 処理方法 コミック向き). Shrink a page
+    /// of 1 px hairlines by half: under `Comic` every line SURVIVES, under
+    /// `Photo` — the kernel every mono export used before 2026-08-29 — most
+    /// of them dissolve to grey and die at the threshold.
+    ///
+    /// The differential is the point. A test that only asserted "comic
+    /// keeps the line" would pass on a kernel that keeps everything (a
+    /// dilate), and one that only asserted "photo loses it" would pass on a
+    /// blank page.
+    #[test]
+    fn a_hairline_survives_the_comic_shrink() {
+        let (img, xs) = hairline_page(120, 32, 5);
+        let n = xs.len();
+
+        let comic = finish_image(img.clone(), 0.5, E::Mono, Resample::Comic);
+        assert_eq!(comic.dimensions(), (60, 16));
+        let kept = surviving(&comic, &xs, 0.5);
+        assert_eq!(kept, n, "comic dropped {} of {n} hairlines", n - kept);
+
+        let photo = finish_image(img, 0.5, E::Mono, Resample::Photo);
+        let photo_kept = surviving(&photo, &xs, 0.5);
+        // Measured 2026-08-29: comic 24/24, photo 0/24. The old export
+        // did not thin these lines, it deleted every one of them.
+        assert!(
+            photo_kept < kept,
+            "the photo kernel kept {photo_kept}/{n} hairlines — if it no \
+             longer loses them, this test has stopped proving anything"
+        );
+    }
+
+    /// The other half of the policy: `Comic` is a decision about where to
+    /// put a THRESHOLD, so it must be inert wherever there is no threshold.
+    /// This is what lets `Comic` be the default without touching a single
+    /// colour or greyscale export.
+    #[test]
+    fn comic_is_a_no_op_for_anything_but_mono() {
+        let (img, _) = hairline_page(120, 32, 5);
+        for e in [E::Colour, E::Grey] {
+            assert!(!Resample::Comic.is_comic(e), "{e:?}");
+            assert_eq!(
+                finish_image(img.clone(), 0.5, e, Resample::Comic),
+                finish_image(img.clone(), 0.5, e, Resample::Photo),
+                "{e:?} must not notice the resample policy"
+            );
+        }
+        assert!(Resample::Comic.is_comic(E::Mono));
+        assert!(!Resample::Photo.is_comic(E::Mono), "the old path stays reachable");
+    }
+
+    /// REGRESSION GUARD for finding 7: `Photo` is the pre-change kernel,
+    /// byte for byte, on a non-trivial page. The right-hand side restates
+    /// the old `finish_image` body verbatim — if someone "improves" the
+    /// shared resample path, the exports that were never broken say so.
+    #[test]
+    fn photo_output_is_byte_identical_to_the_old_kernel() {
+        // Ink, tone-ish dither, a soft ramp and a transparent corner: the
+        // four things a real page mixes.
+        let mut img = image::RgbaImage::new(97, 61);
+        for (x, y, px) in img.enumerate_pixels_mut() {
+            px.0 = match (x, y) {
+                _ if x < 8 && y < 8 => [0, 0, 0, 0],
+                _ if x % 11 == 0 || y % 13 == 0 => [0, 0, 0, 255],
+                _ if (x + y) % 3 == 0 => [17, 34, 51, 255],
+                _ => [(x * 2) as u8, (y * 4) as u8, 200, 255],
+            };
+        }
+        for e in [E::Colour, E::Grey, E::Mono] {
+            for scale in [0.5f32, 350.0 / 600.0, 0.17] {
+                let w = ((img.width() as f32 * scale).round() as u32).max(1);
+                let h = ((img.height() as f32 * scale).round() as u32).max(1);
+                let mut old = image::imageops::resize(
+                    &img,
+                    w,
+                    h,
+                    image::imageops::FilterType::Lanczos3,
+                );
+                if e != E::Colour {
+                    for px in old.pixels_mut() {
+                        px.0 = reduce_u8(px.0, e);
+                    }
+                }
+                assert_eq!(
+                    finish_image(img.clone(), scale, e, Resample::Photo),
+                    old,
+                    "{e:?} @{scale}"
+                );
+            }
+        }
+    }
+
+    /// FINDING 9. The 提出 preset exists, says JPEG, and is DISTINCT from
+    /// every other entry (the picker derives its selection by equality —
+    /// a duplicate triple makes one preset unreachable).
+    #[test]
+    fn the_proof_jpeg_preset_is_reachable_and_light() {
+        let proof = PRINT_PRESETS
+            .iter()
+            .find(|p| p.finish.format == ExportFormat::Jpeg)
+            .expect("a submission preset that is not a print file");
+        assert_eq!(proof.finish.dpi, 150, "phone-openable, not 入稿");
+        assert!(!proof.finish.split_spreads, "a spread stays one image");
+        assert_eq!(matching_preset(proof.finish), Some(4));
+        for (i, p) in PRINT_PRESETS.iter().enumerate() {
+            assert_eq!(matching_preset(p.finish), Some(i), "{}", p.name);
+        }
+        assert_eq!(ExportFormat::Png.ext(), "png");
+        assert_eq!(ExportFormat::Jpeg.ext(), "jpg");
+        // The default finish is still the untouched old run.
+        assert_eq!(ExportFinish::default().format, ExportFormat::Png);
+    }
+
+    /// The recorded mono+JPEG decision: a 1-bit finish written as JPEG
+    /// becomes a GREY jpeg of the thresholded page — it decodes to one
+    /// channel, and the black/white structure is still there.
+    #[test]
+    fn a_mono_finish_written_as_jpeg_is_a_grey_proof() {
+        let (img, _) = hairline_page(64, 64, 5);
+        let page = finish_image(img, 0.5, E::Mono, Resample::Comic);
+        let dir = std::env::temp_dir().join("mn-export-jpeg-decision");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("proof.jpg");
+        save_finished(&page, &path, ExportFormat::Jpeg, PROOF_JPEG_QUALITY, E::Mono).unwrap();
+        let back = image::open(&path).unwrap();
+        assert!(
+            matches!(back, image::DynamicImage::ImageLuma8(_)),
+            "a mono proof is a one-channel JPEG, not an RGB one"
+        );
+        let back = back.to_luma8();
+        assert_eq!(back.dimensions(), page.dimensions());
+        assert!(
+            back.pixels().any(|p| p.0[0] < 64) && back.pixels().any(|p| p.0[0] > 192),
+            "the thresholded structure survived the encode"
+        );
+        // PNG is byte-for-byte what it always was.
+        let png = dir.join("proof.png");
+        save_finished(&page, &png, ExportFormat::Png, PROOF_JPEG_QUALITY, E::Mono).unwrap();
+        assert_eq!(image::open(&png).unwrap().to_rgba8(), page);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -1725,6 +2138,7 @@ mod crop_tests {
             1.0,
             0,
             crate::doc::LayerExpression::Colour,
+            Resample::Photo,
         );
         assert_eq!((out.width(), out.height()), (200, 400));
 
@@ -1734,6 +2148,7 @@ mod crop_tests {
             1.0,
             200,
             crate::doc::LayerExpression::Colour,
+            Resample::Photo,
         );
         assert_eq!(
             (out.width(), out.height()),
@@ -1747,6 +2162,7 @@ mod crop_tests {
             1.0,
             4096,
             crate::doc::LayerExpression::Colour,
+            Resample::Photo,
         );
         assert_eq!((out.width(), out.height()), (400, 600), "never upsamples");
     }
