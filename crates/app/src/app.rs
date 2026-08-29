@@ -647,6 +647,9 @@ pub struct App {
     /// User preferences (`prefs.txt` beside the exe — deliberately NOT
     /// `ui.txt`, which is the file people delete to fix a wrecked dock).
     pub prefs: Prefs,
+    /// User key bindings (`keys.json` beside the exe) — consulted before
+    /// the built-in shortcut table. See `crate::keymap`.
+    pub keymap: crate::keymap::Keymap,
     /// Batch layer operations dialog state (`app/batch.rs`). Session-only.
     pub batch: batch::BatchOps,
     /// Pattern Studio window state (`app/pattern.rs`). Session-only.
@@ -1667,6 +1670,7 @@ impl App {
             recent_fonts: layout.recent_fonts.clone(),
             layout,
             prefs,
+            keymap: crate::keymap::Keymap::load_beside_exe(),
             batch: batch::BatchOps::default(),
             pattern: pattern::PatternStudio::default(),
             vector_capture: None,
@@ -1770,6 +1774,12 @@ impl App {
             .collect();
         // Recorded action sequences (actions.json beside the exe).
         app.actions_load();
+        // keys.json complaints show once, up front — a chord that failed
+        // to bind is otherwise indistinguishable from a chord that fell
+        // through to the built-in table.
+        if !app.keymap.problems.is_empty() {
+            app.set_status(app.keymap.problems.join("  ·  "));
+        }
         app
     }
 

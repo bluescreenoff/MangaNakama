@@ -118,6 +118,14 @@ pub fn command_index() -> Vec<(&'static str, &'static str, AppCmd)> {
             "Layer ▸ Ruler",
             RulerArm(crate::cmd::RulerKind::Symmetric),
         ),
+        // Index-free snap toggles — palette rows so keys.json can bind
+        // them (the owner's CSP Ctrl+1 / Ctrl+2 are exactly these).
+        ("Snap to rulers", "Layer ▸ Ruler", RulerSnapToggle),
+        (
+            "Snap to special rulers (parallel, guide, symmetry)",
+            "Layer ▸ Ruler",
+            RulerSpecialSnapToggle,
+        ),
         // Row 109's other half — the Correction menu, whole. Seeds are the
         // menu's own `Adjust` defaults; the parameterised ones open the
         // shared correction dialog, Reverse gradient runs on the spot.

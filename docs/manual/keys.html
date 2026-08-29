@@ -151,6 +151,23 @@ next tap works normally.</div>
 visible.</b> If that palette is closed, or is tabbed behind another one,
 a three-finger tap there is an ordinary Redo.</div>
 
+<h2>Your own keys — <code>keys.json</code></h2>
+<p>Put a <code>keys.json</code> next to the exe to bind (or rebind) any
+command the command palette (<kbd>Ctrl+K</kbd>) can run by name:</p>
+<pre>{
+  "ctrl+1": "Snap to rulers",
+  "f2": "Cut",
+  "ctrl+shift+t": "Transform"
+}</pre>
+<p>Chord on the left — <code>ctrl</code>/<code>shift</code>/<code>alt</code>
+in any order, one key last (letters, digits, <code>f1</code>–<code>f12</code>,
+<code>[</code> <code>]</code> <code>,</code> <code>.</code> and the usual
+named keys). Command label on the right, exactly as the palette shows it
+(case doesn't matter). Your bindings win over the built-in table, and a
+chord only fires on its exact modifiers. The file is read at launch; a
+line that doesn't resolve is reported in the status bar and the rest
+still bind.</p>
+
 <h2>Recorded deviations</h2>
 <div class="quirk"><b><kbd>Ctrl+D</kbd> is Deselect.</b> CSP uses it for
 Reselect; we kept Deselect on the plain chord deliberately, and

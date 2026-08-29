@@ -21,6 +21,7 @@ mod drop;
 mod gesture;
 mod input;
 mod input_path;
+mod keymap;
 mod recovery;
 mod remote;
 mod screenshot;
@@ -1531,6 +1532,23 @@ fn shortcut(app: &mut App, vk: u16, repeat: bool) -> bool {
     }
     let m = app.shell.sync_modifiers();
     let (ctrl, shift, alt) = (m.ctrl, m.shift, m.alt);
+
+    // keys.json (workflow-audit #5): the user's own chords, consulted
+    // BEFORE the built-in table so a rebind can shadow a default. Exact
+    // modifier match — a bare-key binding does not fire shifted. Repeat
+    // gating mirrors the table below: only the walk/undo family repeats.
+    if let Some(c) = app.keymap.lookup(ctrl, shift, alt, vk) {
+        let c = c.clone();
+        if !repeat
+            || matches!(
+                c,
+                AppCmd::Undo | AppCmd::Redo | AppCmd::LayerAbove | AppCmd::LayerBelow
+            )
+        {
+            app.push_cmd(c);
+        }
+        return true;
+    }
 
     let cmd = match (ctrl, vk) {
         (true, 0x5A) if shift => Some(AppCmd::Redo), // Ctrl+Shift+Z
