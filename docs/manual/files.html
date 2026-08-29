@@ -231,6 +231,28 @@ in — the drop and <code>File ▸ Import Image as Layer…</code> — and the
 status bar says which of the two imports you got. With no selection there is no
 mask (an all-hidden layer would just look like a failed import).</div>
 
+<div class="quirk"><b>An imported image lands ready to be placed.</b>
+Anything bigger than the page is scaled down to fit first (never scaled
+up — enlarging a small asset is a guess, and this is where you make it by
+hand), and the transform box opens straight away: drag inside to move,
+the corners to scale, outside to rotate, <kbd>Enter</kbd> to commit,
+<kbd>Esc</kbd> to cancel. With a selection active the transform stays
+shut — the selection already said where the image goes.
+<code>File ▸ Import Image as Draft…</code> is the same import with the
+draft flag set, for a reference photo or a scanned rough: it shows on
+screen and never reaches the export.</div>
+
+<div class="quirk"><b>Import a photo as a PAGE and it becomes a page of
+<em>your</em> paper, not the photo's.</b> Photograph your ネーム, then
+<code>Pages ▸ Import Page</code>: the new page is built from the work's
+own page setup — trim, bleed, 基本枠, dpi — and the photo goes in scaled
+to fit, at the bottom of the stack, as a draft layer you draw over and
+never print. If the photo is a different shape from the paper it is
+fitted with margins and the status bar says so; the paper is never
+reshaped to match one photo. Same for <code>Replace page with file</code>.
+A plain single-image document has no paper to inherit, so there an
+imported image still makes a page of its own size.</div>
+
 <h2>Saving</h2>
 <div class="quirk"><b>Single images save as .ora; comics are work
 folders</b> (a <code>work.mnc</code> index plus one file per page).

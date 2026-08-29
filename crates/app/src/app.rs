@@ -4417,6 +4417,13 @@ mod mask_stroke_undo_tests;
 #[cfg(test)]
 mod page_size_tests;
 
+/// Workflow audit #2/#3: what "bring an outside image in" produces — the
+/// work's own paper for an imported PAGE, and fit + placement + the draft
+/// flag for an imported LAYER. Same frugality rule as
+/// `new_document_tests`: 72 dpi drafts, one App at a time.
+#[cfg(test)]
+mod import_placement_tests;
+
 /// ROADMAP good-first-issue: ruler creation/move/clear on the document's
 /// one undo history — and the two things that must NOT be steps (the
 /// frame-published sync) or lost (a page switch).

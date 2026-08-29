@@ -111,6 +111,13 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 app.push_cmd(AppCmd::ImportImage);
                 ui.close();
             }
+            // The import route is a bare OS file picker with no dialog of
+            // our own, so the "as a draft" choice is a second menu item
+            // rather than a checkbox (workflow audit #3c).
+            if item(ui, "Import Image as Draft…", "") {
+                app.push_cmd(AppCmd::ImportImageDraft);
+                ui.close();
+            }
             if item(ui, "Import Brushes (.abr, .gbr, .gih, .kpp, .sut)…", "") {
                 app.push_cmd(AppCmd::ImportAbr);
                 ui.close();

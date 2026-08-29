@@ -971,13 +971,19 @@ impl App {
             .as_ref()
             .map(|p| p.paper_px())
             .unwrap_or(self.doc.size);
-        let after = self.page_number1(self.page_index)
+        self.blank_page_doc_at(w, h, self.next_page_number1())
+    }
+
+    /// The reading-order number the slot AddPage and ImportPage fill —
+    /// right after the current page — will carry. A combined spread under
+    /// the cursor eats two numbers, so the page after it starts two on.
+    pub fn next_page_number1(&self) -> usize {
+        self.page_number1(self.page_index)
             + if self.pages.get(self.page_index).is_some_and(|e| e.spread) {
                 2
             } else {
                 1
-            };
-        self.blank_page_doc_at(w, h, after)
+            }
     }
 
     /// Same, at an explicit size (New Manga runs before `self.doc` exists).
@@ -989,45 +995,114 @@ impl App {
     /// The seeding core: `number1` decides which book side the frame's
     /// binding offset mirrors to.
     pub fn blank_page_doc_at(&self, w: u32, h: u32, number1: usize) -> Document {
+        self.seeded_page_doc(w, h, number1, true)
+    }
+
+    /// The shared seeding, with CSP's "Fill inside the frame" choice
+    /// exposed: a blank page wants the White base, an imported-photo page
+    /// must NOT have it — the underlay lands at the BOTTOM of the stack,
+    /// and the White base would hide it across the whole panel interior
+    /// (the part-19 lesson: the White layer's job is to hide what is
+    /// below the folder).
+    fn seeded_page_doc(&self, w: u32, h: u32, number1: usize, fill_white: bool) -> Document {
         let mut doc = Document::new(w, h);
         if self.seed_frame_folder {
             if let Some(p) = self.page.as_ref().filter(|p| p.has_guides()) {
                 let border = (0.8 / 25.4 * p.dpi.max(1) as f32).max(2.0);
                 let right = mn_core::page::PageSetup::page_is_right(number1, self.binding_right);
-                doc.add_frame_folder(
+                doc.add_frame_folder_with(
                     "Frame 1",
                     mn_core::FrameSet::single_rect(p.inner_rect_px_on(right), border),
+                    fill_white,
                 );
             }
         }
         doc
     }
 
-    /// Convert a file (.ora or image) to page ORA bytes. Used by ImportPage
-    /// and ReplacePage: accepts .ora directly or wraps images as single-layer docs.
-    pub fn file_to_page_bytes(&self, path: &std::path::Path) -> Result<Vec<u8>, String> {
+    /// Convert a file (.ora or image) to page ORA bytes, plus a status note
+    /// when the file did not sit squarely on the paper. Used by ImportPage
+    /// and ReplacePage; `number1` is the reading-order number the resulting
+    /// page will carry, which decides the seeded frame's ノド/小口 side.
+    ///
+    /// **Workflow audit #2.** An image used to become a page of the IMAGE's
+    /// own pixel size: a phone photo of a ネーム dropped into a B4/600 dpi
+    /// chapter turned into a foreign-paper page with no trim, no bleed, no
+    /// 基本枠 and no dpi, and — being an ordinary raster layer — its content
+    /// EXPORTED as art. So the image branch now builds the work's own page
+    /// (`blank_page_doc_at`, the same seeding a blank page gets) and places
+    /// the photo in it scaled to fit, as a 下書き draft layer at the bottom
+    /// of the stack: on screen, never in the export, drawn over.
+    ///
+    /// A work with no `PageSetup` is a plain canvas, not a manga project —
+    /// there is no paper to inherit, so there the image's own size is still
+    /// the only size there is and the old behaviour stands.
+    pub fn file_to_page_bytes(
+        &self,
+        path: &std::path::Path,
+        number1: usize,
+    ) -> Result<(Vec<u8>, Option<String>), String> {
         let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
         if ext.eq_ignore_ascii_case("ora") {
             // Already ORA: read raw bytes.
-            std::fs::read(path).map_err(|e| e.to_string())
-        } else {
-            // Assume image: import as single-layer doc, then encode to ORA.
-            let img = image::open(path).map_err(|e| e.to_string())?;
-            let rgba = img.to_rgba8();
-            let (w, h) = (rgba.width(), rgba.height());
-            let mut doc = mn_core::Document::new(w, h);
-            let name = path
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "Imported".to_owned());
+            return std::fs::read(path).map(|b| (b, None)).map_err(|e| e.to_string());
+        }
+        // Assume image.
+        let img = image::open(path).map_err(|e| e.to_string())?;
+        let rgba = img.to_rgba8();
+        let (iw, ih) = (rgba.width(), rgba.height());
+        let name = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Imported".to_owned());
+        let Some((pw, ph)) = self.page.as_ref().map(|p| p.paper_px()) else {
+            // Plain canvas: import as a single-layer doc at the image's size.
+            let mut doc = mn_core::Document::new(iw, ih);
             doc.add_layer_from_image(name, &rgba);
             // Drop the empty default "Layer 1" underneath.
             if doc.layers.len() > 1 && doc.layers[1].is_empty() {
                 doc.layers.remove(1);
                 doc.active = 0;
             }
-            mn_core::project::doc_to_bytes(&doc).map_err(|e| e.to_string())
-        }
+            let bytes = mn_core::project::doc_to_bytes(&doc).map_err(|e| e.to_string())?;
+            return Ok((bytes, None));
+        };
+        // fill_white = false (CSP's "Fill inside the frame" off): the
+        // underlay goes to the BOTTOM of the stack, and the seeded
+        // folder's White base would hide it across the whole panel
+        // interior — an invisible 下書き is no 下書き. Export is
+        // unchanged either way: the draft never prints, and panels
+        // composite to paper white with or without the base.
+        let mut doc = self.seeded_page_doc(pw, ph, number1, false);
+        let s = (pw as f32 / iw as f32).min(ph as f32 / ih as f32);
+        let (tw, th) = (
+            ((iw as f32 * s).round() as u32).max(1),
+            ((ih as f32 * s).round() as u32).max(1),
+        );
+        let fitted = if (tw, th) == (iw, ih) {
+            rgba
+        } else {
+            image::imageops::resize(&rgba, tw, th, image::imageops::FilterType::Lanczos3)
+        };
+        // Aim at the BOTTOM of the stack, outside any seeded frame folder:
+        // a 下書き underlay is what you draw over, so it must not be the
+        // layer the next pen stroke lands on. (Nothing needs to restore
+        // `active` afterwards — the ORA decode every caller runs re-picks
+        // the topmost layer regardless.)
+        doc.active = 0;
+        let at = doc.add_layer_from_image(name, &fitted);
+        doc.move_layer(at, 0);
+        doc.set_layer_draft(0, true);
+        // Letterboxing is the honest answer to a mismatched aspect — the
+        // alternative is reshaping a whole chapter's paper around one photo.
+        // Say it in the status line and let the human decide.
+        let note = ((tw, th) != (pw, ph)).then(|| {
+            format!(
+                "{iw}x{ih} is not the page's shape — fitted to {tw}x{th} inside {pw}x{ph}, with margins"
+            )
+        });
+        let bytes = mn_core::project::doc_to_bytes(&doc).map_err(|e| e.to_string())?;
+        Ok((bytes, note))
     }
 }
 

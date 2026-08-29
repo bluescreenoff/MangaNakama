@@ -1357,6 +1357,14 @@ fn resolve_dialog(hwnd: HWND, cmd: AppCmd) -> Option<AppCmd> {
             )
             .pick_file()
             .map(AppCmd::ImportImagePath),
+        AppCmd::ImportImageDraft => rfd::FileDialog::new()
+            .set_title("Import Image as Draft Layer")
+            .add_filter(
+                "Images",
+                &["png", "jpg", "jpeg", "bmp", "tif", "tiff", "webp", "gif"],
+            )
+            .pick_file()
+            .map(AppCmd::ImportImageDraftPath),
         AppCmd::ImportAbr => rfd::FileDialog::new()
             .set_title("Import Brushes")
             .add_filter(

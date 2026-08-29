@@ -640,6 +640,84 @@ pub(crate) fn transform_lift_rect(app: &App) -> Option<[i32; 4]> {
     })
 }
 
+/// The body of both "import an image as a layer" routes (File ▸ Import and
+/// a dropped file), `draft` = land it as a 下書き layer.
+///
+/// **Workflow audit #3.** The import used to be a 1:1 pixel dump: native
+/// size, centred, anything past the canvas edge silently clipped away by
+/// [`mn_core::Document::add_layer_from_image`], and no way to move it
+/// afterwards short of hunting for Transform. Three things changed:
+///
+/// * **Fit.** An image LARGER than the page shrinks to fit. Never enlarged
+///   — scaling a small asset up is a guess, and the transform below is the
+///   place to make that guess by hand.
+/// * **Placement.** The transform gesture we already have is armed, so the
+///   first thing the user does with the imported image is put it where it
+///   goes; Enter commits, Esc cancels (which leaves the layer, not the
+///   import, since the import is its own undo step).
+/// * **Draft.** `draft` sets the flag, so a reference photo or a scanned
+///   rough shows on screen and never reaches the export.
+///
+/// IO-043's selection-as-mask behaviour is untouched. When a selection IS
+/// active the transform is deliberately NOT armed: the selection already
+/// said where the image goes, and dragging lifted pixels out from under a
+/// freshly built layer mask reads as a bug, not a feature.
+fn import_image_layer(app: &mut App, path: &std::path::Path, draft: bool) {
+    let img = match image::open(path) {
+        Ok(i) => i.to_rgba8(),
+        Err(e) => {
+            app.set_error(format!("import failed: {e}"));
+            return;
+        }
+    };
+    let name = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "Imported".to_owned());
+    let (iw, ih) = (img.width(), img.height());
+    let (pw, ph) = app.doc.size;
+    let fitted = if iw > pw || ih > ph {
+        let s = (pw as f32 / iw as f32).min(ph as f32 / ih as f32);
+        image::imageops::resize(
+            &img,
+            ((iw as f32 * s).round() as u32).max(1),
+            ((ih as f32 * s).round() as u32).max(1),
+            image::imageops::FilterType::Lanczos3,
+        )
+    } else {
+        img
+    };
+    let (fw, fh) = (fitted.width(), fitted.height());
+    // IO-043: a selection turns the import into a masked import. Both
+    // import routes — File ▸ Import ▸ Image and a dropped file — arrive
+    // here, which is why the rule holds for every route without either of
+    // them knowing about it.
+    let (at, masked) = app.doc.add_layer_from_image_masked(name, &fitted);
+    if draft {
+        app.doc.set_layer_draft(at, true);
+    }
+    app.renderer.invalidate();
+    let armed = !masked && {
+        dispatch(app, AppCmd::TransformStart);
+        app.transform_drag.is_some()
+    };
+    let mut s = if masked {
+        format!("imported {iw}x{ih} — masked to the selection (delete the mask to see it all)")
+    } else {
+        format!("imported {iw}x{ih} as a layer")
+    };
+    if (fw, fh) != (iw, ih) {
+        s.push_str(&format!(" — scaled to {fw}x{fh} to fit the page"));
+    }
+    if draft {
+        s.push_str(" — draft layer: on screen, never exported");
+    }
+    if armed {
+        s.push_str(" — drag to place it, Enter commits, Esc cancels");
+    }
+    app.set_status(s);
+}
+
 /// Open the Transform float for layer `li`'s content over the canvas-
 /// clipped lift rect `r` — the shared body of TransformStart and the
 /// Object tool's raster-ink fallback (owner 2026-08-24: the Object tool
@@ -2174,6 +2252,12 @@ pub enum AppCmd {
     /// Import an image file as a new layer (asks for a path first).
     ImportImage,
     ImportImagePath(PathBuf),
+    /// Same import, landing as a 下書き draft layer — the underlay you draw
+    /// over and never print. A separate command (and a separate File-menu
+    /// item) because the import route is a bare OS file picker with nowhere
+    /// to hang a checkbox; see the note on [`import_image_layer`].
+    ImportImageDraft,
+    ImportImageDraftPath(PathBuf),
     // --- layers -----------------------------------------------------------
     AddLayer,
     /// Vector inking (docs/VECTOR-INKING.md): a raster layer that RECORDS
@@ -3881,20 +3965,27 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
             // Resolved to ImportAbrPath by `main::pump_commands`.
         }
         AppCmd::ImportAbrPath(p) => app.import_abr(&p),
-        AppCmd::ImportPagePath(p) => match app.file_to_page_bytes(&p) {
+        AppCmd::ImportPagePath(p) => match app.file_to_page_bytes(&p, app.next_page_number1()) {
             Err(e) => app.set_error(format!("import failed: {e}")),
-            Ok(bytes) => {
+            Ok((bytes, note)) => {
                 let at = app.page_index + 1;
                 let e = app.fresh_page(Some(bytes), None);
                 app.pages.insert(at, e);
                 app.mark_pages_dirty();
-                app.set_status(format!("imported {} as page {}", p.display(), at + 1));
+                // switch_page sets its own status, so say ours after it.
                 app.switch_page(at);
+                let mut s = format!("imported {} as page {}", p.display(), at + 1);
+                if let Some(n) = note {
+                    s.push_str(&format!(" — {n}"));
+                }
+                app.set_status(s);
             }
         },
-        AppCmd::ReplacePagePath(p) => match app.file_to_page_bytes(&p) {
+        AppCmd::ReplacePagePath(p) => match app
+            .file_to_page_bytes(&p, app.page_number1(app.page_index))
+        {
             Err(e) => app.set_error(format!("replace failed: {e}")),
-            Ok(bytes) => match mn_core::project::bytes_to_doc(&bytes) {
+            Ok((bytes, note)) => match mn_core::project::bytes_to_doc(&bytes) {
                 Err(e) => app.set_error(format!("replace decode failed: {e}")),
                 Ok(doc) => {
                     app.commit_text_edit();
@@ -3912,11 +4003,15 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                     app.layer_thumbs.clear();
                     app.fit_to_view();
                     app.mark_pages_dirty();
-                    app.set_status(format!(
+                    let mut s = format!(
                         "page {} replaced with {}",
                         app.page_index + 1,
                         p.display()
-                    ));
+                    );
+                    if let Some(n) = note {
+                        s.push_str(&format!(" — {n}"));
+                    }
+                    app.set_status(s);
                     app.mark_dirty();
                 }
             },
@@ -7979,29 +8074,9 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 app.mark_dirty();
             }
         }
-        AppCmd::ImportImage => {}
-        AppCmd::ImportImagePath(p) => match image::open(&p) {
-            Ok(img) => {
-                let img = img.to_rgba8();
-                let name = p
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "Imported".to_owned());
-                let (iw, ih) = (img.width(), img.height());
-                // IO-043: a selection turns the import into a masked
-                // import. Both import routes — File ▸ Import ▸ Image and a
-                // dropped file — arrive here, which is why the rule holds
-                // for every route without either of them knowing about it.
-                let (_, masked) = app.doc.add_layer_from_image_masked(name, &img);
-                app.renderer.invalidate();
-                app.set_status(if masked {
-                    format!("imported {iw}x{ih} — masked to the selection (delete the mask to see it all)")
-                } else {
-                    format!("imported {iw}x{ih} as a layer")
-                });
-            }
-            Err(e) => app.set_error(format!("import failed: {e}")),
-        },
+        AppCmd::ImportImage | AppCmd::ImportImageDraft => {}
+        AppCmd::ImportImagePath(p) => import_image_layer(app, &p, false),
+        AppCmd::ImportImageDraftPath(p) => import_image_layer(app, &p, true),
 
         // --- view -----------------------------------------------------------
         AppCmd::ZoomFit => app.fit_to_view(),
