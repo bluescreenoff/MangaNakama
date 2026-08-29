@@ -11,6 +11,10 @@ use super::theme;
 use super::widgets::{group_caption, paint_icon};
 use crate::app::App;
 use crate::cmd::{AppCmd, BalloonMode, FillMode, SelectMode, Tool};
+// The group captions are DATA (`crate::subtools`), not literals typed here:
+// a shortcut can name a tab, so the tab's name has to be somewhere both this
+// file and the keymap can point at. Owner ask 2026-08-25.
+use crate::subtools::group;
 
 // --- sub tool list ------------------------------------------------------
 
@@ -139,7 +143,7 @@ fn mode_sub_tools(ui: &mut egui::Ui, app: &mut App) {
             // 参照 rows, then the two path-aimed ones. Picking a 参照 row
             // also returns to the click sub tool — that is what those rows
             // ARE in CSP.
-            group_caption(ui, "Fill");
+            group_caption(ui, group::FILL);
             let click = app.fill_mode == FillMode::Click;
             let refer = app.fill_opts.refer;
             let mut pick_refer: Option<mn_core::FillRefer> = None;
@@ -231,7 +235,7 @@ fn mode_sub_tools(ui: &mut egui::Ui, app: &mut App) {
         }
         Tool::Tone => {
             // The nine screen shapes — the choice made BEFORE the click.
-            group_caption(ui, "Tone");
+            group_caption(ui, group::TONE);
             let mut pick = None;
             for pat in mn_core::tone::TonePattern::ALL {
                 if mode_row(
@@ -252,7 +256,7 @@ fn mode_sub_tools(ui: &mut egui::Ui, app: &mut App) {
             }
         }
         Tool::Wand => {
-            group_caption(ui, "Auto select");
+            group_caption(ui, group::AUTO_SELECT);
             let refer = app.wand_opts.refer;
             if mode_row(
                 ui,
@@ -286,7 +290,7 @@ fn mode_sub_tools(ui: &mut egui::Ui, app: &mut App) {
             }
         }
         Tool::Select | Tool::SelPen | Tool::SelEraser => {
-            group_caption(ui, "Selection");
+            group_caption(ui, group::SELECTION);
             // The four SHAPE sub tools only light while the shape tool is
             // the one in hand: holding the selection pen must not also show
             // "Rectangle" selected, or the list stops saying where you are.
@@ -343,7 +347,7 @@ fn mode_sub_tools(ui: &mut egui::Ui, app: &mut App) {
         Tool::Frame => {
             let m = app.frame_mode;
             let mut pick: Option<FrameMode> = None;
-            group_caption(ui, "Create frame");
+            group_caption(ui, group::CREATE_FRAME);
             if mode_row(ui, m == FrameMode::Rect, Icon::Object, "Rectangle frame").clicked() {
                 pick = Some(FrameMode::Rect);
             }
@@ -359,7 +363,7 @@ fn mode_sub_tools(ui: &mut egui::Ui, app: &mut App) {
             {
                 pick = Some(FrameMode::Pen);
             }
-            group_caption(ui, "Cut frame border");
+            group_caption(ui, group::CUT_FRAME);
             if mode_row(
                 ui,
                 m == FrameMode::DivideFolder,
@@ -389,7 +393,7 @@ fn mode_sub_tools(ui: &mut egui::Ui, app: &mut App) {
             }
         }
         Tool::Balloon => {
-            group_caption(ui, "Balloon");
+            group_caption(ui, group::BALLOON);
             for m in [
                 BalloonMode::Ellipse,
                 BalloonMode::Round,
@@ -402,11 +406,11 @@ fn mode_sub_tools(ui: &mut egui::Ui, app: &mut App) {
             }
         }
         Tool::Text => {
-            group_caption(ui, "Text");
+            group_caption(ui, group::TEXT);
             mode_row(ui, true, Icon::Text, "Text");
         }
         Tool::Object => {
-            group_caption(ui, "Operation");
+            group_caption(ui, group::OPERATION);
             use crate::cmd::ObjectMode;
             let om = app.object_mode;
             if mode_row(ui, om == ObjectMode::Object, Icon::Object, "Object").clicked() {
@@ -433,7 +437,7 @@ fn mode_sub_tools(ui: &mut egui::Ui, app: &mut App) {
             // writes its parameters; the knobs stay editable in Tool
             // Property (a tweaked set simply highlights no row, like a
             // modified brush preset).
-            group_caption(ui, "Direct draw");
+            group_caption(ui, group::DIRECT_DRAW);
             use crate::cmd::FigureMode;
             for (m, icon) in [
                 (FigureMode::Line, Icon::Figure),
@@ -461,7 +465,7 @@ fn mode_sub_tools(ui: &mut egui::Ui, app: &mut App) {
             // and a half-written preset is how the sets drifted.
             let dpi = app.tone_dpi();
             use crate::cmd::FigureLineOpts as FLO;
-            group_caption(ui, "Stream line");
+            group_caption(ui, group::STREAM_LINE);
             for (label, opts) in [
                 ("Stream line", FLO::stream_dpi(dpi)),
                 ("Dense stream", FLO::dense_stream_dpi(dpi)),
@@ -480,7 +484,7 @@ fn mode_sub_tools(ui: &mut egui::Ui, app: &mut App) {
                     };
                 }
             }
-            group_caption(ui, "Saturated line");
+            group_caption(ui, group::SATURATED_LINE);
             for (label, opts) in [
                 ("Saturated line", FLO::focus_dpi(dpi)),
                 ("Dense saturated line", FLO::dense_focus_dpi(dpi)),
@@ -535,7 +539,7 @@ fn mode_sub_tools(ui: &mut egui::Ui, app: &mut App) {
             }
         }
         Tool::Gradient => {
-            group_caption(ui, "Gradient");
+            group_caption(ui, group::GRADIENT);
             use crate::cmd::GradMode;
             for m in [
                 GradMode::FgToBg,
@@ -550,7 +554,7 @@ fn mode_sub_tools(ui: &mut egui::Ui, app: &mut App) {
         Tool::Eyedrop => {
             // E-014 参照: the same three referents the fill tool offers, in
             // the same order, so the two palettes read as one idea.
-            group_caption(ui, "Eyedropper");
+            group_caption(ui, group::EYEDROPPER);
             let refer = app.eyedrop_opts.refer;
             for (v, label, hint) in [
                 (
@@ -578,16 +582,19 @@ fn mode_sub_tools(ui: &mut egui::Ui, app: &mut App) {
             }
             // E-016 average colour: a single pixel of anti-aliased ink is a
             // colour nobody can see on the page.
-            group_caption(ui, "Average color");
-            for n in [1u32, 2, 3, 5] {
-                let label = if n == 1 {
-                    "1 × 1 (one pixel)".to_owned()
-                } else {
-                    format!("{n} × {n}")
-                };
-                if mode_row(ui, app.eyedrop_opts.size == n, Icon::Eyedrop, &label).clicked() {
-                    app.eyedrop_opts.size = n;
+            // Rows straight from the registry — these four have `SubTool`
+            // variants, so the palette, the command palette and a keys.json
+            // binding all reach the same four things by the same names.
+            group_caption(ui, group::AVERAGE_COLOR);
+            let mut pick = None;
+            for &s in crate::subtools::rows(Tool::Eyedrop, group::AVERAGE_COLOR) {
+                if mode_row(ui, crate::subtools::is_lit(app, s), Icon::Eyedrop, s.label()).clicked()
+                {
+                    pick = Some(s);
                 }
+            }
+            if let Some(s) = pick {
+                app.push_cmd(AppCmd::SetSubTool(s));
             }
         }
         Tool::Liquify => {
@@ -595,7 +602,7 @@ fn mode_sub_tools(ui: &mut egui::Ui, app: &mut App) {
             // — no sub-tool shapes to mirror here.
         }
         Tool::Pan => {
-            group_caption(ui, "Move");
+            group_caption(ui, group::MOVE);
             if mode_row(ui, app.pan_mode == PanMode::Hand, Icon::Pan, "Hand").clicked() {
                 app.pan_mode = PanMode::Hand;
             }

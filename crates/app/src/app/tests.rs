@@ -219,6 +219,99 @@ fn brush_size_seeds_from_the_preset_and_is_not_capped_by_it() {
 /// `save_if_dirty` writes and `from_body` is what `load` parses. Tests
 /// must not write the ui.txt beside the test exe — the parallel runner
 /// shares it, and so does the owner's build.
+/// Owner ask 2026-08-25: a tool has to come back in the sub tool GROUP it
+/// was left in, on that group's own row — across a relaunch, which means
+/// through a real `ui.txt` body. (`subtools::tests` covers the two halves in
+/// isolation; this is the seam between them, `to_body` → `from_body`.)
+#[test]
+fn the_sub_tool_memory_round_trips_through_ui_txt() {
+    use crate::cmd::{BalloonMode, FigureMode, FrameMode, PanMode};
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (400, 300), 1.0);
+    app.layout = UiLayout::default(); // the test exe's own ui.txt is shared
+    app.frame_mode = FrameMode::DivideFolder; // the Cut tab, not Create
+    app.balloon_mode = BalloonMode::Tail;
+    app.figure_mode = FigureMode::Urchin; // the Saturated tab
+    app.pan_mode = PanMode::Rotate;
+
+    // Quitting is the snapshot (main.rs `WM_DESTROY`, and every frame).
+    crate::subtools::note_memory(&mut app);
+    let body = app.layout.to_body();
+    assert!(
+        body.lines().any(|l| l.starts_with("sub_tool_last={")
+            && l.contains("\"Frame border\":\"Cut frame border\"")
+            && l.contains("\"Frame border/Cut frame border\":\"Divide frame folder\"")),
+        "tab AND row must reach ui.txt, one line: {body}"
+    );
+
+    // Relaunch: a fresh app at its defaults, ui.txt re-read from that body.
+    app.layout = UiLayout::from_body(&body);
+    app.frame_mode = FrameMode::Rect;
+    app.balloon_mode = BalloonMode::Ellipse;
+    app.figure_mode = FigureMode::Line;
+    app.pan_mode = PanMode::Hand;
+    crate::subtools::restore_from_memory(&mut app);
+    assert_eq!(app.frame_mode, FrameMode::DivideFolder);
+    assert_eq!(app.balloon_mode, BalloonMode::Tail);
+    assert_eq!(app.figure_mode, FigureMode::Urchin);
+    assert_eq!(app.pan_mode, PanMode::Rotate);
+
+    // And the restored state is what a bare tool press then lands on.
+    assert_eq!(
+        crate::subtools::Target::Tool(crate::cmd::Tool::Figure).resolve(&app),
+        Some(crate::cmd::SubTool::Figure(FigureMode::Urchin))
+    );
+}
+
+/// Keymap follow-up (a): the owner's Ctrl+B / Ctrl+Alt+G were unbindable
+/// because both variants take a layer index. The index-free door resolves
+/// the row when the key runs, and toggles from whatever that row holds.
+#[test]
+fn active_layer_commands_aim_at_the_row_selected_when_they_run() {
+    use crate::cmd::ActiveLayerCmd::{ToggleClip, ToggleColour};
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (400, 300), 1.0);
+    crate::cmd::dispatch(&mut app, AppCmd::AddLayer);
+    crate::cmd::dispatch(&mut app, AppCmd::AddLayer);
+    assert!(app.doc.layers.len() >= 3, "three rows to aim between");
+
+    let top = app.doc.active;
+    crate::cmd::dispatch(&mut app, AppCmd::ActiveLayer(ToggleColour));
+    assert!(app.doc.layers[top].layer_colour.is_some(), "colour on");
+    crate::cmd::dispatch(&mut app, AppCmd::ActiveLayer(ToggleClip));
+    assert!(app.doc.layers[top].clip, "clipped to the layer below");
+
+    // Select another row and the SAME command follows the selection —
+    // the whole point of resolving late.
+    let other = app.doc.layers.iter().position(|_| true).expect("a row");
+    let other = if other == top { top - 1 } else { other };
+    crate::cmd::dispatch(&mut app, AppCmd::SelectLayer(other));
+    crate::cmd::dispatch(&mut app, AppCmd::ActiveLayer(ToggleColour));
+    assert!(app.doc.layers[other].layer_colour.is_some(), "the new row");
+    assert!(
+        app.doc.layers[top].layer_colour.is_some(),
+        "and the old one is untouched"
+    );
+
+    // Toggling back clears, so one chord is both directions (CSP's
+    // `layerpropuselayercolor`).
+    crate::cmd::dispatch(&mut app, AppCmd::ActiveLayer(ToggleColour));
+    assert!(app.doc.layers[other].layer_colour.is_none());
+
+    // Both verbs are palette-named, which is the only handle keys.json has.
+    let index = crate::ui::quick::command_index();
+    for want in ["Layer colour on/off", "Clip to layer below", "Command palette"] {
+        assert!(
+            index.iter().any(|(label, _, _)| *label == want),
+            "the palette must know \"{want}\" by name"
+        );
+    }
+}
+
 #[test]
 fn brush_size_survives_a_relaunch_for_the_sub_tools_that_moved() {
     let Some(renderer) = headless_renderer() else {
@@ -9342,6 +9435,81 @@ fn convert_and_extract_commands() {
     assert_eq!(a, 32768, "the black pixel became a full line");
     crate::cmd::dispatch(&mut app, AppCmd::Undo);
     assert_eq!(app.doc.layers.len(), n0 + 1, "the extraction layer is gone");
+}
+
+/// Row 154 (`CL-001`–`014`) through dispatch: a three-tone render becomes
+/// a FOLDER of manga materials — lineart, a ベタ layer, and a LIVE tone
+/// layer whose dots re-derive at print dpi — with the source hidden and
+/// the whole thing on one undo press.
+#[test]
+fn convert_to_lines_and_tones_command() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (400, 300), 1.0);
+    app.doc = Document::new(128, 128);
+    let li = app.doc.add_layer("render");
+    let one = mn_core::blend::f32_to_fix15(1.0);
+    for y in 0..128i32 {
+        for x in 0..128i32 {
+            let v = if x < 40 {
+                0.02
+            } else if x < 88 {
+                0.5
+            } else {
+                1.0
+            };
+            let f = mn_core::blend::f32_to_fix15(v);
+            let idx = TileIdx::of_pixel(x, y);
+            let (ox, oy) = idx.origin();
+            app.doc.layers[li].tile_mut(idx).set_pixel(
+                (x - ox) as usize,
+                (y - oy) as usize,
+                [f, f, f, one],
+            );
+        }
+    }
+    let n0 = app.doc.layers.len();
+
+    crate::cmd::dispatch(&mut app, AppCmd::LinesTonesOpen);
+    assert!(app.lt_open, "the menu item opens the window");
+
+    let params = Box::new(mn_core::convert_lt::LinesTonesParams {
+        black_fill: Some(0.2),
+        tone: Some(mn_core::convert_lt::ToneOutput {
+            bands: 3,
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    crate::cmd::dispatch(&mut app, AppCmd::ConvertLinesTones { params });
+    assert!(
+        app.status.contains("lines and tones"),
+        "status: {}",
+        app.status
+    );
+    let f = app.doc.active;
+    assert!(app.doc.layers[f].folder, "the result is a folder");
+    assert_eq!(app.doc.layers[f].name, "render", "named after the source");
+    let kids: Vec<usize> = app.doc.children_range(f).collect();
+    let names: Vec<&str> = kids
+        .iter()
+        .map(|&i| app.doc.layers[i].name.as_str())
+        .collect();
+    assert!(names.contains(&"Lines"), "{names:?}");
+    assert!(names.contains(&"Black fill"), "{names:?}");
+    let live_tone = kids.iter().any(|&i| {
+        matches!(
+            app.doc.layers[i].kind,
+            mn_core::doc::LayerKind::Fill(mn_core::fill_layer::FillKind::Tone { .. })
+        ) && app.doc.layers[i].mask.is_some()
+    });
+    assert!(live_tone, "the midtones became a re-derivable tone: {names:?}");
+    assert!(!app.doc.layers[li].visible, "the source is hidden");
+
+    crate::cmd::dispatch(&mut app, AppCmd::Undo);
+    assert_eq!(app.doc.layers.len(), n0, "one undo took the folder back");
+    assert!(app.doc.layers[li].visible, "and unhid the source");
 }
 
 /// Row 102 (FL-016/017): radial and spin blur through the filter

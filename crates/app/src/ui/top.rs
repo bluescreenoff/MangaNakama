@@ -333,6 +333,10 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 app.push_cmd(AppCmd::ExtractOpen);
                 ui.close();
             }
+            if item(ui, "Convert to lines and tones…", "") {
+                app.push_cmd(AppCmd::LinesTonesOpen);
+                ui.close();
+            }
             ui.menu_button("Layer Mask", |ui| {
                 if item(ui, "Mask selection (blank)", "") {
                     app.push_cmd(AppCmd::MaskSelection);

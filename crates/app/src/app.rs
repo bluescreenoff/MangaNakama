@@ -514,6 +514,10 @@ pub struct App {
     pub convert_name: String,
     pub extract_open: bool,
     pub extract_detection: f32,
+    /// Layer ▸ Convert to lines and tones… (row 154, `CL-001`–`014`): the
+    /// window and the whole parameter block it collects.
+    pub lt_open: bool,
+    pub lt_params: mn_core::convert_lt::LinesTonesParams,
     /// Edit ▸ Advanced fill… (row 124): the window and its opacity.
     pub advfill_open: bool,
     pub advfill_opacity: f32,
@@ -1542,6 +1546,8 @@ impl App {
             convert_name: String::new(),
             extract_open: false,
             extract_detection: 0.8,
+            lt_open: false,
+            lt_params: mn_core::convert_lt::LinesTonesParams::default(),
             advfill_open: false,
             advfill_opacity: 1.0,
             outline_open: false,

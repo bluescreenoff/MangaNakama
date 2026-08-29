@@ -178,6 +178,33 @@ chord only fires on its exact modifiers. The file is read at launch; a
 line that doesn't resolve is reported in the status bar and the rest
 still bind.</p>
 
+<h3>Aiming a key at a tool, a tab, or one sub tool</h3>
+<p>Instead of a command, the right-hand side can name a place in the Sub
+Tool list. Write <code>tool:</code> and then the tool, optionally the
+group caption, optionally the row:</p>
+<pre>{
+  "u": "tool: Frame border",
+  "shift+u": "tool: Figure / Saturated line",
+  "ctrl+shift+u": "tool: Figure / Direct draw / Ellipse",
+  "j": ["tool: Fill", "tool: Auto select"]
+}</pre>
+<p>The three lengths are three different promises. <b>One name</b> — the
+tool, and it lands on the group and sub tool you last used there.
+<b>Two</b> — that group, on whichever of its rows you last used.
+<b>Three</b> — that exact row, always. All three read the names the Sub
+Tool palette shows you, and case doesn't matter.</p>
+<p>A <b>list</b> puts several targets on one key: press it again and it
+walks them in the order you wrote, which is how Clip Studio puts three
+tools on one letter. The walk has no memory of its own — it looks at
+where you actually are and moves on from there, so clicking a tool in the
+palette between presses never leaves the key out of step. Our own
+<kbd>T</kbd> (Text ⇄ Balloon) and <kbd>E</kbd> (Eraser ⇄ Pen) are exactly
+this, written in the built-in table.</p>
+<p>The tool a key lands on is remembered per group and per tool in
+<code>ui.txt</code>, so it survives closing the app: leave Figure in
+Saturated line on Dark burst, and that is where <kbd>F</kbd> puts you
+tomorrow.</p>
+
 <h2>Recorded deviations</h2>
 <div class="quirk"><b><kbd>Ctrl+D</kbd> is Deselect.</b> CSP uses it for
 Reselect; we kept Deselect on the plain chord deliberately, and
@@ -186,6 +213,18 @@ Reselect lives on <kbd>Ctrl+Shift+D</kbd>.</div>
 and <kbd>Ctrl+Home/End</kbd>.</b> CSP's bare comma/period are our
 sub-tool stepping keys, and bare PageUp/PageDown are zoom bindings —
 so page navigation took the Ctrl chords.</div>
+<div class="quirk"><b>Layer colour and Clip to layer below have no
+built-in chord.</b> They are palette commands (<i>Layer colour on/off</i>,
+<i>Clip to layer below</i>) that act on the layer selected when you press
+the key, so bind them yourself if you came from CSP's
+<kbd>Ctrl+B</kbd> / <kbd>Ctrl+Alt+G</kbd>. <b>Merge selected layers</b>
+and <b>Release folder</b> do not exist yet at all, so
+<kbd>Shift+Alt+E</kbd> and <kbd>Ctrl+Shift+G</kbd> have nothing to point
+at.</div>
+<div class="quirk"><b><kbd>Ctrl+K</kbd> is itself rebindable.</b> The
+command palette opens through a command like everything else
+(<i>Command palette</i>), so it can move — including onto CSP's
+<kbd>Ctrl+K</kbd>-shaped habits from another editor.</div>
 
 <footer><a href="index.html">← manual</a> · the complete table lives in
 the source (<code>crates/app/src/main.rs</code>, the

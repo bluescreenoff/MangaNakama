@@ -168,6 +168,17 @@ pub struct UiLayout {
     /// keyed by preset like the size map. An absent key (or an empty
     /// list) shows every row.
     pub hidden_rows: BTreeMap<String, Vec<String>>,
+    /// The shortcut targeting model's MEMORY (owner ask 2026-08-25): which
+    /// sub tool group each tool was last in, and which sub tool each group
+    /// was last on, so `Target::Tool` lands where you left the tool.
+    ///
+    /// One map, two key shapes — `"Figure"` → group caption, and
+    /// `"Figure/Stream line"` → sub tool label. Tool labels carry no `/`, so
+    /// the two cannot collide. Written under the NEW `sub_tool_last=` key
+    /// (never used by any older build) and read back by NAME, so a caption
+    /// or row this build does not know is skipped one entry at a time —
+    /// `crate::subtools::restore_from_memory` is the reader.
+    pub sub_tool_last: BTreeMap<String, String>,
     dirty: bool,
 }
 
@@ -202,6 +213,7 @@ impl Default for UiLayout {
             gradients: String::new(),
             sub_tool_size_px: BTreeMap::new(),
             hidden_rows: BTreeMap::new(),
+            sub_tool_last: BTreeMap::new(),
             dirty: false,
         }
     }
@@ -422,6 +434,19 @@ impl UiLayout {
         }
     }
 
+    /// Replace the sub tool memory with a fresh snapshot of the live picks
+    /// (`crate::subtools::note_memory` builds it). Entries are MERGED, never
+    /// pruned: a tool whose group this build cannot currently read still
+    /// deserves to keep its line for the build that can.
+    pub fn note_sub_tool_last(&mut self, pairs: Vec<(String, String)>) {
+        for (k, v) in pairs {
+            if self.sub_tool_last.get(&k) != Some(&v) {
+                self.sub_tool_last.insert(k, v);
+                self.dirty = true;
+            }
+        }
+    }
+
     pub fn note_sub_tool_size(&mut self, key: &str, px: Option<f32>) {
         let changed = match px {
             Some(px) => self.sub_tool_size_px.insert(key.to_owned(), px) != Some(px),
@@ -445,6 +470,7 @@ impl UiLayout {
         format!(
             "left_w={:.0}\nright_w={:.0}\nleft_collapsed={}\nright_collapsed={}\ndock_left={}\ndock_right={}\ndock_tree={}\nprop_hidden={}\nwin={}\n{}mono_preview={}\nrecent_fonts={}\nmaterial_folders={}\nmaterial_uses={}\nquick_pins={}\nworkspaces={}\nworkspace_current={}\ntouch_gestures={}\ncolor_history={}\nauto_swatch={}\nreader_page={}\nguides_hidden={}\ntest_stroke_hidden={}\ngradients={}\nsub_tool_size_px={}
 hidden_rows={}
+sub_tool_last={}
 references={}\n",
             self.left_w,
             self.right_w,
@@ -483,6 +509,7 @@ references={}\n",
             self.gradients.replace('\n', ""),
             serde_json::to_string(&self.sub_tool_size_px).unwrap_or_default(),
             serde_json::to_string(&self.hidden_rows).unwrap_or_default(),
+            serde_json::to_string(&self.sub_tool_last).unwrap_or_default(),
             serde_json::to_string(&self.references).unwrap_or_default(),
         )
     }
@@ -591,6 +618,18 @@ references={}\n",
             "hidden_rows" if !line.contains('\n') => {
                 if let Ok(m) = serde_json::from_str::<BTreeMap<String, Vec<String>>>(v) {
                     self.hidden_rows = m.into_iter().filter(|(_, v)| !v.is_empty()).collect();
+                }
+            }
+            // The sub tool memory, JSON map name → name. Nothing is
+            // validated here on purpose: the names belong to the sub tool
+            // registry, which this module knows nothing about, and the
+            // restore skips what it cannot place (so a ui.txt written by a
+            // build with MORE sub tools keeps them for that build). A
+            // malformed line costs the memory only — every tool then starts
+            // wherever its own defaults put it.
+            "sub_tool_last" if !line.contains('\n') => {
+                if let Ok(m) = serde_json::from_str::<BTreeMap<String, String>>(v) {
+                    self.sub_tool_last = m;
                 }
             }
             _ => {}

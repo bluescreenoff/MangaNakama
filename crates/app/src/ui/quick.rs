@@ -65,6 +65,24 @@ pub fn command_index() -> Vec<(&'static str, &'static str, AppCmd)> {
         ("New layer", "Layer", AddLayer),
         ("New folder", "Layer (Ctrl+G)", AddFolder),
         ("Duplicate layer", "Layer", DuplicateLayer),
+        // The two index-free layer verbs (keymap follow-up (a)). They are
+        // here so `keys.json` can NAME them — a palette label is the only
+        // handle that file has, and these two aim at the active row rather
+        // than at a row the binding chose when it was read.
+        (
+            "Layer colour on/off",
+            "Layer",
+            ActiveLayer(crate::cmd::ActiveLayerCmd::ToggleColour),
+        ),
+        (
+            "Clip to layer below",
+            "Layer",
+            ActiveLayer(crate::cmd::ActiveLayerCmd::ToggleClip),
+        ),
+        // Follow-up (b): the palette's own door, so Ctrl+K is rebindable
+        // like every other chord. Searching for it from inside itself is a
+        // no-op, which is the honest behaviour for "open what is open".
+        ("Command palette", "Edit (Ctrl+K)", CommandPalette),
         // TRIAGE 109's "Apply to all (create merged layer)": flatten a copy on
         // top, originals untouched. Named for both things people call it, so
         // "flatten" finds it as well as "merge".

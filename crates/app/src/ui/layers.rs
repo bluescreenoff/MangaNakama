@@ -737,8 +737,10 @@ const EDGE_TINTS: [[u8; 3]; 4] = [
     [0x2a, 0x6f, 0xf4], // blue
 ];
 
-/// The Layer-colour chip set (CSP's default two-tone palette).
-const LAYER_TINTS: [[u8; 3]; 8] = [
+/// The Layer-colour chip set (CSP's default two-tone palette). The FIRST
+/// entry is also what `AppCmd::ActiveLayer(ToggleColour)` turns a layer on
+/// with, so the keyboard and the palette checkbox agree on "on".
+pub(crate) const LAYER_TINTS: [[u8; 3]; 8] = [
     [0x2a, 0x6f, 0xf4], // blue
     [0xe5, 0x4b, 0x4b], // red
     [0x3f, 0xb2, 0x5e], // green

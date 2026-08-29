@@ -26,6 +26,7 @@ mod recovery;
 mod remote;
 mod screenshot;
 mod shell;
+mod subtools;
 mod testlog;
 mod text_edit;
 mod ui;
@@ -41,6 +42,7 @@ use cmd::{AppCmd, Slot, Tool, dispatch};
 use input::{PointerDevice, pointer_device, read_pen_batch, read_touch_contact};
 use mn_core::PenSample;
 use mn_gpu::{GpuConfig, Renderer};
+use subtools::Target;
 use win32::{
     MK_SHIFT, TABLET_INK_FLAGS, WM_TABLET_QUERYSYSTEMGESTURESTATUS, is_pen_promoted_mouse, loword,
     lparam_points, wide,
@@ -526,6 +528,11 @@ fn main() {
     // The reader's F11 fullscreen needs the window handle (tests run
     // headless with hwnd == 0 — state-only).
     app.hwnd = hwnd as isize;
+    // Put every tool back in the sub tool group and row it was left in
+    // (owner ask 2026-08-25). Here rather than in `App::new` on purpose:
+    // the test suite builds Apps by the hundred and must not inherit the
+    // developer's own ui.txt through them.
+    subtools::restore_from_memory(&mut app);
     // GPU dabs on at startup — DECISIONS 8.9's re-flip, implemented as a
     // MEASURED per-adapter auto-default: an explicit choice (the --gpu-dabs
     // flag or a gpu_dabs= line the user's ui.txt actually carries) always
@@ -1510,19 +1517,83 @@ fn key_down(app: &mut App, vk: u16, repeat: bool) {
     if repeat || app.spring.is_some() || app.cmds.len() <= queued {
         return;
     }
-    if let Some(AppCmd::SetTool(t)) = app.cmds.back() {
-        let t = *t;
-        if t != tool0 || app.pan_mode != pan0 {
-            app.spring = Some(crate::app::SpringLoad {
-                vk,
-                saved: tool0,
-                saved_pan: pan0,
-                borrowed: t,
-                at: std::time::Instant::now(),
-                pointer_seen: false,
-            });
+    // The chokepoint, in the two shapes a tool press can queue. `SetSubTool`
+    // joined it with the targeting model (owner ask 2026-08-25): its state
+    // half runs at DISPATCH, so unlike the old H/R arms there is nothing
+    // changed yet to compare against — what arms the spring is whether the
+    // queued row is the one the tool is already on.
+    let borrowed = match app.cmds.back() {
+        Some(AppCmd::SetTool(t)) => {
+            let t = *t;
+            (t != tool0 || app.pan_mode != pan0).then_some(t)
         }
+        Some(AppCmd::SetSubTool(s)) => {
+            let s = *s;
+            (s.tool() != tool0 || !crate::subtools::is_current(app, s)).then_some(s.tool())
+        }
+        _ => None,
+    };
+    if let Some(borrowed) = borrowed {
+        app.spring = Some(crate::app::SpringLoad {
+            vk,
+            saved: tool0,
+            saved_pan: pan0,
+            borrowed,
+            at: std::time::Instant::now(),
+            pointer_seen: false,
+        });
     }
+}
+
+/// The built-in TOOL keys, as TARGETS (owner ask 2026-08-25). One row per
+/// key, in bound order: two or more targets on a key cycle on repeat press,
+/// which is how the hand-written `T` (Text ⇄ Balloon) and `E` (Eraser ⇄ Pen)
+/// flips are expressed now — `crate::subtools::press` runs them, and the
+/// migration is pinned by `subtools::tests`.
+///
+/// These are ours, not CSP's, and the owner said so explicitly: he is fine
+/// with a different default set, the MODEL is the ask. Where his set differs
+/// is recorded in `docs/manual/keys.html`.
+///
+/// When `Tool::Ruler` exists (scope call still with the owner — it is a tool,
+/// not a keymap entry), it joins `U` as a third target after Frame border,
+/// which is his CSP order: Figure → Frame Border → Ruler on one key.
+fn builtin_targets(vk: u16, shift: bool) -> Option<&'static [Target]> {
+    use crate::cmd::{PanMode, SubTool};
+    use crate::subtools::{SubToolPath, group};
+    // Named because a `&[…]` built inside the match arm is a temporary; a
+    // const item is the 'static the caller holds.
+    const HAND: &[Target] = &[Target::SubTool(SubToolPath {
+        tool: Tool::Pan,
+        group: group::MOVE,
+        sub: SubTool::Pan(PanMode::Hand),
+    })];
+    const ROTATE: &[Target] = &[Target::SubTool(SubToolPath {
+        tool: Tool::Pan,
+        group: group::MOVE,
+        sub: SubTool::Pan(PanMode::Rotate),
+    })];
+    Some(match vk {
+        // P / B — B stays a pen alias (old MangaNakama habit).
+        0x50 | 0x42 => &[Target::Tool(Tool::Pen)],
+        0x47 => &[Target::Tool(Tool::Fill)],   // G
+        0x4D => &[Target::Tool(Tool::Select)], // M
+        0x57 => &[Target::Tool(Tool::Wand)],   // W (CSP auto select)
+        0x4F => &[Target::Tool(Tool::Object)], // O (the cycle arm runs first)
+        // F = Figure, V = Gradient (my picks — no CSP defaults in his set).
+        0x46 => &[Target::Tool(Tool::Figure)],
+        0x56 => &[Target::Tool(Tool::Gradient)],
+        0x55 => &[Target::Tool(Tool::Frame)], // U (CSP: frame border)
+        // CSP puts Text and Balloon both on T, and duplicates cycle.
+        0x54 => &[Target::Tool(Tool::Text), Target::Tool(Tool::Balloon)],
+        0x49 => &[Target::Tool(Tool::Eyedrop)], // I
+        // H / R: the Move tool's two sub tools, named as sub tools now
+        // rather than reached by poking `pan_mode` on the way past.
+        0x48 => HAND,
+        0x52 if !shift => ROTATE,
+        0x45 => &[Target::Tool(Tool::Eraser), Target::Tool(Tool::Pen)], // E
+        _ => return None,
+    })
 }
 
 /// Keyboard shortcuts that belong to the app, not to egui. Returns true when
@@ -1591,15 +1662,25 @@ fn shortcut(app: &mut App, vk: u16, repeat: bool) -> bool {
     // BEFORE the built-in table so a rebind can shadow a default. Exact
     // modifier match — a bare-key binding does not fire shifted. Repeat
     // gating mirrors the table below: only the walk/undo family repeats.
-    if let Some(c) = app.keymap.lookup(ctrl, shift, alt, vk) {
-        let c = c.clone();
-        if !repeat
-            || matches!(
-                c,
-                AppCmd::Undo | AppCmd::Redo | AppCmd::LayerAbove | AppCmd::LayerBelow
-            )
-        {
-            app.push_cmd(c);
+    if let Some(b) = app.keymap.lookup(ctrl, shift, alt, vk) {
+        match b.clone() {
+            crate::keymap::Bind::Cmd(c) => {
+                if !repeat
+                    || matches!(
+                        c,
+                        AppCmd::Undo | AppCmd::Redo | AppCmd::LayerAbove | AppCmd::LayerBelow
+                    )
+                {
+                    app.push_cmd(c);
+                }
+            }
+            // A bound target list is a tool key like any other: it cycles on
+            // repeat PRESS, never on auto-repeat.
+            crate::keymap::Bind::Targets(t) => {
+                if !repeat {
+                    crate::subtools::press(app, &t);
+                }
+            }
         }
         return true;
     }
@@ -1632,45 +1713,22 @@ fn shortcut(app: &mut App, vk: u16, repeat: bool) -> bool {
         (true, 0x45) if shift => Some(AppCmd::StampVisible), // Ctrl+Shift+E
         (true, 0x45) => Some(AppCmd::MergeDown), // Ctrl+E
         (true, 0x47) => Some(AppCmd::AddFolder), // Ctrl+G (folder & insert)
-        // Tools — CSP keys. B stays a pen alias (old MangaNakama habit).
-        (false, 0x50) | (false, 0x42) => Some(AppCmd::SetTool(Tool::Pen)), // P / B
-        (false, 0x47) => Some(AppCmd::SetTool(Tool::Fill)),                // G
-        (false, 0x4D) => Some(AppCmd::SetTool(Tool::Select)),              // M
-        (false, 0x57) => Some(AppCmd::SetTool(Tool::Wand)),                // W (CSP auto select)
-        // O: in the Object tool with a selection, pressing it AGAIN cycles
-        // the stacked objects under the pick (owner item 2026-08-19); with
-        // nothing selected it keeps its plain tool-switch meaning.
-        (false, 0x4F) => {
+        // TOOL keys live in `builtin_targets` below, not here — a shortcut
+        // aims at a tool, a sub tool GROUP or an exact sub tool now, and
+        // repeat-press cycles when a key carries more than one. This arm is
+        // the ONE tool key that is not a targeting question: in the Object
+        // tool with something picked, O cycles the stacked objects UNDER the
+        // cursor (owner item 2026-08-19) — a different feature that happens
+        // to share a letter. With nothing picked it falls through to the
+        // table and means the tool.
+        (false, 0x4F)
             if app.tool == Tool::Object
                 && (app.object_sel.is_some()
                     || app.text_sel.is_some()
                     || app.balloon_sel.is_some()
-                    || app.gen_sel.is_some())
-            {
-                Some(AppCmd::ObjectCycle(!shift))
-            } else {
-                Some(AppCmd::SetTool(Tool::Object))
-            }
-        }
-        // F = Figure, V = Gradient (my picks — no CSP defaults in the owner's set).
-        (false, 0x46) => Some(AppCmd::SetTool(Tool::Figure)), // F
-        (false, 0x56) => Some(AppCmd::SetTool(Tool::Gradient)), // V
-        (false, 0x55) => Some(AppCmd::SetTool(Tool::Frame)),  // U (CSP: frame border)
-        // T cycles Text ⇄ Balloon — CSP puts both on T (duplicates cycle).
-        (false, 0x54) => Some(AppCmd::SetTool(if app.tool == Tool::Text {
-            Tool::Balloon
-        } else {
-            Tool::Text
-        })),
-        (false, 0x49) => Some(AppCmd::SetTool(Tool::Eyedrop)), // I
-        // H / R: the Move tool's Hand and Rotate sub tools (owner's CSP set).
-        (false, 0x48) => {
-            app.pan_mode = crate::cmd::PanMode::Hand;
-            Some(AppCmd::SetTool(Tool::Pan))
-        }
-        (false, 0x52) if !shift => {
-            app.pan_mode = crate::cmd::PanMode::Rotate;
-            Some(AppCmd::SetTool(Tool::Pan))
+                    || app.gen_sel.is_some()) =>
+        {
+            Some(AppCmd::ObjectCycle(!shift))
         }
         // Del family: Alt fills, Shift clears outside, plain deletes/clears.
         (false, 0x2E) if alt => Some(AppCmd::FillSelection),
@@ -1692,12 +1750,6 @@ fn shortcut(app: &mut App, vk: u16, repeat: bool) -> bool {
             .or_else(|| app.vector_sel.map(|stroke| AppCmd::VectorDelete { stroke }))
             .or(Some(AppCmd::ClearLayer)),
         (false, 0x2E) => Some(AppCmd::ClearLayer),
-        // E toggles between the Eraser tool and the Pen (CSP's default keys).
-        (false, 0x45) => Some(AppCmd::SetTool(if app.tool == Tool::Eraser {
-            Tool::Pen
-        } else {
-            Tool::Eraser
-        })),
         // C: the transparent colour slot — erase with the current brush.
         (false, 0x43) => Some(AppCmd::SetSlot(if app.slot == Slot::Transparent {
             Slot::Main
@@ -1731,6 +1783,17 @@ fn shortcut(app: &mut App, vk: u16, repeat: bool) -> bool {
             )
         {
             app.push_cmd(c);
+        }
+        return true;
+    }
+
+    // The tool keys, as targets. Ctrl-free like the arms they replaced, and
+    // AFTER them so the Object cycle and the Ctrl chords keep their letters.
+    // A held key repeats; a repeat must not walk a cycle on, so only the
+    // first press aims.
+    if !ctrl && let Some(targets) = builtin_targets(vk, shift) {
+        if !repeat {
+            crate::subtools::press(app, targets);
         }
         return true;
     }
@@ -1769,8 +1832,10 @@ fn shortcut(app: &mut App, vk: u16, repeat: bool) -> bool {
         // already knows. It only OPENS here: once the overlay's field has
         // focus the shell reports `wants_keyboard` and this table stands
         // down, so Esc (or a run) is the way back out.
+        // Through a command, not a direct `ui::` call: that is what lets
+        // `keys.json` move Ctrl+K itself (follow-up (b), 2026-08-29).
         (true, 0x4B) if !repeat => {
-            crate::ui::open_command_palette(app);
+            app.push_cmd(AppCmd::CommandPalette);
             true
         }
         (true, 0x57) => {
@@ -2503,6 +2568,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             // dialled and then quit on into `ui.txt`. Lock-aware, like every
             // other switch (`store_current_props`).
             app.store_current_props();
+            subtools::note_memory(app);
             app.layout.save_if_dirty();
             app.prefs.save_if_dirty();
             // The telemetry exit summary, while the App still exists —

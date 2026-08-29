@@ -1754,6 +1754,9 @@ pub enum SubTool {
     Figure(FigureMode),
     Gradient(GradMode),
     Eyedrop(mn_core::FillRefer),
+    /// E-016 平均色: the eyedropper's sample SIZE in pixels a side — its own
+    /// group in the list, and its own rows so a shortcut can name one.
+    EyedropSize(u32),
     Pan(PanMode),
 }
 
@@ -1816,6 +1819,10 @@ impl SubTool {
             SubTool::Eyedrop(All),
             SubTool::Eyedrop(Active),
             SubTool::Eyedrop(Reference),
+            SubTool::EyedropSize(1),
+            SubTool::EyedropSize(2),
+            SubTool::EyedropSize(3),
+            SubTool::EyedropSize(5),
             SubTool::Pan(PanMode::Hand),
             SubTool::Pan(PanMode::Rotate),
         ]
@@ -1836,7 +1843,7 @@ impl SubTool {
             SubTool::Object(_) => Tool::Object,
             SubTool::Figure(_) => Tool::Figure,
             SubTool::Gradient(_) => Tool::Gradient,
-            SubTool::Eyedrop(_) => Tool::Eyedrop,
+            SubTool::Eyedrop(_) | SubTool::EyedropSize(_) => Tool::Eyedrop,
             SubTool::Pan(_) => Tool::Pan,
         }
     }
@@ -1876,6 +1883,12 @@ impl SubTool {
             SubTool::Eyedrop(All) => "Pick displayed color",
             SubTool::Eyedrop(Active) => "Pick color from layer",
             SubTool::Eyedrop(Reference) => "Pick from reference layers",
+            // The list's own row text, spelled out rather than formatted:
+            // these labels are what `keys.json` and the palette match on.
+            SubTool::EyedropSize(2) => "2 × 2",
+            SubTool::EyedropSize(3) => "3 × 3",
+            SubTool::EyedropSize(5) => "5 × 5",
+            SubTool::EyedropSize(_) => "1 × 1 (one pixel)",
             SubTool::Pan(PanMode::Hand) => "Hand",
             SubTool::Pan(PanMode::Rotate) => "Rotate",
         }
@@ -1898,7 +1911,7 @@ impl SubTool {
             SubTool::Object(_) => "Sub Tool ▸ Operation",
             SubTool::Figure(_) => "Sub Tool ▸ Figure",
             SubTool::Gradient(_) => "Sub Tool ▸ Gradient",
-            SubTool::Eyedrop(_) => "Sub Tool ▸ Eyedropper",
+            SubTool::Eyedrop(_) | SubTool::EyedropSize(_) => "Sub Tool ▸ Eyedropper",
             SubTool::Pan(_) => "Sub Tool ▸ Move",
         }
     }
@@ -2211,6 +2224,24 @@ impl CurveSensor {
     }
 }
 
+/// Layer commands with no layer in them — the index is resolved at EXECUTE
+/// time from the active row (keymap follow-up (a), 2026-08-29).
+///
+/// Every layer command carries a `usize`, which is right for a menu built on
+/// a row and wrong for a keyboard shortcut: a chord is bound once, at load,
+/// when there is no row to name yet. The owner's `Ctrl+B` and `Ctrl+Alt+G`
+/// were unbindable for exactly that reason. These variants are the index-free
+/// door; they delegate to the indexed commands, so undo, status lines and
+/// action recording behave identically.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActiveLayerCmd {
+    /// CSP `layerpropuselayercolor` (the owner's Ctrl+B): the active layer's
+    /// display colour on ⇄ off, keeping whichever tint it last carried.
+    ToggleColour,
+    /// CSP `layerchangebelowclip` (the owner's Ctrl+Alt+G).
+    ToggleClip,
+}
+
 #[derive(Clone, Debug)]
 pub enum AppCmd {
     Undo,
@@ -2266,6 +2297,14 @@ pub enum AppCmd {
     ExtractOpen,
     ExtractLines {
         detection: f32,
+    },
+    /// Layer ▸ Convert to lines and tones… (row 154, `CL-001`–`014`):
+    /// open the parameter window.
+    LinesTonesOpen,
+    /// …and run it: the active layer becomes a folder of lineart, ベタ and
+    /// live tone layers. One structural undo.
+    ConvertLinesTones {
+        params: Box<mn_core::convert_lt::LinesTonesParams>,
     },
     /// Edit ▸ Outline selection… (CSP): stroke a band around the ants.
     OutlineSelection {
@@ -2596,6 +2635,14 @@ pub enum AppCmd {
     SetLayerColour(usize, Option<[u8; 3]>),
     /// Clip to layer below (CSP クリッピング).
     SetLayerClip(usize, bool),
+    /// The same family, aimed at whichever layer is active when it RUNS —
+    /// see [`ActiveLayerCmd`]. What makes a layer command bindable to a key.
+    ActiveLayer(ActiveLayerCmd),
+    /// Ctrl+K's own command (keymap follow-up (b), 2026-08-29): opening the
+    /// command palette was a direct `ui::` call in `main.rs`, which made the
+    /// one chord in the app that finds every other command the only one
+    /// `keys.json` could not move.
+    CommandPalette,
     /// Set the ACTIVE layer's screentone params — `Some` converts it into a
     /// tone layer, `None` converts it back. Non-destructive either way (the
     /// painted pixels are the ink source and survive).
@@ -4989,6 +5036,32 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                     app.mark_dirty();
                 }
                 None => app.set_status("nothing to extract — the layer has no ink"),
+            }
+        }
+        AppCmd::LinesTonesOpen => {
+            app.lt_open = !app.lt_open;
+            app.mark_dirty();
+        }
+        AppCmd::ConvertLinesTones { params } => {
+            let li = app.doc.active;
+            if app.doc.layers.get(li).is_some_and(|l| l.folder) {
+                app.set_status("convert to lines and tones: pick a layer, not a folder");
+                return;
+            }
+            let dpi = app.tone_dpi();
+            match app.doc.convert_to_lines_and_tones(li, &params, dpi) {
+                Some(_) => {
+                    app.set_status(if params.keep_original {
+                        "converted to lines and tones — the materials are in a folder, \
+                         the source is hidden (one undo)"
+                    } else {
+                        "converted to lines and tones — the materials are in a folder, \
+                         the source is removed (one undo)"
+                    });
+                    app.renderer.invalidate();
+                    app.mark_dirty();
+                }
+                None => app.set_status("nothing to convert — the layer has no ink"),
             }
         }
         AppCmd::OutlineOpen => {
@@ -7493,6 +7566,29 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 app.mark_dirty();
             }
         }
+        // The index-free door (keymap follow-up (a)): resolve the row HERE,
+        // at execute time, then hand straight to the indexed command so
+        // there is one implementation of each verb.
+        AppCmd::ActiveLayer(c) => {
+            let i = app.doc.active;
+            let aimed = app.doc.layers.get(i).map(|l| match c {
+                // Off keeps nothing to come back to, so ON re-uses the tint
+                // the layer last displayed — the Layer palette's own rule.
+                ActiveLayerCmd::ToggleColour => AppCmd::SetLayerColour(
+                    i,
+                    match l.layer_colour {
+                        Some(_) => None,
+                        None => Some(crate::ui::LAYER_TINTS[0]),
+                    },
+                ),
+                ActiveLayerCmd::ToggleClip => AppCmd::SetLayerClip(i, !l.clip),
+            });
+            match aimed {
+                Some(c) => dispatch(app, c),
+                None => app.set_status("no layer"),
+            }
+        }
+        AppCmd::CommandPalette => crate::ui::open_command_palette(app),
         AppCmd::SetLayerClip(i, v) => {
             if app.doc.set_layer_clip(i, v) {
                 app.set_status(if v {
@@ -8500,38 +8596,12 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
         // through `SetTool` and the two modes that have their own commands
         // through those, so a palette pick and a click in the list run the
         // same code — including the status lines and the mid-gesture
-        // cleanups those arms carry.
+        // cleanups those arms carry. The state half lives in
+        // `subtools::apply_state`, which the startup memory restore replays
+        // WITHOUT the tool switch (owner ask 2026-08-25).
         AppCmd::SetSubTool(s) => {
             dispatch(app, AppCmd::SetTool(s.tool()));
-            match s {
-                SubTool::FillRefer(r) => {
-                    app.fill_opts.refer = r;
-                    dispatch(app, AppCmd::SetFillMode(FillMode::Click));
-                }
-                SubTool::Fill(m) => dispatch(app, AppCmd::SetFillMode(m)),
-                SubTool::Tone(p) => app.tone_opts.tone.pattern = p,
-                SubTool::Wand(r) => app.wand_opts.refer = r,
-                SubTool::Select(m) => dispatch(app, AppCmd::SetSelectMode(m)),
-                // The create-type IS the tool, and `SetTool(s.tool())`
-                // above already switched to it.
-                SubTool::SelectPen | SubTool::SelectEraser => {}
-                SubTool::Frame(m) => {
-                    app.frame_mode = m;
-                    app.frame_poly = None;
-                    app.frame_pen = None;
-                }
-                SubTool::Balloon(m) => app.balloon_mode = m,
-                SubTool::Text => {}
-                SubTool::Object(m) => app.object_mode = m,
-                SubTool::Figure(m) => {
-                    app.figure_mode = m;
-                    app.figure_poly = None;
-                    app.figure_stage2 = None;
-                }
-                SubTool::Gradient(m) => app.grad_mode = m,
-                SubTool::Eyedrop(r) => app.eyedrop_opts.refer = r,
-                SubTool::Pan(m) => app.pan_mode = m,
-            }
+            crate::subtools::apply_state(app, s);
             app.mark_dirty();
         }
         AppCmd::PaletteOpen(p) => {

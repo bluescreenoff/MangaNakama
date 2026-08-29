@@ -18,9 +18,27 @@
 //! own file. A chord matches its EXACT modifier set: binding `"p"` does
 //! not fire on `Shift+P`.
 //!
-//! Only registry commands are bindable. Commands that need a live layer
-//! index (layer colour, clip to below…) have no index-free door yet —
-//! the follow-up is recorded in the archive TODO, not faked here.
+//! A chord can also name a TOOL TARGET instead of a command (owner ask
+//! 2026-08-25) — a tool, one of its sub tool groups, or an exact sub tool:
+//!
+//! ```json
+//! {
+//!   "u": "tool: Frame border",
+//!   "shift+u": "tool: Figure / Saturated line",
+//!   "ctrl+shift+u": "tool: Figure / Direct draw / Ellipse",
+//!   "j": ["tool: Fill", "tool: Auto select"]
+//! }
+//! ```
+//!
+//! The `tool:` prefix is what tells a target from a command label (a
+//! palette command is free to be called anything). Names are the ones the
+//! Sub Tool list shows, case-insensitively; a LIST binds several targets to
+//! one key and repeat-press cycles them in written order, which is how CSP
+//! puts three tools on `U`. `crate::subtools` owns the model.
+//!
+//! Commands that need a live layer index used to be unbindable — the door
+//! is `AppCmd::ActiveLayer` now (layer colour, clip to below), which
+//! resolves the row when the key is pressed rather than when it is read.
 //!
 //! Read once at startup, like `actions.json`. A missing file is silence;
 //! a broken line is a startup status message naming the line, and every
@@ -31,13 +49,22 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::cmd::AppCmd;
+use crate::subtools::{Target, parse_target};
 
 /// (ctrl, shift, alt, vk) — the exact shape `main.rs::shortcut` matches on.
 type Chord = (bool, bool, bool, u16);
 
+/// What a chord does: run one command, or aim at one or more tool targets
+/// (several = a repeat-press cycle, `subtools::press`).
+#[derive(Clone, Debug)]
+pub enum Bind {
+    Cmd(AppCmd),
+    Targets(Vec<Target>),
+}
+
 #[derive(Default)]
 pub struct Keymap {
-    binds: HashMap<Chord, AppCmd>,
+    binds: HashMap<Chord, Bind>,
     /// Human-readable load complaints, surfaced once as a status line.
     pub problems: Vec<String>,
 }
@@ -79,17 +106,57 @@ impl Keymap {
                 map.problems.push(format!("keys.json: unknown key \"{chord_s}\""));
                 continue;
             };
+            // A LIST is a cycle: every entry must be a target, since
+            // cycling needs to know which one you are standing on and only
+            // a target can answer that.
+            if let Some(list) = cmd_v.as_array() {
+                let mut targets = Vec::new();
+                let mut bad = None;
+                for item in list {
+                    match item.as_str().map(parse_target) {
+                        Some(Ok(t)) => targets.push(t),
+                        Some(Err(e)) => bad = Some(e),
+                        None => bad = Some("a cycle entry must be a string".to_owned()),
+                    }
+                }
+                match (bad, targets.is_empty()) {
+                    (Some(e), _) => map
+                        .problems
+                        .push(format!("keys.json: \"{chord_s}\" — {e}")),
+                    (None, true) => map
+                        .problems
+                        .push(format!("keys.json: \"{chord_s}\" — an empty cycle")),
+                    (None, false) => {
+                        map.binds.insert(chord, Bind::Targets(targets));
+                    }
+                }
+                continue;
+            }
             let Some(want) = cmd_v.as_str() else {
                 map.problems
                     .push(format!("keys.json: \"{chord_s}\" must name a command"));
                 continue;
             };
+            // `tool:` says "a place in the Sub Tool tree", which is a
+            // namespace of its own — a palette command may be called
+            // anything, so the two cannot be told apart by content.
+            if want.trim_start().to_ascii_lowercase().starts_with("tool:") {
+                match parse_target(want) {
+                    Ok(t) => {
+                        map.binds.insert(chord, Bind::Targets(vec![t]));
+                    }
+                    Err(e) => map
+                        .problems
+                        .push(format!("keys.json: \"{chord_s}\" — {e}")),
+                }
+                continue;
+            }
             let found = index
                 .iter()
                 .find(|(label, _, _)| label.eq_ignore_ascii_case(want));
             match found {
                 Some((_, _, cmd)) => {
-                    map.binds.insert(chord, cmd.clone());
+                    map.binds.insert(chord, Bind::Cmd(cmd.clone()));
                 }
                 None => map.problems.push(format!(
                     "keys.json: no command called \"{want}\" — the palette (Ctrl+K) knows the names"
@@ -99,7 +166,7 @@ impl Keymap {
         map
     }
 
-    pub fn lookup(&self, ctrl: bool, shift: bool, alt: bool, vk: u16) -> Option<&AppCmd> {
+    pub fn lookup(&self, ctrl: bool, shift: bool, alt: bool, vk: u16) -> Option<&Bind> {
         self.binds.get(&(ctrl, shift, alt, vk))
     }
 }
@@ -212,7 +279,10 @@ mod tests {
         );
         assert!(m.lookup(true, false, false, 0x31).is_some(), "ctrl+1 bound");
         assert!(
-            matches!(m.lookup(false, false, false, 0x71), Some(AppCmd::Cut)),
+            matches!(
+                m.lookup(false, false, false, 0x71),
+                Some(Bind::Cmd(AppCmd::Cut))
+            ),
             "f2 bound, label case-insensitive"
         );
         assert_eq!(m.problems.len(), 2, "two complaints, no more: {:?}", m.problems);
@@ -252,6 +322,59 @@ mod tests {
         let depth = app.cmds.len();
         assert!(crate::shortcut(&mut app, 0x50, false), "P is a built-in");
         assert!(app.cmds.len() > depth);
+    }
+
+    /// The targeting half: a chord can name a tool, a sub tool group or an
+    /// exact sub tool, and a LIST of them is a repeat-press cycle. Same
+    /// one-bad-line-costs-one-line discipline as the command half.
+    #[test]
+    fn a_chord_can_name_a_tool_target() {
+        use crate::cmd::{FigureMode, SubTool, Tool};
+        use crate::subtools::{SubToolPath, group};
+        let m = Keymap::parse(
+            r#"{
+                "u": "tool: Frame border",
+                "shift+u": "TOOL: figure / saturated line",
+                "ctrl+u": "tool: Figure / Direct draw / Ellipse",
+                "j": ["tool: Fill", "tool: Auto select"],
+                "k": ["tool: Fill", "tool: Nope"],
+                "l": [],
+                "n": "tool: Nope"
+            }"#,
+        );
+        assert!(
+            matches!(
+                m.lookup(false, false, false, 0x55),
+                Some(Bind::Targets(t)) if t[..] == [Target::Tool(Tool::Frame)]
+            ),
+            "a bare tool"
+        );
+        assert!(
+            matches!(
+                m.lookup(false, true, false, 0x55),
+                Some(Bind::Targets(t))
+                    if t[..] == [Target::Group(Tool::Figure, group::SATURATED_LINE)]
+            ),
+            "a group, case-insensitively"
+        );
+        assert!(
+            matches!(
+                m.lookup(true, false, false, 0x55),
+                Some(Bind::Targets(t))
+                    if t[..] == [Target::SubTool(SubToolPath::of(SubTool::Figure(
+                        FigureMode::Ellipse
+                    )))]
+            ),
+            "an exact sub tool"
+        );
+        assert!(
+            matches!(m.lookup(false, false, false, 0x4A), Some(Bind::Targets(t)) if t.len() == 2),
+            "a cycle keeps its written order"
+        );
+        assert!(m.lookup(false, false, false, 0x4B).is_none(), "bad cycle");
+        assert!(m.lookup(false, false, false, 0x4C).is_none(), "empty cycle");
+        assert!(m.lookup(false, false, false, 0x4E).is_none(), "bad target");
+        assert_eq!(m.problems.len(), 3, "one each, no more: {:?}", m.problems);
     }
 
     /// Garbage at the top level degrades to an empty map plus a complaint —

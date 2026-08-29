@@ -86,6 +86,37 @@ fn a_choice_while_held_wins() {
     assert_eq!(app.tool, Tool::Fill, "the user's choice stood");
 }
 
+/// The targeting model (owner ask 2026-08-25) queues `SetSubTool`, not
+/// `SetTool` — the spring's tail check learned that shape, so a key bound in
+/// `keys.json` to a sub tool springs like a built-in tool key does. Q is
+/// deliberately a letter the built-in table does not use.
+#[test]
+fn a_bound_sub_tool_key_borrows_too() {
+    let Some(mut app) = headless() else { return };
+    app.keymap = crate::keymap::Keymap::parse(
+        r#"{ "q": "tool: Frame border / Cut frame border / Divide frame border" }"#,
+    );
+    assert!(app.keymap.problems.is_empty(), "{:?}", app.keymap.problems);
+    let before = app.tool;
+    let mode_before = app.frame_mode;
+    crate::key_down(&mut app, 0x51, false);
+    assert!(
+        matches!(app.cmds.back(), Some(AppCmd::SetSubTool(_))),
+        "the binding queued a sub tool: {:?}",
+        app.cmds.back()
+    );
+    pump(&mut app);
+    assert_eq!(app.tool, Tool::Frame, "the row's tool is in hand");
+    assert_eq!(app.frame_mode, crate::cmd::FrameMode::DivideBorder);
+    age_spring(&mut app);
+    app.spring_release(0x51);
+    pump(&mut app);
+    assert_eq!(app.tool, before, "release restored the tool");
+    // The borrow restores the TOOL, not the sub tool it left behind — same
+    // contract as every other spring (`SpringLoad` saves tool + pan mode).
+    assert_ne!(app.frame_mode, mode_before, "the sub tool pick stands");
+}
+
 /// H/R pick the Move tool's sub mode as a side effect of the same
 /// keydown — a Rotate borrow taken FROM Hand must give Hand back, even
 /// though `app.tool` never changed (both are Tool::Pan).

@@ -39,9 +39,12 @@ mod tools;
 mod top;
 mod widgets;
 
-/// The Ctrl+K door, for `main::shortcut` (the overlay itself lives in
-/// `ui/quick.rs`, next to the index it searches).
+/// The Ctrl+K door, for `AppCmd::CommandPalette` (the overlay itself lives
+/// in `ui/quick.rs`, next to the index it searches).
 pub use quick::open_command_palette;
+/// The Layer-colour chip set, for the index-free `ActiveLayer` command —
+/// keyboard and palette must turn a layer on with the same tint.
+pub(crate) use layers::LAYER_TINTS;
 
 use color::picker_sync;
 use dialogs::{
@@ -146,6 +149,7 @@ pub fn build(ui: &mut egui::Ui, app: &mut App) {
     outline::outline_window(ui.ctx(), app);
     convert::convert_window(ui.ctx(), app);
     convert::extract_window(ui.ctx(), app);
+    convert::lines_tones_window(ui.ctx(), app);
     convert::advfill_window(ui.ctx(), app);
     adjust_window(ui.ctx(), app);
     goto_page_window(ui.ctx(), app);
@@ -167,6 +171,11 @@ pub fn build(ui: &mut egui::Ui, app: &mut App) {
     quick::command_palette(ui.ctx(), app);
 
     app.sync_dock_layout();
+    // The sub tool memory is SNAPSHOT beside the save, not written on every
+    // switch: the app's own mode fields are the truth, whatever moved them
+    // (a click, a shortcut, the `,`/`.` stepper, a Tool Property edit), and
+    // a snapshot cannot disagree with them the way a change hook can.
+    crate::subtools::note_memory(app);
     app.layout.save_if_dirty();
     app.prefs.save_if_dirty();
 }

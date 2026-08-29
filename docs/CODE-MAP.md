@@ -292,6 +292,29 @@ The recurring failure shapes, in order of how often they have shipped:
   the column is a permanent sliver after the next launch. Collapsing also
   hides that column's torn-off FLOATING palettes: egui_dock only draws window
   surfaces from `DockArea::show_inside`, which a collapsed column skips.
+- **A sub tool row exists in three places at once** (`cmd.rs`
+  `SubTool::ALL` ⇄ `subtools.rs` ⇄ `ui/subtool.rs`). `SubTool::ALL` is the
+  enumeration; `subtools::group_of` files each row under a group caption and
+  `subtools::registry` derives the tool → groups → rows tree from those two.
+  The Sub Tool palette draws its captions from `subtools::group::*`
+  constants, and `subtools::is_current` is the REVERSE of the row's
+  `apply_state` arm. So: a new row needs an `ALL` entry, a `group_of` arm, an
+  `apply_state` arm and an `is_current` arm. Miss `ALL` and the row is
+  invisible to Ctrl+K, to `keys.json` and to the memory while still drawing
+  fine; miss `is_current` and the row can be reached but never reports that
+  you are standing on it, which silently breaks the shortcut CYCLE (it starts
+  from the top every press) and the ui.txt memory (the group stops being
+  written down). `subtools::tests::the_registry_holds_every_row_once` catches
+  the first, nothing catches the second but review.
+- The shortcut MEMORY (`sub_tool_last=` in ui.txt) is a SNAPSHOT of live
+  state taken beside the save (`subtools::note_memory`, called from
+  `ui::build` and `WM_DESTROY`), never a hook on the switch. That is
+  deliberate: the mode fields move from a dozen places (`,`/`.`, Tool
+  Property, the palette, a shortcut) and a snapshot cannot fall behind them.
+  It MERGES, because a tool has one mode field and the tab you are not in
+  can only be remembered by the file. The playback
+  (`subtools::restore_from_memory`) runs once in `main`, NOT in `App::new` —
+  in `App::new` the test suite would inherit the developer's own ui.txt.
 - A workspace entry (`app/workspaces.rs`) is a VARIABLE-LENGTH `Vec<String>`,
   never a fixed-size array, and every field is read through `ws_field`. A
   `[String; N]` makes serde reject the whole line the day the entry grows —
