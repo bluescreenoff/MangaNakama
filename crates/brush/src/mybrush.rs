@@ -174,6 +174,110 @@ pub enum TextureRotate {
     Tilt,
 }
 
+/// CSP Color jitter (C-010..012): how far the paint colour is allowed to
+/// wander off the drawing colour, so a stroke is not one flat value.
+///
+/// The three amounts are 0..1 fractions of a FULL swing: `hue` 1.0 is ±180°
+/// around the colour wheel, `sat`/`bri` 1.0 is ±100 % of the channel. Zero on
+/// all three is [`is_off`](ColorJitter::is_off) and is a byte-exact
+/// passthrough — the colour never goes near the jitter code.
+///
+/// `per_dab` is CSP's per-dab / per-stroke switch, with one honest deviation
+/// recorded here: libmypaint computes each dab's colour inside its own C
+/// stroke loop, and we do not patch that loop, so our finest granularity is
+/// one draw per INPUT SAMPLE (~100/s, several per stroke-segment) rather than
+/// one per dab. It reads as grain along the stroke, which is what the row is
+/// for; it is not literally per dab, which is why the UI calls the mode
+/// "Along stroke" instead of borrowing CSP's word.
+///
+/// The `Target` half of CSP's row (main colour / sub colour / both) is NOT
+/// modelled: our engine is handed ONE colour per stroke — whichever slot is
+/// drawing — so a target picker would be a control with one reachable value.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub struct ColorJitter {
+    pub hue: f32,
+    pub sat: f32,
+    pub bri: f32,
+    /// A fresh draw per input sample (grainy) instead of one per stroke.
+    pub per_dab: bool,
+}
+
+impl ColorJitter {
+    /// Nothing to jitter — the stroke takes the drawing colour untouched.
+    pub fn is_off(self) -> bool {
+        !(self.hue > 0.0 || self.sat > 0.0 || self.bri > 0.0)
+    }
+
+    /// Clamped to the ranges the UI offers, non-finite included: a NaN here
+    /// would reach `mypaint_brush_set_base_value` as a NaN hue.
+    pub fn sane(self) -> ColorJitter {
+        let c = |v: f32| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 };
+        ColorJitter {
+            hue: c(self.hue),
+            sat: c(self.sat),
+            bri: c(self.bri),
+            per_dab: self.per_dab,
+        }
+    }
+}
+
+/// CSP's 反転 brush-tip flip (B-026/027), one axis' worth. Both axes carry
+/// their own copy, exactly as CSP has a left-right row and an up-down row.
+///
+/// [`Reverse`](TipFlip::Reverse) is the mode with a reason to exist: an
+/// asymmetric tip (a chisel, a dry-brush edge) draws correctly left-to-right
+/// and backwards right-to-left, and this flips it per dab so both directions
+/// read the same.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TipFlip {
+    #[default]
+    Off,
+    /// Always mirrored on this axis.
+    Always,
+    /// Mirrored or not per dab, from the per-stroke seeded rng.
+    Random,
+    /// Mirrored only while the dab's own direction runs backwards along
+    /// this axis (leftwards for horizontal, upwards for vertical).
+    Reverse,
+}
+
+impl TipFlip {
+    pub const ALL: [TipFlip; 4] = [
+        TipFlip::Off,
+        TipFlip::Always,
+        TipFlip::Random,
+        TipFlip::Reverse,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            TipFlip::Off => "Off",
+            TipFlip::Always => "Always",
+            TipFlip::Random => "Random",
+            TipFlip::Reverse => "On reverse",
+        }
+    }
+
+    /// The `mn-tip-flip-h` / `-v` preset key's value.
+    pub fn key_name(self) -> Option<&'static str> {
+        match self {
+            TipFlip::Off => None,
+            TipFlip::Always => Some("always"),
+            TipFlip::Random => Some("random"),
+            TipFlip::Reverse => Some("reverse"),
+        }
+    }
+
+    pub fn from_key_name(s: &str) -> TipFlip {
+        match s {
+            "always" => TipFlip::Always,
+            "random" => TipFlip::Random,
+            "reverse" => TipFlip::Reverse,
+            _ => TipFlip::Off,
+        }
+    }
+}
+
 /// A libmypaint brush bound to a MangaNakama document.
 ///
 /// Not `Send`/`Sync` (raw pointers): libmypaint keeps mutable stroke state and
@@ -322,6 +426,32 @@ pub struct MyBrush {
     base_aa: f32,
     /// CSP Tool Settings ▸ Anti-aliasing (A-010) as the user last set it.
     anti_alias: AntiAlias,
+    /// CSP Ink ▸ Intensity of blur (I-013): the running-colour sampler's
+    /// radius is a MULTIPLE of the brush radius by default (it scales when
+    /// you resize the brush); this flag says the user pinned it to a canvas
+    /// pixel number instead, so the multiple is re-derived from the live
+    /// radius the way `Interval::FixedPx` re-derives its dab count.
+    blur_abs: bool,
+    /// CSP Color jitter (C-010..012) as the user set it.
+    jitter: ColorJitter,
+    /// The drawing colour as the app handed it over, HSV, BEFORE jitter —
+    /// jitter is an offset from this, so re-drawing it never compounds.
+    base_hsv: (f32, f32, f32),
+    /// This stroke's live jitter offset (h, s, v).
+    jitter_off: (f32, f32, f32),
+    /// The jitter draw's xorshift64, reseeded at every `begin` — the M4
+    /// tip-variation precedent: variation lives between DABS, and the same
+    /// stroke drawn twice paints the same colours.
+    jitter_rng: u64,
+    /// B-026/027 tip flip, per axis.
+    flip_h: TipFlip,
+    flip_v: TipFlip,
+    /// The four mirrorings of the ACTIVE tip — (none, H, V, HV) — as (data
+    /// ptr, size) pairs. BOXED for the same reason as `tip_variants`: the
+    /// per-dab hook publishes this buffer's address.
+    flip_variants: Box<[(*const u8, i32); 4]>,
+    /// Keeps the mirrored buffers `flip_variants` points into alive.
+    _flip_masks: Vec<Arc<TextureMask>>,
 }
 
 /// CSP Advanced ▸ Stroke ▸ Interval (S-028) — the gap between the individual
@@ -728,6 +858,38 @@ impl MyBrush {
             .map(|m| (m.data.as_ptr(), m.size as i32))
             .collect();
 
+        // C-010..012 colour jitter and B-026/027 tip flip: absent = off, so
+        // every preset written before these existed keeps its exact colours
+        // and its unmirrored tip.
+        let jitter_amt = |key: &str| {
+            json.get(key)
+                .and_then(Value::as_f64)
+                .map(|v| v as f32)
+                .unwrap_or(0.0)
+        };
+        let jitter = ColorJitter {
+            hue: jitter_amt("mn-jitter-hue"),
+            sat: jitter_amt("mn-jitter-sat"),
+            bri: jitter_amt("mn-jitter-bri"),
+            // Absent defaults to the ALONG-STROKE draw, not the
+            // per-stroke one: with all three amounts at zero the choice
+            // is invisible either way, and the moment someone raises one
+            // the useful answer is grain along the stroke — a jitter that
+            // only varies between strokes looks like a broken slider.
+            per_dab: json
+                .get("mn-jitter-per-dab")
+                .and_then(Value::as_bool)
+                .unwrap_or(true),
+        }
+        .sane();
+        let flip_of = |key: &str| {
+            json.get(key)
+                .and_then(Value::as_str)
+                .map_or(TipFlip::Off, TipFlip::from_key_name)
+        };
+        let flip_h = flip_of("mn-tip-flip-h");
+        let flip_v = flip_of("mn-tip-flip-v");
+
         // Krita sketch mode (round 27): link the stroke back to its recent
         // history — scribble webs / hatching for roughing.
         let sketch = json
@@ -749,7 +911,7 @@ impl MyBrush {
                     .clamp(0.0, 1.0),
             });
 
-        Ok(MyBrush {
+        let mut loaded = MyBrush {
             brush,
             surface: TileSurface::new(),
             name,
@@ -794,7 +956,20 @@ impl MyBrush {
             base_linearize,
             base_aa,
             anti_alias: AntiAlias::AsPreset,
-        })
+            blur_abs: false,
+            jitter,
+            base_hsv: (0.0, 0.0, 0.0),
+            jitter_off: (0.0, 0.0, 0.0),
+            jitter_rng: JITTER_SEED,
+            flip_h,
+            flip_v,
+            // Filled by `rebuild_flip_variants` below — the table needs the
+            // finished brush's own texture, which is moved into it here.
+            flip_variants: Box::new([(std::ptr::null(), 0); 4]),
+            _flip_masks: Vec::new(),
+        };
+        loaded.rebuild_flip_variants();
+        Ok(loaded)
     }
 
     /// CSP entry taper carried as metadata: (length in px-ish units, min
@@ -814,12 +989,50 @@ impl MyBrush {
     /// `change_color_*` dynamics operate on — so this must go through HSV, not
     /// straight into the dab call.
     pub fn set_color_rgb(&mut self, rgb: [f32; 3]) {
-        let (h, s, v) = rgb_to_hsv(rgb);
+        self.base_hsv = rgb_to_hsv(rgb);
+        self.push_color();
+    }
+
+    /// Write `base_hsv + jitter_off` into the three colour base values.
+    /// Hue WRAPS (it is an angle); saturation and value clamp. With jitter
+    /// off the offset is a hard zero, so this is the plain colour write it
+    /// has always been.
+    fn push_color(&mut self) {
+        let (h, s, v) = self.base_hsv;
+        let (dh, ds, dv) = self.jitter_off;
+        let h = (h + dh).rem_euclid(1.0);
+        let s = (s + ds).clamp(0.0, 1.0);
+        let v = (v + dv).clamp(0.0, 1.0);
         unsafe {
             ffi::mypaint_brush_set_base_value(self.brush, setting::COLOR_H, h);
             ffi::mypaint_brush_set_base_value(self.brush, setting::COLOR_S, s);
             ffi::mypaint_brush_set_base_value(self.brush, setting::COLOR_V, v);
         }
+    }
+
+    /// One xorshift64 step of the jitter rng, as a signed unit (-1..1).
+    fn jitter_unit(&mut self) -> f32 {
+        let mut x = self.jitter_rng;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.jitter_rng = x;
+        ((x >> 40) as f32 / (1u32 << 24) as f32) * 2.0 - 1.0
+    }
+
+    /// Draw a fresh colour offset and push it. Hue's amount is a HALF turn
+    /// (1.0 = ±180°, libmypaint's own `change_color_h` convention); sat and
+    /// bri are ± the amount in their own 0..1 channels.
+    fn draw_jitter(&mut self) {
+        if self.jitter.is_off() {
+            return;
+        }
+        let (h, s, b) = (self.jitter.hue, self.jitter.sat, self.jitter.bri);
+        let dh = self.jitter_unit() * h * 0.5;
+        let ds = self.jitter_unit() * s;
+        let dv = self.jitter_unit() * b;
+        self.jitter_off = (dh, ds, dv);
+        self.push_color();
     }
 
     /// Scale the brush size. `1.0` is the preset's own size.
@@ -1091,6 +1304,165 @@ impl MyBrush {
         self.smudge = v > 0.0;
     }
 
+    /// CSP Ink ▸ **Density of paint** (I-010): how much of the DRAWING
+    /// colour a dab lays down, against how much of the colour it picked up
+    /// off the canvas. 1.0 (the default of every stock preset) is neat
+    /// paint; 0.0 paints purely with what is already there.
+    ///
+    /// This is libmypaint's `smudge` read from the other end — `smudge` is
+    /// "fraction of the picked-up colour", density is "fraction of yours",
+    /// and the two sum to one. Stated as density because that is the
+    /// number CSP shows and the direction an artist thinks in ("how much
+    /// paint is on the brush"), and because a row that reads 0 by default
+    /// is a row nobody believes is on.
+    ///
+    /// Sets the GPU-routing flag with it, exactly like [`set_smudge`]: a
+    /// stroke that samples the canvas needs the smudge sampler served from
+    /// the GPU tile cache, and a brush that started neat and had its
+    /// density pulled down mid-session is the same stroke as a preset that
+    /// shipped that way.
+    ///
+    /// [`set_smudge`]: Self::set_smudge
+    pub fn set_paint_density(&mut self, density: f32) {
+        let d = if density.is_finite() {
+            density.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        self.set_smudge(1.0 - d);
+    }
+
+    /// Density of paint as the engine holds it (a preset nobody has touched
+    /// reports its own honest value).
+    pub fn paint_density(&self) -> f32 {
+        1.0 - self.base_value(setting::SMUDGE)
+    }
+
+    /// CSP Ink ▸ **Color stretch** (I-011): how far the pigment picked up at
+    /// the start of a stroke gets dragged along it. 0 = the picked-up colour
+    /// is replaced at every dab (no stretch); 1 = it never updates, so the
+    /// first colour is carried the whole way.
+    ///
+    /// libmypaint's `smudge_length` is that same number with that same
+    /// meaning, so this is a rename with a range check, not a mechanism.
+    /// It does nothing on its own: with density of paint at 1.0 no colour
+    /// is picked up for it to stretch.
+    pub fn set_color_stretch(&mut self, v: f32) {
+        let v = if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.5 };
+        unsafe { ffi::mypaint_brush_set_base_value(self.brush, setting::SMUDGE_LENGTH, v) };
+    }
+
+    pub fn color_stretch(&self) -> f32 {
+        self.base_value(setting::SMUDGE_LENGTH)
+    }
+
+    /// CSP Ink ▸ **Intensity of blur** (I-013): how wide an area the running
+    /// colour is picked up from. Wider = the mixing reads as a blur rather
+    /// than a smear.
+    ///
+    /// libmypaint stores it as `smudge_radius_log`, a LOGARITHMIC multiple
+    /// of the brush radius, which is CSP's "scales with brush size" mode for
+    /// free. `absolute` is CSP's other mode — a canvas-pixel number that
+    /// does NOT follow the Size slider — and it is converted against the
+    /// live radius here, the same trick (and the same ordering constraint)
+    /// as [`Interval::FixedPx`]: whoever sets the size must set this after,
+    /// or the pinned number is measured against the old radius.
+    pub fn set_blur(&mut self, amount: f32, absolute: bool) {
+        self.blur_abs = absolute;
+        let amount = if amount.is_finite() { amount } else { 1.0 };
+        // A pinned pixel width is a multiple of THIS brush's radius — and
+        // the clamp belongs on the MULTIPLE, after the conversion. Clamping
+        // the pixel number first would cap a 200 px blur at 20 px and never
+        // say why.
+        let rel = if absolute {
+            amount / self.radius_px().max(1e-3)
+        } else {
+            amount
+        };
+        let rel = rel.clamp(BLUR_MIN, BLUR_MAX);
+        unsafe {
+            ffi::mypaint_brush_set_base_value(self.brush, setting::SMUDGE_RADIUS_LOG, rel.ln())
+        };
+    }
+
+    /// The blur width as the user set it: `(amount, absolute)`, where the
+    /// amount is canvas px when absolute and a multiple of the brush radius
+    /// when not.
+    pub fn blur(&self) -> (f32, bool) {
+        let rel = self.base_value(setting::SMUDGE_RADIUS_LOG).exp();
+        if self.blur_abs {
+            (rel * self.radius_px(), true)
+        } else {
+            (rel, false)
+        }
+    }
+
+    /// CSP Color jitter (C-010..012). Off (all three amounts zero) never
+    /// touches the colour base values, so an untouched preset paints the
+    /// drawing colour bit for bit.
+    pub fn set_color_jitter(&mut self, jitter: ColorJitter) {
+        self.jitter = jitter.sane();
+        if self.jitter.is_off() {
+            self.jitter_off = (0.0, 0.0, 0.0);
+            self.push_color();
+        } else {
+            self.draw_jitter();
+        }
+    }
+
+    pub fn color_jitter(&self) -> ColorJitter {
+        self.jitter
+    }
+
+    /// CSP 反転 (B-026/027): the brush tip's horizontal and vertical flip
+    /// modes. Only reaches the pixels through a TEXTURE tip — a preset with
+    /// no tip mask has no image to mirror, and the setting sits inert
+    /// rather than pretending.
+    pub fn set_tip_flip(&mut self, h: TipFlip, v: TipFlip) {
+        // Re-stating the same modes must not rebuild the table: the app
+        // pushes the whole property set on every slider move, and mirroring
+        // a 512² tip twice per drag is real work for no change.
+        if (self.flip_h, self.flip_v) == (h, v) {
+            return;
+        }
+        self.flip_h = h;
+        self.flip_v = v;
+        self.rebuild_flip_variants();
+    }
+
+    pub fn tip_flip(&self) -> (TipFlip, TipFlip) {
+        (self.flip_h, self.flip_v)
+    }
+
+    /// The four mirrorings of the active tip, in the order the per-dab hook
+    /// indexes them: `(v as usize) << 1 | h as usize`.
+    ///
+    /// Rebuilt whenever the tip or the modes change, and NOT built at all
+    /// while both modes are `Off` — the mirrored copies are two extra mask
+    /// buffers per brush, and every stock preset would carry them for
+    /// nothing.
+    fn rebuild_flip_variants(&mut self) {
+        let armed = self.flip_h != TipFlip::Off || self.flip_v != TipFlip::Off;
+        let Some(tip) = self.texture.clone().filter(|_| armed) else {
+            self.flip_variants = Box::new([(std::ptr::null(), 0); 4]);
+            self._flip_masks = Vec::new();
+            return;
+        };
+        let masks = vec![
+            tip.clone(),
+            Arc::new(mirror_mask(&tip, true, false)),
+            Arc::new(mirror_mask(&tip, false, true)),
+            Arc::new(mirror_mask(&tip, true, true)),
+        ];
+        self.flip_variants = Box::new([
+            (masks[0].data.as_ptr(), masks[0].size as i32),
+            (masks[1].data.as_ptr(), masks[1].size as i32),
+            (masks[2].data.as_ptr(), masks[2].size as i32),
+            (masks[3].data.as_ptr(), masks[3].size as i32),
+        ]);
+        self._flip_masks = masks;
+    }
+
     /// Colorize stamp weight (`BlendMode_Color`, GPU-ported in the P4
     /// round): 0 = off. Load-time `exotic` detection is unaffected — this
     /// is the test harness's knob.
@@ -1308,6 +1680,10 @@ impl MyBrush {
     pub fn set_texture(&mut self, mask: Option<Arc<TextureMask>>) {
         self.texture = mask;
         self.tex_accum = (0.0, 0.0);
+        // The flip table mirrors THIS tip: a swapped tip with a stale table
+        // would stamp the old mask's mirror, which looks like a texture
+        // picker that half-works.
+        self.rebuild_flip_variants();
     }
 
     pub fn texture(&self) -> Option<&Arc<TextureMask>> {
@@ -1567,6 +1943,16 @@ impl MyBrush {
         } else {
             set_tip_set_hook(std::ptr::null(), 0, 0.0, 0.0, false);
         }
+        // B-026/027: the flip table rides the same per-stroke arming as the
+        // tip set. Both Off publishes a null table, and the stamp hook's
+        // early return keeps that path bit-identical.
+        set_tip_flip_hook(self.flip_variants.as_ptr(), self.flip_h, self.flip_v);
+        // C-010..012: a fresh draw per input SAMPLE is the finest colour
+        // granularity we have (see `ColorJitter`'s note); per-stroke mode
+        // keeps the offset `begin` drew.
+        if self.jitter.per_dab {
+            self.draw_jitter();
+        }
         set_record_hook(self.record_mode, &mut self.record);
         let surface = self.surface.interface();
         // Wash mode paints into the stroke buffer, not the document — the
@@ -1640,6 +2026,14 @@ impl StrokeSink for MyBrush {
         // Each stroke reseeds the link picker from the clock-ish counter, so
         // identical strokes still produce natural (non-repeating) webs.
         self.rng ^= self.rng.rotate_left(17);
+        // Colour jitter goes the OTHER way, and deliberately (the M4
+        // tip-variation precedent): a FIXED seed per stroke, so the same
+        // stroke replayed — a test, an undo/redo, the repair raster —
+        // paints the same colours. The variation lives along the stroke,
+        // not between two identical ones.
+        self.jitter_rng = JITTER_SEED;
+        self.jitter_off = (0.0, 0.0, 0.0);
+        self.draw_jitter();
         if self.wash {
             // Erase-with-wash: the buffer must record WHERE the dabs landed,
             // so the eraser setting is forced off for the stroke (dabs lay
@@ -1885,6 +2279,20 @@ const FIRST_SAMPLE_DTIME: f64 = 10.0;
 /// number chosen here.
 pub const DENSITY_BY_GAP_DEFAULT: f32 = 0.9;
 
+/// Colour jitter's per-stroke seed. A CONSTANT, not a clock read: the same
+/// stroke has to paint the same colours twice (`ColorJitter`'s doc, and the
+/// M4 tip-variation rng it copies).
+const JITTER_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
+
+/// Range of the running-colour blur width, as a multiple of the brush radius
+/// (and, in the pinned mode, after the px→multiple conversion). The floor is
+/// not zero because the setting is stored as a LOGARITHM: `ln(0)` is `-inf`
+/// and every smudge sample after it reads garbage. The ceiling keeps a
+/// pinned pixel number on a hair-thin brush from asking the sampler for a
+/// radius hundreds of times the dab.
+const BLUR_MIN: f32 = 0.05;
+const BLUR_MAX: f32 = 20.0;
+
 /// Ceiling on dabs per radius. The engine stamps this many dabs for every
 /// radius of travel, so an unbounded value is an unbounded stroke cost (and
 /// `Interval::MIN_PX` on a fat brush would ask for one). 50 is `MIN_PCT`'s
@@ -1979,6 +2387,14 @@ thread_local! {
     /// 1 = base-angle mode, so jitter may apply (direction mode
     /// re-publishes its own angle per dab and would eat it).
     static TIP_JITTER_OK: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+    /// B-026/027 tip flip: the four mirrorings of the active tip (none, H,
+    /// V, HV) as (data ptr, size) pairs — the brush's own boxed table, whose
+    /// address the stamp hook publishes. 0 = no flip armed.
+    static FLIP_SET: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// The two axes' modes, `h | v << 8`, as `TipFlip::ALL` indices.
+    static FLIP_MODE: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// The Random mode's draw, seeded per stroke series like `TIP_RNG`.
+    static FLIP_RNG: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// The mirrored copy of a tip mask (M4's variation variants).
@@ -2209,6 +2625,78 @@ pub extern "C" fn mnc_brush_texture_stamp(direction_deg: f32, tilt_deg: f32) {
         base
     };
     TEXTURE_STAMP_ANGLE.with(|c| c.set(angle.to_bits()));
+    apply_tip_flip(direction_deg);
+}
+
+/// Row 64 (B-026/027): swap the active tip for one of its mirrorings, per
+/// dab. Rides the stamp hook because that is the ONE per-dab callback the C
+/// hands the dab's own direction to — `Reverse` cannot be decided without
+/// it — and because the C calls it before `draw_dab`, so the sampler, the
+/// record and the repair raster all read the pointer this leaves.
+///
+/// Skipped while an M4 tip LIST is armed: that path already mirrors per dab
+/// out of its own variant table, and two hooks writing `TEXTURE_PTR` in the
+/// same dab would just race to be last.
+fn apply_tip_flip(direction_deg: f32) {
+    let set = FLIP_SET.with(|c| c.get()) as *const (*const u8, i32);
+    if set.is_null() || TIP_COUNT.with(|c| c.get()) != 0 {
+        return;
+    }
+    let modes = FLIP_MODE.with(|c| c.get());
+    let (mh, mv) = (
+        TipFlip::ALL[(modes & 0xff) as usize % TipFlip::ALL.len()],
+        TipFlip::ALL[(modes >> 8) as usize % TipFlip::ALL.len()],
+    );
+    // ONE rng step per dab whatever the modes are: two Random axes must not
+    // consume two draws while one axis consumes one, or turning the second
+    // axis on would re-roll the first axis' whole sequence.
+    let r = flip_rng_next();
+    let decide = |mode: TipFlip, bit: u64, reversed: bool| match mode {
+        TipFlip::Off => false,
+        TipFlip::Always => true,
+        TipFlip::Random => (r >> bit) & 1 == 1,
+        TipFlip::Reverse => reversed,
+    };
+    // atan2(dy, dx) in degrees: |angle| > 90 points leftwards, angle < 0
+    // points up the screen (canvas y grows downwards).
+    let dir = if direction_deg.is_finite() {
+        direction_deg
+    } else {
+        0.0
+    };
+    let h = decide(mh, 33, dir.abs() > 90.0);
+    let v = decide(mv, 41, dir < 0.0);
+    let idx = (v as usize) << 1 | h as usize;
+    unsafe {
+        let (p, s) = *set.add(idx);
+        if !p.is_null() {
+            TEXTURE_PTR.with(|c| c.set(p as usize));
+            TEXTURE_SIZE.with(|c| c.set(s));
+        }
+    }
+}
+
+/// One xorshift64 step of the tip-flip rng.
+fn flip_rng_next() -> u64 {
+    FLIP_RNG.with(|c| {
+        let mut x = c.get();
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        c.set(x);
+        x
+    })
+}
+
+/// Arm the tip-flip table for the coming `stroke_to`. Both axes `Off` (every
+/// preset that has never seen this row) publishes a null table, and the
+/// hook's early return then leaves the dab path bit-identical.
+fn set_tip_flip_hook(set: *const (*const u8, i32), h: TipFlip, v: TipFlip) {
+    let armed = h != TipFlip::Off || v != TipFlip::Off;
+    FLIP_SET.with(|c| c.set(if armed { set as usize } else { 0 }));
+    let idx = |f: TipFlip| TipFlip::ALL.iter().position(|x| *x == f).unwrap_or(0) as u32;
+    FLIP_MODE.with(|c| c.set(idx(h) | idx(v) << 8));
+    FLIP_RNG.with(|c| c.set(JITTER_SEED));
 }
 
 /// The published stamp angle — snapshotted into the op (and the GPU
@@ -2843,6 +3331,99 @@ mod wash_smudge_tests {
             mnc_brush_texture_advance();
         }
         assert_eq!(mnc_brush_texture_data(), before, "no set, no swap");
+    }
+
+    /// Row 64 (B-026/027): the per-dab flip picks the right mirroring of
+    /// the tip, and picks it from the DAB'S OWN DIRECTION in `On reverse`
+    /// — the mode the row exists for. Driven through the hook the C calls,
+    /// because that is where the decision has to happen: it is the only
+    /// per-dab callback handed the direction, and it runs before the dab
+    /// is drawn or recorded.
+    #[test]
+    fn tip_flip_picks_the_mirrored_tip_per_dab() {
+        use std::sync::Arc;
+        // Four masks whose only job is to be distinguishable: the table is
+        // (none, H, V, HV) in the index order the hook uses.
+        let mk = |v: u8| {
+            Arc::new(TextureMask {
+                name: format!("f{v}"),
+                size: 4,
+                data: Arc::new(vec![v; 16]),
+            })
+        };
+        let masks = [mk(1), mk(2), mk(3), mk(4)];
+        let table: Box<[(*const u8, i32); 4]> = Box::new([
+            (masks[0].data.as_ptr(), 4),
+            (masks[1].data.as_ptr(), 4),
+            (masks[2].data.as_ptr(), 4),
+            (masks[3].data.as_ptr(), 4),
+        ]);
+        let active = || unsafe { *mnc_brush_texture_data() };
+        // A texture must look ARMED or the swap is skipped like any other
+        // untextured brush.
+        TEXTURE_SIZE.with(|c| c.set(4));
+        TEXTURE_PTR.with(|c| c.set(masks[0].data.as_ptr() as usize));
+        set_tip_set_hook(std::ptr::null(), 0, 0.0, 0.0, false);
+
+        // Off/Off: the pointer must not move — every preset that has never
+        // seen this row draws exactly as before.
+        set_tip_flip_hook(table.as_ptr(), TipFlip::Off, TipFlip::Off);
+        mnc_brush_texture_stamp(180.0, 0.0);
+        assert_eq!(active(), 1, "no flip armed, no swap");
+
+        // Always, horizontal only.
+        set_tip_flip_hook(table.as_ptr(), TipFlip::Always, TipFlip::Off);
+        mnc_brush_texture_stamp(0.0, 0.0);
+        assert_eq!(active(), 2, "always-H stamps the H mirror");
+
+        // On reverse: rightwards keeps the tip, leftwards mirrors it.
+        set_tip_flip_hook(table.as_ptr(), TipFlip::Reverse, TipFlip::Off);
+        mnc_brush_texture_stamp(0.0, 0.0);
+        assert_eq!(active(), 1, "drawing right: unmirrored");
+        mnc_brush_texture_stamp(180.0, 0.0);
+        assert_eq!(active(), 2, "drawing left: mirrored");
+        mnc_brush_texture_stamp(-179.0, 0.0);
+        assert_eq!(active(), 2, "and just past the vertical, still mirrored");
+
+        // Vertical reverse rides the sign of the angle (canvas y grows
+        // downwards, so a negative angle is an upward stroke), and the two
+        // axes combine into the fourth variant.
+        set_tip_flip_hook(table.as_ptr(), TipFlip::Always, TipFlip::Reverse);
+        mnc_brush_texture_stamp(45.0, 0.0);
+        assert_eq!(active(), 2, "downwards: H only");
+        mnc_brush_texture_stamp(-45.0, 0.0);
+        assert_eq!(active(), 4, "upwards: both mirrors");
+
+        // Random visits both sides, and does it identically for the same
+        // arming — a re-armed stroke repeats, exactly like the M4 rng.
+        let roll = || {
+            set_tip_flip_hook(table.as_ptr(), TipFlip::Random, TipFlip::Off);
+            (0..32)
+                .map(|_| {
+                    mnc_brush_texture_stamp(0.0, 0.0);
+                    active()
+                })
+                .collect::<Vec<_>>()
+        };
+        let first = roll();
+        assert!(first.contains(&1) && first.contains(&2), "{first:?}");
+        assert_eq!(first, roll(), "the same stroke must roll the same tips");
+
+        // An M4 tip LIST owns the pointer instead: two hooks writing it in
+        // one dab would just race.
+        let listed: Box<[(*const u8, i32)]> = vec![(masks[2].data.as_ptr(), 4)].into();
+        set_tip_set_hook(listed.as_ptr(), 1, 0.0, 0.0, false);
+        set_tip_flip_hook(table.as_ptr(), TipFlip::Always, TipFlip::Always);
+        mnc_brush_texture_advance();
+        mnc_brush_texture_stamp(0.0, 0.0);
+        assert_eq!(active(), 3, "the tip list's pick stands");
+
+        // Leave the thread-locals as found — every later test in this
+        // harness thread shares them.
+        set_tip_set_hook(std::ptr::null(), 0, 0.0, 0.0, false);
+        set_tip_flip_hook(std::ptr::null(), TipFlip::Off, TipFlip::Off);
+        TEXTURE_SIZE.with(|c| c.set(0));
+        TEXTURE_PTR.with(|c| c.set(usize::MAX));
     }
 
     /// M4: seeded stability — identical strokes through a tip-list brush

@@ -954,6 +954,13 @@ pub enum FigureMode {
     Ellipse,
     /// Click vertices; the first vertex / Enter closes, Esc cancels.
     Polygon,
+    /// Rows 84/85 (C-014–022, U-001/002) 連続曲線: click a few points and
+    /// Enter (or a double-click) inks a smooth spline THROUGH them with the
+    /// current brush. The two-stage sibling of Polygon — same click-list
+    /// gesture, same Enter/Esc, but the path is a Catmull-Rom curve and it
+    /// is not closed. The mark a hand cannot make in one pass: a 900 px
+    /// hair sweep, a cable, a curved speed line.
+    Curve,
     /// CSP 流線 Stream line: drag along the motion — a fresh speed-line
     /// layer sweeps the canvas at that angle (the GenLines engine; the
     /// layer stays parameter-editable afterwards, unlike CSP's).
@@ -1006,6 +1013,7 @@ impl FigureMode {
             FigureMode::Rect => "Rectangle",
             FigureMode::Ellipse => "Ellipse",
             FigureMode::Polygon => "Polygon",
+            FigureMode::Curve => "Continuous curve",
             FigureMode::Stream => "Stream line",
             FigureMode::Focus => "Saturated line",
             FigureMode::Urchin => "Sea urchin flash",
@@ -1276,6 +1284,10 @@ pub enum FillMode {
     /// FI-004 Lasso fill (CSP 塗りつぶし・投げなわ): fill the lassoed shape
     /// ITSELF, boundaries ignored — colour blocking and shadow shapes.
     Lasso,
+    /// Row 119 / FI-005 Leftover pen (CSP 塗り残し部分に塗る): scrub across
+    /// finished colour and only the still-EMPTY enclosed pockets under the
+    /// drag fill. A filter shaped like a brush — see `fill::leftover_fill`.
+    Leftover,
 }
 
 impl FillMode {
@@ -1284,6 +1296,7 @@ impl FillMode {
             FillMode::Click => "Fill",
             FillMode::Enclose => "Enclose and fill",
             FillMode::Lasso => "Lasso fill",
+            FillMode::Leftover => "Leftover pen",
         }
     }
 }
@@ -1554,6 +1567,7 @@ impl SubTool {
             SubTool::FillRefer(Reference),
             SubTool::Fill(FillMode::Enclose),
             SubTool::Fill(FillMode::Lasso),
+            SubTool::Fill(FillMode::Leftover),
             SubTool::Tone(P::Dots),
             SubTool::Tone(P::Lines),
             SubTool::Tone(P::Square),
@@ -1588,6 +1602,7 @@ impl SubTool {
             SubTool::Figure(FigureMode::Rect),
             SubTool::Figure(FigureMode::Ellipse),
             SubTool::Figure(FigureMode::Polygon),
+            SubTool::Figure(FigureMode::Curve),
             SubTool::Figure(FigureMode::Stream),
             SubTool::Figure(FigureMode::Focus),
             SubTool::Figure(FigureMode::Urchin),
@@ -1633,6 +1648,7 @@ impl SubTool {
             SubTool::Fill(FillMode::Click) => "Fill",
             SubTool::Fill(FillMode::Enclose) => "Enclose and fill",
             SubTool::Fill(FillMode::Lasso) => "Lasso fill",
+            SubTool::Fill(FillMode::Leftover) => "Leftover pen",
             SubTool::Tone(p) => p.label(),
             SubTool::Wand(All) => "Refer all layers",
             SubTool::Wand(Active) => "Refer editing layer only",
@@ -1787,6 +1803,28 @@ pub struct ToolProps {
     pub density_by_gap: Option<bool>,
     /// CSP Anti-aliasing (A-010): the four-level edge feather.
     pub anti_alias: AntiAlias,
+    /// CSP Ink ▸ Density of paint (I-010), 0..1: how much of the DRAWING
+    /// colour a dab lays down against how much it picked up off the canvas.
+    /// 1.0 = neat paint, and every preset that has never heard of colour
+    /// mixing reads 1.0 — so the row is a no-op until it is moved.
+    pub paint_density: f32,
+    /// CSP Ink ▸ Color stretch (I-011), 0..1: how far the picked-up pigment
+    /// is dragged along the stroke.
+    pub color_stretch: f32,
+    /// CSP Ink ▸ Intensity of blur (I-013): how wide the running colour is
+    /// sampled from. A multiple of the brush radius, unless `blur_abs`.
+    pub blur: f32,
+    /// The blur width is a canvas-pixel number that does NOT follow the
+    /// Size slider (CSP's other mode) — the `random_abs` pattern exactly,
+    /// including the unit of `blur` changing with it.
+    pub blur_abs: bool,
+    /// CSP Color jitter (C-010..012): hue/sat/brightness wander.
+    pub jitter: mn_brush::ColorJitter,
+    /// CSP 反転 (B-026/027): the brush tip's flip modes, per axis. Only a
+    /// TEXTURE tip has an image to mirror; on a plain round dab the rows
+    /// sit inert (and say so).
+    pub tip_flip_h: mn_brush::TipFlip,
+    pub tip_flip_v: mn_brush::TipFlip,
 }
 
 impl Default for ToolProps {
@@ -1824,6 +1862,21 @@ impl Default for ToolProps {
             interval_px: DEFAULT_INTERVAL_PX,
             density_by_gap: None,
             anti_alias: AntiAlias::AsPreset,
+            // The ink group's neutral state: neat paint, so stretch and
+            // blur have nothing to act on and the three rows cannot change
+            // a pixel until the artist reaches for them.
+            paint_density: 1.0,
+            color_stretch: 0.5,
+            blur: 1.0,
+            blur_abs: false,
+            jitter: mn_brush::ColorJitter {
+                hue: 0.0,
+                sat: 0.0,
+                bri: 0.0,
+                per_dab: true,
+            },
+            tip_flip_h: mn_brush::TipFlip::Off,
+            tip_flip_v: mn_brush::TipFlip::Off,
         }
     }
 }
@@ -2391,6 +2444,23 @@ pub enum AppCmd {
     SetDensityByGap(bool),
     /// CSP Anti-aliasing (A-010): the four-level edge feather.
     SetAntiAlias(AntiAlias),
+    /// CSP Ink ▸ Density of paint (I-010), 0..1.
+    SetPaintDensity(f32),
+    /// CSP Ink ▸ Color stretch (I-011), 0..1.
+    SetColorStretch(f32),
+    /// CSP Ink ▸ Intensity of blur (I-013): the width, in the unit the
+    /// companion `SetBlurAbs` selects.
+    SetBlur(f32),
+    /// ...and that unit: canvas px (pinned) instead of a multiple of the
+    /// brush radius (scales with size).
+    SetBlurAbs(bool),
+    /// CSP Color jitter (C-010..012): the three amounts and the per-dab /
+    /// per-stroke switch, in one variant — they are one row and one
+    /// `ColorJitter` value on the engine side.
+    SetColorJitter(mn_brush::ColorJitter),
+    /// CSP 反転 (B-026/027): the tip's horizontal and vertical flip modes.
+    /// Both axes together, for the same reason as the jitter amounts.
+    SetTipFlip(mn_brush::TipFlip, mn_brush::TipFlip),
     /// Brush opacity 0..1.
     SetOpacity(f32),
     /// Pressure→size floor, 0..100 %.
@@ -2780,6 +2850,12 @@ pub enum AppCmd {
     /// FI-004 Lasso fill: the Lasso drag's freehand path. The shape itself
     /// is painted, boundaries ignored — one undo step.
     LassoFill {
+        pts: Vec<(f32, f32)>,
+    },
+    /// Row 119 / FI-005 Leftover pen: the scrub's freehand path. Only the
+    /// enclosed pockets under it that are STILL EMPTY fill; finished colour
+    /// is never repainted. One undo step, like its two siblings.
+    LeftoverFill {
         pts: Vec<(f32, f32)>,
     },
     // --- materials (TRIAGE 133, part 1) ------------------------------------
@@ -6374,6 +6450,9 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 FillMode::Click => "fill: click an area",
                 FillMode::Enclose => "enclose and fill: drag around the areas to fill",
                 FillMode::Lasso => "lasso fill: drag the shape to paint",
+                FillMode::Leftover => {
+                    "leftover pen: scrub across the flat — only the enclosed spots still empty fill"
+                }
             });
         }
         AppCmd::ToneRegion(x, y) => crate::app::tone_tool::tone_region(app, x, y),
@@ -6402,6 +6481,31 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 )
             } else {
                 "nothing enclosed — drag right around the areas to fill".into()
+            });
+            app.mark_dirty();
+        }
+        AppCmd::LeftoverFill { pts } => {
+            app.refresh_tones();
+            // Denser seeding than the enclose lasso: the holes this tool
+            // exists for are a few pixels wide, and a seed every 4 px of
+            // travel would scrub straight over them. `leftover_fill` drops
+            // every seed standing on finished colour, so the extra points
+            // cost nothing on the flat — one flood per distinct pocket.
+            let seeds = subsample_path(&pts, 1.0);
+            let color = app.active_color();
+            let first = seeds.first().copied().unwrap_or((0, 0));
+            let (opts, auto) = mn_core::fill::resolve_auto(&app.doc, first, &app.fill_opts);
+            if app.fill_opts.auto {
+                app.fill_auto = auto;
+            }
+            let (n, pockets) = mn_core::fill::leftover_fill(&mut app.doc, &seeds, color, &opts);
+            app.set_status(if n > 0 {
+                format!(
+                    "{pockets} leftover spot(s) filled ({n} px){}",
+                    auto_note(&app.fill_opts, auto)
+                )
+            } else {
+                "nothing left over under that drag — it only fills enclosed spots that are still empty".into()
             });
             app.mark_dirty();
         }
@@ -7400,6 +7504,45 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
         AppCmd::SetAntiAlias(aa) => {
             app.props_current.anti_alias = aa;
             app.engine_mut().set_anti_alias(aa);
+            app.mark_dirty();
+        }
+        AppCmd::SetPaintDensity(d) => {
+            app.props_current.paint_density = d.clamp(0.0, 1.0);
+            let v = app.props_current.paint_density;
+            app.engine_mut().set_paint_density(v);
+            app.mark_dirty();
+        }
+        AppCmd::SetColorStretch(v) => {
+            app.props_current.color_stretch = v.clamp(0.0, 1.0);
+            let v = app.props_current.color_stretch;
+            app.engine_mut().set_color_stretch(v);
+            app.mark_dirty();
+        }
+        AppCmd::SetBlur(v) => {
+            app.props_current.blur = v;
+            let (v, abs) = (app.props_current.blur, app.props_current.blur_abs);
+            app.engine_mut().set_blur(v, abs);
+            app.mark_dirty();
+        }
+        AppCmd::SetBlurAbs(abs) => {
+            // The number keeps its face value and changes UNIT, exactly as
+            // the randomization pair does: 2 stops meaning "twice the
+            // radius" and starts meaning "2 px". Re-pushing it is what makes
+            // the switch visible in the stroke instead of only in the label.
+            app.props_current.blur_abs = abs;
+            let v = app.props_current.blur;
+            app.engine_mut().set_blur(v, abs);
+            app.mark_dirty();
+        }
+        AppCmd::SetColorJitter(j) => {
+            app.props_current.jitter = j;
+            app.engine_mut().set_color_jitter(j);
+            app.mark_dirty();
+        }
+        AppCmd::SetTipFlip(h, v) => {
+            app.props_current.tip_flip_h = h;
+            app.props_current.tip_flip_v = v;
+            app.engine_mut().set_tip_flip(h, v);
             app.mark_dirty();
         }
         AppCmd::SetOpacity(o) => {

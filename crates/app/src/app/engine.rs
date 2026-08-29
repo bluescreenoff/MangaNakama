@@ -38,6 +38,11 @@ pub enum EngineKind {
 /// back to the MyPaint path rather than leaving the sub tool with no engine.
 pub fn preset_engine(path: &Path) -> Option<EngineKind> {
     match mn_brush::preset_engine_key(path)?.as_str() {
+        // Row 96: the dot pen is a `SimpleDab` in its pixel-exact mode, not
+        // an engine of its own — it needs no state the plain dab engine
+        // does not already carry, and every `EngineKind` arm is a match
+        // site in six files.
+        "dot" => Some(EngineKind::Dab(SimpleDab::dot_pen())),
         "grid" => Some(EngineKind::Grid(GridDab::default())),
         "hairy" => Some(EngineKind::Hairy(HairyDab::default())),
         "curve" => Some(EngineKind::Curve(CurveDab::default())),
@@ -424,6 +429,12 @@ impl Engine {
                 y.base.min_radius *= k;
                 y.base.max_radius = r;
             }
+            // Row 96: the dot pen is ONE PIXEL by definition, so the Size
+            // slider has nothing to say to it. Left resizable it would keep
+            // stamping single pixels (the aliased path ignores the radius)
+            // but space them by the radius — a 1 px dotted line, which
+            // looks like a bug in the tool rather than a setting.
+            EngineKind::Dab(d) if d.aliased => {}
             EngineKind::Dab(d) => {
                 d.min_radius = r * (BASE_MIN_RADIUS / BASE_MAX_RADIUS);
                 d.max_radius = r;
@@ -589,6 +600,90 @@ impl Engine {
         match &self.main {
             EngineKind::My(b) => b.anti_alias_px(),
             _ => 0.0,
+        }
+    }
+
+    /// CSP Ink ▸ Density of paint (I-010).
+    pub fn set_paint_density(&mut self, d: f32) {
+        self.each_kind(|k| {
+            if let EngineKind::My(b) = k {
+                b.set_paint_density(d);
+            }
+        });
+    }
+
+    /// Density of paint as the PRESET holds it — the honest reading a sub
+    /// tool is seeded from. 1.0 (neat paint) for every kind that has no
+    /// colour mixing at all.
+    pub fn paint_density(&self) -> f32 {
+        match &self.main {
+            EngineKind::My(b) => b.paint_density(),
+            _ => 1.0,
+        }
+    }
+
+    /// CSP Ink ▸ Color stretch (I-011).
+    pub fn set_color_stretch(&mut self, v: f32) {
+        self.each_kind(|k| {
+            if let EngineKind::My(b) = k {
+                b.set_color_stretch(v);
+            }
+        });
+    }
+
+    pub fn color_stretch(&self) -> f32 {
+        match &self.main {
+            EngineKind::My(b) => b.color_stretch(),
+            _ => 0.5,
+        }
+    }
+
+    /// CSP Ink ▸ Intensity of blur (I-013). `absolute` pins the width to
+    /// canvas px instead of scaling it with the brush.
+    pub fn set_blur(&mut self, amount: f32, absolute: bool) {
+        self.each_kind(|k| {
+            if let EngineKind::My(b) = k {
+                b.set_blur(amount, absolute);
+            }
+        });
+    }
+
+    pub fn blur(&self) -> (f32, bool) {
+        match &self.main {
+            EngineKind::My(b) => b.blur(),
+            _ => (1.0, false),
+        }
+    }
+
+    /// CSP Color jitter (C-010..012).
+    pub fn set_color_jitter(&mut self, j: mn_brush::ColorJitter) {
+        self.each_kind(|k| {
+            if let EngineKind::My(b) = k {
+                b.set_color_jitter(j);
+            }
+        });
+    }
+
+    pub fn color_jitter(&self) -> mn_brush::ColorJitter {
+        match &self.main {
+            EngineKind::My(b) => b.color_jitter(),
+            _ => mn_brush::ColorJitter::default(),
+        }
+    }
+
+    /// CSP 反転 (B-026/027): the tip's per-axis flip modes.
+    pub fn set_tip_flip(&mut self, h: mn_brush::TipFlip, v: mn_brush::TipFlip) {
+        self.each_kind(|k| {
+            if let EngineKind::My(b) = k {
+                b.set_tip_flip(h, v);
+            }
+        });
+    }
+
+    pub fn tip_flip(&self) -> (mn_brush::TipFlip, mn_brush::TipFlip) {
+        match &self.main {
+            EngineKind::My(b) => b.tip_flip(),
+            _ => (mn_brush::TipFlip::Off, mn_brush::TipFlip::Off),
         }
     }
 
@@ -850,6 +945,28 @@ impl EngineKind {
             b.set_density_by_gap(on);
         }
         b.set_anti_alias(p.anti_alias);
+        // The ink group (I-010/011/013). Read-back guarded like `min_size`
+        // and the randomization above, and for the same reason: each of
+        // these REPLACES a base value the preset authored, so writing them
+        // unconditionally would re-ink every colour-mixing preset with the
+        // panel's rounded reading of its own number. `set_blur` AFTER
+        // `set_size_px` above — a pinned pixel width is converted against
+        // the radius that call just set, exactly like a Fixed interval.
+        if (p.paint_density - b.paint_density()).abs() > 1e-3 {
+            b.set_paint_density(p.paint_density);
+        }
+        if (p.color_stretch - b.color_stretch()).abs() > 1e-3 {
+            b.set_color_stretch(p.color_stretch);
+        }
+        let (b_amt, b_abs) = b.blur();
+        if (p.blur - b_amt).abs() > 1e-3 || p.blur_abs != b_abs {
+            b.set_blur(p.blur, p.blur_abs);
+        }
+        // Jitter and tip flip carry their own off state (all-zero amounts,
+        // both axes Off), which IS every untouched preset's state, so they
+        // apply unconditionally and still change nothing there.
+        b.set_color_jitter(p.jitter);
+        b.set_tip_flip(p.tip_flip_h, p.tip_flip_v);
         // Wash semantics: in build-up the one Opacity slider IS the per-dab
         // alpha; in wash it becomes the stroke-level opacity and Flow is the
         // per-dab alpha inside the buffer (Krita's Opacity/Flow pair).

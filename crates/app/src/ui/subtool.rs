@@ -199,6 +199,23 @@ fn mode_sub_tools(ui: &mut egui::Ui, app: &mut App) {
             {
                 app.push_cmd(AppCmd::SetFillMode(FillMode::Lasso));
             }
+            // Row 119 / FI-005: the after-flatting pass. Same family, same
+            // freehand drag, opposite question — not "what did I enclose"
+            // but "what did I MISS".
+            if mode_row(
+                ui,
+                app.fill_mode == FillMode::Leftover,
+                Icon::Fill,
+                "Leftover pen",
+            )
+            .on_hover_text(
+                "scrub across a finished flat — only the enclosed spots still \
+                 empty fill; colour you already laid down is never repainted",
+            )
+            .clicked()
+            {
+                app.push_cmd(AppCmd::SetFillMode(FillMode::Leftover));
+            }
         }
         Tool::Tone => {
             // The nine screen shapes — the choice made BEFORE the click.
@@ -411,6 +428,10 @@ fn mode_sub_tools(ui: &mut egui::Ui, app: &mut App) {
                 (FigureMode::Rect, Icon::Rect),
                 (FigureMode::Ellipse, Icon::Ellipse),
                 (FigureMode::Polygon, Icon::Poly),
+                // Rows 84/85: the curve rides in Direct draw because that
+                // is what it does — it inks with your brush, unlike the
+                // generator groups below.
+                (FigureMode::Curve, Icon::Vector),
             ] {
                 if mode_row(ui, app.figure_mode == m, icon, m.label()).clicked() {
                     app.figure_mode = m;

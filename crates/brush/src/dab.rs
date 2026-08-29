@@ -35,6 +35,11 @@ pub struct SimpleDab {
     /// stroke) paints as before, bit for bit. Shared by every MN engine
     /// through `base`.
     pub mask: Option<std::sync::Arc<crate::AntiOverflowMask>>,
+    /// CSP ドットペン (row 96): every dab is ONE whole pixel — the one its
+    /// centre falls in — at full alpha, with no disc, no fringe and no
+    /// pressure. See [`SimpleDab::dot_pen`] for why that is the definition
+    /// rather than "a very small brush".
+    pub aliased: bool,
 }
 
 impl Default for SimpleDab {
@@ -48,6 +53,7 @@ impl Default for SimpleDab {
             prev: None,
             carry: 0.0,
             mask: None,
+            aliased: false,
         }
     }
 }
@@ -55,6 +61,33 @@ impl Default for SimpleDab {
 impl SimpleDab {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// CSP's **dot pen** (ドットペン, triage row 96): locked to 1 px with
+    /// anti-aliasing off — hard single-pixel lines for fine hatching and
+    /// pixel-level cleanup. Reached through a preset's `mn-engine: "dot"`
+    /// key, like the other procedural sub tools.
+    ///
+    /// It is its own engine rather than a `.myb` at radius 0.5 because a
+    /// libmypaint dab that small is not a pixel: its coverage depends on
+    /// where between two pixel centres the dab landed, so the "1 px" line
+    /// comes out as a two-pixel-wide grey ribbon that shimmers along its
+    /// length. Pixel-exact work needs the pixel to be the unit, so here it
+    /// is: one dab paints the pixel its centre is in, whole.
+    ///
+    /// Pressure moves nothing, for the same reason — a half-pressure dot
+    /// would be a grey pixel, which is exactly what this tool exists to
+    /// avoid. The step is a quarter pixel so the pixels a stroke lands on
+    /// are always 8-connected (`stamp_segment`'s floor is 0.25 px).
+    pub fn dot_pen() -> Self {
+        Self {
+            min_radius: 0.5,
+            max_radius: 0.5,
+            flow: 1.0,
+            spacing: 0.5,
+            aliased: true,
+            ..Self::default()
+        }
     }
 
     #[inline]
@@ -65,7 +98,50 @@ impl SimpleDab {
 
     #[inline]
     pub fn alpha_for(&self, pressure: f32) -> f32 {
+        if self.aliased {
+            // Pixel-exact: every pixel is ink or nothing, so pressure has
+            // nowhere to go. A pressure-faded dot pen is a grey-pixel pen.
+            return self.flow.clamp(0.0, 1.0);
+        }
         (pressure.clamp(0.0, 1.0) * self.flow).clamp(0.0, 1.0)
+    }
+
+    /// The dot pen's whole rasterizer: source-over ONE pixel — the one the
+    /// dab centre is in — at `alpha`, honouring the anti-overflow barrier
+    /// like every other MN engine. Off-canvas centres paint nothing.
+    fn stamp_pixel(&self, doc: &mut Document, cx: f32, cy: f32, alpha: f32) {
+        if !(cx.is_finite() && cy.is_finite()) {
+            return;
+        }
+        let (px, py) = (cx.floor() as i32, cy.floor() as i32);
+        let (dw, dh) = (doc.size.0 as i32, doc.size.1 as i32);
+        if px < 0 || py < 0 || px >= dw || py >= dh {
+            return;
+        }
+        if let Some(m) = self.mask.as_deref()
+            && m.blocked(px, py)
+        {
+            return;
+        }
+        let one = FIX15_ONE as u32;
+        let sa15 = ((alpha.clamp(0.0, 1.0) * one as f32) as u32).min(one);
+        if sa15 == 0 {
+            return;
+        }
+        let inv = one - sa15;
+        let idx = TileIdx::of_pixel(px, py);
+        let (ox, oy) = idx.origin();
+        let (lx, ly) = ((px - ox) as usize, (py - oy) as usize);
+        let tile = doc.active_layer_mut().tile_mut(idx);
+        let o = ly * TILE_SIZE * TILE_CHANNELS + lx * TILE_CHANNELS;
+        let data = tile.data_mut();
+        for c in 0..3 {
+            let s = (self.color[c].clamp(0.0, 1.0) * sa15 as f32) as u32;
+            let d = u32::from(data[o + c]);
+            data[o + c] = (s + ((d * inv + (one >> 1)) >> 15)).min(u16::MAX as u32) as u16;
+        }
+        let d = u32::from(data[o + 3]);
+        data[o + 3] = (sa15 + ((d * inv + (one >> 1)) >> 15)).min(one) as u16;
     }
 
     /// Stamp one anti-aliased disc, blended source-over in premultiplied fix15.
@@ -76,6 +152,10 @@ impl SimpleDab {
         let alpha = alpha.clamp(0.0, 1.0);
         if alpha <= 0.0 || radius <= 0.0 || !cx.is_finite() || !cy.is_finite() {
             return;
+        }
+        // The dot pen never draws a disc — see `dot_pen`.
+        if self.aliased {
+            return self.stamp_pixel(doc, cx, cy, alpha);
         }
 
         // Canvas-pixel bbox, clipped to the document. +1 for the AA fringe.
@@ -1025,5 +1105,142 @@ mod anti_overflow_tests {
         plain.color = [1.0, 0.0, 0.0];
         plain.dab(&mut doc, 32.0, 10.0, 8.0, 1.0);
         assert!(alpha(&doc, 32, 10) > 0, "no mask = paint as before");
+    }
+}
+
+#[cfg(test)]
+mod dot_pen_tests {
+    use super::*;
+    use mn_core::{Document, PenSample, StrokeSink, TileIdx};
+
+    fn alpha(doc: &Document, x: i32, y: i32) -> u16 {
+        let idx = TileIdx::of_pixel(x, y);
+        doc.active_layer()
+            .tile(idx)
+            .map(|t| {
+                let (ox, oy) = idx.origin();
+                t.pixel((x - ox) as usize, (y - oy) as usize)[3]
+            })
+            .unwrap_or(0)
+    }
+
+    fn drag(d: &mut SimpleDab, doc: &mut Document, pressure: f32) {
+        d.begin(doc);
+        for i in 0..=40 {
+            d.sample(
+                doc,
+                PenSample {
+                    // A deliberately AWKWARD path: sub-pixel start, gentle
+                    // slope, so a disc-based engine would have to spread
+                    // coverage over two rows somewhere along it.
+                    x: 8.37 + i as f32 * 1.0,
+                    y: 12.62 + i as f32 * 0.25,
+                    pressure,
+                    tilt_x: 0.0,
+                    tilt_y: 0.0,
+                    t_ms: i as f64 * 8.0,
+                },
+            );
+        }
+        d.end(doc);
+    }
+
+    /// Row 96, the whole claim: the dot pen paints WHOLE PIXELS. Every
+    /// pixel it touches is either untouched or fully inked — no partial
+    /// coverage anywhere, at any pressure, from any sub-pixel start.
+    ///
+    /// This is the test the ordinary engine fails: at radius 0.5 the AA
+    /// disc lays a grey ribbon whose darkness depends on where between two
+    /// pixel centres each dab landed, which is exactly the shimmer that
+    /// makes pixel-level cleanup impossible.
+    #[test]
+    fn dot_pen_paints_whole_pixels_only() {
+        let mut doc = Document::new(128, 64);
+        drag(&mut SimpleDab::dot_pen(), &mut doc, 0.35);
+
+        let mut inked = 0usize;
+        for y in 0..64 {
+            for x in 0..128 {
+                let a = u32::from(alpha(&doc, x, y));
+                assert!(
+                    a == 0 || a == mn_core::FIX15_ONE,
+                    "pixel ({x}, {y}) came out grey: alpha {a}"
+                );
+                inked += usize::from(a > 0);
+            }
+        }
+        assert!(inked >= 40, "the stroke barely painted: {inked} px");
+
+        // ...and the same path through the ordinary AA engine DOES produce
+        // partial coverage, so the assertion above is measuring the mode
+        // and not a property every engine has.
+        let mut soft = Document::new(128, 64);
+        let mut plain = SimpleDab::dot_pen();
+        plain.aliased = false;
+        drag(&mut plain, &mut soft, 0.35);
+        let greys = (0..64)
+            .flat_map(|y| (0..128).map(move |x| (x, y)))
+            .filter(|(x, y)| {
+                let a = u32::from(alpha(&soft, *x, *y));
+                a > 0 && a < mn_core::FIX15_ONE
+            })
+            .count();
+        assert!(greys > 0, "the AA disc should have soft edges to contrast");
+    }
+
+    /// Pressure is not a knob on a pixel pen: a feather-light pass and a
+    /// full-force one lay the SAME pixels at the same strength. (The disc
+    /// engine keeps its pressure→alpha ramp — this is the aliased mode's
+    /// rule, not a change to the shared one.)
+    #[test]
+    fn dot_pen_ignores_pressure() {
+        let (mut light, mut heavy) = (Document::new(96, 48), Document::new(96, 48));
+        drag(&mut SimpleDab::dot_pen(), &mut light, 0.05);
+        drag(&mut SimpleDab::dot_pen(), &mut heavy, 1.0);
+        for y in 0..48 {
+            for x in 0..96 {
+                assert_eq!(
+                    alpha(&light, x, y),
+                    alpha(&heavy, x, y),
+                    "pressure moved pixel ({x}, {y})"
+                );
+            }
+        }
+        let plain = SimpleDab::default();
+        assert!(
+            plain.alpha_for(0.2) < plain.alpha_for(1.0),
+            "the ordinary dab keeps its pressure ramp"
+        );
+    }
+
+    /// The barrier applies to the pixel pen too — one pixel at a time is
+    /// still painting (row 42's rule is per pixel, not per engine).
+    #[test]
+    fn dot_pen_obeys_the_anti_overflow_barrier() {
+        let mut doc = Document::new(64, 64);
+        let mut allow = vec![255u8; 64 * 64];
+        for y in 0..64 {
+            allow[y * 64 + 20] = 0;
+        }
+        let mut d = SimpleDab::dot_pen();
+        d.mask = Some(std::sync::Arc::new(crate::AntiOverflowMask { w: 64, allow }));
+        d.begin(&mut doc);
+        for i in 0..=30 {
+            d.sample(
+                &mut doc,
+                PenSample {
+                    x: 8.5 + i as f32,
+                    y: 32.5,
+                    pressure: 1.0,
+                    tilt_x: 0.0,
+                    tilt_y: 0.0,
+                    t_ms: i as f64 * 8.0,
+                },
+            );
+        }
+        d.end(&mut doc);
+        assert!(alpha(&doc, 15, 32) > 0, "the near side painted");
+        assert_eq!(alpha(&doc, 20, 32), 0, "the blocked column stayed clean");
+        assert!(alpha(&doc, 30, 32) > 0, "and it carried on past it");
     }
 }

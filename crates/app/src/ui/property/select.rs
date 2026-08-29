@@ -304,6 +304,12 @@ pub(crate) fn sec_fill(ui: &mut egui::Ui, app: &mut App) {
     if app.fill_mode == crate::cmd::FillMode::Enclose {
         ui.weak("drag right around the areas to fill — everything closed inside goes");
     }
+    // Row 119: the leftover pen runs the same flood, so every knob below
+    // means what it means under the bucket — only the seeds and the mask
+    // differ, and both are decided by what is already painted.
+    if app.fill_mode == crate::cmd::FillMode::Leftover {
+        ui.weak("scrub across the flat — only enclosed spots still empty fill");
+    }
     let mut o = app.fill_opts;
     let mut tol = o.tolerance * 100.0;
     let mut changed = ValueBar::new("Tolerance", 0.0, 50.0)

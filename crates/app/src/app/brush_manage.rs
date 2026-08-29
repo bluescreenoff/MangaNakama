@@ -186,12 +186,63 @@ impl App {
         } else {
             set(settings, "opaque", props.opacity as f64);
         }
+        // The ink group (rows 56/57/60) rides the SETTINGS, not an `mn-`
+        // key: `smudge`, `smudge_length` and `smudge_radius_log` are
+        // ordinary libmypaint base values, so a brush saved with colour
+        // mixing on reloads through the normal preset path — and stays
+        // readable by MyPaint itself. Density is stored the way libmypaint
+        // states it, as the picked-up share.
+        set(settings, "smudge", (1.0 - props.paint_density) as f64);
+        set(settings, "smudge_length", props.color_stretch as f64);
+        // Same px→multiple conversion the engine does, against the size
+        // this preset is being saved AT: a pinned width has to be re-read
+        // as a multiple to survive a file that has no idea it was pinned.
+        let blur_rel = if props.blur_abs {
+            (props.blur / (props.size_px / 2.0).max(1e-3)).clamp(0.05, 20.0)
+        } else {
+            props.blur.clamp(0.05, 20.0)
+        };
+        set(settings, "smudge_radius_log", blur_rel.ln() as f64);
         json["mn-wash"] = serde_json::json!(props.wash);
         if props.wash {
             json["mn-wash-opacity"] = serde_json::json!(props.opacity);
         }
         json["mn-hard-dab"] = serde_json::json!(props.hard_dab);
         json["mn-scatter"] = serde_json::json!(props.scatter);
+        // Colour jitter and tip flip are ours, so they are `mn-` keys —
+        // and absent when off, so a saved brush with neither carries no
+        // trace of the rows.
+        let jitter = props.jitter.sane();
+        let o = json.as_object_mut()?;
+        for (key, amount) in [
+            ("mn-jitter-hue", jitter.hue),
+            ("mn-jitter-sat", jitter.sat),
+            ("mn-jitter-bri", jitter.bri),
+        ] {
+            if jitter.is_off() {
+                o.remove(key);
+            } else {
+                o.insert(key.into(), serde_json::json!(amount));
+            }
+        }
+        if jitter.is_off() {
+            o.remove("mn-jitter-per-dab");
+        } else {
+            o.insert("mn-jitter-per-dab".into(), serde_json::json!(jitter.per_dab));
+        }
+        for (key, mode) in [
+            ("mn-tip-flip-h", props.tip_flip_h),
+            ("mn-tip-flip-v", props.tip_flip_v),
+        ] {
+            match mode.key_name() {
+                Some(name) => {
+                    o.insert(key.into(), serde_json::json!(name));
+                }
+                None => {
+                    o.remove(key);
+                }
+            }
+        }
         if props.brush_blend != mn_core::Blend::Normal {
             json["mn-brush-blend"] = serde_json::json!(props.brush_blend.short_name());
         } else {
@@ -498,6 +549,22 @@ mod tests {
         props.texture = 1;
         props.texture_scroll = 3.0;
         props.texture_rotate = mn_brush::TextureRotate::Tilt;
+        // Rows 56/57/60/61/64: the ink group rides the SETTINGS block, the
+        // two of ours ride `mn-` keys — and "save current" is the rail that
+        // has to carry every one of them or the tuned brush is not the
+        // brush that was tuned.
+        props.paint_density = 0.4;
+        props.color_stretch = 0.8;
+        props.blur = 3.0;
+        props.blur_abs = false;
+        props.jitter = mn_brush::ColorJitter {
+            hue: 0.3,
+            sat: 0.1,
+            bri: 0.2,
+            per_dab: true,
+        };
+        props.tip_flip_h = mn_brush::TipFlip::Reverse;
+        props.tip_flip_v = mn_brush::TipFlip::Off;
         let names = vec!["grain-7".to_owned()];
         let (path, name) = app
             .save_current_into(root.clone(), &src, &props, &names)
@@ -521,6 +588,24 @@ mod tests {
             .as_f64()
             .unwrap();
         assert!((rl - (42.0f64 / 2.0).ln()).abs() < 1e-6, "size inverted: {rl}");
+        // The ink group, stored the way libmypaint states it: density is
+        // the picked-up share inverted, so 0.4 paint is 0.6 smudge.
+        let base = |k: &str| json["settings"][k]["base_value"].as_f64().unwrap();
+        assert!((base("smudge") - 0.6).abs() < 1e-6, "{}", base("smudge"));
+        assert!((base("smudge_length") - 0.8).abs() < 1e-6);
+        assert!(
+            (base("smudge_radius_log") - 3.0f64.ln()).abs() < 1e-6,
+            "blur is stored as ln(multiple): {}",
+            base("smudge_radius_log")
+        );
+        let hue = json["mn-jitter-hue"].as_f64().unwrap();
+        assert!((hue - 0.3).abs() < 1e-6, "jitter hue: {hue}");
+        assert_eq!(json["mn-jitter-per-dab"], true);
+        assert_eq!(json["mn-tip-flip-h"], "reverse");
+        assert!(
+            json.get("mn-tip-flip-v").is_none(),
+            "an Off axis leaves no key"
+        );
 
         // The saved preset LOADS with the tuned state (texture absent on
         // disk is fine — an unresolvable name keeps the brush usable).
@@ -529,6 +614,14 @@ mod tests {
         assert!((b.wash_opacity() - 0.7).abs() < 1e-6);
         assert_eq!(b.wash_blend(), mn_core::Blend::LinearBurn);
         assert_eq!(b.wash_draw(), mn_brush::BrushDraw::Background);
+        assert!((b.paint_density() - 0.4).abs() < 1e-6);
+        assert!((b.color_stretch() - 0.8).abs() < 1e-6);
+        assert!((b.blur().0 - 3.0).abs() < 1e-4 && !b.blur().1);
+        assert_eq!(b.color_jitter(), props.jitter);
+        assert_eq!(
+            b.tip_flip(),
+            (mn_brush::TipFlip::Reverse, mn_brush::TipFlip::Off)
+        );
 
         // Texture OFF drops the keys: the saved brush draws untextured.
         props.texture = 0;
@@ -547,5 +640,25 @@ mod tests {
         let json: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path3).unwrap()).unwrap();
         assert!(json.get("mn-brush-blend").is_none());
+        // ...and so do jitter and tip flip: a brush saved with neither must
+        // carry no trace of the rows, or every future copy of it inherits
+        // an invisible zero-amount jitter.
+        props.jitter = mn_brush::ColorJitter::default();
+        props.tip_flip_h = mn_brush::TipFlip::Off;
+        let (path4, _) = app
+            .save_current_into(root.clone(), &src, &props, &names)
+            .unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path4).unwrap()).unwrap();
+        for key in [
+            "mn-jitter-hue",
+            "mn-jitter-sat",
+            "mn-jitter-bri",
+            "mn-jitter-per-dab",
+            "mn-tip-flip-h",
+            "mn-tip-flip-v",
+        ] {
+            assert!(json.get(key).is_none(), "{key} survived the off state");
+        }
     }
 }

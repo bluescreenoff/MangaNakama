@@ -40,8 +40,8 @@ pub use kpp::{KppPreset, parse_kpp, parse_kpp_file};
 pub use dab::{CurveDab, DynaDab, GridDab, HairyDab, SimpleDab};
 pub use mn_core::dab::{DabParams, DabRecord};
 pub use mybrush::{
-    AntiAlias, BrushDraw, BrushError, BrushLibrary, TextureRotate, DENSITY_BY_GAP_DEFAULT, Interval, MyBrush, RecordMode,
-    SketchParams, TextureMask, commit_wash, load_texture,
+    AntiAlias, BrushDraw, BrushError, BrushLibrary, ColorJitter, TextureRotate, DENSITY_BY_GAP_DEFAULT, Interval, MyBrush, RecordMode,
+    SketchParams, TextureMask, TipFlip, commit_wash, load_texture,
 };
 pub use surface::{TileOracle, set_tile_oracle};
 
@@ -647,6 +647,7 @@ mod tests {
                     g.pitch = g.pitch.min(12.0);
                     Some(Box::new(g))
                 }
+                Some("dot") => Some(Box::new(SimpleDab::dot_pen())),
                 Some("hairy") => Some(Box::new(HairyDab::default())),
                 Some("curve") => Some(Box::new(CurveDab::default())),
                 Some("dyna") => Some(Box::new(DynaDab::default())),

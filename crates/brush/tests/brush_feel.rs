@@ -1,6 +1,9 @@
-//! The three "how does the brush FEEL" rows (CSP-TRIAGE 63/65/74):
-//! Stroke ▸ Interval (`S-028`), Adjust brush density by gap (`B-029`) and the
-//! four-level Anti-aliasing (`A-010`).
+//! The "how does the brush FEEL" rows. Originally the three of CSP-TRIAGE
+//! 63/65/74 — Stroke ▸ Interval (`S-028`), Adjust brush density by gap
+//! (`B-029`) and the four-level Anti-aliasing (`A-010`) — joined by the ink
+//! group (rows 56/57/60: density of paint, colour stretch, blur intensity)
+//! and colour jitter (row 61), which are the same KIND of claim: a number
+//! the panel promises and the dabs have to keep.
 //!
 //! These are all arithmetic, and the arithmetic is the whole feature — a
 //! spacing control that is off by a factor of two still draws a plausible
@@ -422,4 +425,179 @@ fn as_preset_anti_alias_is_the_files_own_feather() {
     b.set_anti_alias(AntiAlias::AsPreset);
     assert_eq!(b.anti_alias_px(), shipped);
     assert_eq!(b.anti_alias(), AntiAlias::AsPreset);
+}
+
+// --- Rows 56/57/60: the ink group (I-010/011/013) -----------------------
+//
+// These three are the colour-mixing knobs, and CSP's names for them are not
+// libmypaint's: "density of paint" is the OTHER END of `smudge`, "color
+// stretch" is `smudge_length`, "intensity of blur" is `smudge_radius_log`.
+// The whole risk of the row is a rename that silently inverts or rescales,
+// so the assertions read the base value the engine actually holds.
+
+/// Each knob lands on its `.myb` key, in the right direction and the right
+/// unit — including the pinned-pixel mode, which is a conversion against the
+/// live radius rather than a stored number.
+#[test]
+fn ink_options_land_on_their_myb_keys() {
+    let mut b = pen();
+
+    // A pen ships neat: density must READ 1.0, not 0.0, or the row shows
+    // "no paint on the brush" for every preset in the tree.
+    assert!(
+        (b.paint_density() - 1.0).abs() < 1e-6,
+        "an inking pen starts at neat paint, got {}",
+        b.paint_density()
+    );
+    assert!(!b.smudge(), "and does not sample the canvas");
+
+    b.set_paint_density(0.25);
+    assert!(
+        (b.base_value(setting::SMUDGE) - 0.75).abs() < 1e-6,
+        "density is the picked-up share INVERTED: {}",
+        b.base_value(setting::SMUDGE)
+    );
+    assert!((b.paint_density() - 0.25).abs() < 1e-6, "and reads back");
+    // The GPU-routing flag has to follow, or a brush the artist mixed with
+    // mid-session gets a smudge sampler that is never served.
+    assert!(b.smudge(), "mixing at runtime must set the routing flag");
+
+    b.set_color_stretch(0.8);
+    assert!((b.base_value(setting::SMUDGE_LENGTH) - 0.8).abs() < 1e-6);
+    assert!((b.color_stretch() - 0.8).abs() < 1e-6);
+
+    // Relative blur: the setting is the LOGARITHM of the multiple.
+    b.set_blur(4.0, false);
+    assert!(
+        (b.base_value(setting::SMUDGE_RADIUS_LOG) - 4.0f32.ln()).abs() < 1e-5,
+        "relative blur is stored as ln(multiple)"
+    );
+    assert_eq!(b.blur(), (4.0, false));
+
+    // Pinned blur: 10 px on a 40 px brush is half a radius.
+    b.set_size_px(40.0);
+    b.set_blur(10.0, true);
+    let want = (10.0f32 / b.radius_px()).ln();
+    assert!(
+        (b.base_value(setting::SMUDGE_RADIUS_LOG) - want).abs() < 1e-4,
+        "pinned blur must convert against the live radius"
+    );
+    let (amount, absolute) = b.blur();
+    assert!(absolute && (amount - 10.0).abs() < 0.01, "{amount} px");
+
+    // Nothing non-finite reaches the C: `ln(0)` and NaN are both a smudge
+    // sampler reading garbage off the canvas.
+    b.set_paint_density(f32::NAN);
+    assert!((b.paint_density() - 1.0).abs() < 1e-6);
+    b.set_color_stretch(f32::INFINITY);
+    assert!(b.color_stretch().is_finite());
+    for bad in [0.0, f32::NAN, f32::NEG_INFINITY] {
+        b.set_blur(bad, false);
+        assert!(
+            b.base_value(setting::SMUDGE_RADIUS_LOG).is_finite(),
+            "blur {bad} produced a non-finite radius"
+        );
+    }
+
+    // And the neutral state is a true no-op: back to neat paint, and the
+    // pen's dabs are the pen's dabs again.
+    let untouched = record_stroke(&mut pen());
+    b.set_paint_density(1.0);
+    b.set_size_px(pen().base_size_px());
+    let back = record_stroke(&mut b);
+    assert_eq!(untouched.len(), back.len(), "dab count changed");
+}
+
+/// The behavioural half: below full density the dabs stop being the drawing
+/// colour and start carrying what is underneath. Measured on the RECORDED
+/// dab colours, because "it looks blended" is exactly the claim a wrong sign
+/// would also satisfy.
+#[test]
+fn low_paint_density_picks_up_the_colour_underneath() {
+    // Lay a wide red band first, with a fat opaque brush.
+    let mut doc = Document::new(1024, 1024);
+    let mut under = pen();
+    under.set_size_px(80.0);
+    under.set_color_rgb([1.0, 0.0, 0.0]);
+    under.begin(&mut doc);
+    for i in 0..=24 {
+        under.sample(&mut doc, sample(100.0 + i as f32 * 8.0, 512.0, 1.0, i as f64 * 8.0));
+    }
+    under.end(&mut doc);
+
+    let mut blue_over_red = |density: f32| -> Vec<[u16; 3]> {
+        let mut b = pen();
+        b.set_color_rgb([0.0, 0.0, 1.0]);
+        b.set_paint_density(density);
+        b.set_color_stretch(0.5);
+        b.set_dab_recording(RecordMode::Tap);
+        b.begin(&mut doc);
+        for i in 0..=24 {
+            b.sample(&mut doc, sample(100.0 + i as f32 * 8.0, 512.0, 1.0, i as f64 * 8.0));
+        }
+        b.end(&mut doc);
+        b.take_dab_record().dabs.iter().map(|d| d.color).collect()
+    };
+
+    // Neat paint: every dab is the drawing colour, whatever is under it.
+    let neat = blue_over_red(1.0);
+    assert!(
+        neat.iter().all(|c| c[0] == 0),
+        "neat paint must not pick anything up: {:?}",
+        &neat[..neat.len().min(4)]
+    );
+    // Mixed: the red under the stroke reaches the dab colour.
+    let mixed = blue_over_red(0.0);
+    assert!(
+        mixed.iter().any(|c| c[0] > 0),
+        "no red reached the dabs at density 0: {:?}",
+        &mixed[..mixed.len().min(4)]
+    );
+}
+
+// --- Row 61: colour jitter (C-010..012) ---------------------------------
+
+/// The row's promise is that a stroke is not one flat value — and the
+/// house rule is that it is still the SAME not-flat value every time, so a
+/// replay, an undo/redo or a test can reproduce it (the M4 tip-variation
+/// precedent). Both halves, on the recorded dab colours.
+#[test]
+fn color_jitter_varies_along_the_stroke_and_repeats_exactly() {
+    let colors = |j: mn_brush::ColorJitter| -> Vec<[u16; 3]> {
+        let mut b = pen();
+        b.set_color_rgb([0.2, 0.5, 0.9]);
+        b.set_color_jitter(j);
+        record_stroke(&mut b).iter().map(|d| d.color).collect()
+    };
+    let amounts = mn_brush::ColorJitter {
+        hue: 0.4,
+        sat: 0.3,
+        bri: 0.3,
+        per_dab: true,
+    };
+
+    // Off: one flat colour, exactly as before this row existed.
+    let off = colors(mn_brush::ColorJitter::default());
+    assert!(!off.is_empty());
+    assert!(
+        off.windows(2).all(|w| w[0] == w[1]),
+        "jitter off must leave the drawing colour alone"
+    );
+
+    // Along the stroke: the colour keeps moving.
+    let along = colors(amounts);
+    let distinct = along.iter().collect::<std::collections::HashSet<_>>().len();
+    assert!(distinct > 3, "only {distinct} colours along the stroke");
+    assert_eq!(along, colors(amounts), "the same stroke must repeat exactly");
+
+    // Per stroke: internally even, but not the drawing colour itself.
+    let per_stroke = colors(mn_brush::ColorJitter {
+        per_dab: false,
+        ..amounts
+    });
+    assert!(
+        per_stroke.windows(2).all(|w| w[0] == w[1]),
+        "per-stroke jitter must not vary WITHIN the stroke"
+    );
+    assert_ne!(per_stroke[0], off[0], "...but it must move off the colour");
 }

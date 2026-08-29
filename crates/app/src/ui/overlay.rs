@@ -1132,7 +1132,16 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
             painter.circle_stroke(c, 3.2, egui::Stroke::new(1.0, theme::c().panel));
         }
         if pts.len() >= 2 {
-            let line: Vec<egui::Pos2> = pts.iter().map(|p| to_pt(p.0, p.1)).collect();
+            // Rows 84/85: the Curve sub tool previews the SPLINE it will
+            // ink, not the chords between the clicks — otherwise the shape
+            // you are judging is not the shape you get.
+            let path: Vec<[f32; 2]> = pts.iter().map(|p| [p.0, p.1]).collect();
+            let shape = if app.figure_mode == crate::cmd::FigureMode::Curve {
+                mn_core::balloon::tessellate_open(&path)
+            } else {
+                path
+            };
+            let line: Vec<egui::Pos2> = shape.iter().map(|p| to_pt(p[0], p[1])).collect();
             painter.add(egui::Shape::line(line, egui::Stroke::new(1.2, col)));
         }
         // Rubber line to the pointer (client px → canvas).

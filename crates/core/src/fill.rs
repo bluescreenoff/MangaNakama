@@ -898,6 +898,60 @@ pub fn enclose_and_fill(
     )
 }
 
+/// Row 119 / FI-005 — the **leftover pen** (CSP 塗り残し部分に塗る):
+/// [`enclose_and_fill`]'s twin for the pass you make AFTER flatting.
+/// Scrub roughly across finished colour and only the still-EMPTY enclosed
+/// pockets the drag crosses take the paint — the forty 1 px holes the
+/// bucket left inside the hair, plugged at working zoom, in ONE undo step.
+///
+/// Two rules, and both matter:
+///
+/// * a seed standing on a pixel the ACTIVE layer already painted is
+///   dropped, so dragging over finished colour costs nothing and starts no
+///   flood (this is what makes it a scrub tool rather than a bucket);
+/// * the flooded region is masked back down to those same empty pixels, so
+///   even a pocket that leaked into filled colour cannot repaint it. What
+///   is already coloured is never touched, which is the promise the row
+///   makes — you can drag straight across a finished cheek.
+///
+/// "Empty" is the ACTIVE layer's own alpha (the layer you are colouring
+/// on), not the composite: the lineart lives on another layer and must
+/// keep walling the flood, not count as filled. `opts.expand_px` still
+/// tucks the paint under the line — that expansion lands on pixels the
+/// colour layer has not written, so the mask keeps it.
+///
+/// Returns the pixels written and the number of closed pockets plugged.
+pub fn leftover_fill(
+    doc: &mut Document,
+    seeds: &[(i32, i32)],
+    color: [f32; 3],
+    opts: &FillOpts,
+) -> (usize, u32) {
+    let (w, h) = (doc.size.0 as usize, doc.size.1 as usize);
+    if w == 0 || h == 0 {
+        return (0, 0);
+    }
+    let alpha = layer_alpha(doc.active_layer(), doc.size);
+    let empty = |x: i32, y: i32| -> bool {
+        x >= 0
+            && y >= 0
+            && (x as usize) < w
+            && (y as usize) < h
+            && alpha[y as usize * w + x as usize] < 128
+    };
+    let seeds: Vec<(i32, i32)> = seeds.iter().copied().filter(|&(x, y)| empty(x, y)).collect();
+    let Some((mut region, pockets)) = enclosed_pockets(doc, &seeds, opts) else {
+        return (0, 0);
+    };
+    for (r, a) in region.iter_mut().zip(&alpha) {
+        *r &= *a < 128;
+    }
+    (
+        paint_region(doc, &region, color, "Leftover pen"),
+        pockets,
+    )
+}
+
 /// Flood-fill from `seed` with `color` (straight RGB 0..1, painted opaque).
 /// Returns the number of pixels written (0 = seed out of bounds, seed on a
 /// barrier of its own colour never happens — the seed area always fills).
@@ -1909,6 +1963,88 @@ mod tests {
             doc.undo_labels().len(),
             steps,
             "an empty enclose is not an undo step"
+        );
+    }
+
+    /// Row 119 / FI-005: the leftover pen plugs the holes a bucket left
+    /// behind and refuses to touch anything already coloured. One drag
+    /// straight across a finished area that has a 塗り残し hole in it: the
+    /// hole takes the new colour, every filled pixel the drag crossed keeps
+    /// the OLD one, and the whole scrub is one undo step.
+    #[test]
+    fn leftover_pen_plugs_the_holes_and_leaves_finished_colour_alone() {
+        let mut doc = Document::new(128, 128);
+        draw_box_with_gap(&mut doc, 20, 20, 100, 100, 0);
+        let opts = FillOpts {
+            gap_close_px: 0,
+            expand_px: 0,
+            ..Default::default()
+        };
+        // Flat the box red, then punch a 2×2 hole in the middle of it —
+        // the speck the bucket could not reach.
+        assert!(bucket_fill(&mut doc, (60, 60), [1.0, 0.0, 0.0], &opts) > 0);
+        for (x, y) in [(60, 60), (61, 60), (60, 61), (61, 61)] {
+            paint_px(&mut doc, x, y, [0; 4]);
+        }
+        let steps = doc.undo_labels().len();
+
+        // The scrub: a rough horizontal drag across the flat, over the
+        // hole, at working zoom — most of its seeds land on finished red.
+        let path: Vec<(i32, i32)> = (30..90).map(|x| (x, 60)).collect();
+        let (wrote, pockets) = leftover_fill(&mut doc, &path, [0.0, 1.0, 0.0], &opts);
+
+        assert!(wrote > 0 && pockets >= 1, "{wrote} px over {pockets}");
+        assert_eq!(px(&doc, 60, 60)[1], FIX15_ONE as u16, "the hole is green");
+        assert_eq!(px(&doc, 61, 61)[1], FIX15_ONE as u16, "all of it");
+        assert_eq!(
+            px(&doc, 50, 60),
+            [FIX15_ONE as u16, 0, 0, FIX15_ONE as u16],
+            "the finished red the drag crossed is untouched"
+        );
+        assert_eq!(px(&doc, 10, 10)[3], 0, "and the outer space is not paint");
+        assert_eq!(
+            doc.undo_labels().len(),
+            steps + 1,
+            "one scrub, one undo press"
+        );
+        assert_eq!(doc.undo_labels()[steps], "Leftover pen", "named for it");
+        assert!(doc.undo());
+        assert_eq!(px(&doc, 60, 60)[3], 0, "undo gives the hole back");
+
+        // A drag entirely over finished colour is a no-op — no flood, no
+        // undo entry to press past.
+        let over: Vec<(i32, i32)> = (40..50).map(|x| (x, 80)).collect();
+        assert_eq!(
+            leftover_fill(&mut doc, &over, [0.0, 0.0, 1.0], &opts),
+            (0, 0),
+            "nothing left over under that drag"
+        );
+        assert_eq!(doc.undo_labels().len(), steps, "and nothing to undo");
+
+        // …and with FI-016's area scaling at its shipped default, where the
+        // pocket deliberately grows a pixel past its own edge to tuck under
+        // lineart: the growth may not eat the colour ringing the hole.
+        let (wrote, _) = leftover_fill(
+            &mut doc,
+            &path,
+            [0.0, 0.0, 1.0],
+            &FillOpts {
+                gap_close_px: 0,
+                expand_px: 1,
+                ..Default::default()
+            },
+        );
+        assert!(wrote > 0, "the hole still fills with the tuck-under on");
+        assert_eq!(px(&doc, 60, 60)[2], FIX15_ONE as u16, "the hole is blue");
+        assert_eq!(
+            px(&doc, 59, 60),
+            [FIX15_ONE as u16, 0, 0, FIX15_ONE as u16],
+            "the red pixel touching the hole is NOT expanded over"
+        );
+        assert_eq!(
+            px(&doc, 62, 61),
+            [FIX15_ONE as u16, 0, 0, FIX15_ONE as u16],
+            "nor the one on the other side"
         );
     }
 

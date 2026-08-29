@@ -1034,6 +1034,9 @@ pub(crate) fn sec_figure_guide(ui: &mut egui::Ui, app: &mut App) {
         FigureMode::Rect => "drag corner to corner; Shift keeps it square",
         FigureMode::Ellipse => "drag the bounding box; Shift keeps it round",
         FigureMode::Polygon => "click vertices; the first one / Enter closes, Esc cancels",
+        FigureMode::Curve => {
+            "click along the curve; Enter (or the last point twice) inks it, Esc cancels"
+        }
         FigureMode::Stream => "drag along the motion — angle and length come from the drag",
         FigureMode::Focus => "drag from the convergence point out to the lines' reach",
         FigureMode::Urchin => "drag from the flash's centre out to the spikes' reach",

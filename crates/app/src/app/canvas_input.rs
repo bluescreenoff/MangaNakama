@@ -734,13 +734,11 @@ impl App {
                 }
                 let (cx, cy) = self.viewport.to_canvas(x, y);
                 match self.fill_mode {
-                    // FI-003 / FI-004 are drags, not clicks: collect the
-                    // freehand path and let the release decide what it
-                    // meant (see canvas_up).
-                    FillMode::Enclose | FillMode::Lasso => {
-                        self.fill_drag = Some(vec![(cx, cy)]);
-                    }
+                    // FI-003 / FI-004 / FI-005 are drags, not clicks:
+                    // collect the freehand path and let the release decide
+                    // what it meant (see canvas_up).
                     FillMode::Click => self.push_cmd(AppCmd::Fill(cx, cy)),
+                    _ => self.fill_drag = Some(vec![(cx, cy)]),
                 }
             }
             Tool::Tone => {
@@ -805,6 +803,38 @@ impl App {
                                 self.figure_poly = Some(vec![(cx, cy)]);
                                 self.set_status(
                                     "click vertices; click the first one (or Enter) to close, Esc cancels",
+                                );
+                            }
+                        }
+                    }
+                    FigureMode::Curve => {
+                        // Rows 84/85, the same two-stage gesture as Polygon
+                        // and for the same reason: the mark is longer than
+                        // one press. Click points; a click back on the LAST
+                        // one (the natural "that's it" motion, and what a
+                        // double-click reads as — the second click lands on
+                        // the point the first placed) ends the curve, as do
+                        // Enter and Esc. Nothing closes the loop: an open
+                        // sweep is the whole difference from Polygon.
+                        let tol = (10.0 / self.viewport.zoom.max(0.01)).max(3.0);
+                        match &mut self.figure_poly {
+                            Some(pts) => {
+                                let last = *pts.last().expect("non-empty");
+                                let done = pts.len() >= 2
+                                    && (last.0 - cx).abs() + (last.1 - cy).abs() < tol;
+                                if done {
+                                    self.finish_figure_poly();
+                                } else {
+                                    pts.push((cx, cy));
+                                }
+                            }
+                            None => {
+                                if self.guard_frame_layer() {
+                                    return;
+                                }
+                                self.figure_poly = Some(vec![(cx, cy)]);
+                                self.set_status(
+                                    "click along the curve; Enter (or click the last point twice) inks it, Esc cancels",
                                 );
                             }
                         }
@@ -1444,7 +1474,9 @@ impl App {
                     })
                     .collect()
             }
-            FigureMode::Polygon => vec![], // handled by finish_figure_poly
+            // Both click-list gestures: no drag geometry to preview, the
+            // commit builds their path (see finish_figure_poly).
+            FigureMode::Polygon | FigureMode::Curve => vec![],
             // Stream line: the drag reads as the motion arrow it sets.
             FigureMode::Stream => vec![[a.0, a.1], [b.0, b.1]],
             // Saturated line and the two flashes: a circle around the
@@ -1519,6 +1551,7 @@ impl App {
             FigureMode::Rect => "rectangle inked",
             FigureMode::Ellipse => "ellipse inked",
             FigureMode::Polygon => "polygon inked",
+            FigureMode::Curve => "curve inked",
             // A generating release never reaches ink_figure (it makes a
             // layer instead) — arms exist for exhaustiveness only.
             FigureMode::Stream | FigureMode::Focus => "lines generated",
@@ -1662,13 +1695,21 @@ impl App {
         ));
     }
 
-    /// Figure ▸ Polygon release: ink the clicked vertex loop.
+    /// Figure ▸ Polygon / Curve commit: ink the clicked point list — the
+    /// loop for Polygon, the spline through them for Curve (rows 84/85).
+    /// One entry point because they are one gesture: same click list, same
+    /// Enter/Esc, same re-guard, same brush.
     pub fn finish_figure_poly(&mut self) {
+        let curve = self.figure_mode == FigureMode::Curve;
         let Some(pts) = self.figure_poly.take() else {
             return;
         };
-        if pts.len() < 3 {
-            self.set_status("a polygon needs at least 3 vertices");
+        if pts.len() < if curve { 2 } else { 3 } {
+            self.set_status(if curve {
+                "a curve needs at least 2 points"
+            } else {
+                "a polygon needs at least 3 vertices"
+            });
             return;
         }
         // RE-GUARD AT THE CLOSE, not just at the first vertex. A polygon
@@ -1687,7 +1728,17 @@ impl App {
             return;
         }
         let path: Vec<[f32; 2]> = pts.iter().map(|p| [p.0, p.1]).collect();
-        self.ink_figure(&path, true);
+        if curve {
+            // The spline is inked through `ink_figure` — the SAME door
+            // Figure ▸ Direct draw already uses — so the curve gets the
+            // active brush, its pressure/taper, the selection clip, the
+            // ruler-free synthetic pen and one undo step, and lands as a
+            // recorded vector stroke on a vector layer. Open, never closed.
+            let dense = mn_core::balloon::tessellate_open(&path);
+            self.ink_figure(&dense, false);
+        } else {
+            self.ink_figure(&path, true);
+        }
         self.needs_redraw = true;
     }
 
@@ -3344,19 +3395,23 @@ impl App {
             return;
         }
         if let Some(mut pts) = self.fill_drag.take() {
-            // FI-003 / FI-004: both sub tools are one freehand loop. The
-            // command arms own the geometry (pockets vs. the shape itself)
-            // and the status line; this arm only decides "was that a drag".
+            // FI-003 / FI-004 / FI-005: all three sub tools are one freehand
+            // path. The command arms own the geometry (pockets vs. the shape
+            // itself vs. the empty pockets only) and the status line; this
+            // arm only decides "was that a drag".
             pts.push((cx, cy));
             if pts.len() < 3 {
                 self.set_status(match self.fill_mode {
                     FillMode::Lasso => "drag the shape to fill",
+                    FillMode::Leftover => "scrub across the area with holes in it",
                     _ => "drag right around the areas to fill",
                 });
-            } else if self.fill_mode == FillMode::Lasso {
-                self.push_cmd(AppCmd::LassoFill { pts });
             } else {
-                self.push_cmd(AppCmd::EncloseFill { pts });
+                match self.fill_mode {
+                    FillMode::Lasso => self.push_cmd(AppCmd::LassoFill { pts }),
+                    FillMode::Leftover => self.push_cmd(AppCmd::LeftoverFill { pts }),
+                    _ => self.push_cmd(AppCmd::EncloseFill { pts }),
+                }
             }
             self.needs_redraw = true;
             return;

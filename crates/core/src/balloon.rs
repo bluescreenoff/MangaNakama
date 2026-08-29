@@ -1102,6 +1102,42 @@ pub fn tessellate_closed(
     (pts, ws)
 }
 
+/// Rows 84/85 (the Figure ▸ Curve sub tool): [`tessellate_closed`]'s OPEN
+/// twin — a dense polyline along the Catmull-Rom spline through a chain of
+/// clicked points, first point to last, nothing joined up. The curve tool
+/// hands this to the brush, so the numbers differ from the balloon's in one
+/// way that matters: the step cap is high, because a 900 px hair sweep is
+/// exactly the mark this tool exists for and 24 chords across it would ink
+/// a visible polygon.
+///
+/// End tangents are ONE-SIDED (the chord itself), so two points ink the
+/// straight line you clicked and three ink an arc through the middle one —
+/// no phantom control points, no overshoot past the ends.
+pub fn tessellate_open(points: &[[f32; 2]]) -> Vec<[f32; 2]> {
+    let n = points.len();
+    if n < 3 {
+        return points.to_vec();
+    }
+    const STEP_PX: f32 = 4.0;
+    let mut out: Vec<[f32; 2]> = Vec::with_capacity(n * 16);
+    for i in 0..n - 1 {
+        let p1 = points[i];
+        let p2 = points[i + 1];
+        let prev = if i == 0 { p1 } else { points[i - 1] };
+        let next = if i + 2 < n { points[i + 2] } else { p2 };
+        let m1 = mul(sub(p2, prev), 0.5);
+        let m2 = mul(sub(next, p1), 0.5);
+        let steps = (len(sub(p2, p1)) / STEP_PX).ceil().clamp(2.0, 512.0) as usize;
+        for k in 0..steps {
+            out.push(hermite(p1, m1, p2, m2, k as f32 / steps as f32));
+        }
+    }
+    // The last control point verbatim: a spline the artist placed must
+    // START and END where they clicked, whatever f32 does in between.
+    out.push(points[n - 1]);
+    out
+}
+
 fn mul(a: [f32; 2], k: f32) -> [f32; 2] {
     [a[0] * k, a[1] * k]
 }
@@ -2143,6 +2179,44 @@ mod tests {
             "the edge bulges outward like a drawn bubble ({bulge})"
         );
         assert!(bulge <= 76.0, "overshoot bounded ({bulge})");
+    }
+
+    /// Rows 84/85: the curve tool's spline. It must pass through every
+    /// point the artist clicked, stay dense enough over a long sweep that
+    /// the brush inks a curve and not a polygon, and never join the ends
+    /// up (an open chain is the whole difference from the balloon).
+    #[test]
+    fn open_spline_runs_through_the_clicked_points() {
+        // Two points = the straight line you clicked, verbatim.
+        let two = [[0.0, 0.0], [900.0, 0.0]];
+        assert_eq!(tessellate_open(&two), two.to_vec());
+
+        // A long sweeping arc: three clicks, apex in the middle.
+        let pts = [[0.0, 0.0], [450.0, -200.0], [900.0, 0.0]];
+        let dense = tessellate_open(&pts);
+        assert_eq!(dense[0], pts[0], "starts on the first click");
+        assert_eq!(*dense.last().unwrap(), pts[2], "ends on the last one");
+        for a in &pts {
+            let d = dense
+                .iter()
+                .map(|p| len(sub(*p, *a)))
+                .fold(f32::INFINITY, f32::min);
+            assert!(d < 1e-3, "clicked point {a:?} is ON the curve ({d})");
+        }
+        // Dense enough that the longest chord is a brush step, not a facet.
+        let gap = dense
+            .windows(2)
+            .map(|w| len(sub(w[1], w[0])))
+            .fold(0.0f32, f32::max);
+        assert!(gap <= 8.0, "longest chord over a 900 px sweep: {gap}");
+        // Open: the last point is nowhere near the first.
+        assert!(len(sub(dense[0], *dense.last().unwrap())) > 800.0);
+        // And it actually bows — the middle click is not on the chord.
+        let apex = dense
+            .iter()
+            .map(|p| p[1])
+            .fold(f32::INFINITY, f32::min);
+        assert!(apex <= -200.0, "the arc reaches its apex ({apex})");
     }
 
     /// A corner anchor kinks: with the tangent dead-stopped the segment

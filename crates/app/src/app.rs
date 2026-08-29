@@ -452,6 +452,22 @@ pub struct App {
         ((u32, u32), Vec<usize>, u64, u8, bool),
         Option<std::sync::Arc<mn_brush::AntiOverflowMask>>,
     )>,
+    /// Row 95 (BR-022, CSP すべてのレイヤーで消去): the eraser rubs through
+    /// the whole stack, not just the layer you are on — the sketch, the
+    /// flats and the ink all lose the same pixels in ONE undo press. Off
+    /// by default and armed per stroke in `begin_stroke`; see
+    /// [`App::erase_on_other_layers`] for who is in the loop.
+    pub erase_all_layers: bool,
+    /// While an erase-all stroke is live: the raw client-space samples it
+    /// was fed, replayed onto the other layers at `end_stroke`. `None` for
+    /// every ordinary stroke.
+    erase_all_capture: Option<Vec<PenSample>>,
+    /// True only inside [`App::erase_on_other_layers`]. The replay runs the
+    /// real `begin_stroke`, which would arm a fresh capture on every layer
+    /// it visits and recurse until the stack ran out — found by the row-95
+    /// test doing exactly that. This is the one flag that stops it, so it
+    /// is read in `begin_stroke` and set nowhere else.
+    erase_all_replaying: bool,
     /// The pen-pressure wizard (BR-014–016): open flag, the
     /// Stronger/Weaker bend, and the raw pressures of strokes drawn
     /// while it listens.
@@ -1488,6 +1504,9 @@ impl App {
             anti_overflow: false,
             anti_overflow_margin: 0,
             anti_overflow_vector_centreline: false,
+            erase_all_layers: false,
+            erase_all_capture: None,
+            erase_all_replaying: false,
             quick_query: String::new(),
             quick_pins: layout
                 .quick_pins
@@ -2231,6 +2250,20 @@ impl App {
                 interval_px: crate::cmd::DEFAULT_INTERVAL_PX,
                 density_by_gap: None,
                 anti_alias: mn_brush::AntiAlias::AsPreset,
+                // The ink group DOES seed as a reading, unlike the feel
+                // rows above: `smudge` / `smudge_length` / `smudge_radius`
+                // are ordinary base values every .myb carries, so the
+                // preset's own numbers are the honest answer and pushing
+                // them back is a no-op (`apply_props` guards on the same
+                // readings). A watercolour preset therefore shows the
+                // mixing it really does instead of reading "neat paint".
+                paint_density: e.paint_density(),
+                color_stretch: e.color_stretch(),
+                blur: e.blur().0,
+                blur_abs: e.blur().1,
+                jitter: e.color_jitter(),
+                tip_flip_h: e.tip_flip().0,
+                tip_flip_v: e.tip_flip().1,
             }
         });
     }
@@ -2973,6 +3006,19 @@ impl App {
             && !(self.mirror_x || self.mirror_y || self.wrap_x || self.wrap_y)
             && self.doc.active_layer().strokes.is_some())
         .then(Vec::new);
+        // Row 95 (BR-022): arm the erase-all capture. Deliberately narrow —
+        // a real ERASE on a real raster layer, nothing else. Mask, live-fill
+        // and selection strokes all mean something other than "take these
+        // pixels off the art", and a recording layer's eraser TRIMS geometry
+        // (end_stroke's vector arm), which has no meaning on a neighbour.
+        // And never inside the replay itself — see `erase_all_replaying`.
+        self.erase_all_capture = (!self.erase_all_replaying
+            && self.erase_all_layers
+            && self.eraser_active()
+            && !(self.mask_edit || live)
+            && !sel_paint
+            && self.doc.active_layer().paintable())
+        .then(Vec::new);
         self.input_resampler.reset();
         self.doc.begin_op();
         self.brush.begin(&mut self.doc);
@@ -3089,6 +3135,13 @@ impl App {
     pub fn push_batch(&mut self, batch: &[PenSample]) {
         if self.stroke.is_none() || batch.is_empty() {
             return;
+        }
+        // Row 95: the erase-all replay keeps the RAW client-space batch, so
+        // every stage below (global pressure, resampler, stabilizer, twins)
+        // re-runs identically on the next layer instead of being rebuilt
+        // from a half-processed copy.
+        if let Some(cap) = &mut self.erase_all_capture {
+            cap.extend_from_slice(batch);
         }
         // Row 89 (BR-014–016): the wizard listens to the RAW tablet
         // pressures; the global correction curve then bends every sample
@@ -3219,6 +3272,12 @@ impl App {
         if self.stroke.is_none() {
             return;
         }
+        // Row 95: how many undo steps stood before this gesture — used at
+        // the bottom to fold the stroke plus every replay into ONE press.
+        // Counted, not assumed: a stroke that erased nothing (all paper)
+        // pushes no step at all, and wrapping "one more than there are"
+        // would swallow whatever the artist did before this.
+        let steps_before = self.erase_all_capture.is_some().then(|| self.doc.undo_len());
         self.doc.set_op_label("Stroke");
         // LM-004: the bracket opened in `begin_stroke` (the snapshot has to
         // predate the first dab); it closes below, after the tail dabs.
@@ -3402,7 +3461,22 @@ impl App {
             .inner_mut()
             .inner_mut()
             .set_anti_overflow_all(None);
-        if let Some(s) = self.stroke.take() {
+        let stroke = self.stroke.take();
+        // Row 95: the stroke's own layer is done and its undo step is on the
+        // stack; now rub the SAME input through the rest of the paintable
+        // stack and fold the lot into one press. After `stroke.take()` on
+        // purpose — the replay calls `begin_stroke`, which would end a
+        // stroke that was still live and re-enter this function.
+        if let (Some(before), Some(samples), Some(s)) =
+            (steps_before, self.erase_all_capture.take(), stroke.as_ref())
+        {
+            self.erase_on_other_layers(&samples, s.kind);
+            let n = self.doc.undo_len().saturating_sub(before);
+            if n > 1 {
+                self.doc.wrap_recent("Erase on every layer", n);
+            }
+        }
+        if let Some(s) = stroke {
             s.report();
             if s.samples == 0 {
                 // §4.2/§5.4 — the corpus's signature failure: the app looks
@@ -3432,6 +3506,77 @@ impl App {
             }
         }
         self.needs_redraw = true;
+    }
+
+    /// Row 95 / BR-022 (CSP すべてのレイヤーで消去): replay the erase that
+    /// just happened onto every OTHER layer that keeps pixels, so one rub
+    /// takes the sketch, the flats and the ink away together.
+    ///
+    /// It replays the raw input through `begin_stroke`/`push_batch`/
+    /// `end_stroke` — the ordinary doors — rather than stamping a coverage
+    /// mask: the neighbours then get the same brush, the same stabilizer,
+    /// the same taper, the same selection clip and the same transparent-lock
+    /// clamp as the layer you were actually on, because it is literally the
+    /// same code path. Each replay leaves its own undo step and `end_stroke`
+    /// folds them together, so the gesture is still ONE undo press.
+    ///
+    /// Who is in the loop, and why the others are not:
+    ///
+    /// * `paintable() && !lock` — the house predicate for "this layer takes
+    ///   a raster edit" (`Document::paint_guard`). Folders organise, vector
+    ///   and stroke-recording layers re-derive their pixels, and a locked
+    ///   layer said no. None of them may be silently rubbed out.
+    /// * live Fill/Correction layers are skipped: their pixels are derived
+    ///   from parameters, so an erase would vanish at the next re-derive.
+    /// * HIDDEN layers are skipped. You erase what you can see — taking
+    ///   pixels off a layer whose eye is shut is damage with no feedback,
+    ///   and turning the eye off is how an artist parks work.
+    /// * Draft and reference layers ARE erased: they are visible raster art
+    ///   you are drawing over, and CSP's own option makes no exception for
+    ///   them (the flags only steer fill/wand sampling and export).
+    ///
+    /// Known v1 constraint: a ruler ATTACHED to one layer (row 149) snaps
+    /// only that layer's stroke, so an attached-ruler erase can land on a
+    /// slightly different path on its neighbours. Recorded rather than
+    /// worked around — the fix is to snap before the replay, and no ruler
+    /// is attached in the flow this option is for.
+    fn erase_on_other_layers(&mut self, samples: &[PenSample], kind: PointerKind) {
+        if samples.is_empty() {
+            return;
+        }
+        let active = self.doc.active;
+        let targets: Vec<usize> = (0..self.doc.layers.len())
+            .filter(|&i| i != active)
+            .filter(|&i| {
+                let l = &self.doc.layers[i];
+                l.paintable()
+                    && !l.lock
+                    && l.visible
+                    && !matches!(
+                        l.kind,
+                        mn_core::LayerKind::Fill(_) | mn_core::LayerKind::Correction(_)
+                    )
+            })
+            .collect();
+        if targets.is_empty() {
+            return;
+        }
+        let n = targets.len();
+        // `set_active` clears the palette's multi-selection; the tour puts
+        // it back, because walking the stack to erase is not the artist
+        // changing what they had selected.
+        let multi = std::mem::take(&mut self.doc.layer_multi);
+        self.erase_all_replaying = true;
+        for li in targets {
+            self.doc.set_active(li);
+            self.begin_stroke(kind);
+            self.push_batch(samples);
+            self.end_stroke();
+        }
+        self.erase_all_replaying = false;
+        self.doc.set_active(active);
+        self.doc.layer_multi = multi;
+        self.set_status(format!("erased on {} more layer(s) — one undo press", n));
     }
 
     /// Per-frame GPU dab flush: rasterize everything the engines recorded
@@ -3922,7 +4067,12 @@ impl App {
                 // parameter of the Click sub tool (strip rows + the Tool
                 // Property dropdown, both one click) and the key belongs to
                 // the three aiming modes.
-                const M: [FillMode; 3] = [FillMode::Click, FillMode::Enclose, FillMode::Lasso];
+                const M: [FillMode; 4] = [
+                    FillMode::Click,
+                    FillMode::Enclose,
+                    FillMode::Lasso,
+                    FillMode::Leftover,
+                ];
                 let cur = M.iter().position(|m| *m == self.fill_mode).unwrap_or(0);
                 self.fill_mode = M[cycle(cur, M.len())];
                 self.fill_drag = None;
@@ -3995,11 +4145,12 @@ impl App {
                 // line too would make the shortcut a six-stop tour where a
                 // stray press generates a layer — those two are a deliberate
                 // sub-tool-list (or Ctrl+K) pick.
-                const M: [FigureMode; 4] = [
+                const M: [FigureMode; 5] = [
                     FigureMode::Line,
                     FigureMode::Rect,
                     FigureMode::Ellipse,
                     FigureMode::Polygon,
+                    FigureMode::Curve,
                 ];
                 let cur = M.iter().position(|m| *m == self.figure_mode).unwrap_or(0);
                 self.figure_mode = M[cycle(cur, M.len())];

@@ -74,8 +74,25 @@ pub(crate) fn pen_property(ui: &mut egui::Ui, app: &mut App) {
     ui.add_space(1.0);
     test_stroke_strip(ui, app);
     brush_sliders(ui, app);
+    eraser_rows(ui, app);
     group_caption(ui, "Dynamics");
     dynamics_editor(ui, app);
+}
+
+/// Row 95 (BR-022): the Eraser's own option. Only the Eraser shows it —
+/// the flag itself asks `eraser_active()` at stroke time, so a transparent
+/// slot or a flipped stylus obeys it too, but a checkbox on the inking pen
+/// saying "erase on every layer" would read as a threat.
+fn eraser_rows(ui: &mut egui::Ui, app: &mut App) {
+    if app.tool != crate::cmd::Tool::Eraser {
+        return;
+    }
+    ui.checkbox(&mut app.erase_all_layers, "Erase on every layer")
+        .on_hover_text(
+            "One rub takes the same pixels off every visible, unlocked layer \
+             that keeps pixels — sketch, flats and ink together — as ONE undo \
+             press. Folders, vector and live layers are never touched.",
+        );
 }
 
 /// BR-005: the gateable pen rows, in display order. The id is the
@@ -97,7 +114,10 @@ const PEN_ROW_IDS: &[(&str, &str)] = &[
     ("sketch", "Sketch"),
     ("ink", "Ink"),
     ("flow", "Flow"),
+    ("mixing", "Color mixing"),
+    ("jitter", "Color jitter"),
     ("texture", "Texture"),
+    ("tip_flip", "Tip flip"),
 ];
 
 /// The LIVE test stroke: one S-curve with a synthesized pressure ramp, re-inked
@@ -765,6 +785,16 @@ flow = faint dabs that stack up to the stroke's Opacity, never past it.",
     }
 
 
+    // CSP's Ink colour-mixing trio (I-010/011/013) and Color jitter
+    // (C-010..012) — each gated as one row, like the sketch and texture
+    // groups above.
+    if app.pen_row_visible("mixing") {
+        mixing_rows(ui, app);
+    }
+    if app.pen_row_visible("jitter") {
+        jitter_rows(ui, app);
+    }
+
     // Krita texture tips — gated as one row (texture + crawl + angle).
     if app.pen_row_visible("texture") {
     // Krita texture tips: a grayscale mask multiplies the dab, anchored to
@@ -850,6 +880,181 @@ pattern is fixed; higher = the grain drifts as you draw, spray-like.",
              stroke's direction, or the pen's physical tilt bearing",
         );
     }
+    }
+
+    // B-026/027: the tip's own mirroring. Its own eye row rather than part
+    // of the texture group, because it is the one setting an artist reaches
+    // for AFTER the tip is chosen and never touches again.
+    if app.pen_row_visible("tip_flip") {
+        tip_flip_rows(ui, app);
+    }
+}
+
+/// CSP Ink ▸ Density of paint / Color stretch / Intensity of blur
+/// (I-010/011/013) — the three knobs of colour mixing, which is one
+/// behaviour and reads as one block.
+///
+/// Stretch and blur only appear below full density, for the reason the row
+/// itself states: with neat paint nothing is picked up, so there is nothing
+/// to stretch or blur and two live-looking sliders would be lying.
+pub(crate) fn mixing_rows(ui: &mut egui::Ui, app: &mut App) {
+    let mut density = app.props_current.paint_density * 100.0;
+    let d_resp = ValueBar::new("Paint", 0.0, 100.0)
+        .suffix("%")
+        .show(ui, &mut density);
+    if d_resp.changed() {
+        app.push_cmd(AppCmd::SetPaintDensity(density / 100.0));
+    }
+    d_resp.on_hover_text(
+        "CSP's Density of paint: how much of YOUR colour a dab lays down, \
+against how much it picks up off the canvas underneath. 100 % is neat ink \
+and is what every pen ships with. Lower it and the brush starts mixing with \
+what is already there — watercolour, blending, a smudge tool.",
+    );
+    if app.props_current.paint_density >= 1.0 {
+        return;
+    }
+
+    let mut stretch = app.props_current.color_stretch * 100.0;
+    let s_resp = ValueBar::new("Stretch", 0.0, 100.0)
+        .suffix("%")
+        .show(ui, &mut stretch);
+    if s_resp.changed() {
+        app.push_cmd(AppCmd::SetColorStretch(stretch / 100.0));
+    }
+    s_resp.on_hover_text(
+        "CSP's Color stretch: how far the colour picked up at the start of \
+a stroke is dragged along it. 0 % re-reads the canvas at every dab (a short \
+smear); 100 % carries the first colour the whole way.",
+    );
+
+    let abs = app.props_current.blur_abs;
+    let mut blur = app.props_current.blur;
+    let b_resp = if abs {
+        ValueBar::new("Blur", 1.0, 200.0)
+            .log()
+            .decimals(1)
+            .suffix(" px")
+            .show(ui, &mut blur)
+    } else {
+        ValueBar::new("Blur", 0.05, 20.0)
+            .log()
+            .decimals(2)
+            .suffix("×r")
+            .show(ui, &mut blur)
+    };
+    if b_resp.changed() {
+        app.push_cmd(AppCmd::SetBlur(blur));
+    }
+    b_resp.on_hover_text(
+        "CSP's Intensity of blur: how wide an area the running colour is \
+picked up from. Narrow reads as a smear, wide reads as a blur. The unit is a \
+multiple of the brush radius, so it follows the Size slider — unless you pin \
+it below.",
+    );
+    let mut pinned = abs;
+    if ui
+        .checkbox(&mut pinned, "Blur pinned to px")
+        .on_hover_text(
+            "Pin the blur width to a canvas-pixel number that does NOT \
+follow the Size slider (CSP's fixed mode). The number keeps its face value \
+and changes meaning when you switch, exactly like Randomize's Fixed px.",
+        )
+        .changed()
+    {
+        app.push_cmd(AppCmd::SetBlurAbs(pinned));
+    }
+}
+
+/// CSP Color jitter (C-010..012): hue / saturation / brightness wander, so a
+/// stroke is not one flat value — the difference between a foliage brush and
+/// a stamped one.
+pub(crate) fn jitter_rows(ui: &mut egui::Ui, app: &mut App) {
+    let j = app.props_current.jitter;
+    let mut next = j;
+    let mut hue = j.hue * 100.0;
+    let h_resp = ValueBar::new("Jit hue", 0.0, 100.0)
+        .suffix("%")
+        .show(ui, &mut hue);
+    if h_resp.changed() {
+        next.hue = hue / 100.0;
+    }
+    h_resp.on_hover_text(
+        "How far the colour is allowed to wander around the wheel: 100 % is \
+a half turn either way. A few percent is what keeps foliage, hair and \
+texture from reading as one flat fill.",
+    );
+    let mut sat = j.sat * 100.0;
+    if ValueBar::new("Jit sat", 0.0, 100.0)
+        .suffix("%")
+        .show(ui, &mut sat)
+        .changed()
+    {
+        next.sat = sat / 100.0;
+    }
+    let mut bri = j.bri * 100.0;
+    if ValueBar::new("Jit bright", 0.0, 100.0)
+        .suffix("%")
+        .show(ui, &mut bri)
+        .changed()
+    {
+        next.bri = bri / 100.0;
+    }
+    if !j.is_off() {
+        ui.horizontal(|ui| {
+            ui.weak("Jitter");
+            let mut per_dab = j.per_dab;
+            ui.selectable_value(&mut per_dab, true, "Along stroke");
+            ui.selectable_value(&mut per_dab, false, "Per stroke");
+            next.per_dab = per_dab;
+        })
+        .response
+        .on_hover_text(
+            "Along stroke: the colour keeps moving as you draw — grain, the \
+natural-texture look. Per stroke: one colour per stroke, so each stroke is \
+slightly different from the last but internally even.\n\nAlong stroke re-draws \
+per input sample rather than per dab: the dab colour is decided inside \
+libmypaint's own loop, which we do not patch.",
+        );
+    }
+    if next != j {
+        app.push_cmd(AppCmd::SetColorJitter(next));
+    }
+}
+
+/// CSP 反転 (B-026/027): flip the brush tip left-right / up-down.
+///
+/// `On reverse` is the mode with the story: an asymmetric tip drawn
+/// right-to-left comes out backwards, and this mirrors it per dab so a
+/// stroke reads the same in both directions.
+pub(crate) fn tip_flip_rows(ui: &mut egui::Ui, app: &mut App) {
+    use mn_brush::TipFlip;
+
+    let (mut h, mut v) = (app.props_current.tip_flip_h, app.props_current.tip_flip_v);
+    let (was_h, was_v) = (h, v);
+    let row = |ui: &mut egui::Ui, label: &str, cur: &mut TipFlip| {
+        ui.horizontal(|ui| {
+            ui.weak(label);
+            for mode in TipFlip::ALL {
+                if ui.selectable_label(*cur == mode, mode.label()).clicked() {
+                    *cur = mode;
+                }
+            }
+        });
+    };
+    row(ui, "Flip ↔", &mut h);
+    row(ui, "Flip ↕", &mut v);
+    ui.response().on_hover_text(
+        "Mirror the brush TIP image. Always is a permanent mirror; Random \
+re-rolls per dab; On reverse mirrors only while the stroke runs backwards \
+along that axis — which is what stops a chisel or dry-brush tip from looking \
+inside-out when you draw right to left.",
+    );
+    if app.props_current.texture == 0 && (h != TipFlip::Off || v != TipFlip::Off) {
+        ui.weak("no tip texture — nothing to mirror");
+    }
+    if (h, v) != (was_h, was_v) {
+        app.push_cmd(AppCmd::SetTipFlip(h, v));
     }
 }
 

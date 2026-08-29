@@ -5397,6 +5397,233 @@ fn lasso_fill_drag_paints_the_shape_over_the_lineart() {
     assert_eq!(app.doc.undo_labels()[steps], "Lasso fill", "named for it");
 }
 
+/// Row 119 / FI-005 e2e: the leftover pen through the real canvas
+/// down/move/up path. One scrub straight across a finished flat that has
+/// a hole in it: the hole fills, the colour under the rest of the drag is
+/// not repainted, and it is one undo press.
+#[test]
+fn leftover_pen_drag_fills_the_holes_and_not_the_flat() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (256, 256), 1.0);
+    app.viewport = mn_gpu::Viewport::default(); // canvas == client
+    ink_box(&mut app, 40, 40, 200, 200);
+
+    app.tool = Tool::Fill;
+    crate::cmd::dispatch(
+        &mut app,
+        AppCmd::SetFillOpts(mn_core::FillOpts {
+            gap_close_px: 0,
+            expand_px: 0,
+            ..mn_core::FillOpts::default()
+        }),
+    );
+    // Flat it red with the ordinary bucket, then punch a 2×2 塗り残し.
+    crate::cmd::dispatch(&mut app, AppCmd::SetSlotColor([1.0, 0.0, 0.0]));
+    crate::cmd::dispatch(&mut app, AppCmd::Fill(120.0, 120.0));
+    for (x, y) in [(120, 120), (121, 120), (120, 121), (121, 121)] {
+        let idx = TileIdx::of_pixel(x, y);
+        let (ox, oy) = idx.origin();
+        app.doc
+            .active_layer_mut()
+            .tile_mut(idx)
+            .set_pixel((x - ox) as usize, (y - oy) as usize, [0; 4]);
+    }
+    let steps = app.doc.undo_labels().len();
+
+    crate::cmd::dispatch(&mut app, AppCmd::SetFillMode(FillMode::Leftover));
+    crate::cmd::dispatch(&mut app, AppCmd::SetSlotColor([0.0, 1.0, 0.0]));
+    let path: Vec<(f32, f32)> = (0..60).map(|i| (70.0 + i as f32 * 2.0, 120.0)).collect();
+    drag_path(&mut app, &path);
+
+    assert!(active_px(&app, 120, 120)[1] > 0, "the hole took the green");
+    assert!(active_px(&app, 121, 121)[1] > 0, "all of it");
+    assert_eq!(
+        active_px(&app, 90, 120),
+        active_px(&app, 90, 140),
+        "finished red under the drag reads like red the drag never crossed"
+    );
+    assert_eq!(active_px(&app, 90, 120)[1], 0, "and it is still red, not green");
+    assert_eq!(
+        app.doc.undo_labels().len(),
+        steps + 1,
+        "one scrub, one undo press: {:?}",
+        app.doc.undo_labels()
+    );
+    assert!(
+        app.status.contains("leftover spot"),
+        "the status names what it did: {}",
+        app.status
+    );
+}
+
+/// Rows 84/85 e2e: the Figure ▸ Continuous curve sub tool. Click three
+/// points, commit with Enter (`finish_figure_poly`, the arm main.rs calls),
+/// and the CURRENT brush inks a spline THROUGH them — not the chords
+/// between them, which is the whole difference from Polygon — in one undo
+/// step, with nothing joining the last point back to the first.
+#[test]
+fn curve_tool_inks_a_spline_through_the_clicked_points() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (256, 256), 1.0);
+    app.viewport = mn_gpu::Viewport::default();
+    app.tool = Tool::Figure;
+    app.figure_mode = crate::cmd::FigureMode::Curve;
+    // A thin nib, so "inked here / not inked there" is about the PATH and
+    // not about how wide the shipped default happens to be.
+    app.props_current.size_px = 6.0;
+    app.apply_props();
+    let steps = app.doc.undo_labels().len();
+
+    // A shallow arc: ends low, apex high in the middle.
+    let empty: [PenSample; 0] = [];
+    for (x, y) in [(40.0, 180.0), (128.0, 80.0), (216.0, 180.0)] {
+        app.canvas_down(x, y, PointerKind::Pen, &empty);
+        app.canvas_up(x, y, &empty);
+    }
+    assert_eq!(
+        app.figure_poly.as_ref().map(Vec::len),
+        Some(3),
+        "three clicks, three points, nothing inked yet"
+    );
+    assert_eq!(app.doc.undo_labels().len(), steps, "and no undo step yet");
+
+    app.finish_figure_poly();
+
+    assert!(app.figure_poly.is_none(), "the gesture is over");
+    assert!(active_px(&app, 40, 180)[3] > 0, "inked from the first point");
+    assert!(active_px(&app, 128, 80)[3] > 0, "through the middle one");
+    assert!(active_px(&app, 216, 180)[3] > 0, "to the last");
+    // The discriminator, and the whole point of the row: the CHORD between
+    // two clicked points is empty. A polyline tool inks straight through
+    // (84, 130); the spline is a dozen px above it there.
+    assert_eq!(
+        active_px(&app, 84, 130)[3],
+        0,
+        "the chord between two clicks is not what got inked"
+    );
+    // The straight line between the two ENDS is empty too, and nothing
+    // closed the loop back to the start.
+    assert_eq!(active_px(&app, 128, 180)[3], 0, "not a chord either");
+    assert_eq!(active_px(&app, 128, 200)[3], 0, "no closing edge");
+    // The spline's own points ARE inked, all along it — the core function
+    // is the oracle for where the curve runs (this test owns the wiring).
+    let dense = mn_core::balloon::tessellate_open(&[
+        [40.0, 180.0],
+        [128.0, 80.0],
+        [216.0, 180.0],
+    ]);
+    for k in [dense.len() / 4, dense.len() / 2, dense.len() * 3 / 4] {
+        let p = dense[k];
+        assert!(
+            active_px(&app, p[0] as i32, p[1] as i32)[3] > 0,
+            "the curve is continuous at {p:?}"
+        );
+    }
+    assert_eq!(
+        app.doc.undo_labels().len(),
+        steps + 1,
+        "one curve, one undo press: {:?}",
+        app.doc.undo_labels()
+    );
+    assert!(app.status.contains("curve inked"), "status: {}", app.status);
+
+    // A single click is not a curve — and must not spend an undo step.
+    app.figure_poly = Some(vec![(10.0, 10.0)]);
+    app.finish_figure_poly();
+    assert!(app.status.contains("at least 2 points"), "{}", app.status);
+    assert_eq!(app.doc.undo_labels().len(), steps + 1);
+}
+
+/// Row 95 / BR-022: with "Erase on every layer" armed, one rub takes the
+/// same pixels off every visible unlocked raster layer — and off NOTHING
+/// else — as ONE undo press that puts them all back.
+#[test]
+fn erase_on_every_layer_rubs_the_stack_in_one_undo_press() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (256, 256), 1.0);
+    app.viewport = mn_gpu::Viewport::default();
+    let art = app.doc.active;
+    let flats = app.doc.add_layer("flats");
+    let locked = app.doc.add_layer("locked");
+    let hidden = app.doc.add_layer("hidden");
+    app.doc.layers[locked].lock = true;
+    app.doc.layers[hidden].visible = false;
+    // A solid band across the middle of all four layers, written straight
+    // into the tiles so the setup spends no undo steps.
+    for li in [art, flats, locked, hidden] {
+        app.doc.set_active(li);
+        for y in 110..=130 {
+            ink_box(&mut app, 60, y, 200, y);
+        }
+    }
+    app.doc.set_active(art);
+
+    app.tool = Tool::Eraser;
+    app.apply_draw_state();
+    app.erase_all_layers = true;
+    let steps = app.doc.undo_labels().len();
+
+    app.begin_stroke(PointerKind::Mouse);
+    let batch: Vec<PenSample> = (0..40)
+        .map(|i| PenSample {
+            x: 70.0 + i as f32 * 3.0,
+            y: 120.0,
+            pressure: 1.0,
+            tilt_x: 0.0,
+            tilt_y: 0.0,
+            t_ms: i as f64 * 8.0,
+        })
+        .collect();
+    app.push_batch(&batch);
+    app.end_stroke();
+
+    let alpha = |app: &App, li: usize, x: i32, y: i32| -> u16 {
+        let idx = TileIdx::of_pixel(x, y);
+        let (ox, oy) = idx.origin();
+        app.doc.layers[li]
+            .tile(idx)
+            .map(|t| t.pixel((x - ox) as usize, (y - oy) as usize)[3])
+            .unwrap_or(0)
+    };
+    assert_eq!(alpha(&app, art, 120, 120), 0, "the layer you were on");
+    assert_eq!(alpha(&app, flats, 120, 120), 0, "and the one below it");
+    assert!(alpha(&app, locked, 120, 120) > 0, "a LOCKED layer said no");
+    assert!(alpha(&app, hidden, 120, 120) > 0, "a hidden layer is spared");
+    assert!(alpha(&app, flats, 120, 129) > 0, "only what the rub covered");
+    assert_eq!(
+        app.doc.undo_labels().len(),
+        steps + 1,
+        "one rub, one undo press: {:?}",
+        app.doc.undo_labels()
+    );
+    assert_eq!(
+        app.doc.undo_labels()[steps],
+        "Erase on every layer",
+        "named for the gesture"
+    );
+
+    assert!(app.doc.undo());
+    assert!(alpha(&app, art, 120, 120) > 0, "one press puts it all back");
+    assert!(alpha(&app, flats, 120, 120) > 0, "including the neighbour");
+
+    // Off again, the eraser is local: only the active layer loses ink.
+    app.erase_all_layers = false;
+    let steps = app.doc.undo_labels().len();
+    app.begin_stroke(PointerKind::Mouse);
+    app.push_batch(&batch);
+    app.end_stroke();
+    assert_eq!(alpha(&app, art, 120, 120), 0);
+    assert!(alpha(&app, flats, 120, 120) > 0, "the neighbour is untouched");
+    assert_eq!(app.doc.undo_labels().len(), steps + 1);
+    assert_eq!(app.doc.undo_labels()[steps], "Stroke", "an ordinary stroke");
+}
+
 /// Reader v2: F flags the current spread (pages, not screens), the
 /// flag list's Go jumps, notes round-trip through reader_set_note,
 /// and the last-read position persists through reader_close/open (the
@@ -10174,4 +10401,91 @@ fn pen_row_eyes_persist_per_sub_tool() {
 
     // The ui.txt line carries it.
     assert!(app.layout.to_body().contains("hidden_rows="));
+}
+
+/// Rows 56/57/60/61/64 — the ink options, colour jitter and tip flip travel
+/// the whole rail: Tool Property command → engine → the per-sub-tool memory
+/// that hands them back when you come home to the brush.
+///
+/// The last leg is the one that breaks quietly: `ToolProps` is re-applied to
+/// a freshly loaded preset on every `SelectBrush`, so a knob that is stored
+/// but not APPLIED looks perfect in the panel and draws like the preset.
+#[test]
+fn ink_options_reach_the_engine_and_come_home_with_the_sub_tool() {
+    use mn_brush::{ColorJitter, TipFlip};
+
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (400, 300), 1.0);
+    let Some(i) = app.selected_preset else {
+        println!("[test] SKIP: no brush presets on disk");
+        return;
+    };
+    let first = app.presets[i].1.clone();
+    // A libmypaint preset to come back to, and any second sub tool to leave
+    // for. The procedural ones (dot pen, the Krita engines) have no ink
+    // settings to read, which is fine for the "leave" half.
+    let Some(other) = app
+        .presets
+        .iter()
+        .map(|(_, p)| p.clone())
+        .find(|p| *p != first)
+    else {
+        println!("[test] SKIP: only one preset on disk");
+        return;
+    };
+
+    let jitter = ColorJitter {
+        hue: 0.25,
+        sat: 0.1,
+        bri: 0.2,
+        per_dab: true,
+    };
+    crate::cmd::dispatch(&mut app, AppCmd::SetPaintDensity(0.3));
+    crate::cmd::dispatch(&mut app, AppCmd::SetColorStretch(0.7));
+    crate::cmd::dispatch(&mut app, AppCmd::SetBlur(4.0));
+    crate::cmd::dispatch(&mut app, AppCmd::SetBlurAbs(true));
+    crate::cmd::dispatch(&mut app, AppCmd::SetColorJitter(jitter));
+    crate::cmd::dispatch(
+        &mut app,
+        AppCmd::SetTipFlip(TipFlip::Always, TipFlip::Reverse),
+    );
+
+    assert!((app.props_current.paint_density - 0.3).abs() < 1e-6);
+    assert!((app.engine().paint_density() - 0.3).abs() < 1e-4, "engine");
+    assert!((app.engine().color_stretch() - 0.7).abs() < 1e-4);
+    let (amount, absolute) = app.engine().blur();
+    assert!(absolute && (amount - 4.0).abs() < 0.05, "{amount} px");
+    assert_eq!(app.engine().color_jitter(), jitter);
+    assert_eq!(
+        app.engine().tip_flip(),
+        (TipFlip::Always, TipFlip::Reverse),
+        "the flip modes must reach the brush, not just the panel"
+    );
+
+    // Away...
+    app.push_cmd(AppCmd::SelectBrush(other));
+    pump_cmds(&mut app);
+    assert_eq!(
+        app.props_current.tip_flip_h,
+        TipFlip::Off,
+        "another sub tool must not inherit this one's flip"
+    );
+
+    // ...and home. The values come back AND are pushed into the freshly
+    // loaded engine.
+    app.push_cmd(AppCmd::SelectBrush(first));
+    pump_cmds(&mut app);
+    assert!((app.props_current.paint_density - 0.3).abs() < 1e-6);
+    assert!(
+        (app.engine().paint_density() - 0.3).abs() < 1e-4,
+        "stored but never re-applied: the panel reads 0.3 and the brush \
+         paints neat"
+    );
+    assert!((app.engine().color_stretch() - 0.7).abs() < 1e-4);
+    assert_eq!(app.engine().color_jitter(), jitter);
+    assert_eq!(app.engine().tip_flip(), (TipFlip::Always, TipFlip::Reverse));
+    let (amount, absolute) = app.engine().blur();
+    assert!(absolute && (amount - 4.0).abs() < 0.05, "{amount} px");
 }

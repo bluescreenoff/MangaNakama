@@ -109,7 +109,13 @@ fn every_csp_preset_loads() {
     let ink = MyBrush::load(&csp("ink-gire-fude-pen.myb")).unwrap();
     assert_eq!(ink.name(), "インク切れ筆ペン");
     let listed = BrushLibrary::scan(&csp(""));
-    assert_eq!(listed.len(), CSP_PRESETS.len());
+    // +1 for `dot-pen.myb` (row 96), which is NOT in `CSP_PRESETS`: it is a
+    // hand-authored PROCEDURAL sub tool (`mn-engine: "dot"`) with no
+    // libmypaint settings at all, so the per-preset load assertions above —
+    // radius, opacity — have nothing to say about it. It is listed here so
+    // the count still catches a file that goes missing.
+    assert_eq!(listed.len(), CSP_PRESETS.len() + 1);
+    assert!(listed.iter().any(|(n, _)| n == "Dot Pen"), "{listed:?}");
     assert!(
         listed.iter().any(|(n, _)| n == "インク切れ筆ペン"),
         "{listed:?}"

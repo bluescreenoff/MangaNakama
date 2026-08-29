@@ -1,0 +1,7 @@
+{
+    "version": 3,
+    "name": "Dot Pen",
+    "group": "csp",
+    "mn-engine": "dot",
+    "comment": "Clip Studio Paint: ドットペン (Pen > Dot pen). Locked to 1 px with anti-aliasing off — one whole pixel per dab, no fringe, no pressure. For fine hatching and pixel-level cleanup, where a soft edge is the bug. Procedural (mn-engine), so it carries no libmypaint settings: a 0.5-radius .myb dab is a grey two-pixel ribbon, not a pixel."
+}

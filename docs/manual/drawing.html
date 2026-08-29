@@ -378,6 +378,36 @@ dab draws its own exact disc with a one-pixel edge and never reads hardness,
 so the four levels change nothing you can see while it is on — the row says
 so instead of showing a pixel figure that is not being used.</div>
 
+<h2>Color mixing, jitter, tip flip, dot pen</h2>
+<div class="quirk"><b>Stretch and Blur only appear once Paint is below
+100 %.</b> Paint (CSP's "density of paint") is how much of YOUR colour a dab
+lays down against how much it picks up off the canvas, and at 100 % — where
+every pen ships — nothing is picked up, so there is nothing for the other two
+to stretch or blur. They appear when there is. <span class="why">Blur is a
+multiple of the brush radius, so it follows the Size slider; tick "Blur
+pinned to px" and it becomes a canvas distance that does not.</span></div>
+<div class="quirk"><b>Color jitter's "Along stroke" varies per input sample,
+not per dab.</b> The dab colour is decided inside libmypaint's own stroke
+loop, which we do not patch, so the finest we can move it is once per pen
+event — roughly a hundred times a second. It reads as grain along the
+stroke, which is the point; it is not literally per dab. <span
+class="why">The draw is seeded per stroke, so the same stroke always paints
+the same colours — an undo and redo cannot repaint a different
+brush.</span></div>
+<div class="quirk"><b>Tip flip needs a tip texture; on a plain round dab it
+does nothing.</b> The row mirrors the tip IMAGE, and a round dab is its own
+mirror. The row says so under itself when a mode is on with no texture
+picked. <span class="why">"On reverse" is the one worth knowing: an
+asymmetric tip drawn right-to-left comes out backwards, and that mode flips
+it per dab so both directions read the same.</span></div>
+<div class="quirk"><b>The Dot Pen ignores both Size and pressure.</b> It
+paints one whole pixel per dab with no soft edge — that is the definition,
+not a limitation, and it is why fine hatching and pixel cleanup work with
+it. A "1 px" ordinary brush is really a two-pixel grey ribbon whose darkness
+shifts along its length. <span class="why">It is a procedural sub tool, so
+the Tool Property rows that belong to the MyPaint engine do not reach
+it.</span></div>
+
 <h2>Fill</h2>
 <div class="quirk"><b>Area scaling is signed, and negative never pulls
 back from the page edge.</b> Positive grows the fill under the lineart
