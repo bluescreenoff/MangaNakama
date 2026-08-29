@@ -49,6 +49,9 @@ pub struct DocSession {
     pub page: Option<PageSetup>,
     pub pages: Vec<PageEntry>,
     pub page_index: usize,
+    /// Which of `pages` hold a parked live document (recency order) — the
+    /// parked documents themselves ride inside their `PageEntry`s.
+    pub page_park_lru: Vec<u64>,
     pub story: String,
     pub binding_right: bool,
     pub seed_frame_folder: bool,
@@ -188,6 +191,7 @@ impl App {
             page: self.page.take(),
             pages: std::mem::take(&mut self.pages),
             page_index: self.page_index,
+            page_park_lru: std::mem::take(&mut self.page_park_lru),
             story: std::mem::take(&mut self.story),
             binding_right: self.binding_right,
             seed_frame_folder: self.seed_frame_folder,
@@ -208,6 +212,7 @@ impl App {
         self.page = s.page;
         self.pages = s.pages;
         self.page_index = s.page_index;
+        self.page_park_lru = s.page_park_lru;
         self.story = s.story;
         self.binding_right = s.binding_right;
         self.seed_frame_folder = s.seed_frame_folder;

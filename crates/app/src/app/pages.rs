@@ -72,6 +72,18 @@ pub struct PageEntry {
     pub pane_tex: Option<egui::TextureHandle>,
     pub pane_tex_px: f32,
     pub pane_tex_rev: u64,
+    /// Workflow-audit #1: the page's LIVE `Document`, parked on
+    /// switch-away beside the encoded bytes — a return to this page
+    /// reinstalls it with undo history and revisions intact, instead of
+    /// decoding a history-less copy. Only the most recent few pages hold
+    /// one (`App::page_park_lru`); the bytes stay the one truth for
+    /// save / export / preflight, so eviction costs only the history.
+    pub parked: Option<Box<Document>>,
+    /// `rev` at the moment `parked` was stored. Every direct byte writer
+    /// (story editor, batch ops, resize-other-pages) bumps `rev` through
+    /// `page_rev_next`, so a mismatch on arrival means the bytes moved on
+    /// without the parked document — it is stale and must be dropped.
+    pub parked_rev: u64,
 }
 
 impl PageEntry {
@@ -105,6 +117,8 @@ impl PageEntry {
             pane_tex: None,
             pane_tex_px: 0.0,
             pane_tex_rev: 0,
+            parked: None,
+            parked_rev: 0,
         }
     }
 }
@@ -264,24 +278,9 @@ impl App {
         let rev = self.page_rev_next();
         PageEntry {
             bytes,
-            blank: None,
             thumb,
-            uid: PageEntry::next_uid(),
-            id: 0,
             rev,
-            saved_rev: 0,
-            autosaved_rev: 0,
-            exported_rev: 0,
-            doc_rev: 0,
-            spread: false,
-            preview_img: None,
-            prev_tex: None,
-            prev_tex_px: 0.0,
-            prev_tex_rev: 0,
-            canvas: None,
-            pane_tex: None,
-            pane_tex_px: 0.0,
-            pane_tex_rev: 0,
+            ..PageEntry::active()
         }
     }
 
@@ -776,13 +775,52 @@ impl App {
     /// by the page you happened to switch away from. (Opening a file or
     /// making a new document does NOT come through here — a different
     /// document gets its own set as loaded.)
-    pub fn adopt_page_doc(&mut self, doc: Document) {
-        let carried = std::mem::take(&mut self.doc.rulers);
-        self.doc = doc;
+    ///
+    /// Returns the document it replaced. The ruler carry CLONES rather than
+    /// takes: the leaving document may be parked (workflow-audit #1), and a
+    /// parked document stripped of its rulers would disagree with its own
+    /// stashed bytes.
+    pub fn adopt_page_doc(&mut self, doc: Document) -> Document {
+        let old = std::mem::replace(&mut self.doc, doc);
         if !self.doc.rulers.has_geometry() {
             // Whole set including the on/special switches: a page without
             // geometry has nothing to say about them either.
-            self.doc.rulers = carried;
+            self.doc.rulers = old.rulers.clone();
+        }
+        old
+    }
+
+    /// Park the leaving page's live document beside its bytes — a return to
+    /// this page reinstalls it, undo history and revisions intact. Newest
+    /// wins a small LRU (a parked page is a full-size document plus its
+    /// history); an evicted page loses only its history, the bytes remain
+    /// the truth for save / export / preflight.
+    fn park_page_doc(&mut self, i: usize, doc: Document) {
+        const CAP: usize = 2;
+        // A never-touched template page (its `blank` marker is unspent)
+        // rebuilds instantly and has no history — not worth a slot.
+        if self.pages[i].blank.is_some() {
+            return;
+        }
+        let uid = self.pages[i].uid;
+        self.pages[i].parked = Some(Box::new(doc));
+        self.pages[i].parked_rev = self.pages[i].rev;
+        // Recency list: also purge uids whose page is gone or no longer
+        // holds a park, so a dead entry can never squat on a CAP slot.
+        let live: Vec<u64> = self
+            .pages
+            .iter()
+            .filter(|e| e.parked.is_some())
+            .map(|e| e.uid)
+            .collect();
+        self.page_park_lru
+            .retain(|&u| u != uid && live.contains(&u));
+        self.page_park_lru.push(uid);
+        while self.page_park_lru.len() > CAP {
+            let evict = self.page_park_lru.remove(0);
+            if let Some(e) = self.pages.iter_mut().find(|e| e.uid == evict) {
+                e.parked = None;
+            }
         }
     }
 
@@ -803,28 +841,55 @@ impl App {
             self.set_error(format!("page stash failed: {e}"));
             return;
         }
-        // The arriving doc: decoded bytes, or a still-blank template page
-        // MATERIALIZED directly (the lazy-blank path — a build, not a
-        // decode, and nothing was ever encoded for it).
-        let arriving = match self.pages[i].bytes.take() {
-            Some(bytes) => match mn_core::project::bytes_to_doc(&bytes) {
-                Ok(doc) => doc,
-                Err(e) => {
-                    self.set_error(format!("page {} failed to decode: {e}", i + 1));
-                    return;
-                }
-            },
-            None => match self.pages[i].blank {
-                Some((bw, bh, n)) => self.blank_page_doc_at(bw, bh, n),
-                None => {
-                    self.set_error(format!("page {} has no data", i + 1));
-                    return;
-                }
+        // The arriving doc, best source first: the page's own PARKED live
+        // document (workflow-audit #1 — history and revisions intact) when
+        // its bytes have not moved on without it; else decoded bytes; else
+        // a still-blank template page MATERIALIZED directly (the lazy-blank
+        // path — a build, not a decode, and nothing was ever encoded for
+        // it).
+        let parked = {
+            let e = &mut self.pages[i];
+            match e.parked.take() {
+                // A direct byte writer (story editor, batch ops, resize)
+                // bumped `rev` past the park — the parked document is
+                // stale. Drop it and decode what actually happened.
+                Some(doc) if e.parked_rev == e.rev => Some(*doc),
+                _ => None,
+            }
+        };
+        if parked.is_some() {
+            let uid = self.pages[i].uid;
+            self.page_park_lru.retain(|&u| u != uid);
+        }
+        let arriving = match parked {
+            Some(doc) => {
+                // The active-page invariant (bytes live in `doc`) holds on
+                // this path too.
+                self.pages[i].bytes = None;
+                doc
+            }
+            None => match self.pages[i].bytes.take() {
+                Some(bytes) => match mn_core::project::bytes_to_doc(&bytes) {
+                    Ok(doc) => doc,
+                    Err(e) => {
+                        self.set_error(format!("page {} failed to decode: {e}", i + 1));
+                        return;
+                    }
+                },
+                None => match self.pages[i].blank {
+                    Some((bw, bh, n)) => self.blank_page_doc_at(bw, bh, n),
+                    None => {
+                        self.set_error(format!("page {} has no data", i + 1));
+                        return;
+                    }
+                },
             },
         };
         {
             let doc = arriving;
-            self.adopt_page_doc(doc);
+            let leaving_size = self.doc.size;
+            let leaving = self.adopt_page_doc(doc);
+            self.park_page_doc(old, leaving);
             self.page_index = i;
             // The page's bytes now equal the decoded doc — record its
             // revision so an untouched stash is a no-op.
@@ -835,7 +900,13 @@ impl App {
                 self.saved_revision = self.doc.revision;
             }
             self.renderer.invalidate();
-            self.fit_to_view();
+            // Workflow-audit #1, cheap half: same paper = same viewport.
+            // The "same spot, next page" pass (a panel-by-panel background
+            // sweep across the chapter) keeps its zoom, pan and rotation;
+            // only a page of a different size re-fits.
+            if self.doc.size != leaving_size {
+                self.fit_to_view();
+            }
             self.layer_thumbs.clear();
             // The reading order is per-page (different geometry).
             self.renumber_frames();

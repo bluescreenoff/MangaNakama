@@ -158,6 +158,10 @@ fn add_page_clones_the_template_page() {
         dispatch(app, AppCmd::SelectPage(i));
         all_ink(app)
     };
+    // Evict page 1's parked live document first: a page switch would
+    // reinstall the 15-bit original (workflow-audit #1), and this test
+    // needs the DECODED page for the quantization reason above.
+    app.pages[0].parked = None;
     let template_ink = ink_of(&mut app, 0);
     let copy_ink = ink_of(&mut app, 1);
     assert_eq!(copy_ink, template_ink, "the new page is a copy of page 1");

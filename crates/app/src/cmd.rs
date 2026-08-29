@@ -4525,6 +4525,8 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                                         pane_tex: None,
                                         pane_tex_px: 0.0,
                                         pane_tex_rev: 0,
+                                        parked: None,
+                                        parked_rev: 0,
                                     })
                                     .collect();
                                 app.page_index = 0;

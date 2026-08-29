@@ -199,6 +199,11 @@ pub struct App {
     /// All pages; `pages[page_index]` is the one decoded into `doc`.
     pub pages: Vec<PageEntry>,
     pub page_index: usize,
+    /// Recency order (`uid`s, newest last) of the pages holding a parked
+    /// live `Document` (`PageEntry::parked`) — the cap is small because a
+    /// parked B4 page plus its undo history is real memory. Per-work state:
+    /// it parks and installs with the `DocSession`.
+    pub page_park_lru: Vec<u64>,
     pub story: String,
     pub binding_right: bool,
     /// New pages get a frame border folder (New Manga checkbox).
@@ -1327,6 +1332,7 @@ impl App {
             page: None,
             pages: vec![PageEntry::active()],
             page_index: 0,
+            page_park_lru: Vec::new(),
             story: String::new(),
             binding_right: true,
             seed_frame_folder: true,
@@ -4321,6 +4327,9 @@ mod new_document_tests;
 
 #[cfg(test)]
 mod document_tab_tests;
+
+#[cfg(test)]
+mod page_switch_park_tests;
 
 #[cfg(test)]
 mod text_editor_undo_tests;
