@@ -162,6 +162,28 @@ pub fn run_work(meta: &ProjectMeta, page_count: usize) -> Vec<PreflightFinding> 
                 ),
             ));
         }
+        // The work's RESOLUTION against the target's (audit finding 10,
+        // honest v1). `profile.setup_drift` below compares paper and trim
+        // only, and dpi is the half that cannot be fixed by re-applying
+        // the profile: there is no resample command yet, so this row
+        // exists to say the number out loud rather than to offer a fix.
+        // A pixel canvas (dpi 0) mismatches EVERY print target, and
+        // saying "this work is 0 dpi" would be a lie about what it is.
+        if p.setup.dpi > 0 && setup.dpi != p.setup.dpi {
+            let mine = if setup.dpi == 0 {
+                "this work is a pixel canvas with no dpi".to_string()
+            } else {
+                format!("this work is {} dpi", setup.dpi)
+            };
+            out.push(warn(
+                "profile.dpi",
+                format!(
+                    "{mine}; \"{}\" expects {} — there is no resample yet, so the \
+                     art has to be redrawn or re-exported at the target's resolution",
+                    p.name, p.setup.dpi
+                ),
+            ));
+        }
         if p.setup.paper_mm != setup.paper_mm || p.setup.trim_mm != setup.trim_mm {
             out.push(warn(
                 "profile.setup_drift",
@@ -610,6 +632,63 @@ mod tests {
         m.profile = None;
         let f = run_work(&m, mult + 1);
         assert!(!f.iter().any(|x| x.check.starts_with("profile.")));
+    }
+
+    /// Audit finding 10 (honest v1): the work's dpi against the picked
+    /// target's, with both numbers and the target NAMED — the geometry
+    /// drift check never looked at resolution, so a 350 dpi work aimed at
+    /// a 600 dpi publisher passed preflight clean.
+    #[test]
+    fn profile_dpi_mismatch_names_both_numbers_and_the_target() {
+        let target = crate::profile::PublisherProfile::builtins()
+            .into_iter()
+            .find(|p| p.setup.dpi == 600)
+            .expect("a 600 dpi builtin");
+        let mut m = meta(Some(target.setup.clone()));
+        m.profile = Some(target.clone());
+        // Matching resolution: silent.
+        assert!(
+            !run_work(&m, 4).iter().any(|x| x.check == "profile.dpi"),
+            "a work at the target's dpi must not flag"
+        );
+        // 350 dpi under a 600 dpi target: the audit's own sentence.
+        m.setup.as_mut().unwrap().dpi = 350;
+        let f = run_work(&m, 4);
+        let d = f
+            .iter()
+            .find(|x| x.check == "profile.dpi")
+            .unwrap_or_else(|| panic!("dpi mismatch must flag: {f:?}"));
+        assert_eq!(d.level, PreflightLevel::Warn);
+        assert!(
+            d.message.contains("this work is 350 dpi")
+                && d.message.contains("expects 600")
+                && d.message.contains(&target.name),
+            "the row names the offender: {}",
+            d.message
+        );
+        // Paper/trim are untouched, so this is NOT the drift row wearing
+        // a new id — the two checks are independent.
+        assert!(
+            !f.iter().any(|x| x.check == "profile.setup_drift"),
+            "dpi alone must not read as geometry drift: {f:?}"
+        );
+        // A pixel canvas says what it is instead of claiming 0 dpi.
+        m.setup.as_mut().unwrap().dpi = 0;
+        let f = run_work(&m, 4);
+        let d = f.iter().find(|x| x.check == "profile.dpi").expect("flags");
+        assert!(
+            d.message.contains("pixel canvas") && !d.message.contains("0 dpi"),
+            "a dpi-less canvas is named honestly: {}",
+            d.message
+        );
+        // A target that states no resolution cannot accuse anyone.
+        let mut loose = m.clone();
+        loose.profile.as_mut().unwrap().setup.dpi = 0;
+        assert!(
+            !run_work(&loose, 4)
+                .iter()
+                .any(|x| x.check == "profile.dpi")
+        );
     }
 
     #[test]

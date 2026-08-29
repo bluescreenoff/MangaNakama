@@ -24,6 +24,73 @@ fn shadow_rects(a: egui::Pos2, b: egui::Pos2, d: f32) -> [egui::Rect; 2] {
     ]
 }
 
+// --- live W×H readout during a drag (IO-081) ---------------------------
+
+/// The readout's text for a drag spanning `w_px` × `h_px` CANVAS pixels.
+///
+/// コマ割り is measured work — gutters and 原稿 rules are specified in mm —
+/// so millimetres lead and the pixels follow in brackets. `dpi` is the
+/// work's OWN print resolution ([`App::work_dpi`]), which a plain pixel
+/// canvas does not have: inventing one there would print a millimetre
+/// number no printer ever agreed to, so that branch reports pixels alone.
+///
+/// Pixels are whole (a canvas has no half pixel) and the mm come off the
+/// UNROUNDED px, so the two halves of the string never disagree by a
+/// rounding step.
+fn dim_readout(w_px: f32, h_px: f32, dpi: Option<u32>) -> String {
+    let (w, h) = (w_px.abs(), h_px.abs());
+    let (wi, hi) = (w.round() as i64, h.round() as i64);
+    match dpi.filter(|d| *d > 0) {
+        Some(d) => {
+            let mm = |px: f32| px * 25.4 / d as f32;
+            format!("{:.1} × {:.1} mm ({wi} × {hi} px)", mm(w), mm(h))
+        }
+        None => format!("{wi} × {hi} px"),
+    }
+}
+
+/// Paint the readout as a chip near — never under — the cursor, clamped
+/// inside the canvas so a drag into a corner does not push the numbers off
+/// screen. Down-right of the pointer by default, which is where the hand
+/// is NOT for a right-handed pen grip.
+fn draw_dim_readout(
+    painter: &egui::Painter,
+    canvas_pts: egui::Rect,
+    cursor: egui::Pos2,
+    text: String,
+) {
+    let t = theme::c();
+    let gal = painter.layout_no_wrap(text, egui::FontId::proportional(12.0), t.text);
+    let pad = egui::vec2(6.0, 3.0);
+    let size = gal.size() + pad * 2.0;
+    let mut min = cursor + egui::vec2(16.0, 18.0);
+    min.x = min.x.min(canvas_pts.right() - size.x).max(canvas_pts.left());
+    min.y = min.y.min(canvas_pts.bottom() - size.y).max(canvas_pts.top());
+    let rect = egui::Rect::from_min_size(min, size);
+    painter.rect_filled(rect, 3.0, t.panel);
+    painter.rect_stroke(
+        rect,
+        3.0,
+        egui::Stroke::new(1.0, t.accent),
+        egui::StrokeKind::Inside,
+    );
+    painter.galley(min + pad, gal, t.text);
+}
+
+/// The axis-aligned extent of a run of canvas-px points, as (w, h).
+/// Empty = zero, so a readout on a just-started freehand drag reads 0 × 0
+/// rather than an infinity from a saturating fold.
+fn extent_of(pts: impl IntoIterator<Item = (f32, f32)>) -> (f32, f32) {
+    let mut b: Option<[f32; 4]> = None;
+    for (x, y) in pts {
+        b = Some(match b {
+            None => [x, y, x, y],
+            Some(r) => [r[0].min(x), r[1].min(y), r[2].max(x), r[3].max(y)],
+        });
+    }
+    b.map_or((0.0, 0.0), |r| (r[2] - r[0], r[3] - r[1]))
+}
+
 /// Painted in egui, over the GPU canvas, clipped to the canvas area. Guides
 /// go through `Viewport::to_screen`, so they survive pan/zoom/rotation.
 pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
@@ -32,6 +99,11 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
     let to_pt = |cx: f32, cy: f32| {
         let (sx, sy) = app.viewport.to_screen(cx, cy);
         egui::pos2(sx / ppp, sy / ppp)
+    };
+    // The pointer in POINTS — the anchor every live-drag readout hangs off.
+    let cursor_pt = || {
+        let (lx, ly) = app.last_pointer;
+        egui::pos2(lx as f32 / ppp, ly as f32 / ppp)
     };
 
     // The input probe readout (View menu): delivery counters, on-canvas —
@@ -644,6 +716,13 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
             SelectMode::Rect if pts.len() >= 2 => {
                 let (a, b) = (pts[0], pts[1]);
                 ants(&[a, (b.0, a.1), b, (a.0, b.1)], (0.0, 0.0), col);
+                // IO-081: the number CSP puts in its Information palette.
+                draw_dim_readout(
+                    &painter,
+                    canvas_pts,
+                    cursor_pt(),
+                    dim_readout(b.0 - a.0, b.1 - a.1, app.work_dpi()),
+                );
             }
             SelectMode::Lasso | SelectMode::Shrink => ants(pts, (0.0, 0.0), col),
             _ => {}
@@ -705,6 +784,15 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
             line,
             egui::Stroke::new(1.5, theme::c().accent),
         ));
+        // IO-081: a freehand panel is still a panel with a size — the
+        // trail's own extent is what it will occupy.
+        let (w, h) = extent_of(pts.iter().copied());
+        draw_dim_readout(
+            &painter,
+            canvas_pts,
+            cursor_pt(),
+            dim_readout(w, h, app.work_dpi()),
+        );
     }
 
     // Frame tools: divide-drag preview (a line for cuts, a box for the
@@ -722,6 +810,14 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
                 ],
                 egui::Stroke::new(2.0, theme::c().accent),
             ));
+            // IO-081. Only the RECT sub tool: a divide drag is a cut line,
+            // and a bounding box around a line is not a panel size.
+            draw_dim_readout(
+                &painter,
+                canvas_pts,
+                cursor_pt(),
+                dim_readout(b.0 - a.0, b.1 - a.1, app.work_dpi()),
+            );
         } else {
             // The divide preview shows the GUTTER, not just the cut (owner,
             // 2026-08-20, CSP behaviour): two parallel lines at the exact
@@ -1530,6 +1626,22 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
     // Transform: veil the vacated source region, float the transformed
     // preview over it, then the bbox + corner handles on top.
     if let Some(drag) = &app.transform_drag {
+        // IO-081: the TRANSFORMED bounds, live, while a handle is held —
+        // the affine box measures along its own (rotated) edges, so a
+        // rotated float still reports the size it will commit at, not its
+        // screen-aligned envelope. A mesh has no such edges: its lattice's
+        // AABB is the honest answer. Drawn at each of this block's two
+        // exits, because the mesh path returns early.
+        let readout = drag.gesture.is_some().then(|| {
+            let (w, h) = match &drag.mesh {
+                Some(m) => extent_of(m.pts.iter().map(|p| (p[0], p[1]))),
+                None => {
+                    let d = |a: [f32; 2], b: [f32; 2]| (b[0] - a[0]).hypot(b[1] - a[1]);
+                    (d(drag.bbox[0], drag.bbox[1]), d(drag.bbox[1], drag.bbox[2]))
+                }
+            };
+            dim_readout(w, h, app.work_dpi())
+        });
         let r = drag.source.rect;
         let veil = [
             to_pt(r[0] as f32, r[1] as f32),
@@ -1628,6 +1740,9 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
                     r,
                     egui::Stroke::new(2.0, theme::c().accent),
                 );
+            }
+            if let Some(text) = readout {
+                draw_dim_readout(&painter, canvas_pts, cursor_pt(), text);
             }
             return;
         }
@@ -1728,6 +1843,9 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
             );
         }
         painter.circle_filled(pv, 2.0, theme::c().accent);
+        if let Some(text) = readout {
+            draw_dim_readout(&painter, canvas_pts, cursor_pt(), text);
+        }
     }
 
     // Panel reading order (owner top item 2026-08-18): numbered badges on
@@ -2206,5 +2324,51 @@ mod tests {
             (3, true),
             "third panel stays the third, and keeps its own flag"
         );
+    }
+
+    /// IO-081: mm leads (コマ割り is specified in mm), px follow, one
+    /// decimal on the mm.
+    #[test]
+    fn dim_readout_leads_with_mm_and_backs_it_with_px() {
+        assert_eq!(
+            dim_readout(1070.0, 709.0, Some(600)),
+            "45.3 × 30.0 mm (1070 × 709 px)"
+        );
+        // Same pixels at half the resolution are twice the paper.
+        assert_eq!(
+            dim_readout(1070.0, 709.0, Some(300)),
+            "90.6 × 60.0 mm (1070 × 709 px)"
+        );
+    }
+
+    /// A plain pixel canvas has NO dpi, and the readout must not invent
+    /// one — a millimetre number nobody set is worse than no millimetres.
+    #[test]
+    fn dim_readout_without_a_dpi_is_pixels_only() {
+        assert_eq!(dim_readout(1070.0, 709.0, None), "1070 × 709 px");
+        // dpi 0 is the same statement in `PageSetup`'s pixel-preset shape.
+        assert_eq!(dim_readout(1070.0, 709.0, Some(0)), "1070 × 709 px");
+    }
+
+    /// A drag up-and-left is the same rectangle as a drag down-and-right:
+    /// the readout is a SIZE, never a signed delta.
+    #[test]
+    fn dim_readout_is_unsigned_and_rounds_px_whole() {
+        assert_eq!(
+            dim_readout(-1070.4, -708.6, Some(600)),
+            "45.3 × 30.0 mm (1070 × 709 px)"
+        );
+        assert_eq!(dim_readout(0.0, 0.0, None), "0 × 0 px");
+    }
+
+    /// The freehand/mesh path measures an arbitrary point run; an empty
+    /// one is zero, not an infinity out of a saturating fold.
+    #[test]
+    fn extent_of_spans_the_points_and_empty_is_zero() {
+        assert_eq!(
+            extent_of([(10.0, 5.0), (-2.0, 40.0), (3.0, 12.0)]),
+            (12.0, 35.0)
+        );
+        assert_eq!(extent_of(std::iter::empty()), (0.0, 0.0));
     }
 }
