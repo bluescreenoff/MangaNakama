@@ -717,7 +717,14 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                 let quality = app.export_all_quality;
                 let ext = format.ext();
                 let setup = app.page.clone();
-                let finish = |img: image::RgbaImage| {
+                // The margin stamp (Work Settings): borrows taken BEFORE
+                // the closure so the loop below can keep `&mut app.renderer`
+                // — the closure captures these, not `&app`.
+                let stamp_on = app.print_margin_info;
+                let stamp_engine = app.text_engine.as_ref();
+                let stamp_font = app.text_font.clone();
+                let stamp_story = app.story.clone();
+                let finish = |img: image::RgbaImage, number: &str| -> image::RgbaImage {
                     let full = [0, 0, img.width(), img.height()];
                     let r = match &setup {
                         Some(s) => {
@@ -725,13 +732,31 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                         }
                         None => full,
                     };
-                    if r != full || px_h > 0 {
+                    let mut out = if r != full || px_h > 0 {
                         mn_core::export::finish_image_cropped(
                             img, r, scale, px_h, colour, resample,
                         )
                     } else {
                         mn_core::export::finish_image(img, scale, colour, resample)
+                    };
+                    if stamp_on {
+                        // Spread halves share the entry's number — the
+                        // file names say p0NNa/p0NNb, the stamp must agree
+                        // with the file it lands in.
+                        crate::app::export_stamp::stamp_margin_info(
+                            stamp_engine,
+                            &stamp_font,
+                            &stamp_story,
+                            &mut out,
+                            setup.as_ref(),
+                            r,
+                            scale,
+                            px_h,
+                            colour,
+                            number,
+                        );
                     }
+                    out
                 };
                 let write = |img: &image::RgbaImage, path: &std::path::Path| {
                     mn_core::export::save_finished(img, path, format, quality, colour).is_ok()
@@ -768,11 +793,14 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                                 // `a` is the half a reader meets first —
                                 // the RIGHT one in a right-bound work.
                                 let (h1, h2) = if rtl { (right, left) } else { (left, right) };
-                                for (tag, half) in [("a", &h1), ("b", &h2)] {
-                                    let img = finish(mn_core::export::composite_for_export(
+                            for (tag, half) in [("a", &h1), ("b", &h2)] {
+                                let img = finish(
+                                    mn_core::export::composite_for_export(
                                         half,
                                         d.paper_export_background(),
-                                    ));
+                                    ),
+                                    &(i + 1).to_string(),
+                                );
                                     let path =
                                         dir.join(format!("{prefix}-p{:03}{tag}.{ext}", i + 1));
                                     if write(&img, &path) {
@@ -783,10 +811,13 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                                 exported.push(i);
                             }
                             None => {
-                                let img = finish(mn_core::export::composite_for_export(
-                                    &d,
-                                    d.paper_export_background(),
-                                ));
+                                let img = finish(
+                                    mn_core::export::composite_for_export(
+                                        &d,
+                                        d.paper_export_background(),
+                                    ),
+                                    &(i + 1).to_string(),
+                                );
                                 let path = dir.join(format!("{prefix}-p{:03}.{ext}", i + 1));
                                 if write(&img, &path) {
                                     ok += 1;

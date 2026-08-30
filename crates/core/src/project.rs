@@ -74,6 +74,11 @@ pub struct ProjectMeta {
     /// = no target picked; nothing checks or preselects.
     #[serde(default)]
     pub profile: Option<crate::profile::PublisherProfile>,
+    /// Print the story title + page number in the margins on export
+    /// (Work Settings ▸ margin info). `false` for every work saved
+    /// before the flag was wired to anything.
+    #[serde(default)]
+    pub print_margin_info: bool,
     /// Page file names inside the zip, reading order.
     pages: Vec<String>,
     /// Stable page identities, reading order, parallel to `pages`
@@ -121,6 +126,7 @@ impl ProjectMeta {
             // so this signature does not grow a parameter per field.)
             template_page: None,
             profile: None,
+            print_margin_info: false,
             pages: Vec::new(),
             page_uids: Vec::new(),
         }
@@ -147,6 +153,7 @@ impl Project {
                 cover: None,
                 template_page: None,
                 profile: None,
+                print_margin_info: false,
                 pages: Vec::new(),
                 page_uids: Vec::new(),
             },
@@ -340,6 +347,8 @@ pub struct FolderMeta {
     #[serde(default)]
     pub profile: Option<crate::profile::PublisherProfile>,
     /// Next free page identity; ids are never reused inside a work.
+    #[serde(default)]
+    pub print_margin_info: bool,
     pub next_id: u32,
     /// Pages in READING order — the list order is the page order, the file
     /// names are stable identities.
@@ -378,6 +387,9 @@ pub struct WorkFolder {
     pub cover: Option<usize>,
     pub template_page: Option<usize>,
     pub profile: Option<crate::profile::PublisherProfile>,
+    /// Print story + page number in the margins — see
+    /// `ProjectMeta::print_margin_info`.
+    pub print_margin_info: bool,
     pub next_id: u32,
     pub pages: Vec<FolderPage>,
 }
@@ -468,6 +480,7 @@ pub fn save_folder(
         spine_mm: wf.spine_mm,
         cover: wf.cover,
         template_page: wf.template_page,
+        print_margin_info: wf.print_margin_info,
         profile: wf.profile.clone(),
         next_id,
         pages: wf
@@ -581,6 +594,7 @@ pub fn load_folder(path: &Path) -> Result<WorkFolder, OraError> {
         spine_mm: meta.spine_mm,
         cover: meta.cover,
         template_page: meta.template_page,
+        print_margin_info: meta.print_margin_info,
         profile: meta.profile,
         next_id,
         pages,
@@ -639,6 +653,7 @@ mod tests {
             spine_mm: 6.2,
             cover: Some(1),
             template_page: Some(0),
+            print_margin_info: true,
             profile: crate::profile::PublisherProfile::builtins().pop(),
             next_id: 0,
             pages: vec![
@@ -675,6 +690,7 @@ mod tests {
         assert!((back.spine_mm - 6.2).abs() < 1e-6);
         assert_eq!(back.cover, Some(1));
         assert_eq!(back.template_page, Some(0), "tekno B2 rides the index");
+        assert!(back.print_margin_info, "margin stamp flag rides the index");
         assert_eq!(
             back.profile.as_ref().map(|p| p.name.clone()),
             crate::profile::PublisherProfile::builtins()

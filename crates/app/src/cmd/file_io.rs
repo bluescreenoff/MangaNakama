@@ -86,6 +86,7 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                                     spine_mm,
                                     cover,
                                     template_page,
+                                    print_margin_info,
                                     profile,
                                     next_id,
                                     pages,
@@ -104,6 +105,7 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                                 app.spine_mm = spine_mm;
                                 app.cover = cover;
                                 app.template_page = template_page;
+                                app.print_margin_info = print_margin_info;
                                 app.profile = profile;
                                 app.pages = pages
                                     .into_iter()
@@ -176,6 +178,7 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                                 app.spine_mm = proj.meta.spine_mm;
                                 app.cover = proj.meta.cover;
                                 app.template_page = proj.meta.template_page;
+                                app.print_margin_info = proj.meta.print_margin_info;
                                 app.profile = proj.meta.profile.clone();
                                 app.pages = proj
                                     .pages
@@ -268,6 +271,7 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                             proj.meta.spine_mm = app.spine_mm;
                             proj.meta.cover = app.cover;
                             proj.meta.template_page = app.template_page;
+                            proj.meta.print_margin_info = app.print_margin_info;
                             proj.meta.profile = app.profile.clone();
                             // Workflow audit §11: the pages' stable
                             // identities ride the file, so a work promoted
@@ -343,6 +347,7 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                     proj.meta.spine_mm = app.spine_mm;
                     proj.meta.cover = app.cover;
                     proj.meta.template_page = app.template_page;
+                    proj.meta.print_margin_info = app.print_margin_info;
                     proj.meta.profile = app.profile.clone();
                     proj.meta.page_uids = app.page_uids();
                     proj.pages = app
@@ -408,6 +413,24 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
             }));
             let img = app.renderer.render_offscreen(&app.doc, w, h);
             app.renderer.set_paper_override(None);
+            // The margin stamp rides this door too: the active page, full
+            // paper, work pixels, no colour reduction — this door has
+            // never had a finish.
+            let mut img = img;
+            if app.print_margin_info {
+                crate::app::export_stamp::stamp_margin_info(
+                    app.text_engine.as_ref(),
+                    &app.text_font,
+                    &app.story,
+                    &mut img,
+                    app.page.as_ref(),
+                    [0, 0, w, h],
+                    1.0,
+                    0,
+                    mn_core::doc::LayerExpression::Colour,
+                    &(app.page_index + 1).to_string(),
+                );
+            }
             match img.save(&p) {
                 Ok(()) => {
                     app.set_status(format!("exported {w}x{h} PNG -> {}", p.display()));
@@ -467,6 +490,7 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                         proj.meta.spine_mm = app.spine_mm;
                         proj.meta.cover = app.cover;
                         proj.meta.template_page = app.template_page;
+                        proj.meta.print_margin_info = app.print_margin_info;
                         proj.meta.profile = app.profile.clone();
                         proj.meta.page_uids = app.page_uids();
                         proj.pages = app

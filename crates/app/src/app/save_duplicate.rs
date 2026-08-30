@@ -74,6 +74,7 @@ impl App {
         proj.meta.spine_mm = self.spine_mm;
         proj.meta.cover = self.cover;
         proj.meta.template_page = self.template_page;
+        proj.meta.print_margin_info = self.print_margin_info;
         proj.meta.profile = self.profile.clone();
         proj.meta.page_uids = self.page_uids();
         proj.pages = self

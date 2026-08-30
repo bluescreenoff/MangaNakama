@@ -19,6 +19,8 @@ pub(crate) mod canvas_input;
 mod comps;
 mod diag;
 mod engine;
+/// The Work Settings margin stamp (story + page number) on export pixels.
+pub(crate) mod export_stamp;
 /// Row 166 file objects: a layer that references an image file and
 /// re-reads it when it changes (`mn_core::file_object` is the document
 /// half). Import, the two update doors, and the relink repair.
@@ -1092,8 +1094,13 @@ pub struct App {
     /// In-progress figure drag, canvas coords `[anchor, current]`
     /// (line/rect/ellipse).
     pub figure_drag: Option<((f32, f32), (f32, f32))>,
-    /// Figure ▸ Polygon: the placed vertices so far.
-    pub figure_poly: Option<Vec<(f32, f32)>>,
+    /// Figure ▸ Polygon / Continuous curve: the placed vertices so far, each
+    /// carrying `FG-016`'s corner bit (see `FigureAnchor`).
+    pub figure_poly: Option<Vec<crate::cmd::FigureAnchor>>,
+    /// `FG-014`: the index into `figure_poly` of the anchor a Ctrl+drag has
+    /// hold of. Pre-commit gesture state, exactly like the click list itself,
+    /// so it costs no undo step — the one press is still spent at the commit.
+    pub figure_anchor_drag: Option<usize>,
     /// Row 157 (`FG-002`/`FG-011`): the gesture's SECOND stage, once the size
     /// drag has been released. Mutually exclusive with `figure_drag` — the
     /// release takes one and may then set the other.
@@ -1896,6 +1903,7 @@ impl App {
             figure_fill: false,
             figure_drag: None,
             figure_poly: None,
+            figure_anchor_drag: None,
             figure_stage2: None,
             figure_adjust_angle: false,
             smart_shape: None,

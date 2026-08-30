@@ -537,3 +537,196 @@ fn a_work_that_was_never_exported_stays_quiet() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+// --- the margin stamp (Work Settings ▸ print story + page number) ---
+
+/// A small but real page setup at 100 dpi: paper 50×70 mm (197×276 px),
+/// trim 40×58 mm — a ~6 mm bottom margin the stamp can sit in outside
+/// the trim.
+fn stamp_setup() -> mn_core::PageSetup {
+    mn_core::PageSetup {
+        name: "stamp".into(),
+        dpi: 100,
+        paper_mm: (50.0, 70.0),
+        trim_mm: (40.0, 58.0),
+        inner_mm: (36.0, 54.0),
+        inner_offset_mm: (0.0, 0.0),
+        bleed_mm: 2.0,
+        safety_mm: None,
+    }
+}
+
+/// A one-page work on that setup with a stripe of ink down the left half
+/// — something for the export to carry besides the stamp.
+fn stamp_work(renderer: mn_gpu::Renderer, story: &str) -> App {
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    app.page = Some(stamp_setup());
+    let (w, h) = stamp_setup().paper_px();
+    app.doc = mn_core::Document::new(w, h);
+    app.story = story.to_owned();
+    let li = app.doc.add_layer("ink");
+    let tile = app.doc.layers[li].tile_mut(mn_core::TileIdx::new(0, 0));
+    for y in 0..h.min(64) {
+        for x in 0..w.min(32) {
+            tile.set_pixel(x as usize, y as usize, [0, 0, 0, mn_core::FIX15_ONE as u16]);
+        }
+    }
+    app
+}
+
+fn decoded_png(p: &std::path::Path) -> image::RgbaImage {
+    image::open(p).unwrap().to_rgba8()
+}
+
+/// The one image this test run wrote (the prefix is the story name).
+fn first_png(dir: &std::path::Path) -> std::path::PathBuf {
+    let mut entries: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("png")))
+        .collect();
+    entries.sort();
+    entries.pop().expect("the export wrote a PNG")
+}
+
+/// Where this work's trim bottom sits, work px = output px (defaults
+/// export at scale 1.0, full paper).
+fn trim_bottom_y() -> u32 {
+    stamp_setup().trim_rect_px()[3].round() as u32
+}
+
+#[test]
+fn the_stamp_off_is_pixel_identical_to_the_old_export() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = stamp_work(renderer, "TEST STORY");
+    app.print_margin_info = false;
+    let dir = std::env::temp_dir().join(format!("mn-stamp-off-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    crate::cmd::dispatch(
+        &mut app,
+        crate::cmd::AppCmd::ExportAllPagesPath(dir.clone()),
+    );
+    let stamped_off = decoded_png(&first_png(&dir));
+    // The same page through the core door with no stamp in sight — the
+    // checkbox OFF must add nothing anywhere.
+    let expected = mn_core::export::composite_for_export(
+        &app.doc,
+        app.doc.paper_export_background(),
+    );
+    assert_eq!(
+        (stamped_off.width(), stamped_off.height()),
+        (expected.width(), expected.height())
+    );
+    assert!(
+        stamped_off
+            .enumerate_pixels()
+            .zip(expected.enumerate_pixels())
+            .all(|(a, b)| a.2.0 == b.2.0),
+        "checkbox OFF: every pixel identical to the plain composite"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn the_stamp_lands_in_the_bottom_margin_only() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("mn-stamp-on-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // Export All: ON vs OFF of the same work; the diff must live in the
+    // bottom margin (below the trim), in a compact band, with ink near
+    // the centre (the number) and near the left (the story).
+    let mut app = stamp_work(renderer, "TEST STORY");
+    crate::cmd::dispatch(
+        &mut app,
+        crate::cmd::AppCmd::ExportAllPagesPath(dir.clone()),
+    );
+    let plain = decoded_png(&first_png(&dir));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    app.print_margin_info = true;
+    crate::cmd::dispatch(
+        &mut app,
+        crate::cmd::AppCmd::ExportAllPagesPath(dir.clone()),
+    );
+    let stamped = decoded_png(&first_png(&dir));
+    let w = stamped.width();
+    let trim = trim_bottom_y();
+    let mut any = false;
+    let mut centre = false;
+    let mut left = false;
+    let mut y_max = 0u32;
+    let mut y_min = u32::MAX;
+    for (x, y, p) in stamped.enumerate_pixels() {
+        if p.0 != plain.get_pixel(x, y).0 {
+            any = true;
+            assert!(y >= trim, "changed pixel above the trim at {x},{y}");
+            y_max = y_max.max(y);
+            y_min = y_min.min(y);
+            if (x as i64 - w as i64 / 2).abs() < 40 {
+                centre = true;
+            }
+            if x < 80 {
+                left = true;
+            }
+        }
+    }
+    assert!(any, "the stamp drew something");
+    assert!(centre, "page-number ink near the horizontal centre");
+    assert!(left, "story ink near the left edge");
+    assert!(y_max - y_min < 30, "one compact band, not the whole margin");
+
+    // The single-page Export PNG door stamps the same ruling.
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let one = dir.join("one.png");
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::ExportPngPath(one.clone()));
+    let single = decoded_png(&one);
+    let mut any = false;
+    for (x, y, p) in single.enumerate_pixels() {
+        if p.0 != plain.get_pixel(x, y).0 {
+            any = true;
+            assert!(y >= trim, "single export: changed pixel above the trim");
+        }
+    }
+    assert!(any, "the single-page door stamps too");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_mono_export_thresholds_the_stamp_like_ink() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = stamp_work(renderer, "TEST STORY");
+    app.print_margin_info = true;
+    app.export_all_colour = mn_core::LayerExpression::Mono;
+    let dir = std::env::temp_dir().join(format!("mn-stamp-mono-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    crate::cmd::dispatch(
+        &mut app,
+        crate::cmd::AppCmd::ExportAllPagesPath(dir.clone()),
+    );
+    let img = decoded_png(&first_png(&dir));
+    let mut blacks = 0;
+    for (_, _, p) in img.enumerate_pixels() {
+        assert_eq!((p.0[0], p.0[1], p.0[2]).0, p.0[1], "channels agree");
+        assert!(
+            p.0[0] == 0 || p.0[0] == 255,
+            "binary page, stamp included (got {})",
+            p.0[0]
+        );
+        if p.0[0] == 0 {
+            blacks += 1;
+        }
+    }
+    assert!(blacks > 0, "ink and stamp both survived the threshold");
+    std::fs::remove_dir_all(&dir).ok();
+}

@@ -49,6 +49,7 @@ impl App {
             spine_mm: self.spine_mm,
             cover: self.cover,
             template_page: self.template_page,
+            print_margin_info: self.print_margin_info,
             profile: self.profile.clone(),
             next_id: self.folder_next_id,
             pages: self
@@ -123,6 +124,7 @@ impl App {
             spine_mm: self.spine_mm,
             cover: self.cover,
             template_page: self.template_page,
+            print_margin_info: self.print_margin_info,
             profile: self.profile.clone(),
             next_id: self.folder_next_id,
             pages: self

@@ -1179,8 +1179,9 @@ pub fn finish_image_cropped(
     colour: crate::doc::LayerExpression,
     resample: Resample,
 ) -> image::RgbaImage {
-    let [x0, y0, x1, y1] = crop_px;
-    let img = if x1 > x0 && y1 > y0 && (x1 - x0 < img.width() || y1 - y0 < img.height()) {
+    let (out, _, applied) = finish_geometry((img.width(), img.height()), crop_px, scale, px_height);
+    let [x0, y0, x1, y1] = applied;
+    let img = if [x0, y0, x1, y1] != [0, 0, img.width(), img.height()] {
         image::imageops::crop_imm(
             &img,
             x0,
@@ -1196,12 +1197,57 @@ pub fn finish_image_cropped(
         // Exact-height fit, resized HERE so the output height is the asked
         // number, not a rounding neighbour of it. Never up: a 1200px-tall
         // crop asked for 2048 stays 1200 (the dialog says so, not us).
-        let w =
-            ((img.width() as f32 * px_height as f32 / img.height() as f32).round() as u32).max(1);
-        let img = resample_to(&img, w, px_height, colour, resample);
+        let img = resample_to(&img, out.0, px_height, colour, resample);
         return finish_image(img, 1.0, colour, resample);
     }
     finish_image(img, scale, colour, resample)
+}
+
+/// The geometry a finish will apply to an `img_px` image: the output size,
+/// the work→output scale, and the crop rect actually taken (a `crop_px`
+/// that does not shrink anything is dropped, exactly as
+/// [`finish_image_cropped`] drops it). Pure, and the single source of the
+/// numbers — the finish itself runs on this helper, so a caller planning
+/// where a stamp lands in the finished image cannot drift from what the
+/// finish does.
+pub fn finish_geometry(
+    img_px: (u32, u32),
+    crop_px: [u32; 4],
+    scale: f32,
+    px_height: u32,
+) -> ((u32, u32), f32, [u32; 4]) {
+    let full = [0, 0, img_px.0, img_px.1];
+    let [x0, y0, x1, y1] = crop_px;
+    let applied = if x1 > x0 && y1 > y0 && (x1 - x0 < img_px.0 || y1 - y0 < img_px.1) {
+        [
+            x0,
+            y0,
+            (x1).min(img_px.0),
+            (y1).min(img_px.1),
+        ]
+    } else {
+        full
+    };
+    let (cw, ch) = (applied[2] - applied[0], applied[3] - applied[1]);
+    if px_height > 0 && px_height < ch {
+        let w = ((cw as f32 * px_height as f32 / ch as f32).round() as u32).max(1);
+        return ((w, px_height), px_height as f32 / ch as f32, applied);
+    }
+    // `finish_image` resamples only under 1.0 — it never upsamples, so a
+    // scale above 1 is not a scale at all.
+    let eff = scale.min(1.0);
+    if eff < 1.0 {
+        (
+            (
+                ((cw as f32 * eff).round() as u32).max(1),
+                ((ch as f32 * eff).round() as u32).max(1),
+            ),
+            eff,
+            applied,
+        )
+    } else {
+        ((cw, ch), 1.0, applied)
+    }
 }
 
 pub fn finish_image(
@@ -1223,6 +1269,157 @@ pub fn finish_image(
         }
     }
     img
+}
+
+/// Ink size of the margin stamp (story title + page number), points at the
+/// output dpi. The stamp's whole look lives in this block's constants —
+/// every one of them is an eye-test ruling away from changing.
+pub const MARGIN_STAMP_PT: f32 = 8.0;
+/// Breathing room between the trim line and the top of the stamp band, mm.
+pub const MARGIN_STAMP_TRIM_GAP_MM: f32 = 1.5;
+/// Inset from the output edge — the fallback band's bottom stand-off and
+/// the story title's left edge, mm at the output dpi. A pixel canvas has
+/// no dpi; it falls back to a fraction of the ink height.
+pub const MARGIN_STAMP_EDGE_MM: f32 = 2.0;
+
+/// Where the two margin-stamp sprites land in a FINISHED export image:
+/// rects in output px, `[x0, y0, x1, y1]`. An empty rect (x1 <= x0 or
+/// y1 <= y0) means "do not draw this one" — the story line when the work
+/// has no title.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MarginStampLayout {
+    /// The page number, horizontally centred on the output.
+    pub number: [u32; 4],
+    /// The story title, at the output's left edge, same band.
+    pub story: [u32; 4],
+}
+
+/// The stamp band's vertical extent, output px. `None` = the trim's bottom
+/// edge is not visible above the output's bottom edge (no page setup, a
+/// pixel canvas, or a crop that took the margin with it), so the stamp
+/// falls back to sitting just inside the paper edge.
+fn stamp_band(
+    setup: Option<&crate::page::PageSetup>,
+    crop: [u32; 4],
+    eff_scale: f32,
+    out_h: u32,
+    ink_h: u32,
+) -> Option<(u32, u32)> {
+    let s = setup?;
+    if s.dpi == 0 {
+        return None;
+    }
+    let out_dpi = s.dpi as f32 * eff_scale;
+    let mm_px = |mm: f32| (mm / 25.4 * out_dpi).max(1.0) as u32;
+    let gap = mm_px(MARGIN_STAMP_TRIM_GAP_MM);
+    let edge = mm_px(MARGIN_STAMP_EDGE_MM);
+    // The trim's bottom edge mapped through the finish: work px → output px.
+    let trim_bottom = ((s.trim_rect_px()[3] - crop[1] as f32) * eff_scale).round() as i64;
+    let top = trim_bottom.saturating_add(gap as i64);
+    let bot = out_h as i64 - edge as i64;
+    if top >= 0 && bot > top && (bot - top) as u32 >= ink_h {
+        Some((top as u32, bot as u32))
+    } else {
+        None
+    }
+}
+
+/// Place the margin stamp (story title + page number) in a finished export
+/// image. Pure geometry — sprites are measured, not drawn — so the tests
+/// pin the ruling the owner will eye-test: number centred in the BOTTOM
+/// margin outside the trim, inside the paper edge when there is no trim to
+/// sit outside of, both lines sharing one band.
+pub fn margin_stamp_layout(
+    setup: Option<&crate::page::PageSetup>,
+    crop: [u32; 4],
+    eff_scale: f32,
+    out_px: (u32, u32),
+    number_size: [u32; 2],
+    story_size: [u32; 2],
+) -> MarginStampLayout {
+    let ink_h = number_size[1].max(story_size[1]).max(1);
+    let edge_px = match (setup, eff_scale) {
+        (Some(s), _) if s.dpi > 0 => {
+            (MARGIN_STAMP_EDGE_MM / 25.4 * s.dpi as f32 * eff_scale).max(1.0) as u32
+        }
+        _ => (ink_h as f32 / 3.0).max(1.0) as u32,
+    };
+    let (top, bot) = stamp_band(setup, crop, eff_scale, out_px.1, ink_h)
+        .unwrap_or((out_px.1.saturating_sub(edge_px + ink_h), out_px.1));
+    // Each line centres vertically in the band on its own height, so a
+    // titleless stamp and a titled one keep the number in the same place.
+    let place = |size: [u32; 2], x0: u32| -> [u32; 4] {
+        if size[0] == 0 || size[1] == 0 {
+            return [0, 0, 0, 0];
+        }
+        let y0 = top + (bot - top).saturating_sub(size[1]) / 2;
+        [
+            x0,
+            y0,
+            (x0 + size[0]).min(out_px.0),
+            (y0 + size[1]).min(out_px.1),
+        ]
+    };
+    MarginStampLayout {
+        number: place(
+            number_size,
+            out_px.0 / 2 - number_size[0] / 2,
+        ),
+        story: place(story_size, edge_px),
+    }
+}
+
+/// Composite the two stamp sprites at their rects, then run the colour
+/// reduction over the stamped pixels so a mono finish thresholds the stamp
+/// exactly like page ink (the reduction is per-pixel, so doing it here is
+/// the same math as stamping before the finish's reduce pass).
+pub fn apply_margin_stamp(
+    img: &mut image::RgbaImage,
+    layout: &MarginStampLayout,
+    story: Option<&crate::text::RenderedText>,
+    number: Option<&crate::text::RenderedText>,
+    colour: crate::doc::LayerExpression,
+) {
+    for (rect, sprite) in [(layout.story, story), (layout.number, number)] {
+        let Some(s) = sprite else { continue };
+        if rect[2] <= rect[0] || rect[3] <= rect[1] {
+            continue;
+        }
+        let (sw, sh) = (s.size[0] as i64, s.size[1] as i64);
+        // Centre the sprite in its rect (the rect is sprite-sized in
+        // practice; the centre keeps a layout/sprite size mismatch safe).
+        let dx = rect[0] as i64 + (rect[2] as i64 - rect[0] as i64 - sw) / 2;
+        let dy = rect[1] as i64 + (rect[3] as i64 - rect[1] as i64 - sh) / 2;
+        for sy in 0..sh {
+            let y = dy + sy;
+            if y < 0 || y >= img.height() as i64 {
+                continue;
+            }
+            for sx in 0..sw {
+                let x = dx + sx;
+                if x < 0 || x >= img.width() as i64 {
+                    continue;
+                }
+                let sp = ((sy * sw + sx) * 4) as usize;
+                let sa = s.rgba[sp + 3] as u32;
+                if sa == 0 {
+                    continue;
+                }
+                let p = img.get_pixel_mut(x as u32, y as u32);
+                let mut out = [p.0[0], p.0[1], p.0[2], p.0[3]];
+                // Premultiplied over: the sprite is premultiplied RGBA.
+                for c in 0..3 {
+                    out[c] = (s.rgba[sp + c] as u32 + out[c] as u32 * (255 - sa) / 255).min(255)
+                        as u8;
+                }
+                out[3] = (sa + out[3] as u32 * (255 - sa) / 255).min(255) as u8;
+                if colour != crate::doc::LayerExpression::Colour {
+                    out = reduce_u8(out, colour);
+                }
+                p.0 = out;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2427,5 +2624,144 @@ mod crop_tests {
             Resample::Photo,
         );
         assert_eq!((out.width(), out.height()), (400, 600), "never upsamples");
+    }
+
+    // --- margin stamp (story title + page number on exports) ---
+
+    /// A B4/600dpi-ish page with a real margin: paper 200x280 mm, trim
+    /// 180x260 mm — 10 mm of margin on every side.
+    fn b4_setup() -> crate::page::PageSetup {
+        crate::page::PageSetup {
+            name: "test".into(),
+            dpi: 600,
+            paper_mm: (200.0, 280.0),
+            trim_mm: (180.0, 260.0),
+            inner_mm: (170.0, 250.0),
+            inner_offset_mm: (0.0, 0.0),
+            bleed_mm: 3.0,
+            safety_mm: None,
+        }
+    }
+
+    fn sprite(w: u32, h: u32, rgb: u8, cover: u8) -> crate::text::RenderedText {
+        let mut rgba = Vec::new();
+        for _ in 0..w * h {
+            rgba.extend_from_slice(&[rgb, rgb, rgb, cover]);
+        }
+        crate::text::RenderedText {
+            origin: [0, 0],
+            size: [w, h],
+            rgba,
+        }
+    }
+
+    #[test]
+    fn finish_geometry_agrees_with_the_real_finish() {
+        // The helper exists so stamp placement cannot drift from what the
+        // finish actually does; pin them together over the knob space.
+        let img = image::RgbaImage::new(7016, 9933); // B4 at 600dpi-ish
+        let combos: Vec<([u32; 4], f32, u32)> = vec![
+            ([0, 0, 7016, 9933], 0.5, 0),
+            ([100, 200, 6916, 9733], 0.58, 0),
+            ([0, 0, 7016, 9933], 1.0, 3200),
+            ([500, 500, 6500, 9400], 1.5, 2000), // never upsamples
+            ([0, 0, 7016, 9933], 2.0, 0),        // ditto, no px fit
+        ];
+        for (crop, scale, px_h) in combos {
+            let (out, _, _) = finish_geometry((img.width(), img.height()), crop, scale, px_h);
+            let real = finish_image_cropped(
+                img.clone(),
+                crop,
+                scale,
+                px_h,
+                crate::doc::LayerExpression::Colour,
+                Resample::Photo,
+            );
+            assert_eq!(
+                out,
+                (real.width(), real.height()),
+                "geometry and finish disagree for crop {crop:?} scale {scale} px_h {px_h}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_stamp_band_sits_below_the_trim() {
+        let s = b4_setup();
+        let (w, h) = s.paper_px();
+        let crop = [0, 0, w, h];
+        // 8pt at 600dpi ≈ 67px of ink.
+        let lay = margin_stamp_layout(Some(&s), crop, 1.0, (w, h), [40, 67], [200, 67]);
+        let trim_bottom = s.trim_rect_px()[3] as u32;
+        let gap = (MARGIN_STAMP_TRIM_GAP_MM / 25.4 * 600.0) as u32 + 1;
+        for r in [lay.number, lay.story] {
+            assert!(r[1] >= trim_bottom + gap, "rect {r:?} not below the trim");
+            assert!(r[3] <= h, "rect {r:?} escapes the paper");
+        }
+        // Centred number, left-anchored story, same band.
+        assert_eq!(lay.number[0] + (lay.number[2] - lay.number[0]) / 2, w / 2);
+        assert!(lay.story[0] < lay.number[0], "story sits left of the number");
+        assert_eq!(lay.number[1], lay.story[1], "both lines share the band");
+    }
+
+    #[test]
+    fn a_trim_crop_or_pixel_canvas_falls_back_to_the_edge() {
+        let s = b4_setup();
+        let (w, h) = s.paper_px();
+        let trim = s.trim_rect_px().map(|v| v.round() as u32);
+        // Crop to trim: the margin is gone, the output edge IS the paper
+        // edge — the band falls back to sitting just inside it.
+        let (out, eff, crop) = finish_geometry((w, h), trim, 0.5, 0);
+        let lay = margin_stamp_layout(Some(&s), crop, eff, out, [20, 34], [100, 34]);
+        assert!(lay.number[3] <= out.1, "stamp stays inside the output");
+        assert!(lay.number[1] > out.1 / 2, "stamp is in the bottom area");
+        // Pixel canvas: no setup at all, same fallback shape.
+        let lay = margin_stamp_layout(None, [0, 0, 800, 600], 1.0, (800, 600), [20, 34], [0, 0]);
+        assert!(lay.number[3] <= 600);
+        assert!(lay.number[1] > 300, "bottom of the page, not the middle");
+        assert_eq!(lay.story, [0, 0, 0, 0], "no story text, no story rect");
+    }
+
+    #[test]
+    fn the_stamp_thresholds_like_ink_on_a_mono_finish() {
+        // A grey-valued stamp (anti-aliased edges) over white must come
+        // out binary under the mono reduction — same rule as page ink.
+        let mut img = image::RgbaImage::new(64, 64);
+        for p in img.pixels_mut() {
+            *p = image::Rgba([255, 255, 255, 255]);
+        }
+        let spr = sprite(10, 10, 128, 128); // 50% grey, 50% cover
+        let lay = MarginStampLayout {
+            number: [10, 10, 20, 20],
+            story: [0, 0, 0, 0],
+        };
+        apply_margin_stamp(
+            &mut img,
+            &lay,
+            None,
+            Some(&spr),
+            crate::doc::LayerExpression::Mono,
+        );
+        for p in img.pixels() {
+            assert_eq!(p.0[0], p.0[1], "mono channels agree");
+            assert!(p.0[0] == 0 || p.0[0] == 255, "binary, got {}", p.0[0]);
+        }
+        // And in colour the blend is a plain premultiplied over.
+        let mut img = image::RgbaImage::new(4, 4);
+        for p in img.pixels_mut() {
+            *p = image::Rgba([255, 255, 255, 255]);
+        }
+        let lay = MarginStampLayout {
+            number: [0, 0, 4, 4],
+            story: [0, 0, 0, 0],
+        };
+        apply_margin_stamp(
+            &mut img,
+            &lay,
+            None,
+            Some(&sprite(4, 4, 0, 128)),
+            crate::doc::LayerExpression::Colour,
+        );
+        assert_eq!(img.get_pixel(1, 1).0, [127, 127, 127, 255]);
     }
 }
