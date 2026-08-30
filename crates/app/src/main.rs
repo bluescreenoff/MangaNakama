@@ -1678,6 +1678,86 @@ fn builtin_targets(vk: u16, shift: bool) -> Option<&'static [Target]> {
     })
 }
 
+/// The STATIC built-in chords as a queryable list — the Shortcut
+/// settings tab's "this chord already does …" lookup. Only arms that
+/// hold on a fresh app are listed; state-gated arms (the reader's keys,
+/// the Object tool's O-cycle, Enter/Esc on a live polyline) are not,
+/// and the table says nothing keys.json cannot shadow. The pin test
+/// walks every entry through [`shortcut`] itself, so a row here that no
+/// longer consumes is a failing test, not a stale hint.
+pub(crate) fn builtin_chords() -> Vec<((bool, bool, bool, u16), &'static str)> {
+    let c = |vk: u16, label: &'static str| ((true, false, false, vk), label);
+    let b = |vk: u16, label: &'static str| ((false, false, false, vk), label);
+    vec![
+        c(0x5A, "Undo"),
+        ((true, true, false, 0x5A), "Redo"),
+        c(0x59, "Redo"),
+        c(0x53, "Save"),
+        ((true, true, false, 0x53), "Save As"),
+        ((true, false, true, 0x53), "Save As"),
+        ((false, true, true, 0x53), "Save As"),
+        c(0x4E, "New document"),
+        ((true, true, false, 0x4E), "New layer"),
+        c(0x4F, "Open"),
+        c(0x50, "Print"),
+        c(0x41, "Select all"),
+        ((true, true, false, 0x44), "Reselect"),
+        c(0x44, "Deselect"),
+        ((true, true, false, 0x49), "Invert selection"),
+        c(0x54, "Transform"),
+        c(0x43, "Copy"),
+        c(0x58, "Cut"),
+        c(0x56, "Paste"),
+        ((true, true, false, 0x56), "Paste in place"),
+        ((true, true, false, 0x45), "Stamp visible"),
+        c(0x45, "Merge down"),
+        c(0x47, "Add folder"),
+        c(0x4B, "Command palette"),
+        c(0x57, "Close document"),
+        c(0x30, "Zoom fit"),
+        ((true, false, true, 0x30), "Zoom 100 %"),
+        c(0x31, "Zoom 100 %"),
+        c(0x39, "Flip view horizontal"),
+        ((true, true, false, 0x39), "Flip view vertical"),
+        c(0x21, "Previous page"),
+        c(0x22, "Next page"),
+        c(0x24, "First page"),
+        c(0x23, "Last page"),
+        c(0xDB, "Brush opacity down"),
+        c(0xDD, "Brush opacity up"),
+        b(0x58, "Swap colours"),
+        b(0x43, "Transparent colour slot"),
+        b(0x77, "Reset colours"),
+        b(0xBD, "Rotate view left"),
+        b(0x78, "Rotate view right"),
+        b(0x21, "Zoom in"),
+        b(0x22, "Zoom out"),
+        b(0x2E, "Delete / clear layer"),
+        ((false, false, true, 0x2E), "Fill selection"),
+        ((false, true, false, 0x2E), "Clear outside"),
+        ((false, false, true, 0xDD), "Layer above"),
+        ((false, false, true, 0xDB), "Layer below"),
+        b(0x50, "Pen"),
+        b(0x42, "Pen"),
+        b(0x47, "Fill"),
+        b(0x4D, "Select"),
+        b(0x57, "Auto select"),
+        b(0x4F, "Object"),
+        b(0x46, "Figure"),
+        b(0x56, "Gradient"),
+        b(0x55, "Frame border"),
+        b(0x54, "Text / Balloon"),
+        b(0x49, "Eyedropper"),
+        b(0x48, "Hand (move)"),
+        b(0x52, "Rotate view"),
+        b(0x45, "Eraser / Pen"),
+        b(0xDB, "Brush size down"),
+        b(0xDD, "Brush size up"),
+        b(0xBC, "Previous sub tool"),
+        b(0xBE, "Next sub tool"),
+    ]
+}
+
 /// Keyboard shortcuts that belong to the app, not to egui. Returns true when
 /// the key was consumed.
 ///

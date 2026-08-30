@@ -75,7 +75,14 @@ impl Keymap {
         let Some(path) = keys_path() else {
             return Keymap::default();
         };
-        let Ok(text) = std::fs::read_to_string(&path) else {
+        Keymap::load_from(&path)
+    }
+
+    /// The loader behind [`Self::load_beside_exe`], path in the open —
+    /// the Shortcut settings tab's save-then-apply goes through here in
+    /// tests, where "beside the exe" is the build tree.
+    pub fn load_from(path: &std::path::Path) -> Keymap {
+        let Ok(text) = std::fs::read_to_string(path) else {
             return Keymap::default(); // no file = no bindings, silently
         };
         Keymap::parse(&text)
@@ -175,9 +182,106 @@ fn keys_path() -> Option<PathBuf> {
     Some(std::env::current_exe().ok()?.parent()?.join("keys.json"))
 }
 
+/// The path keys.json lives at, for the Shortcut settings tab's save.
+pub(crate) fn keys_file() -> Option<PathBuf> {
+    keys_path()
+}
+
+/// The reverse of [`vk_of`]: the canonical key name for a virtual-key
+/// code, or `None` for one keys.json cannot spell (JP-layout OEM keys
+/// are deliberately unnamed — a chord the file can't express must not be
+/// offered by anything that builds one). Called only when a chord is
+/// rendered as text, so the small allocation is free.
+pub(crate) fn name_of_vk(vk: u16) -> Option<String> {
+    Some(match vk {
+        0x41..=0x5A => char::from(b'a' + (vk as u8 - 0x41)).to_string(),
+        0x30..=0x39 => char::from(b'0' + (vk as u8 - 0x30)).to_string(),
+        0x70..=0x7B => format!("f{}", vk - 0x70 + 1),
+        0x20 => "space".into(),
+        0x09 => "tab".into(),
+        0x0D => "enter".into(),
+        0x1B => "esc".into(),
+        0x08 => "backspace".into(),
+        0x2E => "del".into(),
+        0x2D => "ins".into(),
+        0x24 => "home".into(),
+        0x23 => "end".into(),
+        0x21 => "pageup".into(),
+        0x22 => "pagedown".into(),
+        0x26 => "up".into(),
+        0x28 => "down".into(),
+        0x25 => "left".into(),
+        0x27 => "right".into(),
+        0xDB => "[".into(),
+        0xDD => "]".into(),
+        0xBC => ",".into(),
+        0xBE => ".".into(),
+        0xBA => ";".into(),
+        0xDE => "'".into(),
+        0xBD => "-".into(),
+        0xBB => "=".into(),
+        0xBF => "/".into(),
+        0xC0 => "`".into(),
+        0xDC => "\\".into(),
+        _ => return None,
+    })
+}
+
+/// The chord as keys.json spells it: modifiers in canonical order
+/// (Ctrl+Shift+Alt+), key name last — `parse_chord` is its inverse.
+pub(crate) fn chord_text(ctrl: bool, shift: bool, alt: bool, vk: u16) -> Option<String> {
+    let key = name_of_vk(vk)?;
+    let mut s = String::new();
+    for (on, m) in [(ctrl, "ctrl+"), (shift, "shift+"), (alt, "alt+")] {
+        if on {
+            s.push_str(m);
+        }
+    }
+    s.push_str(&key);
+    Some(s)
+}
+
+/// One keys.json entry, VERBATIM — the Shortcut settings tab's model.
+/// Whatever the loader does with an entry, the editor keeps it: arrays,
+/// `tool:` targets, `_`-prefixed comment lanes, and entries the loader
+/// only complains about all ride a save untouched (rendered as plain
+/// raw-text rows when the tab cannot edit them richly).
+pub(crate) struct Entry {
+    pub key: String,
+    pub value: serde_json::Value,
+}
+
+/// The file's entries, in the object's (sorted) key order. `Err` is the
+/// whole-file case the loader also refuses: not JSON, or not an object.
+pub(crate) fn parse_entries(text: &str) -> Result<Vec<Entry>, String> {
+    let v: serde_json::Value =
+        serde_json::from_str(text).map_err(|e| format!("not valid JSON ({e})"))?;
+    let obj = v.as_object().ok_or("expected an object of \"chord\": \"command\"")?;
+    Ok(obj
+        .into_iter()
+        .map(|(k, val)| Entry {
+            key: k.clone(),
+            value: val.clone(),
+        })
+        .collect())
+}
+
+/// The entries back to file text — one save, one rewritten keys.json.
+/// Key order is serde_json's (sorted): the file is REWRITTEN, entries
+/// are never dropped or reordered in meaning, and `_`-comments survive
+/// as the rows they are.
+pub(crate) fn serialize_entries(entries: &[Entry]) -> Option<String> {
+    let mut m = serde_json::Map::new();
+    for e in entries {
+        m.insert(e.key.clone(), e.value.clone());
+    }
+    serde_json::to_string_pretty(&serde_json::Value::Object(m)).ok()
+}
+
 /// `"ctrl+shift+1"` → the exact-modifier chord. Case-insensitive;
-/// modifiers in any order; the LAST token is the key.
-fn parse_chord(s: &str) -> Option<Chord> {
+/// modifiers in any order; the LAST token is the key. `chord_text` is
+/// its inverse.
+pub(crate) fn parse_chord(s: &str) -> Option<Chord> {
     let mut ctrl = false;
     let mut shift = false;
     let mut alt = false;

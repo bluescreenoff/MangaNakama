@@ -881,6 +881,9 @@ pub struct App {
     /// User key bindings (`keys.json` beside the exe) — consulted before
     /// the built-in shortcut table. See `crate::keymap`.
     pub keymap: crate::keymap::Keymap,
+    /// The Shortcuts tab's edit state (`ui::shortcut_tab::State`) —
+    /// keys.json's entries as rows, the chord-capture field, save status.
+    pub shortcut_edit: crate::ui::shortcut_tab::State,
     /// Batch layer operations dialog state (`app/batch.rs`). Session-only.
     pub batch: batch::BatchOps,
     /// Pattern Studio window state (`app/pattern.rs`). Session-only.
@@ -1991,6 +1994,7 @@ impl App {
             prefs,
             layer_defaults: layer_defaults::LayerDefaults::load(),
             keymap: crate::keymap::Keymap::load_beside_exe(),
+            shortcut_edit: Default::default(),
             batch: batch::BatchOps::default(),
             pattern: pattern::PatternStudio::default(),
             vector_capture: None,

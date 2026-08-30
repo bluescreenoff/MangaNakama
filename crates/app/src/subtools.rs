@@ -515,14 +515,19 @@ pub fn parse_target(spec: &str) -> Result<Target, String> {
     }
 }
 
-fn tool_named(name: &str) -> Option<Tool> {
+/// The tools a `tool:` target can NAME bare — the registry's owner keys
+/// plus the row-less ink tools. `tool_named` walks this same set, and
+/// the Shortcut tab's search enumerates it, so the two can never
+/// disagree about what a bare target is.
+pub fn nameable_tools() -> impl Iterator<Item = Tool> {
     registry()
         .iter()
         .map(|(t, _)| *t)
-        // The ink tools have no rows, so they are not in the registry — a
-        // shortcut can still name them.
         .chain([Tool::Pen, Tool::Eraser, Tool::Liquify])
-        .find(|t| t.label().eq_ignore_ascii_case(name))
+}
+
+fn tool_named(name: &str) -> Option<Tool> {
+    nameable_tools().find(|t| t.label().eq_ignore_ascii_case(name))
 }
 
 fn group_named(tool: Tool, name: &str) -> Option<&'static str> {

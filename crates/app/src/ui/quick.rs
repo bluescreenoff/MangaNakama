@@ -22,7 +22,7 @@ use crate::cmd::{AppCmd, SubTool, Tool};
 /// the palette's "Preferences ▸ …" rows open the window on one of these,
 /// and the per-setting rows below them come from the same registry the
 /// window renders, so neither can drift.
-const PREF_SECTIONS: [&str; 7] = super::prefs_dialog::TABS;
+const PREF_SECTIONS: [&str; 8] = super::prefs_dialog::TABS;
 
 /// One searchable entry: what it is called, where it lives (the parenthetical
 /// UI-052 shows), and what it runs. Curated — payload commands are named,

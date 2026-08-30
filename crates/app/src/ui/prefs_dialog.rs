@@ -12,7 +12,7 @@ use mn_core::PageSetup;
 /// The tab rail, in draw order. The Ctrl+K palette's "Preferences ▸ …"
 /// rows come from this same array (`ui::quick`), so a rename here renames
 /// them too instead of orphaning a highlight.
-pub(crate) const TABS: [&str; 7] = [
+pub(crate) const TABS: [&str; 8] = [
     "Saving",
     "Drawing",
     "Canvas & view",
@@ -20,6 +20,7 @@ pub(crate) const TABS: [&str; 7] = [
     "Text",
     "History",
     "Performance",
+    "Shortcuts",
 ];
 
 /// One setting's metadata: `id` is stable (used by `App::prefs_focus` and
@@ -230,6 +231,20 @@ pub(crate) const PREF_INDEX: &[PrefMeta] = &[
                View menu under GPU inking. (gpu, speed, lag, slow brush, \
                hardware acceleration, performance)",
     },
+    // Not a prefs.txt row: the tab itself. This entry is what makes the
+    // window's search and the Ctrl+K palette reach the Shortcuts tab
+    // ("shortcut settings — Setting"), and it satisfies the registry's
+    // every-tab-has-rows rule; no tab fn renders it.
+    PrefMeta {
+        id: "shortcut_settings",
+        tab: "Shortcuts",
+        label: "Shortcut settings",
+        desc: "Edits keys.json — your own chords for commands and tool \
+               targets, ahead of the built-in keys. A save rewrites the \
+               file and applies immediately; a chord shows what it already \
+               does before you take it. (shortcuts, keys, hotkeys, key \
+               bindings, keyboard, rebinding, chords, keymap)",
+    },
 ];
 
 fn meta(id: &str) -> Option<&'static PrefMeta> {
@@ -401,6 +416,7 @@ pub(super) fn prefs_window(ctx: &egui::Context, app: &mut App) {
                             "Interface" => tab_interface(ui, app, focus, &mut fx),
                             "Text" => tab_text(ui, app, focus, &mut fx),
                             "History" => tab_history(ui, app, focus, &mut fx),
+                            "Shortcuts" => super::shortcut_tab::tab(ui, app),
                             _ => tab_performance(ui, app, focus, &mut fx, &gpu_line),
                         }
                     });
