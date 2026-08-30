@@ -1525,6 +1525,16 @@ fn swapping_the_gate_channel_rebuilds_the_canvas() {
 /// source has it folded in already, so the two must read the same straight
 /// value. Tolerance as `cpu_matches_gpu_with_a_gated_clip_layer` (the same
 /// 8-bit snapshot through the same steep knee).
+///
+/// The feather is deliberately GENTLE (0.5, weight slope 2), because the
+/// source is a ramp: some pixel's gate value always lands right on the
+/// band edge, and the feather's slope multiplies whatever 1-bit wiggle the
+/// group-texture sample carries on a given rasterizer. At 0.15 the slope
+/// is ~6.7 and CI's newer WARP build (10.0.26100) rounded 3 pixels one bit
+/// differently than the CPU → delta 7 past the budget, while local WARP
+/// (10.0.19041) and Intel hardware agreed. What this test proves — the
+/// gate is applied at the SAME point on the clip path — survives at any
+/// slope; the knife edge only tested the driver's rounding.
 #[test]
 fn cpu_matches_gpu_for_a_this_layer_gate_on_a_clip_layer() {
     let _serial = gpu_guard();
@@ -1545,7 +1555,7 @@ fn cpu_matches_gpu_for_a_this_layer_gate_on_a_clip_layer() {
         Some(mn_core::BlendIf {
             lo: 0.2,
             hi: 0.7,
-            feather: 0.15,
+            feather: 0.5,
             source: mn_core::blendif::GateSource::This,
             channel: mn_core::blendif::GateChannel::G,
         }),
