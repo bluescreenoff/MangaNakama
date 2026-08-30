@@ -45,6 +45,11 @@ pub struct Shell {
     pub cursor: egui::CursorIcon,
     /// UTF-16 high surrogate waiting for its pair (WM_CHAR arrives in halves).
     pending_surrogate: Option<u16>,
+    /// Pinned modifier state for tests: when set, `sync_modifiers`
+    /// reports THIS instead of reading the physical keyboard, so a human
+    /// typing during a test run cannot flake chord matching. Production
+    /// never sets it. See `App::new` for the harness-wide "none" pin.
+    pub(crate) test_modifiers: Option<Modifiers>,
 }
 
 impl Shell {
@@ -97,6 +102,7 @@ impl Shell {
             ui_islands: Vec::new(),
             wants_keyboard: false,
             cursor: egui::CursorIcon::Default,
+            test_modifiers: None,
             pending_surrogate: None,
         }
     }
@@ -164,14 +170,20 @@ impl Shell {
 
     /// Re-read the modifier keys and emit an event if they moved. Cheap enough
     /// to call on every input message; `GetKeyState` is a thread-local read.
+    /// A pinned `test_modifiers` short-circuits the physical read entirely.
     pub fn sync_modifiers(&mut self) -> Modifiers {
-        let down = |vk: i32| unsafe { GetKeyState(vk) } < 0;
-        let m = Modifiers {
-            alt: down(VK_MENU as i32),
-            ctrl: down(VK_CONTROL as i32),
-            shift: down(VK_SHIFT as i32),
-            mac_cmd: false,
-            command: down(VK_CONTROL as i32),
+        let m = match self.test_modifiers {
+            Some(pinned) => pinned,
+            None => {
+                let down = |vk: i32| unsafe { GetKeyState(vk) } < 0;
+                Modifiers {
+                    alt: down(VK_MENU as i32),
+                    ctrl: down(VK_CONTROL as i32),
+                    shift: down(VK_SHIFT as i32),
+                    mac_cmd: false,
+                    command: down(VK_CONTROL as i32),
+                }
+            }
         };
         if m != self.modifiers {
             self.modifiers = m;

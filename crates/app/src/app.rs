@@ -1532,6 +1532,18 @@ impl App {
             ..NewComicDraft::default()
         };
         let shell = Shell::new(&renderer, ppp);
+        // Test seam (the load-flake fix): under test, pin the modifier
+        // state to "nothing held" so `sync_modifiers` never reads the
+        // PHYSICAL keyboard — a human typing during a run used to flip
+        // chord matching mid-test (spring/transform/new-comic flakes).
+        // Production compiles this out; a test wanting Shift sets it on
+        // the shell explicitly.
+        #[cfg_attr(not(test), allow(unused_mut))]
+        let mut shell = shell;
+        #[cfg(test)]
+        {
+            shell.test_modifiers = Some(egui::Modifiers::default());
+        }
         let layout = UiLayout::load();
         // Docking 2: the single tree, else the one-time migration of the
         // legacy two-column layout, else the default. The legacy keys stay
