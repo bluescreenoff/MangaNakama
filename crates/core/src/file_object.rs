@@ -47,10 +47,10 @@
 //!
 //! # v1 limits (recorded, not worked around)
 //!
-//! * No background watcher thread. Updates happen when the app regains
-//!   focus and on the explicit "Update file objects" command. A watcher is
-//!   a thread, a debounce and a cross-platform dependency for a workflow
-//!   whose natural rhythm is "alt-tab back from the other app".
+//! * Core stays watcher-free by design — no thread, no debounce here; the
+//!   APP half runs one (`app/file_object_watch.rs`: ReadDirectoryChangesW
+//!   + the focus/page-hop/explicit doors in its module doc). The change
+//!   test every door shares is down here, where it is testable.
 //! * The change test is (mtime, length), not a content hash: a rewrite
 //!   that lands in the same millisecond AND keeps the same byte length is
 //!   missed. The explicit Update command is the escape hatch.

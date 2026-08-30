@@ -95,7 +95,6 @@ fn regaining_focus_refreshes_quietly() {
     let Some(mut app) = headless() else { return };
     let src = png("focus", [10, 200, 60]);
     dispatch(&mut app, AppCmd::ImportFileObjectPath(src.clone()));
-
     app.set_status("something else entirely");
     app.refresh_file_objects_quiet();
     assert_eq!(
@@ -108,6 +107,62 @@ fn regaining_focus_refreshes_quietly() {
     app.refresh_file_objects_quiet();
     assert_eq!(centre(&app), [220, 60, 30]);
     assert!(app.status.contains("updated"), "{:?}", app.status);
+}
+
+/// Row 166 door 4, the paid deferral: `set_doc_path` fires once per WORK,
+/// so a page hop inside a work folder used to miss a changed source until
+/// the next alt-tab. The hop itself is the arrival moment now — and it
+/// keeps the quiet discipline: a hop with nothing changed leaves the
+/// "page N" line alone.
+#[test]
+fn a_page_hop_picks_up_a_changed_source() {
+    let Some(mut app) = headless() else { return };
+    super::new_document_tests::small_draft(&mut app, 2, "PageHop");
+    dispatch(&mut app, AppCmd::NewComicCreate);
+    let src = png("pagehop", [10, 200, 60]);
+    dispatch(&mut app, AppCmd::ImportFileObjectPath(src.clone()));
+
+    // The artist redrew the background while page 2 was open.
+    app.switch_page(1);
+    write(&src, [220, 60, 30]);
+    app.switch_page(0);
+    assert_eq!(
+        centre(&app),
+        [220, 60, 30],
+        "the hop itself re-read the changed source"
+    );
+    assert!(app.status.contains("updated"), "{:?}", app.status);
+
+    // And the quiet half: a hop with nothing changed does not talk over
+    // the page line.
+    app.switch_page(1);
+    assert!(
+        app.status.starts_with("page "),
+        "an idle hop keeps its own status: {:?}",
+        app.status
+    );
+}
+
+/// The watcher's watch set: every file-object link on the active page,
+/// resolved where `resolve` already finds it — and a link that resolves
+/// NOWHERE still hands over its raw path, because a restore at the
+/// original location is the repair a wake should catch.
+#[test]
+fn watch_links_cover_resolved_and_broken_references() {
+    let Some(mut app) = headless() else { return };
+    let src = png("watchset", [9, 9, 9]);
+    dispatch(&mut app, AppCmd::ImportFileObjectPath(src.clone()));
+    assert_eq!(app.file_object_watch_links(), vec![src.clone()]);
+
+    // Broken: gone from its home and not beside the work (no doc path) —
+    // the raw absolute path is still the honest watch answer.
+    std::fs::remove_file(&src).expect("delete the source");
+    app.refresh_file_objects_quiet();
+    assert_eq!(
+        app.file_object_watch_links(),
+        vec![src],
+        "a broken link still watches its original folder"
+    );
 }
 
 /// A vanished source: the page keeps its picture, the row is flagged, and

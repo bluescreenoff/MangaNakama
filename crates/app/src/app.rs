@@ -25,6 +25,10 @@ pub(crate) mod export_stamp;
 /// re-reads it when it changes (`mn_core::file_object` is the document
 /// half). Import, the two update doors, and the relink repair.
 mod file_object;
+/// Row 166 leftovers: the filesystem watcher for `file_object`'s links
+/// (door 5 in that module doc) — `ReadDirectoryChangesW` thread, pure
+/// debounce/basename routing, the `WM_APP` wake.
+pub(crate) mod file_object_watch;
 mod frames;
 mod kpp_import;
 /// TRIAGE 36 (`L-001`/`L-002` magnetic lasso) and 38 (`S-001` layer pick),

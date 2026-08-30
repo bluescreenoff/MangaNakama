@@ -1078,6 +1078,15 @@ fn pump_commands(hwnd: HWND) {
         with_app(hwnd, |a| dispatch(a, AppCmd::Autosave));
     }
 
+    // Row 166 door 5: the file-object watcher follows the ACTIVE
+    // document's links wherever they came from — open, page hop, tab
+    // switch, import, relink, even a refresh that re-aimed a repath — so
+    // ONE cheap compare here replaces a hook at each of those sites. An
+    // unchanged plan costs the compare; an empty one keeps no thread.
+    with_app(hwnd, |a| {
+        app::file_object_watch::sync(hwnd as isize, &a.file_object_watch_links())
+    });
+
     // The References palette's "Add images…" button. Like every other file
     // dialog it is resolved HERE, not inside the UI build: a dialog pumps the
     // message queue, which re-enters the wndproc, and `App::render` holds a
@@ -2134,6 +2143,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 let resp = remote::respond(app, &p.req);
                 let _ = p.reply.send(resp);
             }
+            flush_redraw(hwnd, app);
+            0
+        }
+
+        // Row 166 door 5 (app/file_object_watch.rs): a watched source
+        // settled. The debounced wake lands HERE — UI thread, `&mut App`
+        // in hand — and feeds the SAME quiet refresh every other door
+        // uses, so an alt-tab change and a watched change are
+        // indistinguishable downstream.
+        m if m == app::file_object_watch::MSG => {
+            app.refresh_file_objects_quiet();
             flush_redraw(hwnd, app);
             0
         }

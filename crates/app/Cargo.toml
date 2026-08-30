@@ -43,6 +43,16 @@ windows-sys = { workspace = true, features = [
   # StartDocW/StartPage/EndPage/EndDoc/AbortDoc + DOCINFOW. They are gdi32
   # exports, but the metadata files them under Storage::Xps — see app/print.rs.
   "Win32_Storage_Xps",
+  # The file-object watcher (app/file_object_watch.rs): CreateFileW +
+  # ReadDirectoryChangesW over the linked files' folders. CreateFileW's
+  # SECURITY_ATTRIBUTES parameter gates it behind Win32_Security too.
+  "Win32_Storage_FileSystem",
+  "Win32_Security",
+  # Its overlapped reads: OVERLAPPED + GetOverlappedResult + CancelIoEx.
+  "Win32_System_IO",
+  # Its wait loop: CreateEventW/SetEvent + WaitForMultipleObjects
+  # (same Win32_Security note as CreateFileW).
+  "Win32_System_Threading",
   "Win32_UI_Controls",
   # PrintDlgW + PRINTDLGW: File ▸ Print…'s printer picker.
   "Win32_UI_Controls_Dialogs",

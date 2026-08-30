@@ -789,6 +789,13 @@ impl App {
                 }
             }
             self.set_status(format!("page {}", i + 1));
+            // Row 166 door 4 (the paid deferral in `file_object.rs`'s
+            // module doc): the arriving page's links were last checked
+            // when the WORK opened — a hop inside a work folder must not
+            // miss a redrawn background until the next alt-tab. Quiet
+            // door: keeps the "page N" line when nothing changed, and
+            // after it when something did.
+            self.refresh_file_objects_quiet();
         }
         self.needs_redraw = true;
     }

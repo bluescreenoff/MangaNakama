@@ -6,9 +6,9 @@
 //! nothing). This file is the wiring: the import command, the two update
 //! doors, the relink repair, and where "the file changed" is noticed.
 //!
-//! # When updates happen (v1)
+//! # When updates happen
 //!
-//! Honest polling at natural moments, no watcher thread:
+//! Honest polling at natural moments, plus a filesystem watcher:
 //!
 //! 1. **The app regains focus** — `WM_SETFOCUS` in `main.rs`. That IS the
 //!    gesture: you alt-tab to the background file, redraw it, alt-tab back.
@@ -21,14 +21,19 @@
 //! 3. **The explicit command** — *Update file objects* in the File menu and
 //!    the command palette, for the case the stamp test missed (see the core
 //!    module's v1-limits list) and for the artist who wants to be sure.
+//! 4. **A page or tab hop** — the tail of `switch_page` and of
+//!    `session::install`. `set_doc_path` fires once per WORK, so the
+//!    arriving page's links were last checked when the work opened; a hop
+//!    inside (or between) works is itself the natural moment to look. Same
+//!    quiet door as focus: says nothing when nothing changed.
+//! 5. **The watcher** — `file_object_watch.rs`, `ReadDirectoryChangesW`
+//!    over the linked files' folders, debounced, waking the UI with
+//!    `PostMessageW` into the SAME quiet refresh. An addition, not a
+//!    replacement: doors 1–4 stay (the watcher has a torn-read gap between
+//!    collects; polling is the backstop).
 //!
-//! Deferred, recorded rather than half-built:
+//! Still refused, recorded rather than half-built:
 //!
-//! * a filesystem watcher;
-//! * a refresh on PAGE SWITCH inside a work folder (`set_doc_path` fires
-//!   once per work, not once per page). The focus door and the explicit
-//!   command both cover it, and the alternative is a hook in the page
-//!   install path;
 //! * refreshing file objects on pages that are NOT open — their rasters
 //!   live in parked ORA bytes, so a background pass would have to decode,
 //!   edit and re-encode every page (the batch-import machinery) for a
@@ -144,5 +149,20 @@ impl App {
         // the work, that folder is the better guess than a dead absolute.
         let p = resolve(fo, self.file_object_near().as_deref()).unwrap_or_else(|| fo.path.clone());
         p.parent().map(Path::to_path_buf)
+    }
+
+    /// Every file-object link on the ACTIVE document, resolved where
+    /// [`resolve`] already finds it — the watcher's watch set (door 5,
+    /// `file_object_watch.rs`). A link that resolves nowhere still hands
+    /// over its RAW path: restoring the file at its original location is
+    /// exactly the repair a wake should catch.
+    pub fn file_object_watch_links(&self) -> Vec<PathBuf> {
+        let near = self.file_object_near();
+        self.doc
+            .layers
+            .iter()
+            .filter_map(|l| l.file_object())
+            .map(|fo| resolve(fo, near.as_deref()).unwrap_or_else(|| fo.path.clone()))
+            .collect()
     }
 }

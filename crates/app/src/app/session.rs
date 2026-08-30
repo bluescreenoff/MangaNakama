@@ -231,6 +231,11 @@ impl App {
         self.pages_dirty = s.pages_dirty;
         self.doc_path = s.doc_path;
         self.adopt_folder_state(s.folder_next_id, s.folder_managed);
+        // Row 166 door 4, the tab-hop sibling of `switch_page`'s refresh:
+        // the arriving document's links were last checked at ITS
+        // `set_doc_path`, and a tab switch fires neither that nor a focus
+        // event — this install IS the arrival moment. Quiet door.
+        self.refresh_file_objects_quiet();
     }
 
     /// Everything cached against the OLD document's layer indices. Called on
