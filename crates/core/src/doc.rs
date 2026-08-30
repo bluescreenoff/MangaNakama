@@ -312,6 +312,50 @@ pub struct LayerMask {
     pub enabled: bool,
     /// Bumped on every edit — the GPU tile cache's rebuild signal.
     pub revision: u64,
+    /// FULL-CANVAS window: the tiles this mask does not hold read as FULL
+    /// coverage. That is already what both compositors and the bake do
+    /// (LM-005, `mask_apply_bake`) for every mask — the flag exists because
+    /// the CORRECTION derive is the one reader that uses the opposite rule.
+    ///
+    /// A correction's mask is its WINDOW: `correction.rs` derives only the
+    /// tiles the mask holds and treats an absent tile as "outside the
+    /// window, not corrected", which is what a window cut from a selection
+    /// has to mean. `full` says the other thing — "the window is the whole
+    /// page, and the tiles present are only the places it has been carved
+    /// away" — which is what a maskless correction gets ARMED with the
+    /// first time a brush touches it (`arm_full_window`). It costs no
+    /// pixels: an all-visible window is an EMPTY tile map.
+    ///
+    /// Two rules, one field, and every mask that is not a correction window
+    /// leaves it `false` and reads exactly as it always did.
+    pub full: bool,
+}
+
+impl LayerMask {
+    /// An all-visible window that stores NO tiles — the arm state. 30 MB of
+    /// dense coverage says exactly the same thing as this empty map.
+    pub fn full_window() -> Self {
+        Self {
+            tiles: HashMap::new(),
+            enabled: true,
+            revision: crate::tile::next_revision(),
+            full: true,
+        }
+    }
+
+    /// The tile a brush dab materialises where the mask holds none.
+    ///
+    /// A carved window starts one EMPTY and the dab paints coverage in. A
+    /// [`full`](Self::full) window has to start it OPAQUE — otherwise the
+    /// first eraser dab anywhere new would hand back a zero tile and hide
+    /// the whole 64×64 of it instead of the dab's footprint.
+    pub fn blank_tile(&self) -> Tile {
+        let mut t = Tile::new_transparent();
+        if self.full {
+            t.data_mut().fill(crate::tile::FIX15_ONE as u16);
+        }
+        t
+    }
 }
 
 /// Which half of a mask-capped breakout a composite step draws. Only a
@@ -1574,7 +1618,11 @@ pub struct Document {
     /// Layer index an open op is recording into (`None` = no op open).
     op_layer: Option<usize>,
     /// LM-004: the stroke bracket's mask snapshot.
-    mask_op_snapshot: Option<(LayerMask, u64)>,
+    /// The LM-004 bracket's pre-image: the mask as it stood at stroke start
+    /// (`None` = there was none) beside its revision then (`None` likewise).
+    /// Comparing the REVISION OPTION at `end` is what makes "no mask before,
+    /// no mask after" a non-event and "no mask before, a window now" a step.
+    mask_op_snapshot: Option<(Option<LayerMask>, Option<u64>)>,
     /// CV-003: the NEXT op's History-palette label, set by the caller
     /// between `begin_op` and `end_op` ("Stroke", "Fill", …). Consumed
     /// by `end_op`; unset = "Edit".
@@ -1790,6 +1838,7 @@ impl Document {
                 tiles: HashMap::new(),
                 enabled: true,
                 revision: 0,
+                full: false,
             },
             history: History::new(),
             op_layer: None,
@@ -1841,12 +1890,40 @@ impl Document {
 
     /// LM-004 stroke bracket: snapshot at stroke start; mask_op_end pushes
     /// one group when the coverage changed (revision moved).
+    ///
+    /// The snapshot records the mask's ABSENCE too (`None`), which is what
+    /// lets [`Self::arm_full_window`] run inside the bracket and be undone
+    /// with the stroke it armed for. Nothing is pushed when the state at
+    /// `end` matches the state at `begin` — including maskless-to-maskless,
+    /// the H1 backstop's case, which spent no undo step before and does not
+    /// now.
     pub fn mask_op_begin(&mut self) {
-        self.mask_op_snapshot = self
-            .active_layer()
-            .mask
-            .as_ref()
-            .map(|m| (m.clone(), m.revision));
+        let m = self.active_layer().mask.as_ref();
+        self.mask_op_snapshot = Some((m.cloned(), m.map(|m| m.revision)));
+    }
+
+    /// Row 105: ARM an all-visible window on the active layer, for the
+    /// stroke that is about to start. A maskless correction layer refused
+    /// brush strokes the way a maskless live fill does — but "erase the
+    /// correction off the face" is what a CSP user reaches for first, and
+    /// there is nothing to refuse: the window a correction wants here is
+    /// the whole page, and [`LayerMask::full_window`] is that in an empty
+    /// map. Call INSIDE the [`Self::mask_op_begin`] bracket; the pre-image
+    /// is then "no mask at all" and one undo takes the window and the
+    /// stroke together.
+    ///
+    /// Returns false when a mask is already there (nothing to arm).
+    pub fn arm_full_window(&mut self) -> bool {
+        let li = self.active;
+        let Some(l) = self.layers.get_mut(li) else {
+            return false;
+        };
+        if l.mask.is_some() {
+            return false;
+        }
+        l.mask = Some(LayerMask::full_window());
+        self.touch();
+        true
     }
 
     /// Returns true when a group was pushed.
@@ -1854,17 +1931,30 @@ impl Document {
         let Some((before, rev0)) = self.mask_op_snapshot.take() else {
             return false;
         };
-        let changed = self
-            .active_layer()
-            .mask
-            .as_ref()
-            .map(|m| m.revision != rev0)
-            .unwrap_or(true);
-        if !changed {
+        if self.active_layer().mask.as_ref().map(|m| m.revision) == rev0 {
             return false;
         }
         let li = self.active;
-        self.push_mask_group(li, Some(before), "Mask stroke");
+        // An armed window the stroke never wrote into: the arm was
+        // speculative (the pen came down and went up again), so it is taken
+        // back rather than spending the undo step an empty stroke has never
+        // spent. An armed window that DID take a dab keeps every tile it
+        // materialised.
+        if before.is_none()
+            && self.layers[li]
+                .mask
+                .as_ref()
+                .is_some_and(|m| m.full && m.tiles.is_empty())
+        {
+            self.layers[li].mask = None;
+            return false;
+        }
+        let label = if before.is_none() {
+            "Correction window"
+        } else {
+            "Mask stroke"
+        };
+        self.push_mask_group(li, before, label);
         true
     }
 
@@ -1949,6 +2039,8 @@ impl Document {
             tiles: HashMap::new(),
             enabled: true,
             revision: crate::tile::next_revision(),
+            // LM-001/002 cut a window over the layer's own inked tiles.
+            full: false,
         };
         for ti in idxs {
             let (ox, oy) = ti.origin();
@@ -2016,6 +2108,15 @@ impl Document {
         let before = m.clone();
         for t in m.tiles.values_mut() {
             Arc::make_mut(t).data_mut().fill(0);
+        }
+        // A FULL window cannot express "all hidden" by zeroing what it
+        // holds — the tiles it does NOT hold are the visible part, and there
+        // is no dense form of them worth 30 MB. Clearing one drops the flag
+        // instead: an empty CARVED window is a window that reaches nothing,
+        // which is the same page and the same command's meaning.
+        if m.full {
+            m.full = false;
+            m.tiles.clear();
         }
         m.revision = crate::tile::next_revision();
         self.push_mask_group(index, Some(before), "Mask");
@@ -4451,6 +4552,7 @@ impl Document {
                         tiles,
                         enabled: true,
                         revision: crate::tile::next_revision(),
+                        full: false,
                     });
                 }
             }
@@ -5336,6 +5438,15 @@ impl Document {
         }
     }
 
+    /// Tiles per freeform batch — the same 256 the compositor's
+    /// `UPLOAD_BATCH`, `correction::DERIVE_BATCH` and the kernel's
+    /// `TILE_BATCH` use: 1 Mpx, 8 MB of pixels, one dispatch's worth.
+    ///
+    /// Also the granularity of a kernel's decline, so a page whose densest
+    /// batch overflows a segment cap still runs every other batch on the
+    /// GPU.
+    const FREEFORM_BATCH: usize = 256;
+
     /// Guard for the paint ops below: the active layer must accept pixels.
     fn paint_guard(&self) -> bool {
         let l = self.active_layer();
@@ -5482,6 +5593,32 @@ impl Document {
         l2: &[[f32; 2]],
         ramp: &crate::gradient::Ramp,
     ) -> bool {
+        self.paint_gradient_freeform_with(l1, l2, ramp, &mut |_, _| None)
+    }
+
+    /// [`Self::paint_gradient_freeform`] with a kernel lent by the caller —
+    /// the GPU seam's door into the freeform field.
+    ///
+    /// The batch is [`FREEFORM_BATCH`] tiles at a time, each carrying its own
+    /// CULLED segment lists (`Window::pack_into`) so a kernel does exactly
+    /// the work the CPU loop does and no more. `run` sees the flattened
+    /// field plus the batch's CURRENT pixels and returns the painted ones —
+    /// src-over included, because the destination is what it was handed —
+    /// or `None` to decline the batch, in which case the loop below paints
+    /// it. Declining per batch rather than per page is deliberate: a
+    /// segment pool that overflows the kernel's cap on ONE dense batch does
+    /// not cost the rest of the page its speed-up.
+    ///
+    /// Undo is untouched: every tile still goes through `tile_mut`, which is
+    /// what stashes the pre-image, and the whole apply is one `begin_op` /
+    /// `end_op` bracket whoever painted the pixels.
+    pub fn paint_gradient_freeform_with(
+        &mut self,
+        l1: &[[f32; 2]],
+        l2: &[[f32; 2]],
+        ramp: &crate::gradient::Ramp,
+        run: &mut crate::freeform::FieldKernel<'_>,
+    ) -> bool {
         if !self.paint_guard() {
             return false;
         }
@@ -5496,28 +5633,60 @@ impl Document {
         // this from its centre, which is exactly what the cull's bound needs.
         let hd = TILE_SIZE as f32 * 0.5 * std::f32::consts::SQRT_2;
         let half = TILE_SIZE as f32 * 0.5;
+        let todo: Vec<TileIdx> = (0..(h + TILE_SIZE as i32 - 1) / TILE_SIZE as i32)
+            .flat_map(|ty| {
+                (0..(w + TILE_SIZE as i32 - 1) / TILE_SIZE as i32).map(move |tx| TileIdx::new(tx, ty))
+            })
+            .filter(|idx| sel.as_ref().is_none_or(|s| s.tile_mask(*idx).is_some()))
+            .collect();
         self.begin_op();
-        for ty in 0..(h + TILE_SIZE as i32 - 1) / TILE_SIZE as i32 {
-            for tx in 0..(w + TILE_SIZE as i32 - 1) / TILE_SIZE as i32 {
-                let idx = TileIdx::new(tx, ty);
-                if let Some(s) = &sel {
-                    if s.tile_mask(idx).is_none() {
-                        continue;
-                    }
-                }
+        for chunk in todo.chunks(Self::FREEFORM_BATCH) {
+            // Cull BEFORE `tile_mut`: a guide with hundreds of segments is
+            // otherwise re-scanned 4096 times per tile.
+            let mut pool: Vec<f32> = Vec::new();
+            let mut plans = Vec::with_capacity(chunk.len());
+            let mut wins = Vec::with_capacity(chunk.len());
+            for &idx in chunk {
                 let (ox, oy) = idx.origin();
-                // Cull BEFORE `tile_mut`: a guide with hundreds of segments
-                // is otherwise re-scanned 4096 times per tile.
                 let win = field.window([ox as f32 + half, oy as f32 + half], hd);
+                plans.push(win.pack_into(&mut pool, (ox, oy)));
+                wins.push(win);
+            }
+            // The tiles as they stand — the kernel's source AND destination.
+            let mut px = vec![0u16; chunk.len() * crate::tile::TILE_LEN];
+            for (n, &idx) in chunk.iter().enumerate() {
+                if let Some(t) = self.layers[li].tile(idx) {
+                    px[n * crate::tile::TILE_LEN..(n + 1) * crate::tile::TILE_LEN]
+                        .copy_from_slice(t.data());
+                }
+            }
+            let job = crate::freeform::FieldJob {
+                segs: &pool,
+                plans: &plans,
+                ramp,
+                size: self.size,
+            };
+            // A host that hands back the wrong length is a bug on its side,
+            // never a reason to write short tiles — same guard the
+            // correction derive puts on its lent kernel.
+            let lent = run(&job, &px).filter(|o| o.len() == px.len());
+            for (n, &idx) in chunk.iter().enumerate() {
                 let tile = self.layers[li].tile_mut(idx);
                 let data = tile.data_mut();
+                if let Some(out) = &lent {
+                    data.copy_from_slice(
+                        &out[n * crate::tile::TILE_LEN..(n + 1) * crate::tile::TILE_LEN],
+                    );
+                    continue;
+                }
+                let (ox, oy) = idx.origin();
                 for p in 0..TILE_SIZE * TILE_SIZE {
                     let x = ox + (p % TILE_SIZE) as i32;
                     let y = oy + (p / TILE_SIZE) as i32;
                     if x >= w || y >= h {
                         continue;
                     }
-                    let t = win.t_at([x as f32 + 0.5, y as f32 + 0.5]);
+                    let t = wins[n].t_at([x as f32 + 0.5, y as f32 + 0.5]);
                     let s = ramp.eval_unit(t, x, y);
                     // Premultiply, for the reason spelled out in
                     // `paint_gradient_ramp`.
@@ -5555,11 +5724,29 @@ impl Document {
         guides: &[crate::freeform::ColourGuide],
         ramp: &crate::gradient::Ramp,
     ) -> bool {
+        self.paint_gradient_freeform_multi_with(guides, ramp, &mut |_, _| None)
+    }
+
+    /// [`Self::paint_gradient_freeform_multi`] with a kernel lent by the
+    /// caller.
+    ///
+    /// The kernel reaches the TWO-guide path only. `FI-051`'s N-guide field
+    /// is an inverse-distance blend whose colour stage is a SEQUENTIAL mix —
+    /// `idw_colour` folds guide k into the running average with
+    /// `mix::mix_rgba`, and two of the three mixing spaces are `powf`/`cbrt`
+    /// — so it has no exact-parity kernel form the way the two-line ramp
+    /// does. It runs the CPU reference, which is where it is exact.
+    pub fn paint_gradient_freeform_multi_with(
+        &mut self,
+        guides: &[crate::freeform::ColourGuide],
+        ramp: &crate::gradient::Ramp,
+        run: &mut crate::freeform::FieldKernel<'_>,
+    ) -> bool {
         if let [a, b] = guides {
             // The pinned two-line path, byte for byte — the ramp's ends are
             // the two guides' colours, which is where the gesture put them.
             let ramp = crate::gradient::Ramp::new(a.colour, b.colour, ramp.mid, ramp.opts);
-            return self.paint_gradient_freeform(&a.pts, &b.pts, &ramp);
+            return self.paint_gradient_freeform_with(&a.pts, &b.pts, &ramp, run);
         }
         if guides.len() < 2 || !self.paint_guard() {
             return false;
@@ -6464,6 +6651,7 @@ mod tests {    use super::*;
             enabled: true,
             revision: crate::tile::next_revision(),
             tiles: std::collections::HashMap::new(),
+            full: false,
         };
         let mut t = Tile::new_transparent();
         for y in 0..crate::tile::TILE_SIZE {

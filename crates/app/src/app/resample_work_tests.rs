@@ -10,6 +10,35 @@ use super::new_document_tests::{headless, small_draft};
 use crate::cmd::{AppCmd, dispatch};
 use mn_core::{Document, transform::Interp};
 
+/// Drive the run the way frames do: start it, then step until the job is
+/// gone. This is the SHIPPED path — phase 1 is chunked one page per frame so
+/// the app can paint a count between pages, and there is no blocking entry
+/// point left for a test to take a short cut through.
+///
+/// A refusal made before the run starts comes back from `begin`; one made
+/// while building a page lands on the status line as an error, because by
+/// then there is no caller left to return it to.
+fn resample(
+    app: &mut crate::App,
+    dpi: u32,
+    interp: Interp,
+) -> Result<usize, String> {
+    app.resample_work_begin(dpi, interp, String::new())?;
+    // Bounded: a step that neither advances nor finishes is a hang, and a
+    // test that hangs tells nobody anything.
+    for _ in 0..10_000 {
+        if app.resample_job.is_none() {
+            break;
+        }
+        app.resample_work_step();
+    }
+    assert!(app.resample_job.is_none(), "the run terminated");
+    if app.status_warn {
+        return Err(app.status.clone());
+    }
+    Ok(app.pages.len())
+}
+
 fn parked_size(app: &crate::App, i: usize) -> (u32, u32) {
     if let Some((w, h, _)) = app.pages[i].blank {
         return (w, h);
@@ -59,9 +88,7 @@ fn the_work_resample_moves_every_page_and_leaves_the_paper_alone() {
         "this paper is exactly the rounding case worth pinning"
     );
 
-    let n = app
-        .resample_work(setup.dpi * 2, Interp::HighAccuracy)
-        .expect("the resample lands");
+    let n = resample(&mut app, setup.dpi * 2, Interp::HighAccuracy).expect("the resample lands");
 
     assert_eq!(n, 3, "every page of the work was rebuilt");
     assert_eq!(app.doc.size, want, "the open page is the new paper");
@@ -134,8 +161,7 @@ fn a_combined_spread_keeps_its_double_width() {
     e.spread = true;
     app.pages.push(e);
 
-    app.resample_work(setup.dpi * 2, Interp::HighAccuracy)
-        .expect("the resample lands");
+    resample(&mut app, setup.dpi * 2, Interp::HighAccuracy).expect("the resample lands");
 
     assert_eq!(app.doc.size, want, "the single page is the new paper");
     assert_eq!(
@@ -177,8 +203,7 @@ fn one_unreadable_page_leaves_the_whole_work_untouched() {
     let revs: Vec<u64> = app.pages.iter().map(|e| e.rev).collect();
     let bytes2 = app.pages[2].bytes.clone();
 
-    let err = app
-        .resample_work(dpi * 2, Interp::HighAccuracy)
+    let err = resample(&mut app, dpi * 2, Interp::HighAccuracy)
         .expect_err("an unreadable page must refuse the whole run");
     assert!(err.contains("page 3"), "the offender is named: {err}");
 
@@ -191,6 +216,153 @@ fn one_unreadable_page_leaves_the_whole_work_untouched() {
         }
     }
     assert_eq!(app.pages[2].bytes, bytes2, "the bad page is as it was");
+}
+
+/// Four real byte pages, so a run genuinely has work in flight between
+/// steps rather than four lazy blanks it re-marks in one multiplication.
+fn four_real_pages(app: &mut crate::App) {
+    let px = app.doc.size;
+    for i in 1..4 {
+        let good = mn_core::project::doc_to_bytes(&Document::new(px.0, px.1)).unwrap();
+        app.pages[i].blank = None;
+        app.pages[i].bytes = Some(good);
+    }
+}
+
+/// The progress half: phase 1 goes one page per step, the count on the
+/// status line moves with it, and NOTHING is installed until the step after
+/// the last page is built. That last claim is the one that matters — it is
+/// what makes cancelling safe and what makes the op still atomic now that it
+/// is spread over frames.
+#[test]
+fn the_run_counts_pages_off_one_per_step_and_installs_only_at_the_end() {
+    let Some(mut app) = headless() else { return };
+    small_draft(&mut app, 4, "Progress");
+    dispatch(&mut app, AppCmd::NewComicCreate);
+    let dpi = app.page.as_ref().expect("setup").dpi;
+    four_real_pages(&mut app);
+    let before = app.doc.size;
+
+    app.resample_work_begin(dpi * 2, Interp::HighAccuracy, String::new())
+        .expect("the run starts");
+    assert!(
+        app.status.contains("page 1 of 4"),
+        "the count is up before the first page is built: {}",
+        app.status
+    );
+
+    app.resample_work_step();
+    assert_eq!(
+        app.resample_job.as_ref().map(|j| j.done()),
+        Some(1),
+        "one page per step"
+    );
+    assert!(app.status.contains("of 4"), "{}", app.status);
+
+    while app.resample_job.as_ref().is_some_and(|j| j.done() < 4) {
+        app.resample_work_step();
+    }
+    assert!(
+        app.resample_job.is_some(),
+        "every page is built and the run is still going — phase 2 is a step of its own"
+    );
+    assert_eq!(
+        app.doc.size, before,
+        "and nothing has been installed yet: that is the whole reason \
+         Cancel is honest"
+    );
+    assert_eq!(
+        app.page.as_ref().map(|s| s.dpi),
+        Some(dpi),
+        "the setup has not moved either"
+    );
+
+    app.resample_work_step();
+    assert!(app.resample_job.is_none(), "that step was phase 2");
+    assert_ne!(app.doc.size, before, "…and it installed");
+    assert_eq!(app.page.as_ref().map(|s| s.dpi), Some(dpi * 2));
+    assert!(
+        app.status.contains("work resampled"),
+        "the finishing line: {}",
+        app.status
+    );
+}
+
+/// Cancel, which is only offered during phase 1 — and phase 1 writes
+/// nothing, so it has to leave the work byte-identical. Same assertions as
+/// the unreadable-page atomicity test, from the other direction.
+#[test]
+fn cancelling_part_way_leaves_the_whole_work_untouched() {
+    let Some(mut app) = headless() else { return };
+    small_draft(&mut app, 4, "Cancel");
+    dispatch(&mut app, AppCmd::NewComicCreate);
+    let dpi = app.page.as_ref().expect("setup").dpi;
+    let open_px = app.doc.size;
+    four_real_pages(&mut app);
+    let sizes: Vec<(u32, u32)> = (1..4).map(|i| parked_size(&app, i)).collect();
+    let revs: Vec<u64> = app.pages.iter().map(|e| e.rev).collect();
+
+    app.resample_work_begin(dpi * 2, Interp::HighAccuracy, String::new())
+        .expect("the run starts");
+    app.resample_work_step();
+    app.resample_work_step();
+    assert!(
+        app.resample_job.as_ref().is_some_and(|j| j.done() == 2),
+        "stopped part way, with pages built and held"
+    );
+
+    app.resample_work_cancel();
+
+    assert!(app.resample_job.is_none(), "the run is over");
+    assert_eq!(app.doc.size, open_px, "the open page never moved");
+    assert_eq!(app.page.as_ref().map(|s| s.dpi), Some(dpi), "nor the dpi");
+    for i in 1..4 {
+        assert_eq!(app.pages[i].rev, revs[i], "page {}: no revision bump", i + 1);
+        assert_eq!(
+            parked_size(&app, i),
+            sizes[i - 1],
+            "page {} untouched",
+            i + 1
+        );
+    }
+    assert!(
+        app.pages[app.page_index].bytes.is_none(),
+        "active-page invariant restored: an abandoned run must not leave the \
+         open page a second, stale copy of itself in the slot that promises \
+         to be empty"
+    );
+    assert!(
+        app.status.contains("nothing was written"),
+        "and it says so: {}",
+        app.status
+    );
+}
+
+/// While the run is going the app takes no commands. The pending list is
+/// keyed by page INDEX, so a page turn landing between two pages would
+/// install work built against a document set that no longer exists.
+#[test]
+fn no_command_lands_while_the_run_is_going() {
+    let Some(mut app) = headless() else { return };
+    small_draft(&mut app, 4, "Locked");
+    dispatch(&mut app, AppCmd::NewComicCreate);
+    let dpi = app.page.as_ref().expect("setup").dpi;
+    four_real_pages(&mut app);
+    let page = app.page_index;
+
+    app.resample_work_begin(dpi * 2, Interp::HighAccuracy, String::new())
+        .expect("the run starts");
+    app.resample_work_step();
+    dispatch(&mut app, AppCmd::PageNext);
+    assert_eq!(app.page_index, page, "the page turn was refused");
+    assert!(
+        app.resample_job.as_ref().is_some_and(|j| j.done() == 1),
+        "and it did not disturb the run"
+    );
+
+    app.resample_work_cancel();
+    dispatch(&mut app, AppCmd::PageNext);
+    assert_ne!(app.page_index, page, "and commands land again afterwards");
 }
 
 /// The door that stands in for undo. A resample cannot be undone, so the
@@ -230,16 +402,13 @@ fn the_command_refuses_a_work_with_no_current_file_behind_it() {
 fn a_pixel_canvas_and_a_no_op_are_both_refused_by_name() {
     let Some(mut app) = headless() else { return };
     // Default document: no page setup at all.
-    let err = app
-        .resample_work(350, Interp::HighAccuracy)
-        .expect_err("a pixel canvas has no dpi");
+    let err = resample(&mut app, 350, Interp::HighAccuracy).expect_err("a pixel canvas has no dpi");
     assert!(err.contains("pixel canvas"), "{err}");
 
     small_draft(&mut app, 1, "No-op");
     dispatch(&mut app, AppCmd::NewComicCreate);
     let dpi = app.page.as_ref().expect("setup").dpi;
-    let err = app
-        .resample_work(dpi, Interp::HighAccuracy)
+    let err = resample(&mut app, dpi, Interp::HighAccuracy)
         .expect_err("the same dpi is not a resample");
     assert!(err.contains("already"), "{err}");
 }

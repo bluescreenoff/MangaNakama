@@ -314,3 +314,77 @@ fn timed_where_a_param_drag_actually_spends_its_time() {
     );
     let _ = TILE_PIXELS;
 }
+
+/// `FI-050`'s full-page cost, CPU reference against the seam.
+///
+/// The whole page for real: `Document::paint_gradient_freeform_with` walks
+/// its own 256-tile batches, so only 8 MB of pixels is in flight at a time
+/// and the number is a measurement rather than an extrapolation. Two guides
+/// of 40 segments is the realistic end (a hand-drawn guide simplified at 2
+/// screen px is a few dozen points); 200 each is the pathological one, a
+/// deliberately shaky line drawn zoomed in, and it is where the distance
+/// field dominates.
+///
+/// The layer is allocated once per run and dropped before the next, because
+/// a B4 fix15 layer is 418 MB and this laptop shares its RAM with the GPU.
+#[test]
+#[ignore = "wall-clock timing; run deliberately with --ignored --nocapture"]
+fn timed_freeform_full_page() {
+    let Some(mut r) = renderer() else { return };
+    let (w, h) = (6071u32, 8598u32);
+    let guide = |x: f32, n: usize| -> Vec<[f32; 2]> {
+        (0..=n)
+            .map(|i| {
+                let y = i as f32 * (h as f32 / n as f32);
+                [x + (i as f32 * 60.0 / n as f32).sin() * 120.0, y]
+            })
+            .collect()
+    };
+    let ramp = mn_core::Ramp::two([1.0, 0.0, 0.0, 1.0], [0.0, 0.0, 1.0, 1.0]);
+    println!(
+        "B4/600 = {w}x{h} = {:.1} Mpx, freeform gradient",
+        (w as f64 * h as f64) / 1e6
+    );
+
+    // The seam pays for its buffers on the first batch and never again; a
+    // real page's second batch does not, so warm them before the clock.
+    {
+        let mut warm = mn_core::Document::new(512, 512);
+        let (a, b) = (guide(120.0, 8), guide(390.0, 8));
+        warm.paint_gradient_freeform_with(&a, &b, &ramp, &mut |job, px| {
+            r.run_freeform_kernel(job, px)
+        });
+    }
+
+    for n in [40usize, 200] {
+        let (l1, l2) = (guide(1200.0, n), guide(4800.0, n));
+        let cpu = {
+            let mut doc = mn_core::Document::new(w, h);
+            let t = Instant::now();
+            assert!(doc.paint_gradient_freeform(&l1, &l2, &ramp));
+            t.elapsed()
+        };
+        let (gpu, batches, ran) = {
+            let mut doc = mn_core::Document::new(w, h);
+            let (mut batches, mut ran) = (0usize, 0usize);
+            let t = Instant::now();
+            assert!(
+                doc.paint_gradient_freeform_with(&l1, &l2, &ramp, &mut |job, px| {
+                    batches += 1;
+                    let out = r.run_freeform_kernel(job, px);
+                    ran += usize::from(out.is_some());
+                    out
+                })
+            );
+            (t.elapsed(), batches, ran)
+        };
+        assert_eq!(ran, batches, "the seam declined mid-benchmark");
+        println!(
+            "  {} guide segments: cpu {:?}  gpu {:?}  = {:.2}x  ({batches} batches)",
+            n * 2,
+            cpu,
+            gpu,
+            cpu.as_secs_f64() / gpu.as_secs_f64(),
+        );
+    }
+}

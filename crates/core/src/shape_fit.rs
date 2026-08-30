@@ -91,6 +91,10 @@ pub const MAX_POLY_SIDES: usize = 8;
 pub const CIRCLE_RATIO: f32 = 0.88;
 /// Side-length coefficient of variation a regular polygon may have.
 pub const POLY_SIDE_CV: f32 = 0.22;
+/// `FG-021`: how far the drag handle must sit from the pivot before the
+/// post-recognition drag reads anything from it, canvas px. A handle on top
+/// of the pivot has no angle to measure and a scale factor that explodes.
+pub const MIN_DRAG_ARM_PX: f32 = 6.0;
 
 /// What the stroke turned out to be.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -156,13 +160,142 @@ impl Recognized {
     pub fn bbox(&self) -> [f32; 4] {
         bbox(&self.path)
     }
+
+    /// `FG-021`, the post-correction drag: the same figure carried by the
+    /// SIMILARITY (uniform scale + rotation about `anchor`) that takes the
+    /// handle `from` to the pointer `to`. Uniform on purpose — CSP's drag
+    /// adjusts "the size and angle of the shape", and a non-uniform stretch
+    /// would turn the circle it just recognized back into an ellipse behind
+    /// the artist's back.
+    ///
+    /// Always derived from the ORIGINAL recognition rather than from the
+    /// previous frame's result, so a slow drag cannot accumulate rounding
+    /// drift, and letting go where you started gives back exactly the shape
+    /// the hold showed you.
+    pub fn dragged(&self, anchor: [f32; 2], from: [f32; 2], to: [f32; 2]) -> Recognized {
+        let arm = dist(anchor, from);
+        let reach = dist(anchor, to);
+        if !(arm > MIN_DRAG_ARM_PX && reach > 1e-3) {
+            return self.clone();
+        }
+        let k = reach / arm;
+        let rot = (to[1] - anchor[1]).atan2(to[0] - anchor[0])
+            - (from[1] - anchor[1]).atan2(from[0] - anchor[0]);
+        let (sin, cos) = rot.sin_cos();
+        let path = self
+            .path
+            .iter()
+            .map(|p| {
+                let (dx, dy) = ((p[0] - anchor[0]) * k, (p[1] - anchor[1]) * k);
+                [
+                    anchor[0] + dx * cos - dy * sin,
+                    anchor[1] + dx * sin + dy * cos,
+                ]
+            })
+            .collect();
+        Recognized {
+            kind: self.kind,
+            path,
+            residual: self.residual,
+        }
+    }
+
+    /// `FG-021`'s Shift: "forces the regular form — perfect circle, regular
+    /// polygon, true rectangle". An ellipse becomes a circle and a rectangle
+    /// becomes a square, both about their own centre so the shape does not
+    /// jump out from under the hand; polygons are already regular by
+    /// construction ([`fit_poly`] refuses irregular ones outright), so for
+    /// them and for a circle this is the identity.
+    ///
+    /// The straight LINE is the one extrapolation past the manual, which
+    /// only names the three closed forms: Shift snaps it to the nearest 45°
+    /// from its start, keeping its length. That is what Shift already means
+    /// everywhere else in the Figure tool (`FG-001`), and a modifier that is
+    /// live for four shapes and dead for the fifth is worse than either.
+    pub fn regularized(&self) -> Recognized {
+        let same = |kind, path| Recognized {
+            kind,
+            path,
+            residual: self.residual,
+        };
+        match self.kind {
+            ShapeKind::Ellipse => {
+                let c = centroid(&self.path);
+                let theta = principal_angle(&self.path);
+                let (sin, cos) = theta.sin_cos();
+                let (mut rx, mut ry) = (0.0f32, 0.0f32);
+                for p in &self.path {
+                    let (dx, dy) = (p[0] - c[0], p[1] - c[1]);
+                    rx = rx.max((dx * cos + dy * sin).abs());
+                    ry = ry.max((-dx * sin + dy * cos).abs());
+                }
+                let r = (rx + ry) * 0.5;
+                if !(r.is_finite() && r > 0.5) {
+                    return self.clone();
+                }
+                same(ShapeKind::Circle, ellipse_path(c, r, r, 0.0))
+            }
+            ShapeKind::Rect if self.path.len() == 4 => {
+                let c = centroid(&self.path);
+                let w = dist(self.path[0], self.path[1]);
+                let h = dist(self.path[1], self.path[2]);
+                let half = (w + h) * 0.25;
+                if !(half.is_finite() && half > 0.5) {
+                    return self.clone();
+                }
+                let theta = (self.path[1][1] - self.path[0][1])
+                    .atan2(self.path[1][0] - self.path[0][0]);
+                let (sin, cos) = theta.sin_cos();
+                let back =
+                    |u: f32, v: f32| [c[0] + u * cos - v * sin, c[1] + u * sin + v * cos];
+                same(
+                    ShapeKind::Rect,
+                    vec![
+                        back(-half, -half),
+                        back(half, -half),
+                        back(half, half),
+                        back(-half, half),
+                    ],
+                )
+            }
+            ShapeKind::Line if self.path.len() == 2 => {
+                let (a, b) = (self.path[0], self.path[1]);
+                let len = dist(a, b);
+                if !(len > 1e-3) {
+                    return self.clone();
+                }
+                let step = PI * 0.25;
+                let ang = ((b[1] - a[1]).atan2(b[0] - a[0]) / step).round() * step;
+                same(
+                    ShapeKind::Line,
+                    vec![a, [a[0] + len * ang.cos(), a[1] + len * ang.sin()]],
+                )
+            }
+            _ => self.clone(),
+        }
+    }
 }
 
 // --- the entry point -----------------------------------------------------
 
-/// Classify a freehand stroke. `None` means "leave it exactly as drawn",
-/// which is the answer for anything the fits do not clearly explain.
+/// Classify a freehand stroke at the shipped tolerance. `None` means "leave
+/// it exactly as drawn", which is the answer for anything the fits do not
+/// clearly explain.
 pub fn recognize(raw: &[[f32; 2]]) -> Option<Recognized> {
+    recognize_with(raw, FIT_TOL)
+}
+
+/// The same, at a caller-chosen residual bound — `FG-020`'s tolerance
+/// preference. Only the FINAL accept/refuse compare moves: every gate
+/// before it (the size floor, the scribble gates) is about what a mark IS,
+/// not about how closely it was drawn, and loosening those would be the
+/// "it ate my drawing" bug with a settings row in front of it.
+pub fn recognize_with(raw: &[[f32; 2]], tol: f32) -> Option<Recognized> {
+    let tol = if tol.is_finite() && tol > 0.0 {
+        tol
+    } else {
+        FIT_TOL
+    };
     let pts = dedupe(raw);
     if pts.len() < 4 {
         return None;
@@ -198,9 +331,9 @@ pub fn recognize(raw: &[[f32; 2]]) -> Option<Recognized> {
     let best = if closed {
         fit_closed(&s, diag)
     } else {
-        fit_open(&s, diag)
+        fit_open(&s, diag, tol)
     }?;
-    (best.residual <= FIT_TOL).then_some(best)
+    (best.residual <= tol).then_some(best)
 }
 
 // --- closed shapes -------------------------------------------------------
@@ -374,11 +507,11 @@ fn fit_rect(s: &[[f32; 2]], corners: &[[f32; 2]], diag: f32) -> Option<Recognize
 
 // --- open shapes ---------------------------------------------------------
 
-fn fit_open(s: &[[f32; 2]], diag: f32) -> Option<Recognized> {
+fn fit_open(s: &[[f32; 2]], diag: f32, tol: f32) -> Option<Recognized> {
     // Straight line: the ends, scored against every sample between them.
     let line = vec![s[0], s[s.len() - 1]];
     let line_res = rms_to_path(s, &line, false) / diag;
-    if line_res <= FIT_TOL {
+    if line_res <= tol {
         return Some(Recognized {
             kind: ShapeKind::Line,
             path: line,
@@ -1014,6 +1147,230 @@ mod tests {
         // A long run of identical points dedupes to one.
         let same = vec![[50.0, 50.0]; 400];
         assert!(recognize(&same).is_none());
+    }
+
+    // --- `FG-021`: the post-correction drag ------------------------------
+
+    /// The headline of the drag: pulling the handle twice as far from the
+    /// pivot doubles the figure and turns it by the angle the hand swept,
+    /// and nothing else about it changes.
+    #[test]
+    fn dragging_a_circle_scales_and_turns_it_about_its_centre() {
+        let got = recognize(&circle_pts(200.0, 200.0, 90.0, 120, 4.0)).expect("a circle");
+        let c = centroid(&got.path);
+        // The handle starts on the rim to the right and is pulled to twice
+        // the radius, a quarter turn round.
+        let from = [c[0] + 90.0, c[1]];
+        let to = [c[0], c[1] + 180.0];
+        let out = got.dragged(c, from, to);
+        assert_eq!(out.kind, got.kind, "a drag never changes what it is");
+        let c2 = centroid(&out.path);
+        assert!(
+            dist(c, c2) < 1.0,
+            "the pivot does not move: {c:?} -> {c2:?}"
+        );
+        let r = out.path.iter().map(|p| dist(*p, c2)).sum::<f32>() / out.path.len() as f32;
+        assert!((r - 180.0).abs() < 4.0, "radius {r}, wanted 180");
+    }
+
+    /// A line's drag is the manual's own wording: "adjust the position of
+    /// the end point". The start stays nailed down and the end lands under
+    /// the pointer.
+    #[test]
+    fn dragging_a_line_moves_its_end_point_to_the_pointer() {
+        let pts: Vec<[f32; 2]> = (0..=90)
+            .map(|i| {
+                let t = i as f32 / 90.0;
+                [60.0 + t * 280.0, 200.0 + jitter(i, 13) * 2.5]
+            })
+            .collect();
+        let got = recognize(&pts).expect("a line");
+        let (a, b) = (got.path[0], got.path[1]);
+        let to = [300.0, 60.0];
+        let out = got.dragged(a, b, to);
+        assert_eq!(out.path.len(), 2);
+        assert!(dist(out.path[0], a) < 0.01, "the start is the pivot");
+        assert!(
+            dist(out.path[1], to) < 0.5,
+            "the end follows the pointer: {:?}",
+            out.path[1]
+        );
+    }
+
+    /// Letting go where the hold left you gives back exactly what the hold
+    /// showed you — the preview and the commit cannot drift apart just
+    /// because a frame of pointer noise arrived.
+    #[test]
+    fn a_drag_that_goes_nowhere_changes_nothing() {
+        let got = recognize(&circle_pts(200.0, 200.0, 90.0, 120, 4.0)).expect("a circle");
+        let c = centroid(&got.path);
+        let from = [c[0] + 90.0, c[1]];
+        let out = got.dragged(c, from, from);
+        for (p, q) in got.path.iter().zip(&out.path) {
+            assert!(dist(*p, *q) < 0.01, "{p:?} vs {q:?}");
+        }
+        // And a handle sitting ON the pivot has no drag to read at all,
+        // rather than a scale factor that runs to infinity.
+        let stuck = got.dragged(c, c, [c[0] + 400.0, c[1]]);
+        assert_eq!(stuck.path.len(), got.path.len());
+        for (p, q) in got.path.iter().zip(&stuck.path) {
+            assert!(dist(*p, *q) < 0.01, "a zero-length arm must not scale");
+        }
+    }
+
+    /// Shift's half of `FG-021`: the ellipse becomes a perfect circle, on
+    /// the same centre, without jumping out from under the hand.
+    #[test]
+    fn shift_turns_an_ellipse_into_a_circle_on_the_same_centre() {
+        let pts: Vec<[f32; 2]> = (0..=140)
+            .map(|i| {
+                let t = i as f32 / 140.0 * TAU;
+                [
+                    240.0 + (150.0 + jitter(i, 5) * 3.0) * t.cos(),
+                    200.0 + (60.0 + jitter(i, 9) * 3.0) * t.sin(),
+                ]
+            })
+            .collect();
+        let got = recognize(&pts).expect("an ellipse");
+        assert_eq!(got.kind, ShapeKind::Ellipse);
+        let out = got.regularized();
+        assert_eq!(out.kind, ShapeKind::Circle, "it says what it became");
+        let c = centroid(&out.path);
+        assert!(
+            (c[0] - 240.0).abs() < 6.0 && (c[1] - 200.0).abs() < 6.0,
+            "same centre, got {c:?}"
+        );
+        let rs: Vec<f32> = out.path.iter().map(|p| dist(*p, c)).collect();
+        let (lo, hi) = (
+            rs.iter().cloned().fold(f32::MAX, f32::min),
+            rs.iter().cloned().fold(f32::MIN, f32::max),
+        );
+        assert!(hi - lo < 1.0, "every radius equal: {lo}..{hi}");
+        assert!((lo - 105.0).abs() < 12.0, "the mean of 150 and 60: {lo}");
+    }
+
+    /// …and the rectangle becomes a square, keeping the angle it was drawn
+    /// at. A regularizer that squared it up onto the axes would be exactly
+    /// the "it redrew my shape" bug in a different coat.
+    #[test]
+    fn shift_turns_a_tilted_rectangle_into_a_tilted_square() {
+        let th = 0.5f32;
+        let (sin, cos) = th.sin_cos();
+        let c = [220.0f32, 210.0];
+        let spin = |u: f32, v: f32| [c[0] + u * cos - v * sin, c[1] + u * sin + v * cos];
+        let r = [
+            spin(-120.0, -70.0),
+            spin(120.0, -70.0),
+            spin(120.0, 70.0),
+            spin(-120.0, 70.0),
+        ];
+        let got = recognize(&wobble(&r, 170, 3.0, 23)).expect("a tilted box");
+        assert_eq!(got.kind, ShapeKind::Rect);
+        let out = got.regularized();
+        assert_eq!(out.path.len(), 4);
+        let sides: Vec<f32> = (0..4)
+            .map(|i| dist(out.path[i], out.path[(i + 1) % 4]))
+            .collect();
+        let (lo, hi) = (
+            sides.iter().cloned().fold(f32::MAX, f32::min),
+            sides.iter().cloned().fold(f32::MIN, f32::max),
+        );
+        assert!(hi - lo < 1.0, "four equal sides: {sides:?}");
+        assert!((lo - 190.0).abs() < 20.0, "the mean of 240 and 140: {lo}");
+        // Still tilted: an axis-aligned square of this side would have a
+        // bounding box exactly its own width.
+        let b = out.bbox();
+        assert!(
+            (b[2] - b[0]) > lo * 1.2,
+            "the tilt survived: box {b:?} side {lo}"
+        );
+    }
+
+    /// A circle and a regular polygon have no more regular form to go to,
+    /// and Shift must not nudge them anyway.
+    #[test]
+    fn shift_is_the_identity_on_shapes_that_are_already_regular() {
+        for pts in [
+            circle_pts(200.0, 200.0, 90.0, 120, 4.0),
+            wobble(&[[200.0, 60.0], [340.0, 300.0], [60.0, 300.0]], 150, 3.0, 31),
+        ] {
+            let got = recognize(&pts).expect("recognized");
+            let out = got.regularized();
+            assert_eq!(out.kind, got.kind);
+            for (p, q) in got.path.iter().zip(&out.path) {
+                assert!(dist(*p, *q) < 0.01, "{:?}: {p:?} vs {q:?}", got.kind);
+            }
+        }
+    }
+
+    /// The one extrapolation past the manual, pinned so it is a decision and
+    /// not an accident: Shift on a straight line snaps it to 45°, keeping
+    /// its length and its start.
+    #[test]
+    fn shift_snaps_a_line_to_45_degrees() {
+        let line = Recognized {
+            kind: ShapeKind::Line,
+            path: vec![[100.0, 100.0], [200.0, 110.0]],
+            residual: 0.0,
+        };
+        let out = line.regularized();
+        assert!(dist(out.path[0], [100.0, 100.0]) < 0.01, "the start holds");
+        let len = dist(out.path[0], out.path[1]);
+        assert!(
+            (len - dist(line.path[0], line.path[1])).abs() < 0.01,
+            "length {len} is kept"
+        );
+        assert!(
+            (out.path[1][1] - 100.0).abs() < 0.5,
+            "10 px of rise off 100 snaps to flat: {:?}",
+            out.path[1]
+        );
+    }
+
+    /// `FG-020`'s tolerance preference moves the FINAL bound and nothing
+    /// else: a stroke just past the shipped bound is recognized when the
+    /// bound is loosened, and the scribble gates still refuse a scribble at
+    /// any tolerance a person can dial in.
+    #[test]
+    fn the_tolerance_bound_is_the_only_thing_the_preference_moves() {
+        // A lumpy loop the shipped tolerance refuses.
+        let lumpy: Vec<[f32; 2]> = (0..=160)
+            .map(|i| {
+                let t = i as f32 / 160.0 * TAU;
+                let r = 100.0 + (t * 5.0).sin() * 34.0 + (t * 3.0).cos() * 22.0;
+                [220.0 + r * t.cos(), 220.0 + r * t.sin()]
+            })
+            .collect();
+        assert!(recognize(&lumpy).is_none(), "refused as shipped");
+        assert!(
+            recognize_with(&lumpy, 0.5).is_some(),
+            "and accepted once the bound is opened wide"
+        );
+
+        // The scribble is refused by a GATE, so no tolerance rescues it.
+        let scribble: Vec<[f32; 2]> = (0..=400)
+            .map(|i| {
+                let t = i as f32 / 400.0;
+                let a = t * TAU * 8.0;
+                [120.0 + t * 200.0 + a.cos() * 40.0, 200.0 + a.sin() * 40.0]
+            })
+            .collect();
+        assert!(recognize_with(&scribble, 10.0).is_none());
+        // So is a hatch mark: the size floor is not a tolerance either.
+        let hatch: Vec<[f32; 2]> = (0..=10)
+            .map(|i| {
+                let t = i as f32 / 10.0;
+                [100.0 + t * 18.0, 100.0 + t * 14.0]
+            })
+            .collect();
+        assert!(recognize_with(&hatch, 10.0).is_none());
+        // A nonsense tolerance falls back to the shipped one rather than
+        // recognizing everything or nothing.
+        assert!(recognize_with(&lumpy, f32::NAN).is_none());
+        assert_eq!(
+            recognize_with(&circle_pts(200.0, 200.0, 90.0, 120, 4.0), -1.0).map(|r| r.kind),
+            Some(ShapeKind::Circle)
+        );
     }
 
     /// Recognition must not depend on where on the page the stroke was

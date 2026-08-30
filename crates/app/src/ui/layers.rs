@@ -473,6 +473,7 @@ mod tests {
             tiles: std::collections::HashMap::new(),
             enabled: true,
             revision: mn_core::next_revision(),
+            full: false,
         });
         let img = mask_thumb_image(&d, 0);
         assert_eq!(img.pixels.len(), 20 * 20);

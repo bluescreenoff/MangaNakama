@@ -620,3 +620,102 @@ fn freeform_multi_full_page_timing() {
         println!("freeform field, {lines} lines of 40 segments: {:?}", t0.elapsed());
     }
 }
+
+/// The lent kernel replaces the inner loop and nothing else: what it hands
+/// back is what lands, the flattened field it is handed addresses the SAME
+/// culled segments the CPU loop would have used, and the undo bracket is
+/// still one press.
+#[test]
+fn a_lent_field_kernel_paints_the_batch_it_was_given() {
+    let (l1, l2) = two_verticals();
+    let ramp = Ramp::two(RED, BLUE);
+    let mut doc = Document::new(128, 128);
+    let steps = doc.undo_len();
+    let mut seen = (0usize, 0usize, 0usize);
+    assert!(doc.paint_gradient_freeform_with(&l1, &l2, &ramp, &mut |job, px| {
+        seen = (job.plans.len(), job.segs.len(), px.len());
+        // A recognisable constant: opaque mid-grey everywhere.
+        let mut out = vec![0u16; px.len()];
+        for p in out.chunks_exact_mut(4) {
+            p.copy_from_slice(&[16384, 16384, 16384, 32768]);
+        }
+        Some(out)
+    }));
+    assert_eq!(seen.0, 4, "a 128 square page is four tiles, one batch");
+    assert_eq!(
+        seen.1,
+        4 * 2 * crate::freeform::SEG_WORDS,
+        "each tile packed one segment per guide — the cull kept both"
+    );
+    assert_eq!(seen.2, 4 * crate::tile::TILE_LEN);
+    let got = px(&doc, 64, 64);
+    assert!(
+        (got[0] - 0.5).abs() < 0.01 && (got[3] - 1.0).abs() < 0.01,
+        "the kernel's pixels are what landed: {got:?}"
+    );
+    assert_eq!(doc.undo_len(), steps + 1, "still one undo press");
+    doc.undo();
+    assert_eq!(alpha(&doc, 64, 64), 0, "and it took the whole apply back");
+}
+
+/// A kernel that declines — or hands back the wrong length, which is the
+/// same thing — leaves the CPU reference in charge, byte for byte.
+#[test]
+fn a_declining_or_ragged_field_kernel_falls_back_to_the_cpu() {
+    let (l1, l2) = two_verticals();
+    let ramp = Ramp::two(RED, BLUE);
+    let build = |k: &mut crate::freeform::FieldKernel<'_>| {
+        let mut doc = Document::new(128, 128);
+        assert!(doc.paint_gradient_freeform_with(&l1, &l2, &ramp, k));
+        (0..128)
+            .step_by(7)
+            .flat_map(|x| {
+                doc.layers[0]
+                    .tile(TileIdx::of_pixel(x, x))
+                    .map(|t| t.data().to_vec())
+            })
+            .collect::<Vec<_>>()
+    };
+    let reference = build(&mut |_, _| None);
+    let ragged = build(&mut |_, _| Some(vec![0u16; 7]));
+    assert_eq!(
+        reference, ragged,
+        "a ragged kernel result reached the layer"
+    );
+    assert!(
+        reference.iter().any(|t| t.iter().any(|&v| v != 0)),
+        "the reference painted nothing — the test proves nothing"
+    );
+}
+
+/// The batch split is invisible: painting a page wider than one batch
+/// (`FREEFORM_BATCH` tiles) must produce exactly the page one batch would,
+/// or the kernel's per-batch decline would be a visible seam.
+#[test]
+fn the_batch_split_paints_the_identical_page() {
+    // 1600 x 1600 is 25 x 25 = 625 tiles — three batches of 256.
+    let ramp = Ramp::two(RED, BLUE);
+    let l1 = vec![[200.0, 0.0], [260.0, 1600.0]];
+    let l2 = vec![[1300.0, 0.0], [1240.0, 1600.0]];
+    let mut whole = Document::new(1600, 1600);
+    assert!(whole.paint_gradient_freeform(&l1, &l2, &ramp));
+    // A kernel that declines every OTHER batch: the page must not care
+    // which side of the seam painted which tile.
+    let mut mixed = Document::new(1600, 1600);
+    let mut n = 0usize;
+    assert!(
+        mixed.paint_gradient_freeform_with(&l1, &l2, &ramp, &mut |_, _| {
+            n += 1;
+            None
+        })
+    );
+    assert_eq!(n, 3, "625 tiles is three batches");
+    for ty in 0..25i32 {
+        for tx in 0..25i32 {
+            let idx = TileIdx::new(tx, ty);
+            let a = whole.layers[0].tile(idx).map(|t| t.data().to_vec());
+            let b = mixed.layers[0].tile(idx).map(|t| t.data().to_vec());
+            assert_eq!(a, b, "tile ({tx},{ty}) differs across the batch split");
+        }
+    }
+}

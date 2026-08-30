@@ -647,6 +647,13 @@ impl App {
     }
 
     pub fn canvas_down(&mut self, x: f32, y: f32, kind: PointerKind, batch: &[PenSample]) {
+        // `IO-060`: the document is being rebuilt at another resolution one
+        // page at a time. A stroke started now would be resampled into the
+        // result and would have been drawn against pixels that are about to
+        // stop existing. The pointer half of the `cmd::dispatch` refusal.
+        if self.resample_job.is_some() {
+            return;
+        }
         // The user is touching the canvas: the deferred startup fit stands
         // down and never adjusts their view again (see App::render).
         self.startup_fit_pending = false;
@@ -872,17 +879,25 @@ impl App {
                         if self.drawing() {
                             self.push_batch(batch);
                             self.doc.mask_stroke_to_selection();
-                            let refused =
-                                self.shell.sync_modifiers().shift || self.rulers_deciding();
-                            self.smart_shape = Some(crate::app::SmartShape {
-                                pts: vec![[cx, cy]],
-                                anchor: (x, y),
-                                still_since: std::time::Instant::now(),
-                                ripe: false,
-                                hit: None,
-                                refused,
-                                ops_at_start,
-                            });
+                            // `FG-020`'s switch, and it gates only the
+                            // GESTURE: off, this sub tool is a plain
+                            // freehand pen — the stroke above still inks,
+                            // there is simply no hold, no recognition and
+                            // no swap behind it.
+                            if self.prefs.smart_shape {
+                                let refused =
+                                    self.shell.sync_modifiers().shift || self.rulers_deciding();
+                                self.smart_shape = Some(crate::app::SmartShape {
+                                    pts: vec![[cx, cy]],
+                                    anchor: (x, y),
+                                    still_since: std::time::Instant::now(),
+                                    ripe: false,
+                                    hit: None,
+                                    refused,
+                                    ops_at_start,
+                                    adjust: None,
+                                });
+                            }
                         }
                     }
                     m if m.generates() => {
@@ -1761,6 +1776,20 @@ impl App {
         // any part of the stroke means the artist asked for the straight
         // line, so the recognizer keeps out of it (`FG-024`).
         let shift = self.shell.sync_modifiers().shift;
+        // `FG-021`: past the hold the pen stops drawing and starts
+        // ADJUSTING. Nothing more is recorded into the stroke's path, and
+        // Shift stops meaning the `FG-024` refusal here — that decision was
+        // made and spent, and from now on Shift means "make it regular".
+        if self.smart_shape.as_ref().is_some_and(|g| g.armed()) {
+            let begin = self.smart_shape.as_ref().is_some_and(|g| {
+                g.adjust.is_some()
+                    || (x - g.anchor.0).hypot(y - g.anchor.1) > crate::app::SMART_HOLD_SLOP_PX
+            });
+            if begin {
+                self.smart_shape_adjust(cx, cy, shift);
+            }
+            return;
+        }
         let Some(g) = &mut self.smart_shape else {
             return;
         };
@@ -1780,17 +1809,76 @@ impl App {
         }
     }
 
+    /// `FG-021`: the drag that follows a matured hold. The figure is sized
+    /// and turned about its pivot by the similarity that carries the handle
+    /// to the pointer; Shift forces the regular form (a perfect circle, a
+    /// square, a 45° line). Nothing is committed until the release.
+    ///
+    /// `shift` is sampled by the CALLER, for the same reason `refused` is
+    /// (see `SmartShape`): reading `GetKeyState` in here would make the
+    /// gesture untestable and make the suite depend on whether a developer
+    /// happened to be holding Shift while it ran.
+    pub(crate) fn smart_shape_adjust(&mut self, cx: f32, cy: f32, shift: bool) {
+        let Some(g) = self.smart_shape.as_mut() else {
+            return;
+        };
+        if g.adjust.is_none() {
+            let Some(base) = g.hit.clone() else {
+                return;
+            };
+            // The pivot and the handle. A CLOSED figure turns about its own
+            // centre and is dragged by the pen where it came to rest, which
+            // is where the hand already is — no jump on the first frame. An
+            // OPEN one is pinned at its start and dragged by its far END,
+            // which is what makes the manual's "adjust the position of the
+            // end point" land exactly under the pointer.
+            let (pivot, from) = if base.closed() {
+                let n = base.path.len().max(1) as f32;
+                let c = [
+                    base.path.iter().map(|p| p[0]).sum::<f32>() / n,
+                    base.path.iter().map(|p| p[1]).sum::<f32>() / n,
+                ];
+                (c, *g.pts.last().unwrap_or(&c))
+            } else {
+                let a = *base.path.first().unwrap_or(&[cx, cy]);
+                (a, *base.path.last().unwrap_or(&a))
+            };
+            let shape = base.clone();
+            g.adjust = Some(crate::app::SmartAdjust {
+                base,
+                pivot,
+                from,
+                shape,
+            });
+        }
+        let Some(a) = g.adjust.as_mut() else {
+            return;
+        };
+        // Transform first, regularize second: the 45° snap is about the
+        // line's final direction, so a rotation applied after it would take
+        // it straight back off 45°.
+        let moved = a.base.dragged(a.pivot, a.from, [cx, cy]);
+        a.shape = if shift { moved.regularized() } else { moved };
+        let label = a.shape.kind.label();
+        self.set_status(if shift {
+            format!("smart shape: {label} — regular while Shift is held, release inks it")
+        } else {
+            format!("smart shape: {label} — drag to size and turn it, Shift makes it regular")
+        });
+        self.needs_redraw = true;
+    }
+
     /// Has the pointer stood still long enough? Called from the frame head
     /// (a still pointer sends no events) and once more at the release.
     /// Idempotent: `ripe` latches, so the recognizer runs ONCE per hold
     /// however many frames the artist holds for.
     pub fn smart_shape_tick(&mut self) {
+        let hold = std::time::Duration::from_millis(self.prefs.smart_hold_ms);
+        let tol = self.prefs.smart_fit_tol;
         let Some(g) = self.smart_shape.as_ref() else {
             return;
         };
-        if g.ripe
-            || g.still_since.elapsed() < std::time::Duration::from_millis(crate::app::SMART_HOLD_MS)
-        {
+        if g.ripe || g.still_since.elapsed() < hold {
             return;
         }
         // `FG-024`, where the row refuses — decided at the pointer events
@@ -1800,7 +1888,7 @@ impl App {
         let hit = if refuse {
             None
         } else {
-            mn_core::shape_fit::recognize(&pts)
+            mn_core::shape_fit::recognize_with(&pts, tol)
         };
         let msg = match &hit {
             Some(r) => format!(
@@ -2290,7 +2378,20 @@ impl App {
             self.grad_mid,
             self.grad_opts,
         );
-        if self.doc.paint_gradient_freeform_multi(guides, &ramp) {
+        // The GPU tile-kernel seam (`FI-050` follow-up), offered the same
+        // way `AppCmd::FilterApply` offers the blur family theirs: the
+        // destructure is what lets the closure hold `renderer` while the doc
+        // is borrowed. A decline anywhere — software adapter, a job under
+        // the floor, a ramp the shader cannot express, a segment pool past
+        // the cap, the dispatch canary — paints that batch on the CPU.
+        let crate::app::App { doc, renderer, .. } = &mut *self;
+        let painted = doc.paint_gradient_freeform_multi_with(guides, &ramp, &mut |job, px| {
+            if !renderer.kernels_preferred(px.len() / mn_core::tile::TILE_CHANNELS) {
+                return None;
+            }
+            renderer.run_freeform_kernel(job, px)
+        });
+        if painted {
             self.mark_dirty();
             // `fill_live` is a LINEAR-ramp switch: `FillKind::Gradient` is
             // two endpoints, and there is nowhere in it to put drawn
@@ -3031,6 +3132,13 @@ impl App {
             return;
         }
         if self.drawing() {
+            // Row 156 / `FG-021`: once the hold has produced a figure the
+            // pen ADJUSTS it, so its travel must not keep laying ink for a
+            // stroke that is about to be taken back off the page.
+            if self.smart_shape.as_ref().is_some_and(|g| g.armed()) {
+                self.smart_shape_move(x, y);
+                return;
+            }
             self.push_batch(batch);
             self.doc.mask_stroke_to_selection();
             // Row 156: a Smart shape stroke records its path beside the ink
@@ -3461,16 +3569,22 @@ impl App {
             return;
         }
         if self.drawing() {
-            self.push_batch(batch);
-            // Row 156: fold the lift-off point in and give the hold one last
-            // chance to mature (a hold that ripened between the final frame
-            // and the release still counts), THEN close the stroke — the
-            // swap needs a finished undo group to take back.
-            if let Some(g) = &mut self.smart_shape {
-                let (cx, cy) = self.viewport.to_canvas(x, y);
-                g.pts.push([cx, cy]);
+            // Row 156 / `FG-021`: an armed gesture takes the lift-off point
+            // as the last frame of the ADJUSTMENT, not as more ink.
+            if self.smart_shape.as_ref().is_some_and(|g| g.armed()) {
+                self.smart_shape_move(x, y);
+            } else {
+                self.push_batch(batch);
+                // Row 156: fold the lift-off point in and give the hold one
+                // last chance to mature (a hold that ripened between the
+                // final frame and the release still counts), THEN close the
+                // stroke — the swap needs a finished undo group to take back.
+                if let Some(g) = &mut self.smart_shape {
+                    let (cx, cy) = self.viewport.to_canvas(x, y);
+                    g.pts.push([cx, cy]);
+                }
+                self.smart_shape_tick();
             }
-            self.smart_shape_tick();
             self.end_stroke();
             self.finish_smart_shape();
             return;

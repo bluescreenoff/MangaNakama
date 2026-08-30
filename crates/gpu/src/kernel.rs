@@ -89,6 +89,7 @@
 use mn_core::TileIdx;
 use mn_core::adjust::{Adjust, TONE_CURVE_MAX, curve_tangents};
 use mn_core::filter::{BoxPass, Smear};
+use mn_core::freeform::{FieldJob, SEG_WORDS};
 use mn_core::tile::{TILE_LEN, TILE_PIXELS, TILE_SIZE};
 
 /// Threads per workgroup — one pixel each. 256 is the downlevel-defaults
@@ -150,6 +151,29 @@ pub enum Kernel<'a> {
     Smear(&'a Smear),
 }
 
+/// Ceiling on one batch's segment pool, in SEGMENTS.
+///
+/// A freehand guide is a polyline with no bound on its point count, and a
+/// tile's culled list has no bound either — a guide that loops back through
+/// the same tile keeps every one of its segments there. 256 tiles of that
+/// is unbounded upload, so the pool is capped and a batch above it DECLINES,
+/// exactly the way a smear past the chunk ceiling declines: the CPU
+/// reference paints that batch, at its own speed, and the rest of the page
+/// still runs here.
+///
+/// 2^18 segments is 5 MB of pool — far past the measured worst case
+/// (`freeform_paint_tests`' pathological 400-segment guide culls to 24.6
+/// segments per tile, i.e. ~6 300 for a full batch) and still small enough
+/// to bind on an integrated adapter sharing system RAM with the app.
+pub const FREEFORM_SEGS_MAX: usize = 1 << 18;
+
+/// Words of per-tile header in the weights buffer: origin x, origin y, and
+/// each guide's (base, len).
+const FREE_HDR_WORDS: usize = 6;
+
+/// Words per ramp stop: position + straight RGBA.
+const FREE_STOP_WORDS: usize = 5;
+
 /// One tile of a [`TileJob`]: its index, its `TILE_LEN` fix15 RGBA pixels,
 /// and optional `TILE_PIXELS` coverage bytes.
 pub type JobTile<'a> = (TileIdx, &'a [u16], Option<&'a [u8]>);
@@ -186,6 +210,12 @@ const OP_GRADMAP: u32 = 8;
 /// padding — which is what makes `Pod` legal here. A field inserted in the
 /// wrong place desyncs both sides silently; the parity tests are what would
 /// catch it.
+///
+/// `Pipe::Free` reuses four of the scalar slots rather than growing the
+/// block — `taps` is its segment-pool base, `cov_base` its stop-table base,
+/// `k_base` its per-tile header base and `denom` the ramp's flip. Spelled
+/// out here and in the WGSL's field docs, because a reused slot is exactly
+/// the kind of thing that reads as a bug six months later.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Params {
@@ -354,6 +384,7 @@ enum Pipe {
     Adjust,
     Sep,
     Smear,
+    Free,
 }
 
 /// The kernel machinery, owned by the Renderer. `None` when the adapter has
@@ -362,6 +393,7 @@ pub struct KernelGpu {
     adjust_pipe: wgpu::ComputePipeline,
     sep_pipe: wgpu::ComputePipeline,
     smear_pipe: wgpu::ComputePipeline,
+    free_pipe: wgpu::ComputePipeline,
     bgl: wgpu::BindGroupLayout,
     canary_buf: wgpu::Buffer,
     canary_read: wgpu::Buffer,
@@ -451,6 +483,7 @@ impl KernelGpu {
             adjust_pipe: pipe("adjust_main"),
             sep_pipe: pipe("sep_main"),
             smear_pipe: pipe("smear_main"),
+            free_pipe: pipe("free_main"),
             bgl,
             canary_buf: mk(
                 wgpu::BufferUsages::STORAGE
@@ -545,6 +578,88 @@ impl crate::Renderer {
             // Both neighbourhood kernels want one flat region, not tiles.
             Kernel::Separable(_) | Kernel::Smear(_) => self.tile_region(kernel, job),
         }
+    }
+
+    /// The seam, FREEFORM flavour (`FI-050`): paint one batch of tiles.
+    ///
+    /// `px` is the tiles' CURRENT contents, tile-major and `TILE_LEN`
+    /// apiece; the result is that run painted, src-over included, because
+    /// here the destination IS the source. `None` declines and the caller's
+    /// CPU reference paints the batch — `px` is never written through.
+    ///
+    /// **Its own entry point rather than a `Kernel` variant.** The enum's
+    /// two doors are "independent tiles" (`run_tile_kernel`) and "one flat
+    /// region" (`run_region_kernel`); this job is neither. It is pointwise
+    /// but POSITION-DEPENDENT — `adjust_main` gives the shader a flat run
+    /// index with no canvas coordinate anywhere — and it carries per-TILE
+    /// parameters, which no `Kernel` variant has a place for. Squeezing it
+    /// into `TileJob` would have meant inventing a meaning for `out` and
+    /// for the coverage slot it does not use.
+    ///
+    /// **The cull stays on the host.** `Guide::near` is per tile, this is
+    /// per pixel, and without the cull every pixel of a page would scan
+    /// every segment — the kernel would lose to the CPU it replaced. Each
+    /// tile's surviving segments arrive addressed by its own header.
+    ///
+    /// Declines, all honest, all leaving `px` alone: no compute pipelines; a
+    /// batch whose tile count disagrees with the pixel run; a ramp
+    /// [`mn_core::gradient::Ramp::lerp_table`] will not flatten (a
+    /// non-Standard mixing space or a non-zero mixing rate — both put a
+    /// `powf` in the middle of the walk); a DITHERING ramp (ordered noise
+    /// this would have to reproduce bit for bit, on a path the CPU is
+    /// already fast at); a segment pool past [`FREEFORM_SEGS_MAX`]; and the
+    /// dispatch canary.
+    pub fn run_freeform_kernel(&mut self, job: &FieldJob<'_>, px: &[u16]) -> Option<Vec<u16>> {
+        self.kernels.as_ref()?;
+        let tiles = job.plans.len();
+        if tiles == 0 || px.len() != tiles * TILE_LEN {
+            return None;
+        }
+        if job.segs.len() % SEG_WORDS != 0 || job.segs.len() / SEG_WORDS > FREEFORM_SEGS_MAX {
+            return None;
+        }
+        if job.ramp.opts.dither {
+            return None;
+        }
+        let stops = job.ramp.lerp_table()?;
+        // One pool on binding 4 for the whole batch: the ramp's stop table,
+        // then the per-tile headers, then the segments — the same
+        // "everything rides the weights buffer as f32 bits" arrangement the
+        // smear matrices use, and for the same reason (four storage
+        // bindings is the downlevel ceiling and all four are spoken for).
+        // Three bases go in `Params`; the shader adds them.
+        let hdr_base = stops.len() * FREE_STOP_WORDS;
+        let seg_base = hdr_base + tiles * FREE_HDR_WORDS;
+        let mut w: Vec<u32> = Vec::with_capacity(seg_base + job.segs.len());
+        for s in &stops {
+            w.extend(s.iter().map(|v| v.to_bits()));
+        }
+        for plan in job.plans {
+            let (ox, oy) = plan.origin;
+            w.extend_from_slice(&[
+                ox as u32,
+                oy as u32,
+                plan.a.0,
+                plan.a.1,
+                plan.b.0,
+                plan.b.1,
+            ]);
+        }
+        w.extend(job.segs.iter().map(|v| v.to_bits()));
+
+        let mut p = Params::zeroed();
+        p.count = (tiles * TILE_PIXELS) as u32;
+        p.w = job.size.0;
+        p.h = job.size.1;
+        p.n = stops.len() as u32;
+        // The pointwise family's spare scalar slots, reused: the stop table
+        // sits at word 0, the headers at `k_base`, the segment pool at
+        // `taps`, and `denom` carries the ramp's flip.
+        p.cov_base = 0;
+        p.k_base = hdr_base as u32;
+        p.taps = seg_base as u32;
+        p.denom = u32::from(job.ramp.opts.flip);
+        self.dispatch(px, &w, &[p], Pipe::Free, tiles * TILE_LEN)
     }
 
     /// The seam, region flavour: run `kernel` in place over `w * h` fix15
@@ -937,6 +1052,7 @@ impl crate::Renderer {
                 Pipe::Adjust => &k.adjust_pipe,
                 Pipe::Sep => &k.sep_pipe,
                 Pipe::Smear => &k.smear_pipe,
+                Pipe::Free => &k.free_pipe,
             });
             cp.set_bind_group(
                 0,

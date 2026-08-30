@@ -594,6 +594,7 @@ fn a_mask_capped_breakout_is_gated_on_both_of_its_seats() {
         tiles: std::collections::HashMap::new(),
         enabled: true,
         revision: crate::tile::next_revision(),
+        full: false,
     };
     for (idx, c) in [
         (TileIdx::new(0, 0), 0u16),

@@ -104,6 +104,9 @@ pub fn mask_from_selection(doc: &Document, sel: &Selection) -> Option<LayerMask>
         tiles: HashMap::new(),
         enabled: true,
         revision: crate::tile::next_revision(),
+        // A window CUT from a selection: the tiles it holds are where it
+        // applies, and everywhere else is outside it.
+        full: false,
     };
     let (w, h) = (doc.size.0 as i32, doc.size.1 as i32);
     let t = TILE_SIZE as i32;

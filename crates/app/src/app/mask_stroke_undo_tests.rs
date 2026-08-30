@@ -182,6 +182,92 @@ fn an_empty_mask_stroke_spends_no_undo_step() {
     assert_eq!(mask_bits(&app).expect("masked"), before, "nothing moved");
 }
 
+/// Row 105 edge: a brush stroke on a MASKLESS correction layer used to be
+/// refused with a status line ("make one from a selection first") — the
+/// maskless-live-fill rule, applied to a layer where it makes no sense.
+/// CSP's user reaches for the eraser to take the correction off a face, so
+/// the stroke ARMS an all-visible window instead and carves it.
+///
+/// The window is arm-and-carve in one gesture, so it is also one undo
+/// press: the bracket's pre-image is "there was no mask".
+#[test]
+fn a_stroke_on_a_maskless_correction_arms_its_window_in_one_undo_press() {
+    let Some(mut app) = masked_app() else {
+        return;
+    };
+    // A correction over the fixture's ink, maskless (no selection).
+    app.doc.selection = None;
+    let ci = app
+        .doc
+        .add_correction_layer(mn_core::Adjust::Invert, false);
+    app.doc.set_active(ci);
+    assert!(app.doc.active_layer().mask.is_none(), "maskless to start");
+    let steps_before = app.doc.undo_len();
+
+    app.tool = crate::cmd::Tool::Eraser;
+    drag(&mut app, 100.0, 10.0);
+
+    let m = app
+        .doc
+        .active_layer()
+        .mask
+        .as_ref()
+        .expect("the stroke armed a window instead of being refused");
+    assert!(m.full && m.enabled, "and it is the all-visible kind");
+    assert!(
+        !m.tiles.is_empty(),
+        "the eraser carved coverage into it"
+    );
+    assert!(
+        m.tiles.len() < 8,
+        "only the tiles the stroke touched materialised, not the canvas: {}",
+        m.tiles.len()
+    );
+    assert_eq!(
+        app.doc.undo_len(),
+        steps_before + 1,
+        "the arm and the carve are one press"
+    );
+    assert_eq!(
+        app.doc.undo_labels().last().map(String::as_str),
+        Some("Correction window"),
+    );
+
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::Undo);
+    assert!(
+        app.doc.layers[ci].mask.is_none(),
+        "one undo took the window back with the stroke"
+    );
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::Redo);
+    assert!(
+        app.doc.layers[ci].mask.as_ref().is_some_and(|m| m.full),
+        "and redo put it back"
+    );
+}
+
+/// The other half of the same chokepoint: a maskless live FILL is still
+/// refused. Its window is what it DRAWS, so arming one full-canvas would
+/// flood the page with the fill colour before the first dab lands.
+#[test]
+fn a_stroke_on_a_maskless_live_fill_is_still_refused() {
+    let Some(mut app) = masked_app() else {
+        return;
+    };
+    app.doc.selection = None;
+    let fi = app.doc.add_layer("fill");
+    app.doc.layers[fi].kind = mn_core::LayerKind::Fill(mn_core::fill_layer::FillKind::Flat {
+        color: [1.0, 0.0, 0.0, 1.0],
+    });
+    app.doc.set_active(fi);
+    let steps_before = app.doc.undo_len();
+    drag(&mut app, 100.0, 10.0);
+    assert!(
+        app.doc.active_layer().mask.is_none(),
+        "a live fill must not arm a full-canvas window"
+    );
+    assert_eq!(app.doc.undo_len(), steps_before, "and spends no undo step");
+}
+
 /// The control: with mask editing disarmed the stroke is an ordinary
 /// layer edit, recorded by the ordinary op bracket. Its undo behaviour
 /// must be exactly what it always was — one step, pixels restored.

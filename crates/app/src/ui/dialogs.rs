@@ -930,9 +930,11 @@ pub(super) fn resample_work_window(ctx: &egui::Context, app: &mut App) {
                 ui.colored_label(ui.visuals().warn_fg_color, w);
             }
             ui.weak(format!(
-                "Every page of the work ({}) is rebuilt in one step, spreads included \
-                 — a full chapter at print resolution takes a while, and the app will \
-                 not respond while it runs. This cannot be undone and clears the history.",
+                "Every page of the work ({}) is rebuilt, spreads included — a full \
+                 chapter at print resolution takes a while. The pages are counted off \
+                 as they go and you can stop part-way; nothing is written until the \
+                 last one is built. Once it is, this cannot be undone and clears the \
+                 history.",
                 app.pages.len()
             ));
             ui.add_space(2.0);
@@ -961,6 +963,49 @@ pub(super) fn resample_work_window(ctx: &egui::Context, app: &mut App) {
         app.push_cmd(AppCmd::ResampleWorkApply);
     } else {
         app.resample_work_open = open && !cancel;
+    }
+}
+
+/// `IO-060`'s progress window — the other half of that warning.
+///
+/// The op builds one page per frame now (`App::resample_work_step`), which
+/// is the only reason this window can be painted at all: `App::render` runs
+/// on `WM_PAINT`, so a count written from inside a blocking loop would never
+/// reach the screen.
+///
+/// No title-bar X and no `.open()`: closing the window would leave a run
+/// going with nothing on screen saying so. Cancel is the way out, and it is
+/// honest — phase 1 has written nothing into the work, so stopping there
+/// leaves every page exactly as it was.
+pub(super) fn resample_progress_window(ctx: &egui::Context, app: &mut App) {
+    let Some((done, dpi)) = app.resample_job.as_ref().map(|j| (j.done(), j.dpi())) else {
+        return;
+    };
+    let total = app.pages.len().max(1);
+    let mut cancel = false;
+    egui::Window::new("Changing Work Resolution")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, -30.0))
+        .show(ctx, |ui| {
+            ui.set_width(340.0);
+            ui.label(format!("Rebuilding every page of the work at {dpi} dpi."));
+            ui.add(
+                egui::ProgressBar::new(done as f32 / total as f32)
+                    .text(format!("page {} of {total}", (done + 1).min(total))),
+            );
+            ui.weak(
+                "Nothing is written until every page has been rebuilt, so \
+                 cancelling here leaves the work exactly as it is. The app \
+                 takes no other commands until this finishes.",
+            );
+            ui.add_space(2.0);
+            if ui.button("Cancel").clicked() {
+                cancel = true;
+            }
+        });
+    if cancel {
+        app.resample_work_cancel();
     }
 }
 

@@ -68,6 +68,40 @@ pub(crate) const PREF_INDEX: &[PrefMeta] = &[
                off. (stabilizer, smoothing, jitter, shaky lines, mouse)",
     },
     PrefMeta {
+        id: "smart_shape",
+        tab: "Drawing",
+        label: "Hold to create figures",
+        desc: "The Figure ▸ Smart shape sub tool: draw freehand, hold the \
+               pen still at the end of the stroke, and the wobble is \
+               replaced by the clean line, curve or shape it was \
+               approximating. Off leaves that sub tool drawing plain \
+               freehand. (smart shape, hold to create figures, recognize, \
+               recognise, snap, straighten, clean up, circle, ellipse, \
+               rectangle, polygon, FG-020)",
+    },
+    PrefMeta {
+        id: "smart_hold_ms",
+        tab: "Drawing",
+        label: "Hold time",
+        desc: "How long the pen has to stand still before the shape is \
+               recognized. Raise it if you pause mid-stroke to think — past \
+               the hold the pen adjusts the recognized shape instead of \
+               carrying the stroke on. (smart shape, hold duration, delay, \
+               long press, wait, too fast, too slow, FG-020)",
+    },
+    PrefMeta {
+        id: "smart_fit_tol",
+        tab: "Drawing",
+        label: "Recognition tolerance",
+        desc: "How close the fit has to be before a stroke is swapped for a \
+               figure, as a share of the shape's own size. Raise it if it \
+               keeps refusing shapes you meant; the size floor and the \
+               scribble refusals do not move, so cross-hatching and \
+               scribbled-out mistakes are still never eaten. (smart shape, \
+               tolerance, accuracy, confidence, strictness, sensitivity, \
+               refuses, never triggers, FG-020)",
+    },
+    PrefMeta {
         id: "new_canvas",
         tab: "Canvas & view",
         label: "New canvas",
@@ -512,10 +546,57 @@ fn tab_drawing(ui: &mut egui::Ui, app: &mut App, focus: Option<&str>, fx: &mut F
                 )
                 .changed();
             ui.end_row();
+
+            // Row 156 / `FG-020`. The two knobs grey out with the switch:
+            // a hold time for a hold that never happens is a lie.
+            row_label(ui, focus, "smart_shape");
+            fx.changed |= ui.checkbox(&mut p.smart_shape, "").changed();
+            ui.end_row();
+
+            let on = p.smart_shape;
+            row_label(ui, focus, "smart_hold_ms");
+            fx.changed |= ui
+                .add_enabled(
+                    on,
+                    egui::DragValue::new(&mut p.smart_hold_ms)
+                        .range(
+                            crate::app::prefs::SMART_HOLD_MS_MIN
+                                ..=crate::app::prefs::SMART_HOLD_MS_MAX,
+                        )
+                        .speed(10.0)
+                        .suffix(" ms"),
+                )
+                .changed();
+            ui.end_row();
+
+            row_label(ui, focus, "smart_fit_tol");
+            let mut pct = p.smart_fit_tol * 100.0;
+            if ui
+                .add_enabled(
+                    on,
+                    egui::DragValue::new(&mut pct)
+                        .range(
+                            (crate::app::prefs::SMART_FIT_TOL_MIN * 100.0)
+                                ..=(crate::app::prefs::SMART_FIT_TOL_MAX * 100.0),
+                        )
+                        .speed(0.1)
+                        .fixed_decimals(1)
+                        .suffix(" %"),
+                )
+                .changed()
+            {
+                p.smart_fit_tol = pct / 100.0;
+                fx.changed = true;
+            }
+            ui.end_row();
         });
     ui.weak(
-        "Mouse strokes only — the pen always uses the sub tool's own \
-         stabilizer. 0 turns the floor off.",
+        "Mouse smoothing is mouse strokes only — the pen always uses the sub \
+         tool's own stabilizer, and 0 turns the floor off. Hold to create \
+         figures is the Figure ▸ Smart shape sub tool: past the hold, keeping \
+         the pen down and dragging sizes and turns the recognized shape, and \
+         Shift makes it regular. A stroke the recognizer will not explain is \
+         always left exactly as drawn.",
     );
 }
 

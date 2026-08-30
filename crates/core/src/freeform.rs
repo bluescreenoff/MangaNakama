@@ -304,7 +304,70 @@ impl Window {
     pub fn segment_counts(&self) -> (usize, usize) {
         (self.a.len(), self.b.len())
     }
+
+    /// Append this window's two segment lists to a shared pool and return
+    /// the plan that addresses them — the kernel-host flattening.
+    ///
+    /// Five f32 per segment, in [`Seg`]'s own field order, because the
+    /// shader's inner loop reads exactly these five and in this order.
+    /// Bases and lengths are in SEGMENTS, not words: the shader multiplies.
+    pub(crate) fn pack_into(&self, pool: &mut Vec<f32>, origin: (i32, i32)) -> TilePlan {
+        let push = |pool: &mut Vec<f32>, segs: &[Seg]| -> (u32, u32) {
+            let base = (pool.len() / SEG_WORDS) as u32;
+            for s in segs {
+                pool.extend_from_slice(&[s.ax, s.ay, s.dx, s.dy, s.inv_l2]);
+            }
+            (base, segs.len() as u32)
+        };
+        let a = push(pool, &self.a);
+        let b = push(pool, &self.b);
+        TilePlan { origin, a, b }
+    }
 }
+
+/// f32 words one [`Seg`] occupies in a flattened pool.
+pub const SEG_WORDS: usize = 5;
+
+/// One tile's place in a [`FieldJob`]: its canvas-pixel origin, and where
+/// its two culled guides live in the pool — `(base, len)` per guide, in
+/// segments.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TilePlan {
+    pub origin: (i32, i32),
+    pub a: (u32, u32),
+    pub b: (u32, u32),
+}
+
+/// One batch of freeform tiles, flattened for a kernel host.
+///
+/// The per-tile CULL rides along — `plans` addresses each tile's own
+/// surviving segments — because it is what makes the field affordable at
+/// all (24.6 segments per tile instead of 400 on the pathological guide,
+/// measured in `freeform_paint_tests`). A kernel that scanned every segment
+/// for every pixel would be slower than the CPU it replaced, on a page.
+#[derive(Clone, Copy, Debug)]
+pub struct FieldJob<'a> {
+    /// Segment pool: [`SEG_WORDS`] f32 per segment.
+    pub segs: &'a [f32],
+    /// One plan per tile, parallel to the host's tile list.
+    pub plans: &'a [TilePlan],
+    /// The ramp the parameter is looked up in — `Ramp::eval_unit`.
+    pub ramp: &'a crate::gradient::Ramp,
+    /// Canvas size: pixels outside it are left byte-untouched, exactly as
+    /// the CPU loop's `continue` leaves them.
+    pub size: (u32, u32),
+}
+
+/// A kernel the caller lends the freeform paint: given the flattened field
+/// and the batch's CURRENT tile pixels, return the painted pixels (same
+/// length, tile order) — or `None` to decline, in which case the CPU
+/// reference paints the batch.
+///
+/// Declining is always legal and always correct, the same contract
+/// `correction::CorrKernel` and `filter::RasterKernel` carry. The kernel
+/// does the whole pixel, src-over included, because the source it needs is
+/// the destination tile it was handed.
+pub type FieldKernel<'a> = dyn FnMut(&FieldJob<'_>, &[u16]) -> Option<Vec<u16>> + 'a;
 
 // --- `FI-051`: N guides, a colour each ------------------------------------
 

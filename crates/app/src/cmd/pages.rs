@@ -601,21 +601,13 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                 app.commit_text_edit();
                 app.transform_drag = None;
                 app.last_selection = None;
-                match app.resample_work(d.dpi, d.interp) {
-                    Ok(n) => {
-                        // Structural: the texture changes size and every
-                        // cached thumb is stale (the canvas-resize rule).
-                        app.renderer.invalidate();
-                        app.layer_thumbs.clear();
-                        app.set_status(format!(
-                            "work resampled to {} dpi ({}) — {n} page(s), {}×{} — history cleared{back}",
-                            d.dpi,
-                            d.interp.label(),
-                            app.doc.size.0,
-                            app.doc.size.1,
-                        ));
-                    }
-                    Err(e) => app.set_error(format!("resolution unchanged: {e}")),
+                // The run itself is CHUNKED — one page per frame, with a
+                // progress window and a Cancel (see `App::resample_work_step`).
+                // The command's job ends at starting it; the finishing status
+                // line is composed by the last step, which is the only place
+                // that knows how many pages actually landed.
+                if let Err(e) = app.resample_work_begin(d.dpi, d.interp, back) {
+                    app.set_error(format!("resolution unchanged: {e}"));
                 }
             }
             app.mark_dirty();

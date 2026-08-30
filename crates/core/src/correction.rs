@@ -9,7 +9,9 @@
 //! derived pixel OPAQUE, and an opaque tile under `Blend::Normal` *is* a
 //! replace. Neither compositor changes: the CPU walk and the GPU shader
 //! both just see an ordinary layer whose tiles happen to cover the page.
-//! Two consequences, both deliberate:
+//! (Inside a sealed folder the paper is not there to derive over — see
+//! "Scope" below — and the trick then holds where the group's art is
+//! opaque, which is where art is.) Two consequences, both deliberate:
 //!
 //! * Layer opacity is the correction's STRENGTH for free: at 0.5 the
 //!   compositor shows half corrected-page, half the page itself — exactly
@@ -22,12 +24,19 @@
 //!
 //! The layer mask is the window, cut from the selection at creation like a
 //! live fill (`fill_layer::mask_from_selection`; no mask = the whole
-//! canvas). Coverage is applied at DERIVATION through [`correct_tile`]'s
+//! canvas) — or ARMED all-visible by the first brush stroke on a maskless
+//! correction ([`Document::arm_full_window`] +
+//! [`crate::doc::LayerMask::full`]: an empty tile map, so "the window is the
+//! whole page" costs no pixels, and the stroke carves the correction back
+//! off only what it touches). Coverage is applied at DERIVATION through
+//! [`correct_tile`]'s
 //! own blend — a masked-out pixel derives as the below-composite verbatim
 //! — and the compositor then applies LM-005 mask scaling on top like any
 //! layer. A soft window therefore feathers twice (coverage²), the same
 //! convention live fills already have. Tiles the mask does not reach are
-//! not derived at all: the compositor draws the real layers there.
+//! not derived at all: the compositor draws the real layers there. A FULL
+//! window is the other way round — the tiles it holds are where the artist
+//! carved the correction away, and the derive set is the whole canvas.
 //!
 //! # Derivation source
 //!
@@ -44,6 +53,18 @@
 //! the correction runs. That is the displayed page, and it is what CSP
 //! corrects too; the fix15 headroom is spent where it matters, in
 //! `correct_tile`'s own arithmetic.
+//!
+//! # Scope: the page, or the group
+//!
+//! WHICH layers are "below" is [`Document::below_scope`]. A correction at
+//! the top level derives from the whole page beneath it, over paper. One
+//! INSIDE a sealed folder derives from that folder's own children beneath
+//! it, over nothing — the group is isolated, so the page under it is not
+//! visible to a child, which is the ruling Blend If already takes for the
+//! same reason. A Through folder has no seal, so a correction in one still
+//! sees the page. See [`Document::below_scope`] and
+//! [`Document::derive_background`] for the whole rule and its one soft
+//! spot (semi-transparent group content).
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -109,8 +130,10 @@ thread_local! {
 
 /// One tile of correction work, as a kernel host sees it.
 ///
-/// `src` is the below-composite over paper (premultiplied fix15 RGBA,
-/// `TILE_LEN` long); `cov` is the window's per-pixel coverage
+/// `src` is the below-composite (premultiplied fix15 RGBA, `TILE_LEN` long)
+/// — over paper at page scope, so opaque; over nothing inside a sealed
+/// folder, so carrying the group's own alpha. `cov` is the window's
+/// per-pixel coverage
 /// (`TILE_PIXELS` bytes), `None` meaning "no window, correct everything".
 /// Exactly the two arguments [`correct_tile`] takes — the CPU function IS
 /// the specification of what a kernel must reproduce.
@@ -136,9 +159,12 @@ pub type CorrKernel<'a> = dyn FnMut(&Adjust, &[CorrTile<'_>]) -> Option<Vec<Box<
 pub struct CorrDerived {
     /// The corrected page, tile by tile. What both compositors display.
     pub(crate) tiles: HashMap<TileIdx, Arc<Tile>>,
-    /// (params, window-mask revision, dpi, canvas size, below props key)
-    /// — a mismatch on any of these rebuilds EVERY tile.
-    stamp: Option<(Adjust, Option<u64>, u32, (u32, u32), u64)>,
+    /// (params, window-mask key, dpi, canvas size, below props key)
+    /// — a mismatch on any of these rebuilds EVERY tile. The window key is
+    /// `(revision, full)`: the flag decides what the tiles the mask does
+    /// NOT hold mean, so flipping it changes every derived tile without
+    /// moving a revision.
+    stamp: Option<(Adjust, Option<(u64, bool)>, u32, (u32, u32), u64)>,
     /// The same stamp WITHOUT the parameters — everything the below-composite
     /// depends on. This is the whole point of the split: a slider drag moves
     /// `stamp` and leaves this alone, so every tile's source survives and the
@@ -153,7 +179,7 @@ pub struct CorrDerived {
     /// which point the composite would be roughly two thirds of every drag
     /// tick. The two changes only pay off together, which is why they shipped
     /// together.
-    src_stamp: Option<(Option<u64>, u32, (u32, u32), u64)>,
+    src_stamp: Option<(Option<(u64, bool)>, u32, (u32, u32), u64)>,
     /// The below-composite each derived tile was made from, kept 8-bit
     /// exactly as `composite_rect_export` produced it — the derive converts
     /// to fix15 on the way in, so caching the wide form would double the cost
@@ -173,14 +199,20 @@ pub struct CorrDerived {
 /// Tile contents are deliberately absent — they have their own per-tile
 /// keys. Misses here are silent stale-correction bugs; when a new
 /// presentation field lands on `Layer`, it belongs in this hash.
-fn below_props_key(doc: &Document, i: usize) -> u64 {
+///
+/// `scope` is [`Document::below_scope`]'s answer and rides the hash itself:
+/// it IS the scoping rule, and dragging the correction into a folder or
+/// flipping that folder's seal moves it without touching a single layer.
+fn below_props_key(doc: &Document, i: usize, scope: Option<usize>) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     i.hash(&mut h);
+    scope.hash(&mut h);
+    let floor = scope.unwrap_or(0);
     // The derivation background: a paper retint must re-derive.
     if let crate::export::Background::Solid(c) = doc.paper_export_background() {
         c.hash(&mut h);
     }
-    for l in &doc.layers[..i] {
+    for l in &doc.layers[floor..i] {
         l.visible.hash(&mut h);
         l.opacity.to_bits().hash(&mut h);
         l.blend.hash(&mut h);
@@ -211,7 +243,7 @@ fn below_props_key(doc: &Document, i: usize) -> u64 {
 /// raster when it differs, folder coverage masks, border-effect mats.
 /// Double counting a map that aliases another is fine — the key only has to
 /// be deterministic and move when content moves.
-fn below_tile_keys(doc: &Document, i: usize) -> HashMap<TileIdx, (u64, u32)> {
+fn below_tile_keys(doc: &Document, i: usize, floor: usize) -> HashMap<TileIdx, (u64, u32)> {
     let (tw, th) = canvas_tiles(doc.size);
     let in_canvas = |idx: &TileIdx| idx.x >= 0 && idx.y >= 0 && idx.x < tw && idx.y < th;
     let mut keys: HashMap<TileIdx, (u64, u32)> = HashMap::new();
@@ -220,7 +252,7 @@ fn below_tile_keys(doc: &Document, i: usize) -> HashMap<TileIdx, (u64, u32)> {
         e.0 = e.0.max(rev);
         e.1 += 1;
     };
-    for l in &doc.layers[..i] {
+    for l in &doc.layers[floor..i] {
         for (idx, t) in l.tiles() {
             if in_canvas(&idx) {
                 fold(idx, t.revision());
@@ -316,12 +348,16 @@ impl Document {
             .mask
             .as_ref()
             .filter(|m| m.enabled)
-            .map(|m| m.revision);
-        let props = below_props_key(self, i);
+            .map(|m| (m.revision, m.full));
+        // The scope FIRST: it decides which layers the two freshness keys
+        // below enumerate, and it is itself part of the props key.
+        let scope = self.below_scope(i);
+        let floor = scope.unwrap_or(0);
+        let props = below_props_key(self, i, scope);
         let stamp = (adj, mask_rev, dpi, self.size, props);
         // The source half of the stamp — the same fields minus the params.
         let src_stamp = (mask_rev, dpi, self.size, props);
-        let tile_keys = below_tile_keys(self, i);
+        let tile_keys = below_tile_keys(self, i, floor);
         let force = self.layers[i].corr.as_ref().and_then(|c| c.stamp) != Some(stamp);
         // A slider drag lands here: `force` (params moved) but not
         // `force_src` (nothing under the layer moved), so every tile's cached
@@ -336,35 +372,45 @@ impl Document {
             return;
         }
 
-        // The tiles this correction derives: the window's tiles when a mask
-        // is on, the whole canvas otherwise. Everywhere else the compositor
-        // draws the real layers and the correction has nothing to say.
-        let wanted: Vec<TileIdx> = match self.layers[i].mask.as_ref().filter(|m| m.enabled) {
-            Some(m) => {
-                let (tw, th) = canvas_tiles(self.size);
-                m.tiles
-                    .keys()
-                    .copied()
-                    .filter(|idx| idx.x >= 0 && idx.y >= 0 && idx.x < tw && idx.y < th)
-                    .collect()
-            }
-            None => {
-                let (tw, th) = canvas_tiles(self.size);
-                (0..th)
-                    .flat_map(|y| (0..tw).map(move |x| TileIdx::new(x, y)))
-                    .collect()
-            }
+        // The tiles this correction derives: the window's tiles when a
+        // CARVED mask is on, the whole canvas otherwise. Everywhere else the
+        // compositor draws the real layers and the correction has nothing to
+        // say.
+        //
+        // A FULL window (`LayerMask::full`, what a brush stroke on a
+        // maskless correction arms) is the "otherwise": its tiles are the
+        // places the artist has carved the correction AWAY, and the tiles it
+        // does not hold are still corrected — so the derive set is the whole
+        // canvas, exactly as if there were no mask at all, and an
+        // untouched arm costs no pixels anywhere.
+        let (tw, th) = canvas_tiles(self.size);
+        let carved = self.layers[i]
+            .mask
+            .as_ref()
+            .filter(|m| m.enabled && !m.full);
+        let wanted: Vec<TileIdx> = match carved {
+            Some(m) => m
+                .tiles
+                .keys()
+                .copied()
+                .filter(|idx| idx.x >= 0 && idx.y >= 0 && idx.x < tw && idx.y < th)
+                .collect(),
+            None => (0..th)
+                .flat_map(|y| (0..tw).map(move |x| TileIdx::new(x, y)))
+                .collect(),
         };
 
         // One truncated clone for the whole rebuild — Arc-shared tiles, so
         // this is pointer traffic, not pixels.
-        let below = self.below_doc(i);
-        let bg = self.paper_export_background();
+        let below = self.below_doc(i, floor);
+        let bg = self.derive_background(scope);
+        // The window's coverage, plus what a tile it does not hold means:
+        // 0 for a carved window (outside it), full for a `full` one.
         let mask_tiles = self.layers[i]
             .mask
             .as_ref()
             .filter(|m| m.enabled)
-            .map(|m| m.tiles.clone());
+            .map(|m| (m.tiles.clone(), if m.full { 255u8 } else { 0 }));
 
         let mut old = self.layers[i].corr.take().unwrap_or_default();
         let mut out: HashMap<TileIdx, Arc<Tile>> = HashMap::new();
@@ -428,31 +474,47 @@ impl Document {
                         s
                     }
                 };
-                // The below-composite as an opaque fix15 tile. Off-canvas
-                // pixels stay transparent (the image is zero there) and
-                // `correct_tile` passes them through; the compositor clips
-                // them anyway.
+                // The below-composite as a premultiplied fix15 tile. Under
+                // page scope the source is opaque by construction (the
+                // paper) and this is the old byte-for-byte conversion; under
+                // group scope the alpha is real and rides along, so
+                // `correct_tile` corrects the straight colour and hands the
+                // group's own coverage back. Off-canvas pixels stay
+                // transparent (the image is zero there) and `correct_tile`
+                // passes them through; the compositor clips them anyway.
                 let dst = &mut src_px[n * TILE_PIXELS * 4..(n + 1) * TILE_PIXELS * 4];
                 dst.fill(0);
                 for p in 0..TILE_PIXELS {
                     let o = p * 4;
-                    if bytes[o + 3] == 0 {
+                    let a = bytes[o + 3] as u32;
+                    if a == 0 {
                         continue;
                     }
+                    // 255 → exactly 32768, so the opaque path is unchanged.
+                    let a15 = (a * 32768 + 127) / 255;
                     for c in 0..3 {
-                        dst[o + c] = ((bytes[o + c] as u32 * 32768 + 127) / 255) as u16;
+                        dst[o + c] = ((bytes[o + c] as u32 * a15 + 127) / 255).min(a15) as u16;
                     }
-                    dst[o + 3] = 32768;
+                    dst[o + 3] = a15 as u16;
                 }
-                covs.push(mask_tiles.as_ref().map(|mt| {
-                    let mut cov = Box::new([0u8; TILE_PIXELS]);
-                    if let Some(m) = mt.get(&idx) {
-                        let d = m.data();
-                        for (p, c) in cov.iter_mut().enumerate() {
-                            *c = ((d[p * 4 + 3] as u32 * 255 + 16384) / 32768).min(255) as u8;
+                covs.push(mask_tiles.as_ref().and_then(|(mt, absent)| {
+                    match mt.get(&idx) {
+                        Some(m) => {
+                            let mut cov = Box::new([0u8; TILE_PIXELS]);
+                            let d = m.data();
+                            for (p, c) in cov.iter_mut().enumerate() {
+                                *c = ((d[p * 4 + 3] as u32 * 255 + 16384) / 32768).min(255) as u8;
+                            }
+                            Some(cov)
                         }
+                        // Full coverage IS "no window" as far as
+                        // `correct_tile` is concerned — handing `None`
+                        // instead of 256 opaque bytes keeps the kernel on
+                        // its cheap path for the tiles a full window has
+                        // never been carved out of, which is most of them.
+                        None if *absent == 255 => None,
+                        None => Some(Box::new([0u8; TILE_PIXELS])),
                     }
-                    cov
                 }));
             }
 
@@ -505,14 +567,87 @@ impl Document {
         });
     }
 
-    /// The layers below `i`, as their own document — the derivation source.
-    /// Everything the composite walk reads is carried; undo history and
-    /// selection are not (and must not be — the composite never looks).
-    fn below_doc(&self, i: usize) -> Document {
+    /// What a correction at `i` derives FROM: `Some(start)` — the first
+    /// index of the sealed group it lives in — or `None` for the page.
+    ///
+    /// The convention was top-level, so the answer was always the page. A
+    /// correction dragged INSIDE a folder kept deriving from the global
+    /// below-set, which is not what a group means and (worse) is not even
+    /// what it got — a truncated stack that starts mid-folder has orphan
+    /// children at depth 1, they composite into an accumulator nothing ever
+    /// blends down, and the folder's own art silently vanished from the
+    /// derivation while the derived page flooded the group.
+    ///
+    /// **The rule, mirroring the compositor rather than re-deciding it.**
+    /// `export::composite_size` gives each layer the accumulator
+    /// `collapse[depth]`: a SEALED folder opens a new one for its children,
+    /// a THROUGH folder collapses onto its parent's. So the scope is the
+    /// nearest SEALED enclosing folder — walk out through Through folders,
+    /// and the first sealed one's children are the below-set; none at all
+    /// (or Through all the way out) means the page. That is the same
+    /// sealed-is-the-group / Through-is-the-page ruling Blend If takes, and
+    /// for the same reason: both questions are "what has this layer's
+    /// accumulator got in it so far".
+    ///
+    /// The `Some`/`None` distinction is not just the start index — see
+    /// [`Self::below_doc`]'s background. A sealed group whose children
+    /// happen to start at index 0 still scopes as a GROUP.
+    pub(crate) fn below_scope(&self, i: usize) -> Option<usize> {
+        let mut cur = i;
+        while let Some(f) = self.enclosing_folder(cur) {
+            if !self.layers[f].through {
+                return Some(self.children_range(f).start);
+            }
+            cur = f;
+        }
+        None
+    }
+
+    /// The below-set of a correction at `i`, as its own document — the
+    /// derivation source. Everything the composite walk reads is carried;
+    /// undo history and selection are not (and must not be — the composite
+    /// never looks).
+    ///
+    /// `normalize_depths` is load-bearing, not tidiness: a folder-local
+    /// slice starts BELOW its folder header, so its children are orphans at
+    /// depth 1. `composite_size` initialises its depth→accumulator collapse
+    /// to the identity and only rewrites it at a header, so an orphan lands
+    /// in accumulator 1 — which nothing blends onto accumulator 0, which is
+    /// the only one the page is blitted from. Un-normalised, the derivation
+    /// comes back blank. Re-basing to 0 is exactly what the missing header
+    /// would have done for a sealed group, and exactly what a Through
+    /// folder does for real.
+    fn below_doc(&self, i: usize, floor: usize) -> Document {
         let mut d = Document::new(self.size.0.max(1), self.size.1.max(1));
-        d.layers = self.layers[..i].to_vec();
+        d.layers = self.layers[floor..i].to_vec();
         d.paper = self.paper.clone();
+        d.normalize_depths();
         d
+    }
+
+    /// The background a correction at `i` derives over.
+    ///
+    /// Page scope keeps the paper: that is what makes every derived pixel
+    /// OPAQUE, which is what makes `Blend::Normal` a replace, which is the
+    /// whole trick (see the module doc). GROUP scope must not — a sealed
+    /// folder is isolated, so the page beneath it is not visible to a child
+    /// (the same isolation ruling Blend If takes), and deriving over paper
+    /// there floods the whole group with opaque corrected paper and covers
+    /// the page with it. Transparent instead: the group's own composite,
+    /// alpha and all, and the derived tile stays transparent exactly where
+    /// the group has nothing to correct.
+    ///
+    /// The replace trick survives where it matters, because group art is
+    /// opaque where it exists. It DEGRADES on semi-transparent group
+    /// content: an alpha-`a` pixel comes out `C·a + G·(1−a)` rather than
+    /// `C·a`, since Normal-over-itself is only a replace at `a == 1`. That
+    /// is the same no-Replace-blend compromise this module already lives
+    /// with, now visible at soft edges inside a group.
+    fn derive_background(&self, scope: Option<usize>) -> crate::export::Background {
+        match scope {
+            Some(_) => crate::export::Background::Transparent,
+            None => self.paper_export_background(),
+        }
     }
 }
 
@@ -981,6 +1116,308 @@ mod tests {
         }
         SRC_CAP_OVERRIDE.with(|c| c.set(0));
         assert_eq!(px(&doc, 100, 100), [255, 255, 255], "paper binarizes white");
+    }
+
+    // ---- row 105 edge: the armed all-visible window -------------------
+
+    /// The arm costs NO pixels. An all-visible window is an empty tile map
+    /// — the point of `LayerMask::full` — and the page it derives is the
+    /// same page a maskless correction derives, tile for tile.
+    #[test]
+    fn an_armed_full_window_corrects_the_whole_page_and_stores_no_tiles() {
+        let mut maskless = Document::new(128, 128);
+        put(&mut maskless, 0, 10, 10, [0.6, 0.6, 0.6, 1.0]);
+        maskless.add_correction_layer(Adjust::Invert, false);
+        refresh(&mut maskless);
+        let want = crate::export::composite(&maskless, crate::export::Background::White);
+
+        let mut doc = Document::new(128, 128);
+        put(&mut doc, 0, 10, 10, [0.6, 0.6, 0.6, 1.0]);
+        let ci = doc.add_correction_layer(Adjust::Invert, false);
+        doc.set_active(ci);
+        assert!(doc.arm_full_window(), "a maskless correction arms");
+        assert!(!doc.arm_full_window(), "and only once");
+        let m = doc.layers[ci].mask.as_ref().unwrap();
+        assert!(m.full && m.enabled);
+        assert!(
+            m.tiles.is_empty(),
+            "an all-visible window allocated tiles — the whole point is that \
+             it does not (a B4/600 dense one is ~30 MB)"
+        );
+        refresh(&mut doc);
+        let got = crate::export::composite(&doc, crate::export::Background::White);
+        assert!(
+            want.pixels().zip(got.pixels()).all(|(a, b)| a.0 == b.0),
+            "an armed window changed the derived page"
+        );
+    }
+
+    /// …and carving it takes the correction off exactly what was carved.
+    /// The carve is written the way `mn-brush`'s mask surface writes it: a
+    /// tile materialised from `blank_tile` (OPAQUE, because the window is
+    /// full) with the eraser's footprint taken down to zero.
+    #[test]
+    fn carving_a_full_window_only_uncorrects_what_it_touched() {
+        let mut doc = Document::new(256, 256);
+        for (x, y) in [(10, 10), (100, 100), (200, 200)] {
+            put(&mut doc, 0, x, y, [0.6, 0.6, 0.6, 1.0]);
+        }
+        let ci = doc.add_correction_layer(Adjust::Invert, false);
+        doc.set_active(ci);
+        doc.arm_full_window();
+        {
+            let m = doc.layers[ci].mask.as_mut().unwrap();
+            let mut t = m.blank_tile();
+            assert_eq!(t.data()[3], 32768, "a full window blanks OPAQUE");
+            // Erase a 4x4 corner of tile (1,1) — pixels (64..68, 64..68).
+            for y in 0..4 {
+                for x in 0..4 {
+                    t.set_pixel(x, y, [0; 4]);
+                }
+            }
+            m.tiles.insert(TileIdx::new(1, 1), Arc::new(t));
+            m.revision = crate::tile::next_revision();
+        }
+        refresh(&mut doc);
+        assert_eq!(
+            px(&doc, 65, 65),
+            [255, 255, 255],
+            "the carved pixels show the page itself again"
+        );
+        assert!(
+            px(&doc, 80, 80)[0] <= 2,
+            "the rest of the carved TILE is still corrected — a zero tile \
+             must not hide the whole 64x64: {:?}",
+            px(&doc, 80, 80)
+        );
+        assert!(
+            (px(&doc, 100, 100)[0] as i32 - 102).abs() <= 2,
+            "and a tile the window never held is still corrected: {:?}",
+            px(&doc, 100, 100)
+        );
+    }
+
+    /// The arm and the stroke it was armed for are ONE undo press, and a
+    /// stroke that never dabbed takes the window back instead of spending
+    /// a step on nothing.
+    #[test]
+    fn arming_a_window_costs_one_undo_press_and_an_empty_stroke_costs_none() {
+        let mut doc = Document::new(128, 128);
+        put(&mut doc, 0, 10, 10, [0.6, 0.6, 0.6, 1.0]);
+        let ci = doc.add_correction_layer(Adjust::Invert, false);
+        doc.set_active(ci);
+
+        // The pen came down and went up again.
+        let steps = doc.undo_len();
+        doc.mask_op_begin();
+        assert!(doc.arm_full_window());
+        assert!(!doc.mask_op_end(), "an empty stroke pushed a step");
+        assert!(doc.layers[ci].mask.is_none(), "the speculative arm stayed");
+        assert_eq!(doc.undo_len(), steps, "…and cost a press");
+
+        // A real stroke: one press takes the window and the carve together.
+        doc.mask_op_begin();
+        assert!(doc.arm_full_window());
+        {
+            let m = doc.layers[ci].mask.as_mut().unwrap();
+            let t = m.blank_tile();
+            m.tiles.insert(TileIdx::new(0, 0), Arc::new(t));
+            m.revision = crate::tile::next_revision();
+        }
+        assert!(doc.mask_op_end(), "a real mask stroke pushed no step");
+        assert_eq!(doc.undo_len(), steps + 1, "the arm and the carve are one");
+        doc.undo();
+        assert!(
+            doc.layers[ci].mask.is_none(),
+            "one undo left the armed window behind"
+        );
+    }
+
+    /// Clear Mask on a full window means what it says. It cannot say it by
+    /// zeroing coverage — the visible part of a full window is the tiles it
+    /// does NOT hold — so it drops the flag and empties the map, which is a
+    /// window that reaches nothing.
+    #[test]
+    fn clearing_a_full_window_takes_the_correction_off_the_whole_page() {
+        let mut doc = Document::new(128, 128);
+        put(&mut doc, 0, 10, 10, [0.6, 0.6, 0.6, 1.0]);
+        let ci = doc.add_correction_layer(Adjust::Invert, false);
+        doc.set_active(ci);
+        doc.arm_full_window();
+        refresh(&mut doc);
+        assert!(px(&doc, 100, 100)[0] <= 2, "armed: the page is inverted");
+        assert!(doc.mask_clear(ci));
+        refresh(&mut doc);
+        assert_eq!(
+            px(&doc, 100, 100),
+            [255, 255, 255],
+            "cleared: the correction reaches nothing"
+        );
+        assert!((px(&doc, 10, 10)[0] as i32 - 153).abs() <= 2, "including the ink");
+    }
+
+    /// A carved full window survives ORA — without the flag the reload
+    /// would read the carve tiles as the window and correct only there,
+    /// which is the exact inverse of what was saved.
+    #[test]
+    fn a_full_window_round_trips_through_ora() {
+        let mut doc = Document::new(128, 128);
+        put(&mut doc, 0, 10, 10, [0.6, 0.6, 0.6, 1.0]);
+        let ci = doc.add_correction_layer(Adjust::Invert, false);
+        doc.set_active(ci);
+        doc.arm_full_window();
+        {
+            let m = doc.layers[ci].mask.as_mut().unwrap();
+            let mut t = m.blank_tile();
+            for y in 0..8 {
+                for x in 0..8 {
+                    t.set_pixel(x, y, [0; 4]);
+                }
+            }
+            m.tiles.insert(TileIdx::new(0, 0), Arc::new(t));
+            m.revision = crate::tile::next_revision();
+        }
+        refresh(&mut doc);
+        let before = crate::export::composite(&doc, crate::export::Background::White);
+
+        let mut buf = std::io::Cursor::new(Vec::new());
+        crate::ora::save_to(&doc, &mut buf).unwrap();
+        let mut back =
+            crate::ora::load_from(std::io::Cursor::new(buf.into_inner())).unwrap();
+        assert!(
+            back.layers.iter().any(|l| l.mask.as_ref().is_some_and(|m| m.full)),
+            "the full-window flag did not survive the save"
+        );
+        back.refresh_derived(600);
+        let after = crate::export::composite(&back, crate::export::Background::White);
+        assert!(
+            before.pixels().zip(after.pixels()).all(|(a, b)| a.0 == b.0),
+            "the reloaded window derives a different page"
+        );
+    }
+
+    // ---- the in-folder scope ------------------------------------------
+
+    /// A page layer, a folder holding one art layer, and a correction
+    /// stacked on that art INSIDE the folder. Returns (doc, correction).
+    fn in_folder(through: bool) -> (Document, usize) {
+        let mut doc = Document::new(128, 128);
+        // Below the folder, on the page: must never be corrected by a
+        // correction sealed inside the group.
+        put(&mut doc, 0, 100, 100, [0.6, 0.6, 0.6, 1.0]);
+        let f = doc.add_folder_above(0, "group");
+        let art = doc.add_layer_in_folder(f, "art").unwrap();
+        put(&mut doc, art, 10, 10, [0.6, 0.6, 0.6, 1.0]);
+        doc.set_active(art);
+        let ci = doc.add_correction_layer(Adjust::Invert, false);
+        let header = doc.enclosing_folder(ci).expect("the correction is inside");
+        doc.layers[header].through = through;
+        assert_eq!(doc.layers[ci].depth, 1, "the correction is a child");
+        (doc, ci)
+    }
+
+    /// The ruling: a correction INSIDE a sealed folder derives from that
+    /// folder's own children below it, not from the page.
+    ///
+    /// Before the fix it derived from `layers[..i]` — the global set — and
+    /// got the worst of both: the folder's own art was an orphan at depth 1
+    /// in the truncated clone, composited into an accumulator nothing
+    /// blends down, so it VANISHED from the derivation; and the paper came
+    /// along, so the derived tiles were opaque everywhere and the group
+    /// covered the page with them.
+    #[test]
+    fn a_correction_inside_a_sealed_folder_derives_from_the_folder() {
+        let (mut doc, ci) = in_folder(false);
+        assert_eq!(doc.below_scope(ci), Some(1), "sealed = the group");
+        refresh(&mut doc);
+        assert!(
+            (px(&doc, 10, 10)[0] as i32 - 102).abs() <= 2,
+            "the group's own art is what got corrected: {:?}",
+            px(&doc, 10, 10)
+        );
+        assert!(
+            (px(&doc, 100, 100)[0] as i32 - 153).abs() <= 2,
+            "the page BELOW the folder is outside the group and untouched: {:?}",
+            px(&doc, 100, 100)
+        );
+        assert_eq!(
+            px(&doc, 60, 60),
+            [255, 255, 255],
+            "and where the group has nothing the derived tile is transparent \
+             — no flood of corrected paper"
+        );
+    }
+
+    /// The other half of the same ruling: a THROUGH folder has no seal, so
+    /// a correction in one still corrects the page, exactly as if it were
+    /// loose at the top level.
+    #[test]
+    fn a_correction_inside_a_through_folder_still_derives_from_the_page() {
+        let (mut doc, ci) = in_folder(true);
+        assert_eq!(doc.below_scope(ci), None, "Through = the page");
+        refresh(&mut doc);
+        assert!(
+            (px(&doc, 10, 10)[0] as i32 - 102).abs() <= 2,
+            "the group's art is corrected: {:?}",
+            px(&doc, 10, 10)
+        );
+        assert!(
+            (px(&doc, 100, 100)[0] as i32 - 102).abs() <= 2,
+            "and so is the page under the folder — that is what Through \
+             means: {:?}",
+            px(&doc, 100, 100)
+        );
+        assert!(
+            px(&doc, 60, 60)[0] <= 2,
+            "including the bare paper: {:?}",
+            px(&doc, 60, 60)
+        );
+    }
+
+    /// Flipping the seal moves nothing but a bool — no tile revision, no
+    /// layer under the correction — so the freshness keys have to catch it
+    /// on the SCOPE alone.
+    #[test]
+    fn flipping_the_folders_seal_re_derives_the_correction() {
+        let (mut doc, ci) = in_folder(false);
+        refresh(&mut doc);
+        assert!((px(&doc, 100, 100)[0] as i32 - 153).abs() <= 2);
+        let header = doc.enclosing_folder(ci).unwrap();
+        doc.layers[header].through = true;
+        refresh(&mut doc);
+        assert!(
+            (px(&doc, 100, 100)[0] as i32 - 102).abs() <= 2,
+            "the correction kept a group-scoped derive after the seal opened: \
+             {:?}",
+            px(&doc, 100, 100)
+        );
+    }
+
+    /// A correction nested in a THROUGH folder inside a SEALED one scopes
+    /// to the sealed grandparent — the walk mirrors the compositor's
+    /// depth→accumulator collapse, which a Through folder does not open.
+    #[test]
+    fn a_through_folder_inside_a_sealed_one_scopes_to_the_sealed_grandparent() {
+        let mut doc = Document::new(128, 128);
+        put(&mut doc, 0, 100, 100, [0.6, 0.6, 0.6, 1.0]);
+        let outer = doc.add_folder_above(0, "outer");
+        let inner = doc.add_folder_above(outer - 1, "inner");
+        doc.layers[inner].depth = 1;
+        doc.layers[inner].through = true;
+        let art = doc.add_layer_in_folder(inner, "art").unwrap();
+        doc.set_active(art);
+        let ci = doc.add_correction_layer(Adjust::Invert, false);
+        let outer = doc
+            .layers
+            .iter()
+            .position(|l| l.name == "outer")
+            .expect("the outer folder is still there");
+        assert!(!doc.layers[outer].through);
+        assert_eq!(
+            doc.below_scope(ci),
+            Some(doc.children_range(outer).start),
+            "the Through folder was walked through to the sealed one"
+        );
     }
 
     #[test]

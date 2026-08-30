@@ -26,6 +26,12 @@ fn app_with_smart() -> Option<App> {
     app.viewport = mn_gpu::Viewport::default();
     app.tool = Tool::Figure;
     app.figure_mode = FigureMode::Smart;
+    // `FG-020` is preference-driven now, and `App::new` reads the MACHINE's
+    // prefs.txt — so pin all three to the shipped defaults or this suite
+    // passes or fails according to what the developer last set.
+    app.prefs.smart_shape = true;
+    app.prefs.smart_hold_ms = crate::app::SMART_HOLD_MS;
+    app.prefs.smart_fit_tol = mn_core::shape_fit::FIT_TOL;
     // A thin nib: "inked here / clear there" must be about the PATH.
     app.props_current.size_px = 5.0;
     app.apply_props();
@@ -103,13 +109,14 @@ fn release(app: &mut App, p: [f32; 2]) {
 /// happened to be holding Shift while the suite ran; the refusal itself gets
 /// its own test below, which sets the flag deliberately.
 fn hold(app: &mut App) {
+    let ms = app.prefs.smart_hold_ms + 50;
     let g = app
         .smart_shape
         .as_mut()
         .expect("a smart shape gesture is live");
     g.refused = false;
     g.still_since = std::time::Instant::now()
-        .checked_sub(std::time::Duration::from_millis(crate::app::SMART_HOLD_MS + 50))
+        .checked_sub(std::time::Duration::from_millis(ms))
         .expect("the process is older than the hold threshold");
 }
 
@@ -422,11 +429,66 @@ fn a_held_wobbly_box_becomes_a_true_rectangle() {
     assert!(!inked_near(&app, 200, 160, 8), "the box is not filled");
 }
 
-/// Moving on after a hold disarms it: the preview goes away and the release
-/// is an ordinary stroke again. Without this the artist could pause to think
-/// halfway through a long stroke and have the end of it eaten.
+/// A hold that found NOTHING disarms when the hand moves on, and the stroke
+/// carries on as an ordinary stroke. This is the pause-to-think protection:
+/// stopping halfway through a long stroke must not cost you the rest of it.
+///
+/// (`FG-021` deliberately takes the other case — a hold that DID find a
+/// shape — and turns further motion into an adjustment of that shape. The
+/// hold-time preference is the way out of that one.)
 #[test]
-fn moving_on_after_a_hold_disarms_the_recognition() {
+fn moving_on_after_a_hold_that_found_nothing_disarms_the_recognition() {
+    let Some(mut app) = app_with_smart() else {
+        return;
+    };
+    let steps = app.doc.undo_labels().len();
+    // A scribble: held, and refused.
+    let path: Vec<[f32; 2]> = (0..=240)
+        .map(|i| {
+            let t = i as f32 / 240.0;
+            let a = t * std::f32::consts::TAU * 7.0;
+            [110.0 + t * 170.0 + a.cos() * 35.0, 200.0 + a.sin() * 35.0]
+        })
+        .collect();
+    draw(&mut app, &path);
+    hold(&mut app);
+    app.smart_shape_tick();
+    assert!(
+        app.smart_shape.as_ref().is_some_and(|g| g.ripe),
+        "the hold matured"
+    );
+    assert!(
+        app.smart_shape.as_ref().is_some_and(|g| !g.armed()),
+        "…on nothing, so there is no figure to adjust"
+    );
+
+    // The hand carries on — well past the slop.
+    app.canvas_move(60.0, 60.0, &NONE);
+    assert!(
+        app.smart_shape.as_ref().is_some_and(|g| !g.ripe),
+        "the hold has to be earned again"
+    );
+    assert!(
+        app.smart_shape.as_ref().is_some_and(|g| g.adjust.is_none()),
+        "and no adjustment was started"
+    );
+
+    release(&mut app, [60.0, 60.0]);
+    assert!(app.transform_drag.is_none(), "no swap happened");
+    assert_eq!(
+        app.doc.undo_labels().len(),
+        steps + 1,
+        "one ordinary stroke"
+    );
+}
+
+/// `FG-021`, the headline: "after the shape corrects itself, you can adjust
+/// the size and angle of the shape by dragging". Keep the pen down, pull the
+/// handle halfway in, and the circle that lands is the SMALL one — asserted
+/// from the page, so both halves are real: the new rim is inked and the rim
+/// the hold previewed is not.
+#[test]
+fn dragging_after_the_hold_sizes_the_shape_before_it_commits() {
     let Some(mut app) = app_with_smart() else {
         return;
     };
@@ -436,23 +498,196 @@ fn moving_on_after_a_hold_disarms_the_recognition() {
     hold(&mut app);
     app.smart_shape_tick();
     assert!(
-        app.smart_shape.as_ref().and_then(|g| g.preview()).is_some(),
-        "armed"
+        app.smart_shape.as_ref().is_some_and(|g| g.armed()),
+        "the hold found a circle"
     );
 
-    // The hand carries on — well past the slop.
-    app.canvas_move(60.0, 60.0, &NONE);
-    assert!(
-        app.smart_shape.as_ref().and_then(|g| g.preview()).is_none(),
-        "the preview is gone the moment the hand moves on"
+    // The pen rests at the rim to the right; pull it halfway to the centre.
+    app.canvas_move(250.0, 200.0, &NONE);
+    let adj = app
+        .smart_shape
+        .as_ref()
+        .and_then(|g| g.adjust.as_ref())
+        .expect("the drag adjusts rather than disarming");
+    assert_eq!(
+        adj.shape.kind,
+        mn_core::shape_fit::ShapeKind::Circle,
+        "a drag never changes what it is"
     );
+    assert!(
+        app.status.contains("drag to size"),
+        "the status says what the pen is doing now: {}",
+        app.status
+    );
+
+    release(&mut app, [250.0, 200.0]);
+
+    // The adjusted rim is on the page…
+    assert!(
+        inked_near(&app, 250, 200, 8),
+        "the rim of the shrunken circle is missing"
+    );
+    // …the rim it would have had without the drag is not…
+    assert!(
+        !inked_near(&app, 300, 200, 4),
+        "the un-adjusted rim was inked — the drag did not reach the commit"
+    );
+    // …and neither is the freehand wobble that used to be there.
+    assert!(
+        !inked_near(&app, 200, 108, 4),
+        "the drawn stroke survived the swap at the top of the loop"
+    );
+    assert_eq!(
+        app.doc.undo_labels().len(),
+        steps + 1,
+        "still one gesture, one undo press: {:?}",
+        app.doc.undo_labels()
+    );
+}
+
+/// `FG-021`'s Shift, at app level: it forces the regular form, and it is
+/// applied AFTER the drag rather than before — an ellipse dragged and
+/// Shift-held comes back a circle, not an ellipse that was briefly round.
+#[test]
+fn shift_during_the_drag_forces_the_regular_form() {
+    let Some(mut app) = app_with_smart() else {
+        return;
+    };
+    // A wide, flat loop: 150 × 60.
+    let path: Vec<[f32; 2]> = (0..=140)
+        .map(|i| {
+            let t = i as f32 / 140.0 * std::f32::consts::TAU;
+            [200.0 + 150.0 * t.cos(), 200.0 + 60.0 * t.sin()]
+        })
+        .collect();
+    draw(&mut app, &path);
+    hold(&mut app);
+    app.smart_shape_tick();
+    assert_eq!(
+        app.smart_shape
+            .as_ref()
+            .and_then(|g| g.preview())
+            .map(|r| r.kind),
+        Some(mn_core::shape_fit::ShapeKind::Ellipse),
+        "the hold found the oval that was drawn"
+    );
+
+    // Shift is read from the physical keyboard at the pointer events, so
+    // the gesture is driven here with the flag passed in — the same rule
+    // the `FG-024` refusal test uses.
+    app.smart_shape_adjust(350.0, 200.0, true);
+    let shaped = app
+        .smart_shape
+        .as_ref()
+        .and_then(|g| g.preview())
+        .expect("still armed");
+    assert_eq!(
+        shaped.kind,
+        mn_core::shape_fit::ShapeKind::Circle,
+        "Shift made the oval a perfect circle, and it says so"
+    );
+    let b = shaped.bbox();
+    assert!(
+        ((b[2] - b[0]) - (b[3] - b[1])).abs() < 2.0,
+        "as wide as it is tall: {b:?}"
+    );
+
+    // Letting Shift go puts the oval back — nothing was destroyed by it.
+    app.smart_shape_adjust(350.0, 200.0, false);
+    assert_eq!(
+        app.smart_shape
+            .as_ref()
+            .and_then(|g| g.preview())
+            .map(|r| r.kind),
+        Some(mn_core::shape_fit::ShapeKind::Ellipse),
+        "Shift is a live modifier, not a one-way door"
+    );
+}
+
+/// A drift under the slop is still a hold, so it must not start an
+/// adjustment either — otherwise a pen resting on glass would slowly
+/// shrink the shape it just found.
+#[test]
+fn a_tremor_under_the_slop_does_not_start_an_adjustment() {
+    let Some(mut app) = app_with_smart() else {
+        return;
+    };
+    let path = circle_path(200.0, 200.0, 100.0, 96, 9.0);
+    draw(&mut app, &path);
+    hold(&mut app);
+    app.smart_shape_tick();
+    let last = path[path.len() - 1];
+    let drift = crate::app::SMART_HOLD_SLOP_PX * 0.35;
+    app.canvas_move(last[0] + drift, last[1] + drift, &NONE);
+    assert!(
+        app.smart_shape.as_ref().is_some_and(|g| g.adjust.is_none()),
+        "a tremor is not a drag"
+    );
+    assert!(
+        app.smart_shape.as_ref().and_then(|g| g.preview()).is_some(),
+        "and the preview is still the one the hold armed"
+    );
+}
+
+/// `FG-020`, the hold-duration preference: the gesture waits for the number
+/// in Preferences, not for the constant it defaults to.
+#[test]
+fn the_hold_duration_preference_is_what_the_gesture_waits_for() {
+    let Some(mut app) = app_with_smart() else {
+        return;
+    };
+    app.prefs.smart_hold_ms = 1000;
+    let path = circle_path(200.0, 200.0, 100.0, 96, 9.0);
+    draw(&mut app, &path);
+
+    // Long enough for the DEFAULT hold, nowhere near the one that is set.
+    if let Some(g) = app.smart_shape.as_mut() {
+        g.refused = false;
+        g.still_since = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_millis(crate::app::SMART_HOLD_MS + 50))
+            .expect("the process is older than the hold threshold");
+    }
+    app.smart_shape_tick();
     assert!(
         app.smart_shape.as_ref().is_some_and(|g| !g.ripe),
-        "and the hold has to be earned again"
+        "300 ms is not 1000 ms — the preference is what counts"
     );
 
-    release(&mut app, [60.0, 60.0]);
-    assert!(app.transform_drag.is_none(), "no swap happened");
+    hold(&mut app); // now past the preference
+    app.smart_shape_tick();
+    assert!(
+        app.smart_shape.as_ref().and_then(|g| g.preview()).is_some(),
+        "and past it, the shape arrives"
+    );
+}
+
+/// `FG-020`'s switch. Off, the sub tool is a plain freehand pen: no gesture
+/// is armed at all, so no hold can mature and no stroke can be swapped.
+#[test]
+fn turning_hold_to_create_figures_off_leaves_a_plain_freehand_stroke() {
+    let Some(mut app) = app_with_smart() else {
+        return;
+    };
+    app.prefs.smart_shape = false;
+    let steps = app.doc.undo_labels().len();
+    let path = circle_path(200.0, 200.0, 100.0, 96, 9.0);
+    let outer = path
+        .iter()
+        .find(|p| (p[0] - 200.0).hypot(p[1] - 200.0) > 105.0)
+        .copied()
+        .expect("the wobble reaches past the clean radius");
+    draw(&mut app, &path);
+    assert!(
+        app.smart_shape.is_none(),
+        "nothing to hold: the gesture was never armed"
+    );
+
+    release(&mut app, path[path.len() - 1]);
+    assert!(app.transform_drag.is_none(), "and nothing was swapped");
+    assert!(
+        inked_near(&app, outer[0] as i32, outer[1] as i32, 4),
+        "the wobble the hand drew is the wobble that stays"
+    );
     assert_eq!(
         app.doc.undo_labels().len(),
         steps + 1,

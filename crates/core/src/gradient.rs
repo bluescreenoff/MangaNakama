@@ -340,6 +340,45 @@ impl Ramp {
         crate::mix::mix_rgba(self.opts.mix, c0, c1, s, self.opts.bright)
     }
 
+    /// [`Self::color_at`] as a flat stop table — `(pos, r, g, b, a)` sorted
+    /// low→high with both ends included — or `None` when `color_at` is not
+    /// a plain lerp table.
+    ///
+    /// This exists for kernel hosts (`mn-gpu`'s freeform pipeline), which
+    /// cannot carry `MidStops` and must not carry a transcendental. The two
+    /// refusals are exactly the two things that put one in the middle of the
+    /// walk: a non-Standard MIXING SPACE (Oklab and linear light are both
+    /// `powf`/`cbrt`) and a non-zero MIXING RATE (`bias` is `powf`). Both
+    /// then run the CPU reference, which is the only place they are exact.
+    ///
+    /// The table reproduces the bracket walk, ties included: `p0` is the
+    /// LAST entry at or below `t` and `p1` the one after it, which is what
+    /// `color_at`'s forward-then-reverse scan resolves to on a sorted list.
+    /// A mid stop at 0 therefore replaces `from`, one at 1 replaces `to`,
+    /// and the walk keeps its stored order among equal positions — hence
+    /// the STABLE sort.
+    pub fn lerp_table(&self) -> Option<Vec<[f32; 5]>> {
+        if self.opts.mix != crate::mix::MixMode::Standard || self.opts.curve.abs() >= 1e-4 {
+            return None;
+        }
+        let mut mid: Vec<[f32; 5]> = self
+            .mid
+            .as_slice()
+            .iter()
+            .map(|s| {
+                let p = s.pos.clamp(0.0, 1.0);
+                [p, s.color[0], s.color[1], s.color[2], s.color[3]]
+            })
+            .collect();
+        mid.sort_by(|a, b| a[0].partial_cmp(&b[0]).unwrap_or(std::cmp::Ordering::Equal));
+        let end = |p: f32, c: [f32; 4]| [p, c[0], c[1], c[2], c[3]];
+        let mut out = Vec::with_capacity(mid.len() + 2);
+        out.push(end(0.0, self.from));
+        out.extend(mid);
+        out.push(end(1.0, self.to));
+        Some(out)
+    }
+
     /// Projection → colour at canvas pixel `(x, y)`, dithering included.
     /// `None` = do not draw.
     pub fn eval(&self, u: f32, x: i32, y: i32) -> Option<[f32; 4]> {

@@ -611,6 +611,7 @@ fn cpu_matches_gpu_with_a_mask_capped_breakout() {
         tiles: std::collections::HashMap::new(),
         enabled: true,
         revision: 1,
+        full: false,
     };
     for (tx, ty, cov) in [(0, 0, 32768u16), (1, 0, 0), (0, 1, 0), (1, 1, 12000)] {
         let mut t = mn_core::tile::Tile::new_transparent();
@@ -1057,6 +1058,7 @@ fn cpu_matches_gpu_for_a_many_tile_upload() {
         enabled: true,
         revision: 1,
         tiles: std::collections::HashMap::new(),
+        full: false,
     };
     for (n, (tx, ty)) in [(0usize, 0usize), (7, 3), (11, 8), (19, 14), (4, 12)]
         .into_iter()

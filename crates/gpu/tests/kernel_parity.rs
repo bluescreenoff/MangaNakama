@@ -704,3 +704,244 @@ fn routing_declines_software_adapters_and_small_jobs() {
         "a software adapter must route CPU even above the floor"
     );
 }
+
+// ---------------------------------------------------- the freeform field --
+
+/// Two hand-drawn-ish guides down a page: a sine wobble so the field is
+/// genuinely curved and the per-tile cull has something to cull.
+fn guide(x: f32, h: u32, n: usize) -> Vec<[f32; 2]> {
+    (0..=n)
+        .map(|i| {
+            let y = i as f32 * (h as f32 / n as f32);
+            [x + (i as f32 * 0.7).sin() * 40.0, y]
+        })
+        .collect()
+}
+
+/// A 512 square page with a wash already on the layer, so the src-over the
+/// shader does has something to composite ONTO — a kernel that ignored the
+/// destination would pass a test painted onto a blank layer.
+fn free_doc() -> mn_core::Document {
+    let mut doc = mn_core::Document::new(512, 512);
+    for ty in 0..8 {
+        for tx in 0..8 {
+            let t = doc.layers[0].tile_mut(TileIdx::new(tx, ty));
+            let d = t.data_mut();
+            for p in 0..TILE_PIXELS {
+                let a = ((p % 64) * 500).min(32768) as u16;
+                d[p * 4] = a / 4;
+                d[p * 4 + 1] = a / 8;
+                d[p * 4 + 2] = a / 2;
+                d[p * 4 + 3] = a;
+            }
+        }
+    }
+    doc
+}
+
+fn ramp_with_stops() -> mn_core::Ramp {
+    let mut mid = mn_core::gradient::MidStops::default();
+    mid.insert(mn_core::gradient::GradStop {
+        pos: 0.35,
+        color: [0.0, 1.0, 0.2, 1.0],
+    });
+    mid.insert(mn_core::gradient::GradStop {
+        pos: 0.7,
+        color: [1.0, 1.0, 0.0, 0.4],
+    });
+    mn_core::Ramp::new(
+        [1.0, 0.0, 0.0, 1.0],
+        [0.0, 0.0, 1.0, 0.8],
+        mid,
+        mn_core::gradient::RampOpts::default(),
+    )
+}
+
+/// Every tile of the layer, flattened — the comparison oracle.
+fn page_px(doc: &mn_core::Document) -> Vec<u16> {
+    let mut v = vec![0u16; 64 * TILE_LEN];
+    for ty in 0..8i32 {
+        for tx in 0..8i32 {
+            let n = (ty * 8 + tx) as usize;
+            if let Some(t) = doc.layers[0].tile(TileIdx::new(tx, ty)) {
+                v[n * TILE_LEN..(n + 1) * TILE_LEN].copy_from_slice(t.data());
+            }
+        }
+    }
+    v
+}
+
+/// The whole point: `free_main` reproduces
+/// `Document::paint_gradient_freeform`'s inner loop — two culled distance
+/// fields, the eased ratio, the ramp's stop walk, premultiply, src-over.
+///
+/// **Tolerance 2 fix15 units, the colour family's bar**, and with less to
+/// spend it on: every expression on both sides is multiply/add/clamp/min
+/// plus one divide and one `sqrt`, and WGSL promises `sqrt` correctly
+/// rounded. What is left is division and whatever the driver contracts into
+/// an fma. Interior stops are in the ramp on purpose — the bracket walk is
+/// the part with a `var` and a loop in it, which is where this file's two
+/// WARP scars both were.
+#[test]
+fn freeform_parity_matches_the_cpu_field() {
+    let _g = gpu_guard();
+    let Some(mut r) = renderer() else {
+        return;
+    };
+    let (l1, l2) = (guide(120.0, 512, 24), guide(390.0, 512, 24));
+    let ramp = ramp_with_stops();
+
+    let mut cpu = free_doc();
+    assert!(cpu.paint_gradient_freeform(&l1, &l2, &ramp));
+
+    let mut gpu = free_doc();
+    let mut batches = 0usize;
+    let mut ran = 0usize;
+    assert!(
+        gpu.paint_gradient_freeform_with(&l1, &l2, &ramp, &mut |job, px| {
+            batches += 1;
+            let out = r.run_freeform_kernel(job, px);
+            ran += usize::from(out.is_some());
+            out
+        })
+    );
+    assert_eq!(batches, 1, "a 512 square page is one 256-tile batch");
+    assert_eq!(ran, 1, "the kernel declined — nothing was compared");
+
+    let (a, b) = (page_px(&cpu), page_px(&gpu));
+    let mut worst = 0i32;
+    for (x, y) in a.iter().zip(&b) {
+        worst = worst.max((*x as i32 - *y as i32).abs());
+    }
+    println!("[parity] {:<26} max delta {worst}", "freeform");
+    assert!(worst <= 2, "freeform parity: max delta {worst}");
+    assert!(
+        a.iter().any(|&v| v != 0),
+        "the reference painted nothing — the test proves nothing"
+    );
+}
+
+/// The ramp options the shader has no exact form for DECLINE rather than
+/// being approximated: a non-Standard mixing space and a non-zero mixing
+/// rate are both `powf`, and dithering is ordered noise the CPU is already
+/// fast at. Each must leave the page to the CPU reference, byte for byte.
+#[test]
+fn a_ramp_the_shader_cannot_express_declines() {
+    let _g = gpu_guard();
+    let Some(mut r) = renderer() else {
+        return;
+    };
+    let (l1, l2) = (guide(120.0, 512, 8), guide(390.0, 512, 8));
+    let mut refused = 0usize;
+    for opts in [
+        mn_core::gradient::RampOpts {
+            mix: mn_core::mix::MixMode::Perceptual,
+            ..Default::default()
+        },
+        mn_core::gradient::RampOpts {
+            curve: 0.5,
+            ..Default::default()
+        },
+        mn_core::gradient::RampOpts {
+            dither: true,
+            ..Default::default()
+        },
+    ] {
+        let ramp = mn_core::Ramp::new(
+            [1.0, 0.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0, 1.0],
+            Default::default(),
+            opts,
+        );
+        let mut cpu = free_doc();
+        assert!(cpu.paint_gradient_freeform(&l1, &l2, &ramp));
+        let mut gpu = free_doc();
+        assert!(
+            gpu.paint_gradient_freeform_with(&l1, &l2, &ramp, &mut |job, px| {
+                let out = r.run_freeform_kernel(job, px);
+                refused += usize::from(out.is_none());
+                out
+            })
+        );
+        assert_eq!(page_px(&cpu), page_px(&gpu), "the CPU reference did not run");
+    }
+    assert_eq!(refused, 3, "one of the three ramps was accepted");
+}
+
+/// The cap is a real ceiling, and crossing it declines rather than
+/// uploading an unbounded pool. Built by hand: a guide long enough to do it
+/// for real would be a quarter of a million points.
+#[test]
+fn a_freeform_segment_pool_past_the_cap_declines() {
+    let _g = gpu_guard();
+    let Some(mut r) = renderer() else {
+        return;
+    };
+    let ramp = mn_core::Ramp::two([1.0, 0.0, 0.0, 1.0], [0.0, 0.0, 1.0, 1.0]);
+    let plans = [mn_core::freeform::TilePlan {
+        origin: (0, 0),
+        a: (0, 1),
+        b: (1, 1),
+    }];
+    let px = vec![0u16; TILE_LEN];
+    let over = vec![0.0f32; (mn_gpu::FREEFORM_SEGS_MAX + 1) * mn_core::freeform::SEG_WORDS];
+    let job = mn_core::freeform::FieldJob {
+        segs: &over,
+        plans: &plans,
+        ramp: &ramp,
+        size: (512, 512),
+    };
+    assert!(
+        r.run_freeform_kernel(&job, &px).is_none(),
+        "a pool past the cap was uploaded anyway"
+    );
+    // …and the cap itself is accepted, so the ceiling is the reason.
+    let at = vec![0.0f32; mn_gpu::FREEFORM_SEGS_MAX * mn_core::freeform::SEG_WORDS];
+    let job = mn_core::freeform::FieldJob { segs: &at, ..job };
+    assert!(
+        r.run_freeform_kernel(&job, &px).is_some(),
+        "the cap itself was refused"
+    );
+}
+
+/// A dropped dispatch (the driver trap the canary exists for) declines, and
+/// the page then comes out exactly as the CPU would have painted it.
+#[test]
+fn a_dropped_freeform_dispatch_falls_back_to_the_cpu() {
+    let _g = gpu_guard();
+    let Some(mut r) = renderer() else {
+        return;
+    };
+    let (l1, l2) = (guide(120.0, 512, 12), guide(390.0, 512, 12));
+    let ramp = ramp_with_stops();
+    let mut cpu = free_doc();
+    assert!(cpu.paint_gradient_freeform(&l1, &l2, &ramp));
+
+    let mut gpu = free_doc();
+    r.debug_fail_next_kernel();
+    let mut declined = 0usize;
+    assert!(
+        gpu.paint_gradient_freeform_with(&l1, &l2, &ramp, &mut |job, px| {
+            let out = r.run_freeform_kernel(job, px);
+            declined += usize::from(out.is_none());
+            out
+        })
+    );
+    assert_eq!(declined, 1, "the canary did not fire");
+    assert_eq!(
+        page_px(&cpu),
+        page_px(&gpu),
+        "a declined batch did not fall back byte for byte"
+    );
+    // The seam recovers: the very next job runs.
+    let mut again = free_doc();
+    let mut ok = 0usize;
+    assert!(
+        again.paint_gradient_freeform_with(&l1, &l2, &ramp, &mut |job, px| {
+            let out = r.run_freeform_kernel(job, px);
+            ok += usize::from(out.is_some());
+            out
+        })
+    );
+    assert_eq!(ok, 1, "the seam did not recover after a simulated drop");
+}

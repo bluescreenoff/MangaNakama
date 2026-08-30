@@ -367,6 +367,28 @@ The recurring failure shapes, in order of how often they have shipped:
   a `undo_len == before + 1` test would refuse the swap for every user with
   a deep session — and a check that was merely wrong in the other direction
   would undo somebody else's operation.
+- **Smart Shape's post-hold drag (`FG-021`) turns the pen off.** Once the
+  hold has produced a figure (`SmartShape::armed`), pointer travel ADJUSTS
+  that figure instead of continuing the stroke — so `canvas_move` and
+  `canvas_up` must both skip `push_batch` while it is armed, or the pen
+  keeps laying ink for a stroke that is about to be taken back off the page.
+  The overlay and the commit stay in step for free because both read the one
+  accessor, `SmartShape::preview`, which returns the ADJUSTED shape when
+  there is one. Note the deliberate consequence: a hold that lands on a real
+  shape can no longer be escaped by drawing on — the `smart_hold_ms`
+  preference is the way out, and a hold that recognized NOTHING still
+  disarms on the next move.
+- **A work resample (`IO-060`) in flight is a modal state.** Phase 1 is
+  chunked one page per frame (`App::resample_work_step`, driven from
+  `App::render`) so the progress window can be painted at all, and its
+  pending list is keyed by page INDEX. `cmd::dispatch` and `canvas_down`
+  therefore refuse everything while `App::resample_job` is `Some`: a page
+  turn or an undo arriving between two pages would install work built
+  against a document set that no longer exists. Cancel is safe because
+  phase 1 writes nothing into the work; phase 2 installs whole, inside one
+  frame, so there is no half-installed state to cancel into. Abandoning a
+  run must restore `pages[page_index].bytes = None` — the stash phase 1
+  needed is the only mark it leaves.
 - Selection coverage is weighted, not boolean, and selection ops go
   through coverage-based bounds — a new op that derives its region from
   one outline loop breaks multi-island selections.

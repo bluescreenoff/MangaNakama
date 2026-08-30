@@ -1225,6 +1225,18 @@ pub const SIZE_PX_MAX: f32 = 5000.0;
 pub const DEFAULT_SIZE_PX: f32 = 10.0;
 
 pub fn dispatch(app: &mut App, cmd: AppCmd) {
+    // `IO-060`: a work resample in flight owns the whole page set. Its
+    // phase 1 has the open page stashed and a pending list keyed by page
+    // INDEX, so a page turn, an undo or a save arriving between two pages
+    // would install work built against a document set that no longer
+    // exists. Commands are dropped rather than queued — a queue would
+    // replay a dozen impatient clicks the moment the run finished — and
+    // not silently: the progress window is on screen for the whole run
+    // saying that the app takes nothing else until it is done, and
+    // carrying the Cancel that ends it.
+    if app.resample_job.is_some() {
+        return;
+    }
     // FB-039: the last-frame delete confirmation is one-shot — any other
     // command disarms it.
     if !matches!(cmd, AppCmd::FrameDelete { .. }) {

@@ -49,6 +49,14 @@ pub const ROTATE_STEP_DEG: f32 = 15.0;
 pub const RECENT_DEPTH: usize = 8;
 /// Point size a freshly typed text item starts at.
 pub const TEXT_SIZE_PT: f32 = 12.0;
+/// `FG-020` hold duration bounds, ms, and the recognition-tolerance bounds
+/// (a fraction of the shape's diagonal). The tolerance ceiling is
+/// deliberately low: past a few percent the recognizer stops answering "the
+/// circle you meant" and starts answering "a circle, near enough".
+pub const SMART_HOLD_MS_MIN: u64 = 100;
+pub const SMART_HOLD_MS_MAX: u64 = 2000;
+pub const SMART_FIT_TOL_MIN: f32 = 0.01;
+pub const SMART_FIT_TOL_MAX: f32 = 0.12;
 
 /// The ten values that are genuinely user preferences rather than
 /// architecture constants (docs/design/PREFERENCES-SPEC.md §0 and, more
@@ -74,6 +82,25 @@ pub struct Prefs {
     /// Mouse smoothing floor, screen px; 0 = off (mouse then behaves like
     /// the pen and takes the sub tool's stabilizer verbatim).
     pub mouse_smooth_px: f32,
+    /// Row 156 / `FG-020` — CSP's Preferences ▸ Tool ▸ "Hold to create
+    /// figures". ON by default, because that is exactly what the Smart
+    /// shape sub tool did before this key existed. Off leaves the sub tool
+    /// drawing freehand and nothing else: no hold, no recognition, no swap.
+    pub smart_shape: bool,
+    /// `FG-020`'s hold duration, ms — how long the pen stands still at the
+    /// end of a stroke before the recognizer runs. Also the mitigation for
+    /// `FG-021`: once the hold matures on a real shape the pen ADJUSTS it
+    /// rather than carrying the stroke on, so an artist who pauses to think
+    /// mid-stroke raises this rather than losing the pause.
+    pub smart_hold_ms: u64,
+    /// How close the fit has to be before a stroke is swapped for a figure
+    /// — `mn_core::shape_fit::FIT_TOL`, as a fraction of the shape's own
+    /// diagonal. NOT a CSP row: our recognizer is tuned to refuse first (see
+    /// that module's header), and this is the escape valve for a hand
+    /// wobblier than the tuning. It moves the final accept/refuse bound
+    /// ONLY — the size floor and the scribble gates are about what a mark
+    /// IS and stay where they are at any setting.
+    pub smart_fit_tol: f32,
     /// The blank startup canvas, px.
     pub new_canvas: (u32, u32),
     /// Fit-to-window margin, 0.80..=1.00.
@@ -156,6 +183,9 @@ impl Default for Prefs {
             new_folder_through: false,
             undo_depth: mn_core::UNDO_LIMIT,
             mouse_smooth_px: MOUSE_SMOOTH_FLOOR_PX,
+            smart_shape: true,
+            smart_hold_ms: crate::app::SMART_HOLD_MS,
+            smart_fit_tol: mn_core::shape_fit::FIT_TOL,
             new_canvas: mn_core::DEFAULT_SIZE,
             fit_margin: FIT_MARGIN,
             wheel_step: WHEEL_STEP,
@@ -302,6 +332,12 @@ impl Prefs {
         );
         body.push_str(&format!("automation={}\n", u8::from(self.automation)));
         body.push_str(&format!(
+            "smart_shape={}\nsmart_hold_ms={}\nsmart_fit_tol={}\n",
+            u8::from(self.smart_shape),
+            self.smart_hold_ms,
+            self.smart_fit_tol,
+        ));
+        body.push_str(&format!(
             "print_size={}\n",
             self.print_size.replace('\n', "")
         ));
@@ -339,6 +375,17 @@ impl Prefs {
             }
             "undo_depth" => self.undo_depth = v.parse().unwrap_or(self.undo_depth),
             "mouse_smooth_px" => self.mouse_smooth_px = v.parse().unwrap_or(self.mouse_smooth_px),
+            // The honest-bool rule again: gibberish keeps the value. Reading
+            // it as OFF would quietly turn a sub tool into a plain pen.
+            "smart_shape" => {
+                self.smart_shape = match v {
+                    "1" | "true" => true,
+                    "0" | "false" => false,
+                    _ => self.smart_shape,
+                }
+            }
+            "smart_hold_ms" => self.smart_hold_ms = v.parse().unwrap_or(self.smart_hold_ms),
+            "smart_fit_tol" => self.smart_fit_tol = v.parse().unwrap_or(self.smart_fit_tol),
             "new_canvas_w" => self.new_canvas.0 = v.parse().unwrap_or(self.new_canvas.0),
             "new_canvas_h" => self.new_canvas.1 = v.parse().unwrap_or(self.new_canvas.1),
             "fit_margin" => self.fit_margin = v.parse().unwrap_or(self.fit_margin),
@@ -434,6 +481,15 @@ impl Prefs {
             MOUSE_SMOOTH_FLOOR_PX,
             0.0,
             mn_core::stabilize::MAX_STRING_PX,
+        );
+        // A hold under ~a tenth of a second fires while the hand is still
+        // moving; past two seconds nobody waits for it.
+        self.smart_hold_ms = self.smart_hold_ms.clamp(SMART_HOLD_MS_MIN, SMART_HOLD_MS_MAX);
+        self.smart_fit_tol = finite(
+            self.smart_fit_tol,
+            mn_core::shape_fit::FIT_TOL,
+            SMART_FIT_TOL_MIN,
+            SMART_FIT_TOL_MAX,
         );
         self.new_canvas.0 = self.new_canvas.0.clamp(1, 65535);
         self.new_canvas.1 = self.new_canvas.1.clamp(1, 65535);
@@ -855,6 +911,50 @@ mod tests {    /// Row 19: the Through-default preference round-trips and takes 
         );
         // A mangled line keeps the default rather than writing a blank key.
         assert_eq!(from_body("print_size=\n").print_size, "actual");
+    }
+
+    /// Row 156 / `FG-020`: the three Smart shape keys round-trip, ship as
+    /// today's constants (a user who never opens Preferences sees the
+    /// gesture behave exactly as it did before the keys existed), and clamp
+    /// hand-edited nonsense at load rather than at write.
+    #[test]
+    fn the_smart_shape_keys_round_trip_and_ship_as_todays_constants() {
+        let d = Prefs::default();
+        assert!(d.smart_shape, "the sub tool recognized before this key");
+        assert_eq!(d.smart_hold_ms, crate::app::SMART_HOLD_MS);
+        assert_eq!(d.smart_hold_ms, 300);
+        assert_eq!(d.smart_fit_tol, mn_core::shape_fit::FIT_TOL);
+        assert!(d.to_body().contains("smart_shape=1\n"));
+
+        let mut me = Prefs::default();
+        me.smart_shape = false;
+        me.smart_hold_ms = 900;
+        me.smart_fit_tol = 0.08;
+        let back = from_body(&me.to_body());
+        assert!(!back.smart_shape, "turning it off persists");
+        assert_eq!(back.smart_hold_ms, 900);
+        assert!((back.smart_fit_tol - 0.08).abs() < 1e-6);
+
+        // The honest-bool rule: gibberish must not quietly turn a sub tool
+        // into a plain pen.
+        assert!(from_body("smart_shape=nope\n").smart_shape);
+        assert!(from_body("smart_shape=true\n").smart_shape);
+        assert!(!from_body("smart_shape=false\n").smart_shape);
+
+        // Hand-edited nonsense is clamped at LOAD, NaN falls back.
+        assert_eq!(from_body("smart_hold_ms=5\n").smart_hold_ms, SMART_HOLD_MS_MIN);
+        assert_eq!(
+            from_body("smart_hold_ms=999999\n").smart_hold_ms,
+            SMART_HOLD_MS_MAX
+        );
+        assert_eq!(
+            from_body("smart_fit_tol=NaN\n").smart_fit_tol,
+            mn_core::shape_fit::FIT_TOL,
+            "NaN falls back rather than clamping — a NaN tolerance refuses \
+             every shape and says nothing about why"
+        );
+        assert_eq!(from_body("smart_fit_tol=9\n").smart_fit_tol, SMART_FIT_TOL_MAX);
+        assert_eq!(from_body("smart_fit_tol=0\n").smart_fit_tol, SMART_FIT_TOL_MIN);
     }
 
     /// Row 89: the pressure curve round-trips through prefs.txt, empty

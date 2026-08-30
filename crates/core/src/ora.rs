@@ -323,6 +323,7 @@ pub fn save_to_with<W: Write + Seek>(
             strokes_src,
             mask_enabled: layer.mask.as_ref().map(|m| m.enabled),
             mask_unlinked: (layer.mask.is_some() && !layer.mask_linked).then_some(true),
+            mask_full: layer.mask.as_ref().is_some_and(|m| m.full).then_some(true),
             mask_org,
             mask_tiles,
         });
@@ -419,6 +420,12 @@ struct LayerEntry {
     strokes_src: Option<String>,
     mask_enabled: Option<bool>,
     mask_unlinked: Option<bool>,
+    /// Row 105: the window is FULL-CANVAS (`LayerMask::full`) — the tiles
+    /// it holds are where the correction has been carved AWAY, not where it
+    /// applies. Absent = the ordinary carved window, so every file written
+    /// before this attribute existed reloads with the meaning it was saved
+    /// with.
+    mask_full: Option<bool>,
     /// Audit H2/M1 (rounds 50-68): the mask PNG is cropped to its tiles'
     /// bbox — the crop's PIXEL origin on the canvas, without which a
     /// corner mask reloaded at (0,0) and hid the wrong region.
@@ -624,6 +631,9 @@ fn stack_xml(
             }
             if e.mask_unlinked == Some(true) {
                 extra.push_str(" mnc-mask-unlinked=\"1\"");
+            }
+            if e.mask_full == Some(true) {
+                extra.push_str(" mnc-mask-full=\"1\"");
             }
         }
         // `#` like `mnc-label`, and readable by a build that predates this
@@ -874,6 +884,7 @@ pub fn load_from<R: Read + Seek>(source: R) -> Result<Document, OraError> {
             layer.mask = Some(mask_from_image(
                 img.to_rgba8(),
                 e.mask_enabled,
+                e.mask_full,
                 e.mask_org,
                 e.mask_tiles.as_deref(),
             ));
@@ -952,12 +963,14 @@ fn mask_image(m: &crate::doc::LayerMask) -> (image::RgbaImage, i32, i32) {
 fn mask_from_image(
     img: image::RgbaImage,
     enabled: bool,
+    full: bool,
     org: Option<(i32, i32)>,
     tiles: Option<&[TileIdx]>,
 ) -> crate::doc::LayerMask {
     use crate::doc::LayerMask;
     let mut mask = LayerMask {
         enabled,
+        full,
         revision: crate::tile::next_revision(),
         ..Default::default()
     };
@@ -1118,6 +1131,8 @@ struct ParsedLayer {
     strokes_src: Option<String>,
     mask_enabled: bool,
     mask_unlinked: bool,
+    /// Row 105 (`mnc-mask-full`): the window covers the whole canvas.
+    mask_full: bool,
     /// FB-overflow (`mnc-escape`): art bursts out of the panel.
     escape: bool,
     /// FB-overflow part 2 (`mnc-draws-over`): the stable ids this breakout
@@ -1320,6 +1335,7 @@ fn parse_stack_xml(xml: &str) -> Result<ParsedStack, OraError> {
                         strokes_src: get("mnc-strokes").map(str::to_string),
                         mask_enabled: get("mnc-mask-enabled") != Some("0"),
                         mask_unlinked: get("mnc-mask-unlinked").is_some(),
+                    mask_full: get("mnc-mask-full").is_some(),
                         mask_org: get("mnc-mask-org").and_then(parse_i32_pair),
                         mask_tiles: get("mnc-mask-tiles").map(parse_tile_list),
                     });
@@ -1376,6 +1392,7 @@ fn parse_stack_xml(xml: &str) -> Result<ParsedStack, OraError> {
                     strokes_src: get("mnc-strokes").map(str::to_string),
                     mask_enabled: get("mnc-mask-enabled") != Some("0"),
                     mask_unlinked: get("mnc-mask-unlinked").is_some(),
+                    mask_full: get("mnc-mask-full").is_some(),
                     mask_org: get("mnc-mask-org").and_then(parse_i32_pair),
                     mask_tiles: get("mnc-mask-tiles").map(parse_tile_list),
                 });
@@ -1695,6 +1712,7 @@ mod tests {
             ]),
             enabled: true,
             revision: crate::tile::next_revision(),
+            full: false,
         });
         let img = crate::export::composite(&doc, crate::export::Background::Transparent);
         assert_eq!(

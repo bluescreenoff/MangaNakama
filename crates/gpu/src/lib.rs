@@ -46,7 +46,7 @@ mod dabs;
 pub use dabs::{WASH_LAYER_KEY, dab_tiles};
 
 mod kernel;
-pub use kernel::{KERNEL_FLOOR_PX, Kernel, TileJob};
+pub use kernel::{FREEFORM_SEGS_MAX, KERNEL_FLOOR_PX, Kernel, TileJob};
 
 /// Canvas texture format. Non-sRGB so `render_offscreen` readback is exact.
 const CANVAS_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;

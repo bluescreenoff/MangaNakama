@@ -266,17 +266,21 @@ pub unsafe extern "C" fn mn_brush_tile_request_start(
     if readonly != 0 && st.mask_mode {
         // LM-004: sample the MASK's coverage (no wash-composite path —
         // masks are plain coverage; wash-on-mask is out of scope).
+        let mask = doc.active_layer().mask.as_ref();
         let m = if on_canvas {
-            doc.active_layer()
-                .mask
-                .as_ref()
-                .and_then(|m| m.tiles.get(&idx))
+            mask.and_then(|m| m.tiles.get(&idx))
         } else {
             None
         };
         match m {
             Some(tile) => st.scratch.copy_from_slice(tile.data()),
-            None => st.scratch.fill(0),
+            // Same rule the paint half below writes with: a tile a FULL
+            // window does not hold reads as full coverage, not as empty.
+            None => st.scratch.fill(if on_canvas && mask.is_some_and(|m| m.full) {
+                mn_core::tile::FIX15_ONE as u16
+            } else {
+                0
+            }),
         }
         return st.scratch.as_mut_ptr();
     }
@@ -393,10 +397,12 @@ pub unsafe extern "C" fn mn_brush_tile_request_start(
             st.scratch.fill(0);
             return st.scratch.as_mut_ptr();
         };
-        let t = m
-            .tiles
-            .entry(idx)
-            .or_insert_with(|| Arc::new(Tile::new_transparent()));
+        // A FULL window materialises new tiles OPAQUE, a carved one empty
+        // (`LayerMask::blank_tile`): under a full window an eraser dab
+        // landing where the mask holds nothing must take the correction off
+        // the dab's footprint, not off the whole 64×64 tile.
+        let blank = m.blank_tile();
+        let t = m.tiles.entry(idx).or_insert_with(|| Arc::new(blank));
         m.revision = mn_core::tile::next_revision();
         return Arc::make_mut(t).data_mut().as_mut_ptr();
     }

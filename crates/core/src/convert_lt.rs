@@ -448,6 +448,7 @@ impl Document {
                     tiles: into_arcs(tiles),
                     enabled: true,
                     revision: crate::tile::next_revision(),
+                    full: false,
                 });
                 l.fill_stamp = None;
                 kids.push(l);

@@ -63,7 +63,7 @@ pub use layout::{ScreenRect, UiLayout, WinGeom, peek_win};
 pub use prefs::Prefs;
 
 pub use crate::cmd::RulerKind;
-pub use page_resize::mono_resample_warning;
+pub use page_resize::{ResampleJob, mono_resample_warning};
 pub use pages::{
     BatchImportDraft, CanvasSizeDraft, NewComicDraft, PageEntry, ResampleWorkDraft, SpreadOp,
     WorkSettingsDraft,
@@ -160,8 +160,9 @@ pub struct SpringLoad {
 }
 
 /// Row 156 / `FG-020`: how long the pointer must stand still at the end of a
-/// Smart shape stroke before the recognizer runs. CSP calls this the hold
-/// duration and makes it a preference; one tuned constant for v1.
+/// Smart shape stroke before the recognizer runs — the DEFAULT of the
+/// `smart_hold_ms` preference (CSP's own "Hold to create figures" duration).
+/// Nothing reads this constant at run time; `Prefs::smart_hold_ms` does.
 pub const SMART_HOLD_MS: u64 = 300;
 /// How far the pointer may drift and still count as held, in SCREEN px — a
 /// pen resting on glass is never perfectly still, and the threshold is in
@@ -205,14 +206,48 @@ pub struct SmartShape {
     /// undo anything unless the count says the newest history entry is
     /// exactly this stroke and nothing else — see `finish_smart_shape`.
     pub ops_at_start: u64,
+    /// `FG-021`: the post-correction drag, once the hand has moved on from
+    /// a matured hold. `Some` means the pen is no longer drawing — it is
+    /// sizing and turning the figure it just conjured, and the release inks
+    /// whatever it has become.
+    pub adjust: Option<SmartAdjust>,
+}
+
+/// `FG-021` — "after the shape corrects itself, you can adjust the size and
+/// angle of the shape by dragging", and for a line "the position of the end
+/// point". One similarity transform covers both: pivot at the figure's
+/// centre for a closed shape and at its START for an open one, so dragging
+/// an open figure lands its far end exactly under the pointer.
+pub struct SmartAdjust {
+    /// The recognition as the hold left it. Every frame's shape is derived
+    /// from THIS, never from the last frame's, so a slow drag cannot
+    /// accumulate rounding drift and coming back to where you started gives
+    /// back exactly the figure the preview showed.
+    pub base: mn_core::shape_fit::Recognized,
+    /// Canvas point the similarity turns about.
+    pub pivot: [f32; 2],
+    /// The handle it carries: where the pen was when the hold matured.
+    pub from: [f32; 2],
+    /// What the release would ink right now.
+    pub shape: mn_core::shape_fit::Recognized,
 }
 
 impl SmartShape {
     /// The shape the release would ink right now, or `None` while the hold
     /// has not matured (or matured on something unrecognizable). ONE
-    /// accessor, so the overlay preview and the commit cannot disagree.
+    /// accessor, so the overlay preview and the commit cannot disagree —
+    /// which is also how `FG-021` reaches the overlay for free.
     pub fn preview(&self) -> Option<&mn_core::shape_fit::Recognized> {
-        self.ripe.then(|| self.hit.as_ref()).flatten()
+        match &self.adjust {
+            Some(a) => Some(&a.shape),
+            None => self.ripe.then(|| self.hit.as_ref()).flatten(),
+        }
+    }
+
+    /// Has the hold produced a figure? From here on the pen adjusts rather
+    /// than draws, so this is also "stop inking this stroke".
+    pub fn armed(&self) -> bool {
+        self.adjust.is_some() || (self.ripe && self.hit.is_some())
     }
 }
 
@@ -313,6 +348,12 @@ pub struct App {
     /// re-frames, this one re-makes every pixel.
     pub resample_work_open: bool,
     pub resample_work_draft: ResampleWorkDraft,
+    /// The run that dialog starts, once it is running: one page per frame,
+    /// with a count on screen and a Cancel that is safe because nothing is
+    /// installed until the last page is built (see [`ResampleJob`]). `Some`
+    /// is also the app's "not taking commands" state — `cmd::dispatch`
+    /// refuses while it is up.
+    pub resample_job: Option<ResampleJob>,
     /// Batch Import dialog (workflow audit #4): N roughs -> N page underlays.
     pub batch_import_open: bool,
     /// "New work from this work…" dialog (workflow audit §11): the ネーム
@@ -1566,6 +1607,7 @@ impl App {
             canvas_size_open: false,
             resample_work_open: false,
             resample_work_draft: ResampleWorkDraft::default(),
+            resample_job: None,
             batch_import_open: false,
             promote_open: false,
             promote: PromoteDraft::default(),
@@ -2988,6 +3030,13 @@ impl App {
         // neighbours as prefetch). Owner top item 2026-08-18.
         self.reader_frame();
 
+        // `IO-060`: the work resample's phase 1, one page per frame, for the
+        // same reason and by the same rule — a heavy unit, then yield, so
+        // the progress window below actually gets drawn between pages. It
+        // runs BEFORE the UI is built so the count on screen is this
+        // frame's, not last frame's.
+        self.resample_work_step();
+
         // The context is an Arc handle, so cloning it frees `self` to be
         // borrowed mutably by the UI closure.
         let ctx = self.shell.ctx.clone();
@@ -3192,7 +3241,18 @@ impl App {
         // around this one.
         self.disarm_mask_edit_if_unmasked();
         let live = self.live_fill_active();
-        if live && self.doc.active_layer().mask.is_none() {
+        // Row 105 edge: a maskless CORRECTION layer is not refused — its
+        // window gets armed all-visible below, inside the mask bracket, and
+        // the stroke carves the correction off what it touches. A live FILL
+        // still is: its window is what it DRAWS, so arming one full-canvas
+        // would flood the page with the fill colour before the first dab.
+        let arm = live
+            && self.doc.active_layer().mask.is_none()
+            && matches!(
+                self.doc.active_layer().kind,
+                mn_core::LayerKind::Correction(_)
+            );
+        if live && !arm && self.doc.active_layer().mask.is_none() {
             self.set_status("live layer has no window mask — make one from a selection first");
             return;
         }
@@ -3226,6 +3286,7 @@ impl App {
                 tiles: std::collections::HashMap::new(),
                 enabled: true,
                 revision: 0,
+                full: false,
             };
         }
         self.brush
@@ -3245,6 +3306,14 @@ impl App {
         // an aborted or empty stroke still spends no undo step.
         if (self.mask_edit || live) && !sel_paint {
             self.doc.mask_op_begin();
+            // Row 105: the arm lands INSIDE the bracket, whose pre-image is
+            // therefore "there was no mask" — one undo press takes the
+            // window and the stroke it was armed for, and a stroke that
+            // never dabbed takes the window back itself (`mask_op_end`).
+            if arm {
+                self.doc.arm_full_window();
+                self.set_status("correction window armed — the stroke carves it");
+            }
         }
         // Vector inking phase 1 (docs/VECTOR-INKING.md): a plain ink stroke
         // on a recording layer captures its post-snap samples beside the
@@ -3685,6 +3754,7 @@ impl App {
                     tiles: std::collections::HashMap::new(),
                     enabled: true,
                     revision: 0,
+                    full: false,
                 },
             );
             if !scratch.tiles.is_empty() {

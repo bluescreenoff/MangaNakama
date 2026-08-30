@@ -1688,6 +1688,7 @@ mod tests {
             tiles: std::collections::HashMap::new(),
             enabled: true,
             revision: crate::tile::next_revision(),
+            full: false,
         };
         for &(idx, c) in cov {
             let mut t = crate::tile::Tile::new_transparent();

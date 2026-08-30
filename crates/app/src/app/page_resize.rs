@@ -39,39 +39,65 @@ enum PageResample {
     Blank((u32, u32, usize)),
 }
 
+/// `IO-060`, the progress half: one whole-work resample in flight, one page
+/// per frame.
+///
+/// [`App::resample_work`] does the same job in one blocking call, and on a
+/// twenty-page B4 chapter that is a freeze long enough to look like a hang.
+/// A status line written inside that loop would never be seen either:
+/// `App::render` runs on `WM_PAINT` and nothing in this app paints from
+/// inside a command. So phase 1 is chunked across frames — the
+/// `App::reader_frame` idiom, one heavy unit per frame then yield — which
+/// costs the same total work and paints a count between pages.
+///
+/// Chunking is safe here for exactly the reason the op is atomic: phase 1
+/// writes NOTHING into the work, it only fills `pending`. That is also what
+/// makes Cancel honest, and why Cancel exists only during phase 1 — phase 2
+/// installs everything inside a single frame, so there is no half-installed
+/// state to cancel into and nothing to refuse.
+pub struct ResampleJob {
+    dpi: u32,
+    interp: mn_core::transform::Interp,
+    /// New paper over old, per axis — see [`App::resample_work`] for why it
+    /// comes from the paper's pixels and not from the dpi.
+    ratio: (f64, f64),
+    pending: Vec<(usize, PageResample)>,
+    /// The next page phase 1 will look at; also the count already done.
+    next: usize,
+    /// The finishing line's tail ("…the file on disk is still at the old
+    /// resolution"), composed by the command while it still had the saved
+    /// path in hand.
+    back: String,
+}
+
+impl ResampleJob {
+    /// Pages phase 1 has got through, and the resolution being built — what
+    /// the progress window puts on screen.
+    pub fn done(&self) -> usize {
+        self.next
+    }
+
+    pub fn dpi(&self) -> u32 {
+        self.dpi
+    }
+}
+
 impl App {
-    /// `IO-060` — resample the WHOLE work to `new_dpi`.
+    /// The op's refusals and its scale factor, before anything is stashed
+    /// or built. New paper over old, per axis.
     ///
-    /// Returns `Ok(pages touched)`, or `Err` with the page that refused and
-    /// the work COMPLETELY unchanged.
+    /// The ratio comes from the PAPER in pixels, not from the dpi.
     ///
-    /// # Atomic by construction
-    ///
-    /// Every other page is decoded, resampled and re-encoded into a pending
-    /// list FIRST; nothing is installed until every page has produced its
-    /// bytes. A page that will not decode aborts the run before a single
-    /// entry is written. The alternative — the shape `batch_other_pages`
-    /// and `resize_other_pages` use, editing entries as it goes — would
-    /// leave a chapter half at 600 dpi and half at 350 the first time an
-    /// unreadable page turned up, and a half-resampled work is not
-    /// something an artist can diagnose or repair.
-    ///
-    /// # Not undoable, and what stands in for undo
-    ///
-    /// A work-level resample is not an undo step (CSP treats it the same
-    /// way, and `Document::resize_to` already clears the history for the
-    /// much smaller canvas resize). The caller refuses to run on a work
-    /// with unsaved changes, so the file on disk is always the way back —
-    /// that is cheaper and more honest than a per-page history nobody can
-    /// hold in their head. The open page is resampled LAST, after every
-    /// other page has succeeded, so the visible document is never the one
-    /// left inconsistent.
-    pub fn resample_work(
-        &mut self,
-        new_dpi: u32,
-        interp: mn_core::transform::Interp,
-    ) -> Result<usize, String> {
-        let Some(setup) = self.page.clone().filter(|s| s.has_guides()) else {
+    /// Both are "new over old" to within a rounding, but `paper_px` rounds
+    /// mm→px independently at each resolution, so a B4 page that is 729 px
+    /// at 72 dpi is 1457 px at 144 dpi — not 1458. Scaling by the dpi would
+    /// leave every page one pixel wider than the setup that describes it,
+    /// and the next Add Page would then produce a page that does not match
+    /// the ones beside it. Deriving the ratio from the paper makes a
+    /// paper-sized page land EXACTLY on the new paper, and a double-width
+    /// spread on exactly twice it.
+    fn resample_ratio(&self, new_dpi: u32) -> Result<(f64, f64), String> {
+        let Some(setup) = self.page.as_ref().filter(|s| s.has_guides()) else {
             return Err("this work is a pixel canvas — it has no resolution to change".into());
         };
         if new_dpi == 0 {
@@ -80,68 +106,73 @@ impl App {
         if new_dpi == setup.dpi {
             return Err(format!("the work is already {new_dpi} dpi"));
         }
-        // The ratio comes from the PAPER in pixels, not from the dpi.
-        //
-        // Both are "new over old" to within a rounding, but `paper_px`
-        // rounds mm→px independently at each resolution, so a B4 page that
-        // is 729 px at 72 dpi is 1457 px at 144 dpi — not 1458. Scaling by
-        // the dpi would leave every page one pixel wider than the setup
-        // that describes it, and the next Add Page would then produce a
-        // page that does not match the ones beside it. Deriving the ratio
-        // from the paper makes a paper-sized page land EXACTLY on the new
-        // paper, and a double-width spread on exactly twice it.
         let old_px = setup.paper_px();
         let mut probe = setup.clone();
         probe.dpi = new_dpi;
         let new_px = probe.paper_px();
-        let ratio_x = new_px.0 as f64 / old_px.0.max(1) as f64;
-        let ratio_y = new_px.1 as f64 / old_px.1.max(1) as f64;
-        self.stash_current_page()
-            .map_err(|e| format!("the open page could not be stashed: {e}"))?;
+        Ok((
+            new_px.0 as f64 / old_px.0.max(1) as f64,
+            new_px.1 as f64 / old_px.1.max(1) as f64,
+        ))
+    }
 
-        // --- phase 1: build every page's new bytes, installing nothing ---
-        let mut pending: Vec<(usize, PageResample)> = Vec::new();
-        let scaled = |wh: (u32, u32)| -> (u32, u32) {
-            (
-                ((wh.0 as f64 * ratio_x).round() as u32).max(1),
-                ((wh.1 as f64 * ratio_y).round() as u32).max(1),
-            )
-        };
-        for i in 0..self.pages.len() {
-            if i == self.page_index {
-                // The live document takes the op itself, below. Resampling
-                // the stash as well would do a B4 page's worth of work
-                // twice and then throw one copy away.
-                continue;
-            }
-            if self.pages[i].bytes.is_none()
-                && let Some((w, h, n)) = self.pages[i].blank
-            {
-                // A lazy blank never decodes for this: its size IS its
-                // whole content, so the resample is one multiplication.
-                let (w, h) = scaled((w, h));
-                pending.push((i, PageResample::Blank((w, h, n))));
-                continue;
-            }
-            let Some(bytes) = self.pages[i].bytes.as_deref() else {
-                return Err(format!("page {} has no content to resample", i + 1));
-            };
-            let mut doc = mn_core::project::bytes_to_doc(bytes)
-                .map_err(|e| format!("page {} could not be read: {e}", i + 1))?;
-            // The target comes from THIS page's own pixels, so a combined
-            // spread (double width) stays a spread and an odd page keeps
-            // whatever size it really has.
-            let target = scaled(doc.size);
-            if !doc.resample_to(target.0, target.1, interp) {
-                return Err(format!("page {} could not be resampled", i + 1));
-            }
-            crate::app::refresh_derived_gpu(&mut doc, &mut self.renderer, new_dpi);
-            let nb = mn_core::project::doc_to_bytes(&doc)
-                .map_err(|e| format!("page {} could not be re-encoded: {e}", i + 1))?;
-            pending.push((i, PageResample::Bytes(nb, target)));
+    fn scaled(ratio: (f64, f64), wh: (u32, u32)) -> (u32, u32) {
+        (
+            ((wh.0 as f64 * ratio.0).round() as u32).max(1),
+            ((wh.1 as f64 * ratio.1).round() as u32).max(1),
+        )
+    }
+
+    /// Phase 1 for ONE page: build its new bytes, install nothing.
+    /// `Ok(None)` = there was nothing to build.
+    fn resample_page(
+        &mut self,
+        i: usize,
+        ratio: (f64, f64),
+        new_dpi: u32,
+        interp: mn_core::transform::Interp,
+    ) -> Result<Option<PageResample>, String> {
+        if i == self.page_index {
+            // The live document takes the op itself, in phase 2. Resampling
+            // the stash as well would do a B4 page's worth of work twice
+            // and then throw one copy away.
+            return Ok(None);
         }
+        if self.pages[i].bytes.is_none()
+            && let Some((w, h, n)) = self.pages[i].blank
+        {
+            // A lazy blank never decodes for this: its size IS its whole
+            // content, so the resample is one multiplication.
+            let (w, h) = Self::scaled(ratio, (w, h));
+            return Ok(Some(PageResample::Blank((w, h, n))));
+        }
+        let Some(bytes) = self.pages[i].bytes.as_deref() else {
+            return Err(format!("page {} has no content to resample", i + 1));
+        };
+        let mut doc = mn_core::project::bytes_to_doc(bytes)
+            .map_err(|e| format!("page {} could not be read: {e}", i + 1))?;
+        // The target comes from THIS page's own pixels, so a combined
+        // spread (double width) stays a spread and an odd page keeps
+        // whatever size it really has.
+        let target = Self::scaled(ratio, doc.size);
+        if !doc.resample_to(target.0, target.1, interp) {
+            return Err(format!("page {} could not be resampled", i + 1));
+        }
+        crate::app::refresh_derived_gpu(&mut doc, &mut self.renderer, new_dpi);
+        let nb = mn_core::project::doc_to_bytes(&doc)
+            .map_err(|e| format!("page {} could not be re-encoded: {e}", i + 1))?;
+        Ok(Some(PageResample::Bytes(nb, target)))
+    }
 
-        // --- phase 2: install, which cannot fail ---
+    /// Phase 2: install everything phase 1 built, then take the open page
+    /// through core. Cannot fail, and runs whole inside one caller.
+    fn resample_install(
+        &mut self,
+        pending: Vec<(usize, PageResample)>,
+        new_dpi: u32,
+        interp: mn_core::transform::Interp,
+        ratio: (f64, f64),
+    ) -> usize {
         for (i, p) in pending {
             let rev = self.page_rev_next();
             let e = &mut self.pages[i];
@@ -165,7 +196,7 @@ impl App {
 
         // The OPEN page's live document takes the same op through core, so
         // it keeps being the truth its `bytes: None` slot promises.
-        let target = scaled(self.doc.size);
+        let target = Self::scaled(ratio, self.doc.size);
         self.doc.resample_to(target.0, target.1, interp);
         // Text sprites were shaped at the OLD dpi and dropped by the
         // resample; the resampled pixels are standing in. Re-shape at the
@@ -199,7 +230,153 @@ impl App {
         self.preflight_stale = true;
         self.mark_pages_dirty();
         self.mark_dirty();
-        Ok(touched)
+        touched
+    }
+
+    // --- the chunked run, so twenty pages is not one silent freeze --------
+
+    /// `IO-060` — resample the WHOLE work to `new_dpi`. Refuses, or starts
+    /// a [`ResampleJob`] the frame loop then steps to completion.
+    ///
+    /// Every refusal is made HERE, before anything is stashed or built: a
+    /// run that cannot start must not leave the open page's slot
+    /// rearranged. `back` is the finishing line's tail, which the caller
+    /// composes while it still has the saved path in hand.
+    ///
+    /// # Atomic by construction
+    ///
+    /// Every other page is decoded, resampled and re-encoded into a pending
+    /// list FIRST; nothing is installed until every page has produced its
+    /// bytes. A page that will not decode aborts the run before a single
+    /// entry is written. The alternative — the shape `batch_other_pages`
+    /// and `resize_other_pages` use, editing entries as it goes — would
+    /// leave a chapter half at 600 dpi and half at 350 the first time an
+    /// unreadable page turned up, and a half-resampled work is not
+    /// something an artist can diagnose or repair.
+    ///
+    /// That same split is what lets phase 1 be spread over frames with a
+    /// count and a Cancel on screen instead of freezing the app for a
+    /// chapter's worth of pixels.
+    ///
+    /// # Not undoable, and what stands in for undo
+    ///
+    /// A work-level resample is not an undo step (CSP treats it the same
+    /// way, and `Document::resize_to` already clears the history for the
+    /// much smaller canvas resize). The caller refuses to run on a work
+    /// with unsaved changes, so the file on disk is always the way back —
+    /// that is cheaper and more honest than a per-page history nobody can
+    /// hold in their head. The open page is resampled LAST, after every
+    /// other page has succeeded, so the visible document is never the one
+    /// left inconsistent.
+    pub fn resample_work_begin(
+        &mut self,
+        new_dpi: u32,
+        interp: mn_core::transform::Interp,
+        back: String,
+    ) -> Result<(), String> {
+        if self.resample_job.is_some() {
+            return Err("a work resample is already running".into());
+        }
+        let ratio = self.resample_ratio(new_dpi)?;
+        self.stash_current_page()
+            .map_err(|e| format!("the open page could not be stashed: {e}"))?;
+        let total = self.pages.len();
+        self.resample_job = Some(ResampleJob {
+            dpi: new_dpi,
+            interp,
+            ratio,
+            pending: Vec::new(),
+            next: 0,
+            back,
+        });
+        self.set_status(format!(
+            "changing work resolution to {new_dpi} dpi — page 1 of {total}…"
+        ));
+        self.needs_redraw = true;
+        Ok(())
+    }
+
+    /// One page of phase 1 per call, from the frame head — the whole point:
+    /// the app paints between pages, so twenty pages reads as twenty counted
+    /// steps instead of one hang. The last call installs.
+    pub fn resample_work_step(&mut self) {
+        let Some(j) = self.resample_job.as_ref() else {
+            return;
+        };
+        let (i, ratio, dpi, interp) = (j.next, j.ratio, j.dpi, j.interp);
+        let total = self.pages.len();
+        // A running job sends no input events, so there is a next frame
+        // only if we ask for one — the same rule as the liquify and
+        // smart-shape holds in `App::render`.
+        self.shell
+            .ctx
+            .request_repaint_after(std::time::Duration::ZERO);
+        if i < total {
+            match self.resample_page(i, ratio, dpi, interp) {
+                Ok(built) => {
+                    let Some(j) = self.resample_job.as_mut() else {
+                        return;
+                    };
+                    if let Some(p) = built {
+                        j.pending.push((i, p));
+                    }
+                    j.next = i + 1;
+                    let at = (i + 2).min(total);
+                    self.set_status(format!(
+                        "changing work resolution to {dpi} dpi — page {at} of {total}…"
+                    ));
+                }
+                Err(e) => {
+                    // Same atomicity as the blocking run: nothing was
+                    // installed, so abandoning IS the rollback.
+                    self.resample_abandon();
+                    self.set_error(format!("resolution unchanged: {e}"));
+                }
+            }
+            self.needs_redraw = true;
+            return;
+        }
+        // Phase 1 is complete. Phase 2 runs WHOLE, here, inside one frame:
+        // it cannot fail and it must never be observed half-done.
+        let Some(job) = self.resample_job.take() else {
+            return;
+        };
+        let ResampleJob { pending, back, .. } = job;
+        let n = self.resample_install(pending, dpi, interp, ratio);
+        // Structural: the texture changes size and every cached thumb is
+        // stale (the canvas-resize rule).
+        self.renderer.invalidate();
+        self.layer_thumbs.clear();
+        self.set_status(format!(
+            "work resampled to {dpi} dpi ({}) — {n} page(s), {}×{} — history cleared{back}",
+            interp.label(),
+            self.doc.size.0,
+            self.doc.size.1,
+        ));
+        self.mark_dirty();
+        self.needs_redraw = true;
+    }
+
+    /// Cancel, which is only ever offered during phase 1. Phase 2 installs
+    /// inside a single frame, so a cancel aimed at it could not arrive
+    /// between two pages — there is no mid-install state to refuse.
+    pub fn resample_work_cancel(&mut self) {
+        let Some(done) = self.resample_job.as_ref().map(|j| j.next) else {
+            return;
+        };
+        self.resample_abandon();
+        self.set_status(format!(
+            "work resolution unchanged — cancelled after {done} page(s); nothing was written"
+        ));
+    }
+
+    /// Drop the run and put the open page's slot back the way phase 2 would
+    /// have left it. `bytes: None` is the active-page invariant, and the
+    /// stash phase 1 needed is the only mark an abandoned run leaves.
+    fn resample_abandon(&mut self) {
+        self.resample_job = None;
+        self.pages[self.page_index].bytes = None;
+        self.needs_redraw = true;
     }
 
     /// Resize every OTHER page of the work to `w × h`, pinning content to

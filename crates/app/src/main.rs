@@ -1190,6 +1190,12 @@ fn pump_commands(hwnd: HWND) {
     // find a dirty document, SWITCH TO IT so the prompt is about something
     // the user can see, ask, and go round again.
     if with_app(hwnd, |a| std::mem::take(&mut a.close_requested)).unwrap_or(false) {
+        // A work resample in flight dies here, FIRST. This flow bypasses
+        // `cmd::dispatch` (so the resample guard there never sees it) and
+        // the save-prompt loop below calls `switch_doc` — which would yank
+        // the page set out from under a job whose pending list is keyed by
+        // page index. Cancelling is free: phase 1 installs nothing.
+        with_app(hwnd, |a| a.resample_work_cancel());
         // One pass per dirty document. The loop lives HERE rather than
         // re-arming `close_requested` and waiting for another message: an
         // idle window might not deliver one, and a half-finished close is
