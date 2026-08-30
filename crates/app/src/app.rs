@@ -92,7 +92,8 @@ use mn_gpu::{Renderer, Viewport};
 
 use crate::cmd::{
     AppCmd, BASE_MAX_RADIUS, BASE_MIN_RADIUS, BalloonMode, DivideContents, EyedropOpts, FigureMode,
-    FillMode, FrameMode, GradMode, ObjectMode, PanMode, PickExclude, SelectMode, Slot, Tool,
+    FillMode, FrameMode, GradMode, ObjectMode, PanMode, PickExclude, SelectMode, Slot, SubTool,
+    Tool,
     ToolProps,
 };
 use crate::shell::Shell;
@@ -4349,187 +4350,107 @@ impl App {
     }
 
     /// `,` / `.` — step through the active tool's Sub Tool list, CSP-style.
+    /// The LIST of stops is the sub-tool registry's own
+    /// (`subtools::step_rows` — the same tree the palette draws, filtered
+    /// where the walk has always been narrower than the list); this
+    /// function only owns the side effects of landing on a row.
     pub fn step_subtool(&mut self, forward: bool) {
         let dir: i32 = if forward { 1 } else { -1 };
-        let cycle =
-            |cur: usize, n: usize| -> usize { ((cur as i32 + dir).rem_euclid(n as i32)) as usize };
         match self.tool {
             // No sub tools of its own; `,`/`.` must not crash on it.
             Tool::Liquify => {}
+            // The ink tools' list is the brush presets, which are files.
             Tool::Pen | Tool::Eraser => {
                 if self.presets.is_empty() {
                     return;
                 }
                 let cur = self.selected_preset.unwrap_or(0);
-                let next = cycle(cur, self.presets.len());
+                let next = ((cur as i32 + dir).rem_euclid(self.presets.len() as i32)) as usize;
                 let p = self.presets[next].1.clone();
                 self.push_cmd(AppCmd::SelectBrush(p));
             }
-            // ONE cycle over the whole Selection list: the four shapes, then
-            // the two paint sub tools folded in from the strip (2026-08-23).
-            // Stepping onto or off a paint row switches the tool, so `,`/`.`
-            // walks exactly the rows `ui/subtool.rs` draws.
-            Tool::Select | Tool::SelPen | Tool::SelEraser => {
-                const SHAPES: [SelectMode; 4] = [
-                    SelectMode::Rect,
-                    SelectMode::Lasso,
-                    SelectMode::Magnetic,
-                    SelectMode::Shrink,
-                ];
-                let cur = match self.tool {
-                    Tool::SelPen => SHAPES.len(),
-                    Tool::SelEraser => SHAPES.len() + 1,
-                    _ => SHAPES
-                        .iter()
-                        .position(|m| *m == self.select_mode)
-                        .unwrap_or(0),
-                };
-                match cycle(cur, SHAPES.len() + 2) {
-                    4 => self.push_cmd(AppCmd::SetTool(Tool::SelPen)),
-                    5 => self.push_cmd(AppCmd::SetTool(Tool::SelEraser)),
-                    i => {
+            _ => {
+                let rows = crate::subtools::step_rows(self);
+                if rows.is_empty() {
+                    return;
+                }
+                let cur = rows
+                    .iter()
+                    .position(|&s| crate::subtools::is_current(self, s))
+                    .unwrap_or(0);
+                let next = rows[((cur as i32 + dir).rem_euclid(rows.len() as i32)) as usize];
+                match next {
+                    // The refer trio's ONE stop: "click, at the referent
+                    // already set" — landing here never moves the referent.
+                    SubTool::FillRefer(_) => {
+                        self.fill_drag = None;
+                        self.fill_mode = FillMode::Click;
+                        self.set_status(self.fill_mode.label());
+                    }
+                    SubTool::Fill(m) => {
+                        self.fill_drag = None;
+                        self.fill_mode = m;
+                        self.set_status(self.fill_mode.label());
+                    }
+                    SubTool::Tone(p) => {
+                        self.tone_opts.tone.pattern = p;
+                        self.set_status(p.label());
+                    }
+                    // The wand's sub tools are its three 参照 rows.
+                    SubTool::Wand(r) => self.wand_opts.refer = r,
+                    // Stepping onto or off a paint row switches the tool;
+                    // a shape row is the Select tool's own mode.
+                    SubTool::Select(m) => {
                         if self.tool != Tool::Select {
                             self.push_cmd(AppCmd::SetTool(Tool::Select));
                         }
-                        self.select_mode = SHAPES[i];
+                        self.select_mode = m;
+                        self.magnetic = None;
                     }
+                    SubTool::SelectPen => {
+                        self.push_cmd(AppCmd::SetTool(Tool::SelPen));
+                        self.magnetic = None;
+                    }
+                    SubTool::SelectEraser => {
+                        self.push_cmd(AppCmd::SetTool(Tool::SelEraser));
+                        self.magnetic = None;
+                    }
+                    SubTool::Frame(m) => {
+                        self.frame_mode = m;
+                        self.frame_poly = None;
+                        self.frame_pen = None;
+                    }
+                    SubTool::Balloon(m) => self.balloon_mode = m,
+                    // E-014: three referents now, so the stepper walks
+                    // them (the `,`/`.` direction counts).
+                    SubTool::Eyedrop(r) => self.eyedrop_opts.refer = r,
+                    // Direct-draw shapes only — the generator tabs stay a
+                    // deliberate sub-tool-list pick (unreachable here: the
+                    // walk filters to the Direct draw group).
+                    SubTool::Figure(m) => {
+                        self.figure_mode = m;
+                        self.figure_poly = None;
+                        self.figure_stage2 = None;
+                        self.smart_shape = None;
+                    }
+                    SubTool::Gradient(m) => {
+                        self.grad_mode = m;
+                        // A half-drawn gesture belongs to the row that
+                        // started it — dropped on any step away.
+                        self.grad_drag = None;
+                        self.grad_free = None;
+                    }
+                    SubTool::Object(m) => {
+                        self.object_mode = m;
+                        self.set_status(m.label());
+                    }
+                    SubTool::Pan(m) => self.pan_mode = m,
+                    // Text's one-row walk steps onto itself — the same
+                    // nothing the old arm did. The eyedropper's size row
+                    // is filtered out of its walk and never lands here.
+                    SubTool::Text | SubTool::EyedropSize(_) => {}
                 }
-                self.magnetic = None;
             }
-            Tool::Object => {
-                self.object_mode = match self.object_mode {
-                    ObjectMode::Object => ObjectMode::PickLayer,
-                    ObjectMode::PickLayer => ObjectMode::Object,
-                };
-                self.set_status(self.object_mode.label());
-            }
-            Tool::Fill => {
-                // The stepper walks the Fill tool's SUB TOOLS. It used to
-                // flip the 参照 pair instead, back when refer was the only
-                // axis the tool had; with FI-003/FI-004 landed, refer is a
-                // parameter of the Click sub tool (strip rows + the Tool
-                // Property dropdown, both one click) and the key belongs to
-                // the three aiming modes.
-                const M: [FillMode; 5] = [
-                    FillMode::Click,
-                    FillMode::Enclose,
-                    FillMode::Lasso,
-                    FillMode::Leftover,
-                    FillMode::Dust,
-                ];
-                let cur = M.iter().position(|m| *m == self.fill_mode).unwrap_or(0);
-                self.fill_mode = M[cycle(cur, M.len())];
-                self.fill_drag = None;
-                self.set_status(self.fill_mode.label());
-            }
-            Tool::Tone => {
-                // The Tone tool's sub tools are the screen shapes.
-                const M: [mn_core::tone::TonePattern; 9] = mn_core::tone::TonePattern::ALL;
-                let cur = M
-                    .iter()
-                    .position(|p| *p == self.tone_opts.tone.pattern)
-                    .unwrap_or(0);
-                self.tone_opts.tone.pattern = M[cycle(cur, M.len())];
-                self.set_status(self.tone_opts.tone.pattern.label());
-            }
-            Tool::Wand => {
-                // The wand's sub tools are its three 参照 rows — all three,
-                // since the Sub Tool list lists all three (the old pair flip
-                // could never reach "refer reference layer" from the key).
-                const M: [mn_core::FillRefer; 3] = [
-                    mn_core::FillRefer::All,
-                    mn_core::FillRefer::Active,
-                    mn_core::FillRefer::Reference,
-                ];
-                let cur = M
-                    .iter()
-                    .position(|r| *r == self.wand_opts.refer)
-                    .unwrap_or(0);
-                self.wand_opts.refer = M[cycle(cur, M.len())];
-            }
-            Tool::Balloon => {
-                const M: [BalloonMode; 4] = [
-                    BalloonMode::Ellipse,
-                    BalloonMode::Round,
-                    BalloonMode::Draw,
-                    BalloonMode::Tail,
-                ];
-                let cur = M.iter().position(|m| *m == self.balloon_mode).unwrap_or(0);
-                self.balloon_mode = M[cycle(cur, M.len())];
-            }
-            Tool::Frame => {
-                const M: [FrameMode; 5] = [
-                    FrameMode::Rect,
-                    FrameMode::Polyline,
-                    FrameMode::Pen,
-                    FrameMode::DivideFolder,
-                    FrameMode::DivideBorder,
-                ];
-                let cur = M.iter().position(|m| *m == self.frame_mode).unwrap_or(0);
-                self.frame_mode = M[cycle(cur, M.len())];
-                self.frame_poly = None;
-                self.frame_pen = None;
-            }
-            Tool::Eyedrop => {
-                // E-014: three referents now, so the stepper walks them
-                // (the `,`/`.` direction counts, unlike the old flip).
-                const M: [mn_core::FillRefer; 3] = [
-                    mn_core::FillRefer::All,
-                    mn_core::FillRefer::Active,
-                    mn_core::FillRefer::Reference,
-                ];
-                let cur = M
-                    .iter()
-                    .position(|m| *m == self.eyedrop_opts.refer)
-                    .unwrap_or(0);
-                self.eyedrop_opts.refer = M[cycle(cur, M.len())];
-            }
-            Tool::Figure => {
-                // Direct-draw shapes only: cycling through Stream/Saturated
-                // line too would make the shortcut a six-stop tour where a
-                // stray press generates a layer — those two are a deliberate
-                // sub-tool-list (or Ctrl+K) pick.
-                const M: [FigureMode; 7] = [
-                    FigureMode::Line,
-                    FigureMode::Rect,
-                    FigureMode::Ellipse,
-                    FigureMode::Polygon,
-                    FigureMode::Arc,
-                    FigureMode::Curve,
-                    // Row 156: Smart shape rides the cycle — unlike the two
-                    // generator groups it inks the active layer with the
-                    // brush, so a stray press costs one ordinary stroke.
-                    FigureMode::Smart,
-                ];
-                let cur = M.iter().position(|m| *m == self.figure_mode).unwrap_or(0);
-                self.figure_mode = M[cycle(cur, M.len())];
-                self.figure_drag = None;
-                self.figure_poly = None;
-                self.figure_stage2 = None;
-                self.smart_shape = None;
-            }
-            Tool::Gradient => {
-                const M: [GradMode; 4] = [
-                    GradMode::FgToBg,
-                    GradMode::FgToTransparent,
-                    GradMode::TransparentToFg,
-                    // FI-050: rides the cycle like any other row — a stray
-                    // press just starts a gesture that Esc throws away.
-                    GradMode::Freeform,
-                ];
-                let cur = M.iter().position(|m| *m == self.grad_mode).unwrap_or(0);
-                self.grad_mode = M[cycle(cur, M.len())];
-                self.grad_drag = None;
-                self.grad_free = None;
-            }
-            Tool::Pan => {
-                self.pan_mode = match self.pan_mode {
-                    PanMode::Hand => PanMode::Rotate,
-                    PanMode::Rotate => PanMode::Hand,
-                };
-            }
-            // Object has its own arm above (S-001 gave it two sub tools).
-            Tool::Text => {}
         }
         self.needs_redraw = true;
     }

@@ -154,6 +154,45 @@ pub fn rows(tool: Tool, group: &str) -> &'static [SubTool] {
         .unwrap_or(&[])
 }
 
+/// The rows the `,`/`.` stepper walks for the tool in hand — the
+/// registry's own list, filtered, so the walk and the palette can never
+/// disagree about what a tool's sub tools are. This is the ONE home of
+/// that list; `App::step_subtool` asks here and only decides the side
+/// effects of landing on a row.
+///
+/// Two group-scoped exclusions, carried over from the hand-written walks
+/// this replaced: Figure tours Direct draw only (the generator tabs are a
+/// deliberate sub-tool-list pick — a stray `,` press must not queue a
+/// layer-generating mode), and the eyedropper tours its referents (the
+/// size row is a parameter). One row-fold: the fill tab's refer trio is
+/// a single stop — "click, at whatever refer is set" — the other two
+/// referents are a Tool Property pick, not cycle stops.
+pub fn step_rows(app: &App) -> Vec<SubTool> {
+    let tool = owner(app.tool);
+    let keep_group = |name: &str| match tool {
+        Tool::Figure => name == group::DIRECT_DRAW,
+        Tool::Eyedrop => name == group::EYEDROPPER,
+        _ => true,
+    };
+    let mut out: Vec<SubTool> = Vec::new();
+    for g in groups_of(tool) {
+        if !keep_group(g.name) {
+            continue;
+        }
+        for &s in &g.subs {
+            if matches!(s, SubTool::FillRefer(_)) {
+                // One stop for the trio: the referent already set.
+                if !out.iter().any(|r| matches!(r, SubTool::FillRefer(_))) {
+                    out.push(SubTool::FillRefer(app.fill_opts.refer));
+                }
+                continue;
+            }
+            out.push(s);
+        }
+    }
+    out
+}
+
 /// Whether this row is the one its tool is currently SET to — mode only, and
 /// deliberately blind to which tool is in hand: `select_mode` still says
 /// "Lasso" while you are drawing with the pen, and that is the memory a `M`
@@ -804,5 +843,66 @@ mod tests {
         ] {
             assert!(parse_target(bad).is_err(), "{bad}");
         }
+    }
+
+    /// The stepper's walk is the registry filtered: these are the exact
+    /// sequences the hand-written `const M` arrays walked before the
+    /// merge — the pin that the merge changed nothing about WHERE `,`/`.`
+    /// lands.
+    #[test]
+    fn the_step_walk_matches_the_old_hand_written_lists() {
+        let Some(mut app) = headless() else { return };
+        use crate::cmd::FillMode;
+        use mn_core::FillRefer;
+        // Fill: the refer trio folded to ONE stop at the current referent,
+        // then the four other modes — the old [Click, Enclose, Lasso,
+        // Leftover, Dust] cycle, stop for stop.
+        app.tool = Tool::Fill;
+        app.fill_opts.refer = FillRefer::Reference;
+        assert_eq!(
+            step_rows(&app),
+            vec![
+                SubTool::FillRefer(FillRefer::Reference),
+                SubTool::Fill(FillMode::Enclose),
+                SubTool::Fill(FillMode::Lasso),
+                SubTool::Fill(FillMode::Leftover),
+                SubTool::Fill(FillMode::Dust),
+            ]
+        );
+        // Select: the four shapes, then the two paint rows.
+        app.tool = Tool::Select;
+        assert_eq!(step_rows(&app).len(), 6);
+        assert_eq!(step_rows(&app)[0], SubTool::Select(SelectMode::Rect));
+        assert_eq!(step_rows(&app)[4], SubTool::SelectPen);
+        assert_eq!(step_rows(&app)[5], SubTool::SelectEraser);
+        // Frame border crosses BOTH tabs in list order.
+        app.tool = Tool::Frame;
+        assert_eq!(
+            step_rows(&app),
+            vec![
+                SubTool::Frame(FrameMode::Rect),
+                SubTool::Frame(FrameMode::Polyline),
+                SubTool::Frame(FrameMode::Pen),
+                SubTool::Frame(FrameMode::DivideFolder),
+                SubTool::Frame(FrameMode::DivideBorder),
+            ]
+        );
+        // Figure: Direct draw only — the generator tabs are not stops.
+        app.tool = Tool::Figure;
+        let walk = step_rows(&app);
+        assert_eq!(walk.len(), 7);
+        assert_eq!(walk[0], SubTool::Figure(FigureMode::Line));
+        assert_eq!(walk[6], SubTool::Figure(FigureMode::Smart));
+        assert!(!walk.iter().any(|s| matches!(s, SubTool::Figure(FigureMode::Stream))));
+        // The eyedropper walks its referents, never the size row.
+        app.tool = Tool::Eyedrop;
+        assert_eq!(
+            step_rows(&app),
+            vec![
+                SubTool::Eyedrop(FillRefer::All),
+                SubTool::Eyedrop(FillRefer::Active),
+                SubTool::Eyedrop(FillRefer::Reference),
+            ]
+        );
     }
 }
