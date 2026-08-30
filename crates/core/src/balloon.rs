@@ -1138,6 +1138,60 @@ pub fn tessellate_open(points: &[[f32; 2]]) -> Vec<[f32; 2]> {
     out
 }
 
+/// `FG-016` (Figure ▸ Continuous curve ▸ Alt+tap an anchor): [`tessellate_open`]
+/// with CORNERS — anchors the artist has marked as creases rather than as
+/// points the spline sweeps smoothly through.
+///
+/// The trick is that a corner is not a different kind of interpolation, it is
+/// a different set of NEIGHBOURS. Catmull-Rom takes its tangent at a point
+/// from the chord between the point before it and the point after it, so a
+/// crease is what you get when the run simply ENDS there: the run before the
+/// corner tessellates with the corner as its last point (one-sided end
+/// tangent), the run after it starts there (one-sided start tangent), and the
+/// two arrive at the same coordinate from different directions. Hence "split
+/// into smooth runs, tessellate each, join at the corner" rather than any
+/// special-casing inside the Hermite loop.
+///
+/// Endpoint flags are ignored on purpose: `tessellate_open` already uses a
+/// one-sided tangent at both ends, so the first and last anchors are creases
+/// by construction and marking them changes nothing. They are still allowed to
+/// carry the flag because the artist marks the point they JUST placed — which
+/// is the last one at that moment, and becomes an interior one the next click.
+///
+/// `corners` shorter than `points` reads as "smooth from there on", so a
+/// caller that has not built flags at all can pass `&[]`.
+///
+/// This is deliberately NOT [`tessellate_closed`]'s corner rule (zero the
+/// tangent). Zeroing works there because a closed balloon has two-sided
+/// tangents everywhere, so killing one is the only way to make a kink; here
+/// the ends are already one-sided, and re-using them at a crease is both
+/// simpler and truer to what the artist asked for — two anchors in a row
+/// marked as corners give back the straight chord they clicked, which a
+/// zeroed tangent on a one-sided end would not.
+pub fn tessellate_open_corners(points: &[[f32; 2]], corners: &[bool]) -> Vec<[f32; 2]> {
+    let n = points.len();
+    // Interior creases only — see above. Without one there is nothing to
+    // split, so this is exactly the smooth spline and shares its code.
+    let breaks: Vec<usize> = (1..n.saturating_sub(1))
+        .filter(|&i| corners.get(i).copied().unwrap_or(false))
+        .collect();
+    if breaks.is_empty() {
+        return tessellate_open(points);
+    }
+    let mut out: Vec<[f32; 2]> = Vec::with_capacity(n * 16);
+    let mut start = 0usize;
+    for end in breaks.into_iter().chain(std::iter::once(n - 1)) {
+        let run = tessellate_open(&points[start..=end]);
+        // The joint is the corner itself, and the previous run already ended
+        // ON it (`tessellate_open` pushes its last control point verbatim).
+        // Skipping the duplicate keeps the brush from double-dabbing there,
+        // which on a low-flow nib is a visible dark bead at every crease.
+        out.extend(if start == 0 { &run[..] } else { &run[1..] });
+        start = end;
+    }
+    out
+}
+
 /// `FG-002` (the Figure ▸ Curve sub tool): the quadratic Bezier that runs
 /// from `a` to `b` and passes exactly THROUGH `through` at its own midpoint.
 ///
@@ -2255,6 +2309,92 @@ mod tests {
             .map(|p| p[1])
             .fold(f32::INFINITY, f32::min);
         assert!(apex <= -200.0, "the arc reaches its apex ({apex})");
+    }
+
+    /// `FG-016`: the open spline's corner anchor. The curve still passes
+    /// THROUGH the marked point — it just arrives and leaves with a crease
+    /// instead of sweeping — and the smooth runs either side of it keep the
+    /// shape they had, which is what tells this apart from "flatten it".
+    #[test]
+    fn open_spline_creases_at_a_corner_anchor() {
+        // A shallow "V" laid out as five clicks. Marked smooth it bows
+        // through the middle; marked as a corner the middle is a kink.
+        let pts = [
+            [0.0, 0.0],
+            [100.0, -60.0],
+            [200.0, 0.0],
+            [300.0, -60.0],
+            [400.0, 0.0],
+        ];
+        let smooth = tessellate_open(&pts);
+        let kinked = tessellate_open_corners(&pts, &[false, false, true, false, false]);
+
+        // No flags at all is the smooth spline, byte for byte — the row adds
+        // a case, it does not re-route the ordinary curve.
+        assert_eq!(tessellate_open_corners(&pts, &[]), smooth);
+
+        // Both run end to end through every click.
+        assert_eq!(kinked[0], pts[0]);
+        assert_eq!(*kinked.last().unwrap(), pts[4]);
+        for a in &pts {
+            let d = kinked
+                .iter()
+                .map(|p| len(sub(*p, *a)))
+                .fold(f32::INFINITY, f32::min);
+            assert!(d < 1e-3, "clicked point {a:?} is still ON the curve ({d})");
+        }
+
+        // THE discriminator, and the definition of a crease: somewhere along
+        // the creased polyline the direction changes abruptly. A smooth
+        // Catmull-Rom turns by a fraction of a degree per 4 px chord, so the
+        // sharpest turn in the whole dense run separates the two cleanly —
+        // no eyeballing of y values, which a spline can match by accident.
+        let sharpest = |dense: &[[f32; 2]]| {
+            dense
+                .windows(3)
+                .map(|w| {
+                    let (u, v) = (sub(w[1], w[0]), sub(w[2], w[1]));
+                    let d = (u[0] * v[0] + u[1] * v[1]) / (len(u) * len(v)).max(1e-6);
+                    d.clamp(-1.0, 1.0).acos().to_degrees()
+                })
+                .fold(0.0f32, f32::max)
+        };
+        assert!(
+            sharpest(&smooth) < 15.0,
+            "the smooth spline never kinks ({}°)",
+            sharpest(&smooth)
+        );
+        assert!(
+            sharpest(&kinked) > 45.0,
+            "the corner anchor is a real crease ({}°)",
+            sharpest(&kinked)
+        );
+
+        // Two corners in a row give back the chord the artist clicked — the
+        // span between them is a two-point run, i.e. the straight line.
+        let straight = tessellate_open_corners(&pts, &[false, true, true, false, false]);
+        let i = straight
+            .iter()
+            .position(|p| *p == pts[1])
+            .expect("the corner is on the path");
+        assert_eq!(
+            straight[i + 1],
+            pts[2],
+            "nothing is tessellated between two corners — it is the chord"
+        );
+        // Which the smooth spline is emphatically not: it puts samples in
+        // there, and they bow off the chord.
+        let off = smooth
+            .iter()
+            .filter(|p| p[0] > 105.0 && p[0] < 195.0)
+            .map(|p| (p[1] - (-60.0 + (p[0] - 100.0) * 0.6)).abs())
+            .fold(0.0f32, f32::max);
+        assert!(off > 3.0, "the smooth spline bows off that chord ({off})");
+        // A flag on an END anchor is inert — that end is one-sided already.
+        assert_eq!(
+            tessellate_open_corners(&pts, &[true, false, false, false, true]),
+            smooth
+        );
     }
 
     /// A corner anchor kinks: with the tangent dead-stopped the segment

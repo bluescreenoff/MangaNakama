@@ -192,6 +192,40 @@ impl FigureMode {
     }
 }
 
+/// One placed point of an in-progress Polygon / Continuous-curve click list
+/// (`FG-003`/`FG-004`), with the one bit `FG-016` needs on top of the
+/// coordinate: is this a CORNER?
+///
+/// The flag lives on the point rather than in a parallel `Vec<bool>` beside
+/// `App::figure_poly` on purpose. `FG-013` inserts and deletes points in the
+/// middle of the list mid-draw, and every index-keyed side table would have
+/// to be re-indexed at each of those edits — one missed site and the creases
+/// silently walk to the wrong anchors, with nothing to catch it but the eye.
+/// Carrying the bit inside the element makes that class of bug unwritable.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct FigureAnchor {
+    /// Canvas px.
+    pub p: (f32, f32),
+    /// `FG-016`: Alt+tap flips this. Meaningful only on the Continuous
+    /// curve — a Polygon is corners all the way down — and only on INTERIOR
+    /// anchors, since the spline's ends are one-sided already
+    /// (`balloon::tessellate_open_corners`). Both no-ops are harmless, which
+    /// is why the flag is allowed to be set anywhere: the artist marks the
+    /// point they just placed, and it becomes interior on the next click.
+    pub corner: bool,
+}
+
+impl FigureAnchor {
+    /// A freshly clicked point: smooth, because the ordinary curve is the
+    /// one people draw and the crease is the thing you ask for.
+    pub fn new(x: f32, y: f32) -> Self {
+        Self {
+            p: (x, y),
+            corner: false,
+        }
+    }
+}
+
 /// Row 157: what the SECOND stage of a two-stage figure gesture is steering.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FigureStage2Kind {

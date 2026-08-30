@@ -623,7 +623,10 @@ fn rdp_indices(pts: &[Sample], eps: f32) -> Vec<usize> {
     (0..pts.len()).filter(|&i| keep[i]).collect()
 }
 
-fn dist_to_segment(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
+/// Point-to-segment distance, the hit test every "did I click the line?"
+/// question in the app funnels through — the Object tool's stroke picking
+/// here, and `FG-013`'s insert-a-point tap on the Figure tool's live path.
+pub(crate) fn dist_to_segment(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
     let (abx, aby) = (b[0] - a[0], b[1] - a[1]);
     let len2 = abx * abx + aby * aby;
     let t = if len2 <= f32::EPSILON {

@@ -8,8 +8,8 @@
 
 use super::{App, PointerKind, TransformGesture};
 use crate::cmd::{
-    AppCmd, BalloonMode, FigureMode, FigureStage2, FigureStage2Kind, FillMode, FrameMode, GradMode,
-    ObjectMode, PanMode, RulerKind, SelectMode, Tool,
+    AppCmd, BalloonMode, FigureAnchor, FigureMode, FigureStage2, FigureStage2Kind, FillMode,
+    FrameMode, GradMode, ObjectMode, PanMode, RulerKind, SelectMode, Tool,
 };
 use mn_core::{
     Balloon, BalloonHandle, BalloonSet, BalloonShape, Frame, PenSample, Selection, Tail, selected,
@@ -800,6 +800,20 @@ impl App {
                     self.needs_redraw = true;
                     return;
                 }
+                // `FG-013`/`FG-014`/`FG-016`: Ctrl and Alt turn this press
+                // from "place another point" into "edit the list I already
+                // have". Sampled ONCE here, at the caller, and handed down as
+                // plain booleans — the `smart_shape_adjust` rule. A helper
+                // that read the keyboard itself would make the whole editing
+                // grammar untestable and would tie the suite to whatever the
+                // developer's hands were doing while it ran.
+                //
+                // The Figure tool is safe ground for both: the Ctrl
+                // temporary-Object grab and the Alt eyedropper above are
+                // gated to Pen/Eraser/Sel*/Fill, so neither modifier already
+                // means something here.
+                let m = self.shell.sync_modifiers();
+                let (ctrl, alt) = (m.ctrl, m.alt);
                 match self.figure_mode {
                     FigureMode::Polygon => {
                         // Click = place a vertex; a click back on the first
@@ -807,22 +821,32 @@ impl App {
                         let close_tol = (10.0 / self.viewport.zoom.max(0.01)).max(3.0);
                         match &mut self.figure_poly {
                             Some(pts) => {
-                                let first = pts[0];
+                                let first = pts[0].p;
+                                // Closing is a PLAIN tap only. With a
+                                // modifier down the artist is reaching for
+                                // the anchor itself (move it, or ask for a
+                                // corner that Polygon does not have), and
+                                // committing the shape out from under that
+                                // reach is unrecoverable in one keystroke.
                                 let close = pts.len() >= 3
+                                    && !ctrl
+                                    && !alt
                                     && (first.0 - cx).abs() + (first.1 - cy).abs() < close_tol;
                                 if close {
                                     self.finish_figure_poly();
-                                } else {
-                                    pts.push((cx, cy));
+                                } else if !self.figure_poly_edit(cx, cy, ctrl, alt) {
+                                    self.figure_poly
+                                        .get_or_insert_with(Vec::new)
+                                        .push(FigureAnchor::new(cx, cy));
                                 }
                             }
                             None => {
                                 if self.guard_frame_layer() {
                                     return;
                                 }
-                                self.figure_poly = Some(vec![(cx, cy)]);
+                                self.figure_poly = Some(vec![FigureAnchor::new(cx, cy)]);
                                 self.set_status(
-                                    "click vertices; click the first one (or Enter) to close, Esc cancels",
+                                    "click vertices; tap one to delete it, tap an edge to insert, Ctrl+drag moves; Enter closes",
                                 );
                             }
                         }
@@ -839,22 +863,32 @@ impl App {
                         let tol = (10.0 / self.viewport.zoom.max(0.01)).max(3.0);
                         match &mut self.figure_poly {
                             Some(pts) => {
-                                let last = *pts.last().expect("non-empty");
+                                let last = pts.last().expect("non-empty").p;
+                                // Plain taps only, same reasoning as the
+                                // Polygon close — and one more that is
+                                // specific to `FG-016`: Alt+tapping the point
+                                // you JUST placed to make it a corner is the
+                                // actual CSP workflow, so Alt must never be
+                                // read as "that's it, ink it".
                                 let done = pts.len() >= 2
+                                    && !ctrl
+                                    && !alt
                                     && (last.0 - cx).abs() + (last.1 - cy).abs() < tol;
                                 if done {
                                     self.finish_figure_poly();
-                                } else {
-                                    pts.push((cx, cy));
+                                } else if !self.figure_poly_edit(cx, cy, ctrl, alt) {
+                                    self.figure_poly
+                                        .get_or_insert_with(Vec::new)
+                                        .push(FigureAnchor::new(cx, cy));
                                 }
                             }
                             None => {
                                 if self.guard_frame_layer() {
                                     return;
                                 }
-                                self.figure_poly = Some(vec![(cx, cy)]);
+                                self.figure_poly = Some(vec![FigureAnchor::new(cx, cy)]);
                                 self.set_status(
-                                    "click along the curve; Enter (or click the last point twice) inks it, Esc cancels",
+                                    "click along the curve; Alt+tap a point for a corner, Ctrl+drag moves; Enter inks it",
                                 );
                             }
                         }
@@ -2008,6 +2042,182 @@ impl App {
         self.needs_redraw = true;
     }
 
+    /// The dense path an in-progress click list would ink, and — for each of
+    /// its points — which SOURCE segment it came from.
+    ///
+    /// The segment map exists so `FG-013`'s "tap the line to add a point"
+    /// can hit-test what the artist can actually SEE. For Polygon the drawn
+    /// line is the chords and the two agree; for the Curve the drawn line is
+    /// the spline, which at a hard bend runs a long way off the chord it
+    /// spans, and hit-testing chords there means clicking the visible curve
+    /// quietly appends a point at the end instead of inserting one. The map
+    /// is exact rather than nearest-anchor because `tessellate_open` emits
+    /// every control point verbatim (the Hermite basis at `t = 0` is the
+    /// identity), so a forward scan for those points partitions the dense
+    /// path at precisely the right places.
+    fn figure_poly_dense(&self, pts: &[FigureAnchor]) -> (Vec<[f32; 2]>, Vec<usize>) {
+        let path: Vec<[f32; 2]> = pts.iter().map(|a| [a.p.0, a.p.1]).collect();
+        if path.len() < 2 {
+            return (path, Vec::new());
+        }
+        if self.figure_mode != FigureMode::Curve {
+            let seg = (0..path.len()).map(|i| i.min(path.len() - 2)).collect();
+            return (path, seg);
+        }
+        let corners: Vec<bool> = pts.iter().map(|a| a.corner).collect();
+        let dense = mn_core::balloon::tessellate_open_corners(&path, &corners);
+        let last = path.len() - 2;
+        let mut seg = Vec::with_capacity(dense.len());
+        let mut si = 0usize;
+        for d in &dense {
+            if si + 1 < path.len() && *d == path[si + 1] {
+                si += 1;
+            }
+            seg.push(si.min(last));
+        }
+        (dense, seg)
+    }
+
+    /// `FG-013`/`FG-014`/`FG-016`: a press on an in-progress Polygon or
+    /// Continuous-curve click list that means EDIT rather than "one more
+    /// point". Returns whether it was consumed — `false` sends the press
+    /// back to the caller's ordinary append.
+    ///
+    /// `ctrl`/`alt` come from the caller (see `canvas_down`'s Figure arm) so
+    /// the whole grammar is drivable from a test without a keyboard.
+    ///
+    /// Four outcomes, in the order they are tried:
+    ///
+    /// * **Ctrl + an anchor** → arm the `FG-014` move drag.
+    /// * **Alt + an anchor** → flip `FG-016`'s corner bit. On Polygon this is
+    ///   a no-op with an explanation, because a polygon is corners already;
+    ///   it is still CONSUMED, so Alt+tapping a vertex never silently drops a
+    ///   duplicate vertex on top of the one you were aiming at.
+    /// * **A plain tap on an anchor** → delete it. Down to nothing, the
+    ///   figure ends exactly as `FG-012`'s Backspace ends it.
+    /// * **A plain tap on the drawn line** → insert an anchor there, in the
+    ///   list position that span belongs to.
+    ///
+    /// DEVIATION from `FG-016`, deliberate. CSP also toggles the LAST
+    /// anchor's corner on a plain tap. We cannot have that: a plain tap on an
+    /// anchor is `FG-013`'s delete, and on the Curve a plain tap on the last
+    /// anchor is already the shipped commit gesture (rows 84/85 — it is what
+    /// a double-click reads as). Both of those are reachable by accident far
+    /// more often than a corner toggle is wanted, so the corner toggle keeps
+    /// Alt and only Alt, on every anchor including the last.
+    ///
+    /// REFUSED: `FG-015` (Ctrl+drag a direction point, Space to switch to its
+    /// anchor). There is nothing here to drag. Our Continuous curve is a
+    /// Catmull-Rom spline THROUGH the clicked points — `tessellate_open`
+    /// derives every tangent from the neighbouring anchors — so it has no
+    /// direction points, no Bezier handles, and no off-curve control polygon
+    /// for Space to toggle away from. `FG-015` is not deferred work; it is a
+    /// row that only exists for the Bezier sub tools (`FG-005`/`FG-006`),
+    /// which are themselves absent. Implementing it would mean replacing the
+    /// curve model first, and that is a different row.
+    pub(crate) fn figure_poly_edit(&mut self, cx: f32, cy: f32, ctrl: bool, alt: bool) -> bool {
+        // The house handle-hit radius (`vector_edit`, the text and frame
+        // handles): 10 SCREEN px, so the grab stays the same size under the
+        // hand at every zoom, with a canvas-px floor so it never collapses.
+        let tol = (10.0 / self.viewport.zoom.max(0.01)).max(2.0);
+        let Some(pts) = &self.figure_poly else {
+            return false;
+        };
+        if pts.is_empty() {
+            return false;
+        }
+        // Nearest anchor within reach; ties go to the LATER one, because
+        // that is the one drawn on top (`vector_edit`'s picking order).
+        let hit = pts
+            .iter()
+            .enumerate()
+            .rev()
+            .map(|(i, a)| (i, (a.p.0 - cx).hypot(a.p.1 - cy)))
+            .filter(|(_, d)| *d <= tol)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(i, _)| i);
+
+        if let Some(i) = hit {
+            if ctrl {
+                self.figure_anchor_drag = Some(i);
+                self.set_status("moving that point — release to drop it");
+                self.needs_redraw = true;
+                return true;
+            }
+            if alt {
+                if self.figure_mode != FigureMode::Curve {
+                    self.set_status("corner/curve only applies to the Continuous curve");
+                    return true;
+                }
+                let a = &mut self.figure_poly.as_mut().expect("checked")[i];
+                a.corner = !a.corner;
+                let corner = a.corner;
+                self.set_status(if corner {
+                    "corner point — the curve creases here"
+                } else {
+                    "smooth point — the curve sweeps through"
+                });
+                self.needs_redraw = true;
+                return true;
+            }
+            let pts = self.figure_poly.as_mut().expect("checked");
+            pts.remove(i);
+            let left = pts.len();
+            if left == 0 {
+                // Same landing as `FG-012` walked to the end: an empty list
+                // would keep the overlay alive with nothing in it.
+                self.figure_poly = None;
+                self.set_status("figure cancelled — no points left");
+            } else {
+                self.set_status(format!("point deleted — {left} left"));
+            }
+            self.needs_redraw = true;
+            return true;
+        }
+        if ctrl || alt {
+            // Nothing under the modifier: fall through and place a point, so
+            // a held key never turns the press into a dead click.
+            return false;
+        }
+        let (dense, seg) = self.figure_poly_dense(pts);
+        let at = dense
+            .windows(2)
+            .enumerate()
+            .map(|(j, w)| (j, crate::app::vector_edit::dist_to_segment([cx, cy], w[0], w[1])))
+            .filter(|(_, d)| *d <= tol)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(j, _)| seg[j] + 1);
+        let Some(at) = at else {
+            return false;
+        };
+        let pts = self.figure_poly.as_mut().expect("checked");
+        // The new anchor lands where the artist CLICKED, not on the line
+        // they clicked at — the tap says "a point about here", and snapping
+        // it to the old path would make the first drag of a correction do
+        // nothing visible. Smooth, like any freshly placed point.
+        pts.insert(at, FigureAnchor::new(cx, cy));
+        let n = pts.len();
+        self.set_status(format!("point inserted — {n} now"));
+        self.needs_redraw = true;
+        true
+    }
+
+    /// `FG-014`: put the dragged anchor under the pointer. Self-healing —
+    /// the drag index is cleared the moment the list it points into is gone
+    /// or has shrunk past it, because the many places that abandon a figure
+    /// (Esc, a sub-tool switch, the tool cycle) all just drop `figure_poly`
+    /// and must not have to know this field exists.
+    fn figure_anchor_drag_move(&mut self, cx: f32, cy: f32) {
+        let Some(i) = self.figure_anchor_drag else {
+            return;
+        };
+        match self.figure_poly.as_mut().and_then(|p| p.get_mut(i)) {
+            Some(a) => a.p = (cx, cy),
+            None => self.figure_anchor_drag = None,
+        }
+        self.needs_redraw = true;
+    }
+
     /// Figure release (line/rect/ellipse): ink the dragged shape.
     /// Stream/Saturated/flash release: generate an effect-line layer instead.
     pub fn finish_figure_drag(&mut self, a: (f32, f32), b: (f32, f32)) {
@@ -2176,14 +2386,21 @@ impl App {
             self.needs_redraw = true;
             return;
         }
-        let path: Vec<[f32; 2]> = pts.iter().map(|p| [p.0, p.1]).collect();
+        self.figure_anchor_drag = None;
+        let path: Vec<[f32; 2]> = pts.iter().map(|a| [a.p.0, a.p.1]).collect();
         if curve {
             // The spline is inked through `ink_figure` — the SAME door
             // Figure ▸ Direct draw already uses — so the curve gets the
             // active brush, its pressure/taper, the selection clip, the
             // ruler-free synthetic pen and one undo step, and lands as a
             // recorded vector stroke on a vector layer. Open, never closed.
-            let dense = mn_core::balloon::tessellate_open(&path);
+            //
+            // `FG-016`: the corner bits ride into the tessellation, which is
+            // the only place they can act — a crease is a property of how the
+            // path is BUILT, not of how it is inked, so by the time the brush
+            // sees the dense polyline the creases are already in it.
+            let corners: Vec<bool> = pts.iter().map(|a| a.corner).collect();
+            let dense = mn_core::balloon::tessellate_open_corners(&path, &corners);
             self.ink_figure(&dense, false);
         } else {
             self.ink_figure(&path, true);
@@ -3305,6 +3522,15 @@ impl App {
             // last_pointer); nothing to record.
             self.needs_redraw = true;
         }
+        // `FG-014`: a Ctrl+drag has hold of one anchor of the in-progress
+        // click list. The point follows the pointer LIVE, which is the whole
+        // row — the preview (chords for Polygon, the spline for Curve) is
+        // rebuilt from the list every frame, so what redraws is the shape as
+        // it will ink and not a ghost of where the anchor used to be.
+        if self.figure_anchor_drag.is_some() {
+            self.figure_anchor_drag_move(cx, cy);
+            return;
+        }
         if let Some((a, cur)) = &mut self.figure_drag {
             *cur = (cx, cy);
             // Shift constrains line/rect/ellipse to 45° steps (CSP).
@@ -3992,6 +4218,16 @@ impl App {
                     self.set_status("that edit would collapse the balloon — reverted");
                 }
             }
+            self.needs_redraw = true;
+            return;
+        }
+        // `FG-014`: the anchor drag ends where the pointer let go. Nothing is
+        // committed and nothing is undone — the list is still a list, and the
+        // single undo press is still waiting at the commit.
+        if self.figure_anchor_drag.is_some() {
+            self.figure_anchor_drag_move(cx, cy);
+            self.figure_anchor_drag = None;
+            self.set_status("point moved — keep clicking, or Enter to ink");
             self.needs_redraw = true;
             return;
         }

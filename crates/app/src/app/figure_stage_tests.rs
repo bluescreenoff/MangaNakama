@@ -266,7 +266,7 @@ fn backspace_takes_back_one_point_without_ending_the_figure() {
         "one point back, figure still alive"
     );
     assert_eq!(
-        app.figure_poly.as_ref().expect("alive").last().copied(),
+        app.figure_poly.as_ref().expect("alive").last().map(|a| a.p),
         Some((300.0, 300.0)),
         "and it is the LAST one that went"
     );
@@ -312,4 +312,312 @@ fn backspace_past_the_first_point_ends_the_figure_cleanly() {
     // Inert once there is no figure — the key is never an error.
     app.figure_undo_point();
     assert!(app.figure_poly.is_none());
+}
+
+// --- `FG-013`/`FG-014`/`FG-016`: editing the click list mid-draw ----------
+//
+// The modifier cases drive `figure_poly_edit` with explicit flags rather
+// than pressing through `canvas_down`, for the reason the function's own doc
+// gives: the press samples the PHYSICAL keyboard, and a suite that depended
+// on that would pass or fail on what the developer's hands were doing.
+// The plain-tap cases go the whole way through `canvas_down`, because for
+// those the routing is exactly what is under test.
+
+/// `FG-013`, half one: a plain tap on a point you already placed DELETES it
+/// instead of dropping a second point on top of it. Walked to the end, the
+/// figure ends the way `FG-012`'s Backspace ends it — an empty list would
+/// keep the overlay alive with nothing in it.
+#[test]
+fn tapping_an_anchor_deletes_it() {
+    let Some(mut app) = app_with_figure(FigureMode::Polygon) else {
+        return;
+    };
+    let steps = app.doc.undo_labels().len();
+    for p in [(60.0, 60.0), (300.0, 60.0), (300.0, 300.0), (240.0, 200.0)] {
+        click(&mut app, p);
+    }
+    assert_eq!(app.figure_poly.as_ref().map(Vec::len), Some(4));
+
+    // Tap the second vertex — an interior one, so nothing else claims it.
+    click(&mut app, (300.0, 60.0));
+
+    let pts = app.figure_poly.as_ref().expect("figure still alive");
+    assert_eq!(pts.len(), 3, "the tap deleted, it did not append");
+    assert!(
+        !pts.iter().any(|a| a.p == (300.0, 60.0)),
+        "and it is THAT vertex that went: {:?}",
+        pts.iter().map(|a| a.p).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        pts.iter().map(|a| a.p).collect::<Vec<_>>(),
+        vec![(60.0, 60.0), (300.0, 300.0), (240.0, 200.0)],
+        "the survivors keep their order"
+    );
+    assert!(app.status.contains("3 left"), "status: {}", app.status);
+
+    // All the way down. Once the list is under three points the first vertex
+    // is no longer a close target either, so it deletes like any other.
+    click(&mut app, (240.0, 200.0));
+    click(&mut app, (300.0, 300.0));
+    assert_eq!(app.figure_poly.as_ref().map(Vec::len), Some(1));
+    click(&mut app, (60.0, 60.0));
+
+    assert!(app.figure_poly.is_none(), "the gesture ended, not stalled");
+    assert!(
+        app.status.contains("no points left"),
+        "status: {}",
+        app.status
+    );
+    assert_eq!(
+        app.doc.undo_labels().len(),
+        steps,
+        "the whole edit session is pre-commit — no history was touched"
+    );
+}
+
+/// `FG-013`, half two: a tap on the LINE between two anchors inserts a point
+/// there — at that span's position in the list, not at the end, which is the
+/// whole content of the row. Appending would put the new vertex on the wrong
+/// side of the shape.
+#[test]
+fn tapping_the_line_inserts_a_point_at_the_right_index() {
+    let Some(mut app) = app_with_figure(FigureMode::Polygon) else {
+        return;
+    };
+    for p in [(60.0, 60.0), (300.0, 60.0), (300.0, 300.0)] {
+        click(&mut app, p);
+    }
+
+    // Midway along the FIRST edge: the new vertex belongs at index 1.
+    click(&mut app, (180.0, 62.0));
+    assert_eq!(
+        app.figure_poly
+            .as_ref()
+            .expect("alive")
+            .iter()
+            .map(|a| a.p)
+            .collect::<Vec<_>>(),
+        vec![
+            (60.0, 60.0),
+            (180.0, 62.0),
+            (300.0, 60.0),
+            (300.0, 300.0)
+        ],
+        "inserted into the span that was tapped, at the tapped spot"
+    );
+    assert!(app.status.contains("4 now"), "status: {}", app.status);
+
+    // And midway along what is now the LAST edge: index 4, not 1.
+    click(&mut app, (302.0, 180.0));
+    let ps: Vec<_> = app
+        .figure_poly
+        .as_ref()
+        .expect("alive")
+        .iter()
+        .map(|a| a.p)
+        .collect();
+    assert_eq!(ps.len(), 5);
+    assert_eq!(ps[3], (302.0, 180.0), "the second insert found its own span");
+    assert_eq!(ps[4], (300.0, 300.0));
+}
+
+/// `FG-014`: Ctrl+drag takes hold of an anchor and it follows the pointer,
+/// live, until the release. The list keeps its length and its order — this
+/// is a move, not a delete-and-place — and it costs no undo step.
+#[test]
+fn ctrl_drag_moves_an_anchor_live() {
+    let Some(mut app) = app_with_figure(FigureMode::Polygon) else {
+        return;
+    };
+    let steps = app.doc.undo_labels().len();
+    for p in [(60.0, 60.0), (300.0, 60.0), (300.0, 300.0)] {
+        click(&mut app, p);
+    }
+
+    assert!(
+        app.figure_poly_edit(300.0, 60.0, true, false),
+        "Ctrl on an anchor is consumed as a grab, not as a new point"
+    );
+    assert_eq!(app.figure_anchor_drag, Some(1), "it grabbed THAT anchor");
+
+    app.canvas_move(322.0, 88.0, &NONE);
+    assert_eq!(
+        app.figure_poly.as_ref().expect("alive")[1].p,
+        (322.0, 88.0),
+        "the point moves DURING the drag — the preview is the live shape"
+    );
+    app.canvas_move(340.0, 100.0, &NONE);
+    app.canvas_up(340.0, 100.0, &NONE);
+
+    let pts = app.figure_poly.as_ref().expect("alive");
+    assert_eq!(pts.len(), 3, "a move, not a delete-and-place");
+    assert_eq!(
+        pts.iter().map(|a| a.p).collect::<Vec<_>>(),
+        vec![(60.0, 60.0), (340.0, 100.0), (300.0, 300.0)],
+        "dropped where the pointer let go, in its original slot"
+    );
+    assert!(app.figure_anchor_drag.is_none(), "the grab is released");
+    assert!(app.status.contains("point moved"), "status: {}", app.status);
+    assert_eq!(app.doc.undo_labels().len(), steps, "no history was touched");
+
+    // Self-healing: abandoning the figure (Esc's path) leaves no dangling
+    // index behind for the next drag to write through.
+    app.figure_poly_edit(60.0, 60.0, true, false);
+    app.figure_poly = None;
+    app.canvas_move(10.0, 10.0, &NONE);
+    assert!(app.figure_anchor_drag.is_none(), "the grab cleared itself");
+}
+
+/// `FG-016`: Alt+tap flips an anchor between smooth and corner, and the
+/// CREASE reaches the ink — the committed curve runs somewhere the smooth
+/// one does not. The probe is chosen from the two paths themselves (where
+/// they disagree most), so the test cannot drift as the tessellation is
+/// tuned; what it pins is that the flag is wired all the way through.
+#[test]
+fn alt_tap_makes_a_corner_and_the_committed_curve_creases() {
+    // A steep zigzag: the sharper the bend at the middle anchor, the further
+    // the smooth spline swings away from the creased one there.
+    let path = [
+        [60.0, 300.0],
+        [140.0, 110.0],
+        [220.0, 300.0],
+        [300.0, 110.0],
+        [360.0, 300.0],
+    ];
+    let corners = [false, false, true, false, false];
+    let smooth = mn_core::balloon::tessellate_open_corners(&path, &[]);
+    let kinked = mn_core::balloon::tessellate_open_corners(&path, &corners);
+    // Where the creased curve is furthest from anything the smooth one
+    // touches — inked in one, empty in the other, if the bit got through.
+    let (probe, gap) = kinked
+        .iter()
+        .map(|k| {
+            let d = smooth
+                .iter()
+                .map(|s| (s[0] - k[0]).hypot(s[1] - k[1]))
+                .fold(f32::INFINITY, f32::min);
+            (*k, d)
+        })
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .expect("dense");
+    assert!(
+        gap > 8.0,
+        "the two curves must part by more than the nib for this to prove \
+         anything (gap {gap} px at {probe:?})"
+    );
+
+    let place = |corner: bool| -> Option<App> {
+        let mut app = app_with_figure(FigureMode::Curve)?;
+        for p in path {
+            click(&mut app, (p[0], p[1]));
+        }
+        if corner {
+            assert!(
+                app.figure_poly_edit(220.0, 300.0, false, true),
+                "Alt on an anchor is consumed as a toggle, not as a point"
+            );
+            let pts = app.figure_poly.as_ref().expect("alive");
+            assert_eq!(pts.len(), 5, "toggling places nothing and drops nothing");
+            assert!(pts[2].corner, "the middle anchor is now a corner");
+            assert!(
+                app.status.contains("corner point"),
+                "status: {}",
+                app.status
+            );
+        }
+        app.finish_figure_poly();
+        Some(app)
+    };
+    let (Some(plain), Some(creased)) = (place(false), place(true)) else {
+        return;
+    };
+
+    let (x, y) = (probe[0] as i32, probe[1] as i32);
+    assert!(
+        px(&creased, x, y)[3] > 0,
+        "the creased curve is inked at {probe:?}"
+    );
+    assert_eq!(
+        px(&plain, x, y)[3],
+        0,
+        "and the smooth one never goes there — the corner reached the ink"
+    );
+    // Both still pass through every point the artist clicked: a corner is a
+    // crease, not a shortcut.
+    for p in path {
+        assert!(
+            px(&creased, p[0] as i32, p[1] as i32)[3] > 0,
+            "clicked point {p:?} is still on the curve"
+        );
+    }
+
+    // A second Alt+tap puts it back — it is a toggle, not a latch.
+    let Some(mut app) = app_with_figure(FigureMode::Curve) else {
+        return;
+    };
+    for p in path {
+        click(&mut app, (p[0], p[1]));
+    }
+    app.figure_poly_edit(220.0, 300.0, false, true);
+    app.figure_poly_edit(220.0, 300.0, false, true);
+    assert!(!app.figure_poly.as_ref().expect("alive")[2].corner);
+    assert!(app.status.contains("smooth point"), "status: {}", app.status);
+}
+
+/// `FG-016` on the Polygon: nothing to toggle, because a polygon is corners
+/// all the way down. It still CONSUMES the press — silently appending a
+/// duplicate vertex under the one the artist was aiming at would be the
+/// worst of the three possible answers.
+#[test]
+fn alt_tap_is_an_explained_no_op_on_the_polygon() {
+    let Some(mut app) = app_with_figure(FigureMode::Polygon) else {
+        return;
+    };
+    for p in [(60.0, 60.0), (300.0, 60.0), (300.0, 300.0)] {
+        click(&mut app, p);
+    }
+    assert!(app.figure_poly_edit(300.0, 60.0, false, true));
+    let pts = app.figure_poly.as_ref().expect("alive");
+    assert_eq!(pts.len(), 3, "nothing placed, nothing deleted");
+    assert!(!pts.iter().any(|a| a.corner), "and no flag was set");
+    assert!(
+        app.status.contains("Continuous curve"),
+        "it says why: {}",
+        app.status
+    );
+}
+
+/// The regression the editing grammar could most easily break: a tap on
+/// EMPTY canvas is still just "place the next point", and the Polygon's
+/// close-on-the-first-vertex gesture still closes rather than deleting.
+#[test]
+fn plain_taps_on_empty_canvas_still_place_points() {
+    let Some(mut app) = app_with_figure(FigureMode::Polygon) else {
+        return;
+    };
+    let steps = app.doc.undo_labels().len();
+    for p in [(60.0, 60.0), (300.0, 60.0), (180.0, 300.0), (60.0, 300.0)] {
+        click(&mut app, p);
+    }
+    let pts = app.figure_poly.as_ref().expect("alive");
+    assert_eq!(
+        pts.iter().map(|a| a.p).collect::<Vec<_>>(),
+        vec![
+            (60.0, 60.0),
+            (300.0, 60.0),
+            (180.0, 300.0),
+            (60.0, 300.0)
+        ],
+        "four taps in open space, four points, in order"
+    );
+
+    // And the shipped terminator still wins over `FG-013`'s delete: a tap
+    // back on the FIRST vertex with three or more placed closes the shape.
+    click(&mut app, (60.0, 60.0));
+    assert!(app.figure_poly.is_none(), "the polygon closed");
+    assert_eq!(
+        app.doc.undo_labels().len(),
+        steps + 1,
+        "one polygon, one undo press"
+    );
 }

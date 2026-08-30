@@ -54,30 +54,55 @@ pub(super) fn figures(
     }
     if let Some(pts) = &app.figure_poly {
         let col = theme::c().accent;
-        for p in pts {
-            let c = to_pt(p.0, p.1);
-            painter.circle_filled(c, 3.2, col);
-            painter.circle_stroke(c, 3.2, egui::Stroke::new(1.0, theme::c().panel));
+        for (i, a) in pts.iter().enumerate() {
+            let c = to_pt(a.p.0, a.p.1);
+            // `FG-016`: corner anchors are SQUARE and smooth ones round —
+            // the vector-editing convention this app already reads (frame
+            // and transform handles are squares, on-curve markers circles),
+            // and the only way the artist can tell which of two identical
+            // dots will crease. Alt+tap is invisible otherwise.
+            if a.corner {
+                let r = egui::Rect::from_center_size(c, egui::vec2(6.4, 6.4));
+                painter.rect_filled(r, 0.0, col);
+                painter.rect_stroke(
+                    r,
+                    0.0,
+                    egui::Stroke::new(1.0, theme::c().panel),
+                    egui::StrokeKind::Inside,
+                );
+            } else {
+                painter.circle_filled(c, 3.2, col);
+                painter.circle_stroke(c, 3.2, egui::Stroke::new(1.0, theme::c().panel));
+            }
+            // `FG-014`: the anchor a Ctrl+drag has hold of wears a ring, so
+            // a drag that has not moved yet still says WHICH point it took.
+            if app.figure_anchor_drag == Some(i) {
+                painter.circle_stroke(c, 6.5, egui::Stroke::new(1.5, col));
+            }
         }
         if pts.len() >= 2 {
             // Rows 84/85: the Curve sub tool previews the SPLINE it will
             // ink, not the chords between the clicks — otherwise the shape
-            // you are judging is not the shape you get.
-            let path: Vec<[f32; 2]> = pts.iter().map(|p| [p.0, p.1]).collect();
+            // you are judging is not the shape you get. `FG-016`'s creases
+            // go through the same door for the same reason.
+            let path: Vec<[f32; 2]> = pts.iter().map(|a| [a.p.0, a.p.1]).collect();
             let shape = if app.figure_mode == crate::cmd::FigureMode::Curve {
-                mn_core::balloon::tessellate_open(&path)
+                let corners: Vec<bool> = pts.iter().map(|a| a.corner).collect();
+                mn_core::balloon::tessellate_open_corners(&path, &corners)
             } else {
                 path
             };
             let line: Vec<egui::Pos2> = shape.iter().map(|p| to_pt(p[0], p[1])).collect();
             painter.add(egui::Shape::line(line, egui::Stroke::new(1.2, col)));
         }
-        // Rubber line to the pointer (client px → canvas).
+        // Rubber line to the pointer (client px → canvas). Not while an
+        // anchor is being dragged: the pointer is holding a point of the
+        // figure, not aiming at where the next one goes.
         let (lx, ly) = app.last_pointer;
         let (mx, my) = app.viewport.to_canvas(lx as f32, ly as f32);
-        if let Some(last) = pts.last() {
+        if let Some(last) = pts.last().filter(|_| app.figure_anchor_drag.is_none()) {
             painter.line_segment(
-                [to_pt(last.0, last.1), to_pt(mx, my)],
+                [to_pt(last.p.0, last.p.1), to_pt(mx, my)],
                 egui::Stroke::new(1.0, theme::c().text_weak),
             );
         }

@@ -5815,7 +5815,7 @@ fn curve_tool_inks_a_spline_through_the_clicked_points() {
     assert!(app.status.contains("curve inked"), "status: {}", app.status);
 
     // A single click is not a curve — and must not spend an undo step.
-    app.figure_poly = Some(vec![(10.0, 10.0)]);
+    app.figure_poly = Some(vec![crate::cmd::FigureAnchor::new(10.0, 10.0)]);
     app.finish_figure_poly();
     assert!(app.status.contains("at least 2 points"), "{}", app.status);
     assert_eq!(app.doc.undo_labels().len(), steps + 1);
@@ -11088,4 +11088,35 @@ fn the_shared_correction_derive_matches_the_cpu_reference() {
     // The seam's own tolerance is 2 fix15 units out of 32768; composited to
     // 8-bit that cannot survive as anything but 0.
     assert_eq!(worst, 0, "a routed derive changed the page by {worst}/255");
+}
+
+/// Wave 3, the load-flake fix: a pinned `test_modifiers` short-circuits
+/// the physical keyboard in `sync_modifiers` — the seam every test app
+/// gets from `App::new` under cfg(test), so a human typing during a run
+/// cannot flip chord matching mid-test.
+#[test]
+fn pinned_modifiers_override_the_physical_keyboard() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (400, 300), 1.0);
+    // `command` mirrors ctrl in a real read, so command-without-ctrl is a
+    // state the physical path cannot produce — seeing it back proves the
+    // pin answered instead of GetKeyState.
+    app.shell.test_modifiers = Some(egui::Modifiers {
+        command: true,
+        ..Default::default()
+    });
+    let m = app.shell.sync_modifiers();
+    assert!(m.command && !m.ctrl, "the pin answered, not the keyboard");
+    // The harness default: a quiet keyboard, deterministic.
+    app.shell.test_modifiers = Some(egui::Modifiers::default());
+    let m = app.shell.sync_modifiers();
+    assert!(!m.shift && !m.ctrl && !m.alt && !m.command);
+    // A test wanting Shift pins it explicitly — the wave-2 caller-side
+    // sampling (smart_shape_adjust / BalloonObjDrag.shift_snap) stays the
+    // pattern for gesture tests; this is the escape hatch for the paths
+    // that still read the shell directly.
+    app.shell.test_modifiers = Some(egui::Modifiers::SHIFT);
+    assert!(app.shell.sync_modifiers().shift);
 }
