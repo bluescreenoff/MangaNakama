@@ -24,6 +24,32 @@ The recurring failure shapes, in order of how often they have shipped:
    first/last samples, edge endpoints, the last tile of a region — the
    interior's math must hold at the boundary too.
 
+## Command dispatch (`cmd.rs` ⇄ `cmd/*.rs`)
+
+- `cmd.rs` still owns the public seam: the `AppCmd` enum, the size/radius
+  constants, and `dispatch` — the one entry every widget and shortcut goes
+  through. The tool enums (`Tool`, `SubTool`, the mode enums, `ToolProps`)
+  live in `cmd/tools.rs` and are re-exported whole, so every
+  `crate::cmd::Tool` path still resolves; the same holds for the handful of
+  helpers other modules address as `crate::cmd::…`. **Address them through
+  `crate::cmd::`, not through the submodule** — the submodules are private
+  and the re-export is what keeps a later re-shuffle from touching callers.
+- The one `match cmd` is cut across ten domain modules (`history`, `pages`,
+  `file_io`, `layers`, `frames`, `text`, `edit`, `transform`, `brush`,
+  `misc`), each a `run(app, cmd, cmd_tail)` that matches its own arms and
+  hands anything else to the next module in the chain. **A new `AppCmd`
+  variant must be claimed by exactly one of them.** The compiler can no
+  longer prove exhaustiveness across module walls, so an unclaimed variant
+  reaches `misc`'s catch-all and panics there rather than doing nothing.
+- `dispatch` runs a PROLOGUE (disarm one-shots, revert a live correction
+  preview, snapshot dangling clips, tap the action recorder) and a TAIL
+  (`sync_pages_palette`, the clip-change report, the recorded step). The
+  tail travels with the command as `CmdTail` and a module runs it only
+  where its `match` falls THROUGH: an arm's bare `return` still means
+  "skip the tail", exactly as it did when this was one function. A new arm
+  that returns early is opting out of the palette sync, the clip report and
+  the action recording — which is sometimes right, but never accidental.
+
 ## Undo / operation recording (core `doc.rs` ⇄ everything that mutates)
 
 - Every tile mutation must happen inside an armed op: `begin_op` arms
@@ -88,6 +114,13 @@ The recurring failure shapes, in order of how often they have shipped:
 
 ## Page identity (`app/pages.rs` ⇄ `core/project.rs` ⇄ every work writer)
 
+- The page code sits in four files, split by responsibility: `app/pages.rs`
+  (the page slots and the switch/stash/park machinery), `app/page_import.rs`
+  (files coming IN as pages, and the underlay placement a draft scan lands
+  under), `app/page_files.rs` (the work-folder save and its autosave twin)
+  and `app/page_resize.rs` (the DPI resample and canvas resize that walk
+  every page, parked or live). Every writer rule below applies across all
+  four.
 - `PageEntry::uid` is the page's identity — the key the park LRU, the
   reader's texture map and the MCP page lookups use, precisely because
   page INDICES move under reorder/insert/delete (seam pattern 2).
@@ -231,6 +264,23 @@ The recurring failure shapes, in order of how often they have shipped:
 
 ## The tile-kernel seam (`gpu/kernel.rs` + `kernel.wgsl` ⇄ core `adjust.rs`, `filter.rs`)
 
+- **`filter.rs` is a directory module, and `Filter::reach` now lives in a
+  DIFFERENT FILE from the kernels it describes.** `filter.rs` keeps the enum,
+  the menu seeds, `reach`, `run`, `is_identity`, `separable_passes`, the
+  gather/scatter and `Document::apply_filter*`; the kernels are
+  `filter/blur.rs` (the box/Gaussian family, motion, radial, spin, unsharp),
+  `filter/distort.rs` (FL-020..023) and `filter/lines.rs` (LC-001 dust,
+  LC-002 line width). The halo rule is unchanged and is now a cross-file
+  one: an arm of `reach` and the kernel it names must share arithmetic
+  (`gaussian_reach`, `motion_span`, `wave_amplitude`, `dust_max`,
+  `line_width_radius` are exported from the kernel files for exactly that).
+  Understate `reach` and the outermost written pixels read halo, i.e. a
+  seam at the region edge.
+- `core/transform.rs` split the same way: `transform/resample.rs` holds
+  `I-005`'s samplers (`Interp`, nearest/bilinear/bicubic/area) and
+  `resample_tile_map`; `transform.rs` keeps the float lift/clear and
+  `commit_transform`. `Interp` and `resample_tile_map` keep their old
+  `mn_core::transform::…` paths through re-exports.
 - **The CPU function is the specification, and every caller keeps it as
   the fallback.** `Document::refresh_corrections_with` and
   `Document::apply_filter_with` take a kernel the caller lends; it may
@@ -321,7 +371,7 @@ The recurring failure shapes, in order of how often they have shipped:
   through coverage-based bounds — a new op that derives its region from
   one outline loop breaks multi-island selections.
 - A PASTE with a selection active lands MASKED to it (owner 2026-08-21),
-  and the halves live apart: `cmd.rs`'s `TransformCommit` picks the shape —
+  and the halves live apart: `cmd/transform.rs`'s `TransformCommit` picks the shape —
   a paste that CREATES its layer gets a non-destructive layer mask built
   from the coverage (`fill_layer::mask_from_selection`), a paste that
   stamps an existing layer passes `mask_to_selection: true` into
@@ -368,6 +418,24 @@ The recurring failure shapes, in order of how often they have shipped:
   so egui's own widget visuals follow. Canvas-SEMANTIC colours (marching
   ants, guides, ruler marks in `ui/overlay.rs`) are meaning, not decoration,
   and stay literal on purpose.
+- **`ui/overlay.rs` is a directory module and its Z-ORDER lives in exactly
+  one place** — `canvas_overlay`'s list of band calls. Each band
+  (`overlay/page.rs`, `rulers.rs`, `selection.rs`, `frames.rs`, `tools.rs`,
+  `text.rs`, `areas.rs`, `transform.rs`, `readouts.rs`) paints only what it
+  is handed: the painter, `to_pt`, `cursor_pt` and the `ants` closure are
+  built once in the entry and lent down, so a band cannot quietly re-derive
+  a different screen mapping. A new overlay goes in the band it belongs to
+  and gets ONE call in that list; adding a second call site for the same
+  band is how a Z-order bug ships. `transform::paint` returns `true` for its
+  mesh early-exit — the caller returns too, which is what keeps the reading
+  order and the magnetic lasso unpainted in that state.
+- `ui/layers.rs` is a directory module too: `layers/rows.rs` (stack rows,
+  drag-drop, row menus, thumbnail caches), `layers/property.rs` (the Layer
+  Property panel), plus the existing `breakout.rs`/`blendif.rs` sections.
+  `layers.rs` itself keeps only what BOTH halves read — `BLENDS`,
+  `blend_name`, `tools_for_layer`, `LAYER_TINTS` — and the pane entries
+  (`layer_section`, `layer_property`) are re-exported from there, so
+  `dock.rs` and `batch.rs` still see one module.
 - **egui_dock must be styled from `Style::from_egui`, never
   `Style::default()`** — 0.21's default is a LIGHT style, and using it paints
   white tab bodies over a dark app (owner bug report 2026-08-16). `dock.rs`
@@ -393,7 +461,7 @@ The recurring failure shapes, in order of how often they have shipped:
   `MaterialKind`): images, and generator materials — a `<stem>.gen.json`
   holding a serialized `GenLinesSpec`, whose same-stem PNG is only its
   thumbnail and must never scan as a second material. `PasteMaterial`
-  routes a generator through `genlines_new_layer` in `cmd.rs` (never a
+  routes a generator through `genlines_new_layer` in `cmd/history.rs` (never a
   bitmap decode), so the placed layer carries `Layer.genlines` and the
   Object tool edits it from the first click; that helper is also the
   dialog's Generate path, and it owns the `wrap_recent("Generate lines",
@@ -405,7 +473,7 @@ The recurring failure shapes, in order of how often they have shipped:
   the column is a permanent sliver after the next launch. Collapsing also
   hides that column's torn-off FLOATING palettes: egui_dock only draws window
   surfaces from `DockArea::show_inside`, which a collapsed column skips.
-- **A sub tool row exists in three places at once** (`cmd.rs`
+- **A sub tool row exists in three places at once** (`cmd/tools.rs`
   `SubTool::ALL` ⇄ `subtools.rs` ⇄ `ui/subtool.rs`). `SubTool::ALL` is the
   enumeration; `subtools::group_of` files each row under a group caption and
   `subtools::registry` derives the tool → groups → rows tree from those two.

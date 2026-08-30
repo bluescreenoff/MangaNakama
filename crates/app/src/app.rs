@@ -36,6 +36,9 @@ pub mod layer_defaults;
 mod layout;
 mod make_brush;
 pub mod materials;
+mod page_files;
+mod page_import;
+mod page_resize;
 mod pages;
 pub mod pattern;
 /// Workflow audit §11: the ネーム promotion path — "New work from this
@@ -60,9 +63,10 @@ pub use layout::{ScreenRect, UiLayout, WinGeom, peek_win};
 pub use prefs::Prefs;
 
 pub use crate::cmd::RulerKind;
+pub use page_resize::mono_resample_warning;
 pub use pages::{
     BatchImportDraft, CanvasSizeDraft, NewComicDraft, PageEntry, ResampleWorkDraft, SpreadOp,
-    WorkSettingsDraft, mono_resample_warning,
+    WorkSettingsDraft,
 };
 pub use promote::PromoteDraft;
 pub use session::{DocSession, unsaved_autosave_folder_for, unsaved_autosave_path_for};

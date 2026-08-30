@@ -37,7 +37,8 @@
 use std::path::Path;
 
 use super::App;
-use super::pages::{PageEntry, fit_to_paper, place_draft_underlay};
+use super::page_import::{fit_to_paper, place_draft_underlay};
+use super::pages::PageEntry;
 use mn_core::Document;
 
 /// The "New work from this work…" dialog's working state.
