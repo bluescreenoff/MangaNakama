@@ -135,7 +135,7 @@ impl App {
             if !doc.resample_to(target.0, target.1, interp) {
                 return Err(format!("page {} could not be resampled", i + 1));
             }
-            doc.refresh_derived(new_dpi);
+            crate::app::refresh_derived_gpu(&mut doc, &mut self.renderer, new_dpi);
             let nb = mn_core::project::doc_to_bytes(&doc)
                 .map_err(|e| format!("page {} could not be re-encoded: {e}", i + 1))?;
             pending.push((i, PageResample::Bytes(nb, target)));

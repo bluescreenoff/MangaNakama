@@ -764,7 +764,7 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                         // continuous, so halving first would restart the
                         // dot phase on the second half and the seam would
                         // show in print.
-                        d.refresh_derived(dpi);
+                        crate::app::refresh_derived_gpu(&mut d, &mut app.renderer, dpi);
                         // PM-055: gap 0 — the export must not swallow the
                         // seam. The gutter swallow is an EDIT-time choice
                         // (PM-031), not something a print run gets to do.

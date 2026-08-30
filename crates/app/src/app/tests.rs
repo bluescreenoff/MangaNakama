@@ -11019,3 +11019,73 @@ fn the_interpolation_row_reaches_the_transform_commit() {
     );
     let _ = renderer;
 }
+
+/// The three non-drag correction refreshes — the resample-work rebuild
+/// (`page_resize.rs`), the export-range loop and the comp-export loop — all
+/// go through `refresh_derived_gpu` now instead of `Document::refresh_derived`.
+/// Those pages are re-encoded and parked, so the pin that matters is that
+/// routing them cannot change a page: the helper's result must be the CPU
+/// reference's, byte for byte.
+///
+/// 512² is 64 tiles, which is exactly `KERNEL_FLOOR_PX` for a batch, so on
+/// real silicon the seam really runs here. Under `MN_WARP` the routing
+/// predicate declines software adapters and this asserts the fallback
+/// instead — which is the other half of the contract.
+#[test]
+fn the_shared_correction_derive_matches_the_cpu_reference() {
+    let Some(mut renderer) = headless_renderer() else {
+        return;
+    };
+    let page = || {
+        let mut doc = Document::new(512, 512);
+        let mut s = 13579u32;
+        let mut next = || {
+            s ^= s << 13;
+            s ^= s >> 17;
+            s ^= s << 5;
+            s
+        };
+        for y in 0..512i32 {
+            for x in 0..512i32 {
+                let idx = TileIdx::of_pixel(x, y);
+                let (ox, oy) = idx.origin();
+                let o = ((y - oy) as usize * mn_core::tile::TILE_SIZE + (x - ox) as usize) * 4;
+                let a = next() % 32769;
+                let d = doc.layers[0].tile_mut(idx).data_mut();
+                for c in 0..3 {
+                    d[o + c] = (next() % (a + 1)) as u16;
+                }
+                d[o + 3] = a as u16;
+            }
+        }
+        let mut pts = [[0.0f32; 2]; 8];
+        pts[0] = [0.0, 0.05];
+        pts[1] = [0.35, 0.2];
+        pts[2] = [0.7, 0.85];
+        pts[3] = [1.0, 1.0];
+        doc.add_correction_layer(mn_core::adjust::Adjust::ToneCurve { pts, n: 4 }, false);
+        doc
+    };
+
+    let mut want = page();
+    want.refresh_derived(600);
+    let mut got = page();
+    crate::app::refresh_derived_gpu(&mut got, &mut renderer, 600);
+
+    let a = mn_core::export::composite(&want, mn_core::export::Background::White);
+    let b = mn_core::export::composite(&got, mn_core::export::Background::White);
+    let worst = a
+        .pixels()
+        .zip(b.pixels())
+        .map(|(p, q)| {
+            (0..4)
+                .map(|c| (p.0[c] as i32 - q.0[c] as i32).abs())
+                .max()
+                .unwrap_or(0)
+        })
+        .max()
+        .unwrap_or(0);
+    // The seam's own tolerance is 2 fix15 units out of 32768; composited to
+    // 8-bit that cannot survive as anything but 0.
+    assert_eq!(worst, 0, "a routed derive changed the page by {worst}/255");
+}

@@ -555,8 +555,11 @@ fn mode_sub_tools(ui: &mut egui::Ui, app: &mut App) {
                 let row = if m == GradMode::Freeform {
                     row.on_hover_text(
                         "draw TWO lines: the first takes the main colour, the second the sub \
-                         colour, and the ramp between them follows both shapes. Esc between \
-                         strokes cancels.",
+                         colour, and the ramp between them follows both shapes. Enter (or a \
+                         click away from them) paints. Draw a THIRD line and up and each one \
+                         carries the main colour as it stands when you draw it, with the \
+                         colour blending by proximity to every line. Backspace takes the last \
+                         line back, Esc cancels.",
                     )
                 } else {
                     row

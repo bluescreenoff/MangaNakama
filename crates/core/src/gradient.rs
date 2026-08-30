@@ -232,7 +232,11 @@ const BAYER8: [u8; 64] = [
 ];
 
 /// -0.5..+0.5, one 8-bit level of dither amplitude at canvas `(x, y)`.
-fn dither_offset(x: i32, y: i32) -> f32 {
+///
+/// `pub(crate)` for `FI-051`'s colour-per-guide field, which has no ramp
+/// parameter to be inside of but wants the SAME noise — two Bayer matrices
+/// in one application would show as two different textures on one page.
+pub(crate) fn dither_offset(x: i32, y: i32) -> f32 {
     let i = (y.rem_euclid(8) * 8 + x.rem_euclid(8)) as usize;
     (BAYER8[i] as f32 + 0.5) / 64.0 - 0.5
 }

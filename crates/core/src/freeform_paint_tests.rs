@@ -9,7 +9,7 @@
 //! precedent.
 
 use crate::doc::Document;
-use crate::freeform::Freeform;
+use crate::freeform::{ColourGuide, Freeform};
 use crate::gradient::{MixMode, Ramp};
 use crate::tile::{FIX15_ONE, TileIdx};
 
@@ -319,6 +319,207 @@ fn the_per_tile_cull_paints_the_identical_page() {
     }
 }
 
+// --- `FI-051`: three guides and up ----------------------------------------
+
+/// **The pin.** Two guides through the N-guide door paint the SAME BYTES as
+/// two guides through the shipped two-line door — because they route to it,
+/// rather than degenerating into inverse-distance weights that would be
+/// close but not equal (and would drop the smoothstep, the interior stops
+/// and the edge process on the way).
+#[test]
+fn two_guides_still_take_the_pinned_ramp_path() {
+    let (l1, l2) = two_verticals();
+    // Not a plain two-stop ramp: an interior stop, a mixing rate and a flip,
+    // none of which the colour-per-guide field can express. If the routing
+    // ever changed, these are the first things that would vanish.
+    let mut mid = crate::gradient::MidStops::default();
+    mid.insert(crate::gradient::GradStop {
+        pos: 0.35,
+        color: [0.0, 1.0, 0.0, 1.0],
+    });
+    let mut opts = crate::gradient::RampOpts::default();
+    opts.curve = 0.4;
+    opts.flip = true;
+    let ramp = Ramp::new(RED, BLUE, mid, opts);
+
+    let mut old = Document::new(128, 128);
+    assert!(old.paint_gradient_freeform(&l1, &l2, &ramp));
+
+    let mut new = Document::new(128, 128);
+    assert!(new.paint_gradient_freeform_multi(
+        &[
+            ColourGuide::new(l1.clone(), RED),
+            ColourGuide::new(l2.clone(), BLUE),
+        ],
+        &ramp,
+    ));
+
+    for ty in 0..2 {
+        for tx in 0..2 {
+            let idx = TileIdx::new(tx, ty);
+            let a = old.layers[old.active].tile(idx).map(|t| t.data().to_vec());
+            let b = new.layers[new.active].tile(idx).map(|t| t.data().to_vec());
+            assert_eq!(a, b, "tile ({tx},{ty}) is not byte-identical");
+        }
+    }
+}
+
+/// THE FEATURE. Three guides, three colours: each guide comes out its own
+/// colour on the canvas, and the space between leans to the nearer one.
+#[test]
+fn three_guides_each_land_their_own_colour() {
+    const GREEN: [f32; 4] = [0.0, 1.0, 0.0, 1.0];
+    let mut doc = Document::new(256, 128);
+    assert!(doc.paint_gradient_freeform_multi(
+        &[
+            ColourGuide::new(vec![[16.0, 0.0], [16.0, 128.0]], RED),
+            ColourGuide::new(vec![[128.0, 0.0], [128.0, 128.0]], GREEN),
+            ColourGuide::new(vec![[240.0, 0.0], [240.0, 128.0]], BLUE),
+        ],
+        &Ramp::two(RED, BLUE),
+    ));
+
+    let one = px(&doc, 16, 64);
+    assert!(one[0] > 0.98 && one[1] < 0.02, "guide 1 is red: {one:?}");
+    let two = px(&doc, 128, 64);
+    assert!(two[1] > 0.98 && two[0] < 0.02, "guide 2 is green: {two:?}");
+    let three = px(&doc, 240, 64);
+    assert!(three[2] > 0.98 && three[1] < 0.02, "guide 3 is blue: {three:?}");
+
+    // Between 1 and 2 the red gives way to the green, monotonically enough
+    // that no band reads as a step.
+    let mut prev = px(&doc, 16, 64)[1];
+    for x in 17..128 {
+        let now = px(&doc, x, 64)[1];
+        assert!((now - prev).abs() < 0.05, "a step at x={x}: {prev} -> {now}");
+        prev = now;
+    }
+    // Opaque everywhere, like the two-line field: there is no outside.
+    for x in [0, 60, 200, 255] {
+        assert_eq!(alpha(&doc, x, 64), FIX15_ONE as u16, "x={x}");
+    }
+}
+
+/// The per-tile cull cannot change the picture with N guides either — and
+/// the reference here is the all-segments, ALL-GUIDES field, so a tile that
+/// dropped a far guide would show up as a colour shift.
+#[test]
+fn the_multi_per_tile_cull_paints_the_identical_page() {
+    const GREEN: [f32; 4] = [0.0, 1.0, 0.0, 1.0];
+    let wiggle = |x: f32, phase: f32| -> Vec<[f32; 2]> {
+        (0..=120)
+            .map(|i| {
+                let y = i as f32 * 2.0;
+                [x + (i as f32 * 0.4 + phase).sin() * 9.0, y]
+            })
+            .collect()
+    };
+    let guides = vec![
+        ColourGuide::new(wiggle(40.0, 0.0), RED),
+        ColourGuide::new(wiggle(140.0, 1.7), GREEN),
+        ColourGuide::new(wiggle(230.0, 3.1), BLUE),
+    ];
+    let ramp = Ramp::two(RED, BLUE);
+    let mut doc = Document::new(256, 240);
+    assert!(doc.paint_gradient_freeform_multi(&guides, &ramp));
+
+    let field = crate::freeform::Multi::new(&guides).unwrap();
+    for y in (1..240).step_by(17) {
+        for x in (1..256).step_by(13) {
+            let want = field.colour_at([x as f32 + 0.5, y as f32 + 0.5], MixMode::Standard, 0);
+            let got = px(&doc, x, y);
+            for k in 0..3 {
+                assert!(
+                    (got[k] - want[k]).abs() < 2.0 / 255.0,
+                    "({x},{y}) ch {k}: culled {got:?} vs exact {want:?}"
+                );
+            }
+        }
+    }
+}
+
+/// The whole N-guide apply is ONE undo press, and a refused one banks
+/// nothing — the same two promises the two-line form makes.
+#[test]
+fn the_multi_apply_is_one_undo_press_and_a_refusal_is_not_history() {
+    const GREEN: [f32; 4] = [0.0, 1.0, 0.0, 1.0];
+    let guides = vec![
+        ColourGuide::new(vec![[16.0, 0.0], [16.0, 128.0]], RED),
+        ColourGuide::new(vec![[64.0, 0.0], [64.0, 128.0]], GREEN),
+        ColourGuide::new(vec![[112.0, 0.0], [112.0, 128.0]], BLUE),
+    ];
+    let ramp = Ramp::two(RED, BLUE);
+
+    let mut doc = Document::new(128, 128);
+    let before = doc.op_count();
+    assert!(doc.paint_gradient_freeform_multi(&guides, &ramp));
+    assert_eq!(doc.op_count(), before + 1, "one op for the whole field");
+    assert!(doc.undo(), "one press");
+    for (x, y) in [(0, 0), (16, 64), (64, 64), (112, 64), (127, 127)] {
+        assert_eq!(alpha(&doc, x, y), 0, "({x},{y}) survived the undo");
+    }
+
+    // A locked layer, a guide with no usable point, and fewer than two
+    // guides are all refusals rather than half-painted pages.
+    let mut locked = Document::new(128, 128);
+    locked.layers[locked.active].lock = true;
+    let before = locked.op_count();
+    assert!(!locked.paint_gradient_freeform_multi(&guides, &ramp));
+    assert_eq!(locked.op_count(), before);
+
+    let mut doc = Document::new(128, 128);
+    let before = doc.op_count();
+    assert!(!doc.paint_gradient_freeform_multi(&guides[..1], &ramp), "one guide");
+    let mut bad = guides.clone();
+    bad[1].pts = vec![[f32::NAN, 0.0]];
+    assert!(!doc.paint_gradient_freeform_multi(&bad, &ramp), "a junk guide");
+    assert_eq!(doc.op_count(), before, "neither refusal is history");
+    assert_eq!(alpha(&doc, 64, 64), 0);
+}
+
+/// The mixing SPACE reaches the N-guide field (it is per-mix, not
+/// per-position), and the ramp's positional options are inert there — which
+/// is the honest half of the deal, so it is pinned rather than left to be
+/// discovered.
+#[test]
+fn the_mixing_space_reaches_the_field_and_the_ramp_positions_do_not() {
+    let blue = [0.0, 0.0, 1.0, 1.0];
+    let yellow = [1.0, 1.0, 0.0, 1.0];
+    let guides = vec![
+        ColourGuide::new(vec![[16.0, 0.0], [16.0, 128.0]], blue),
+        ColourGuide::new(vec![[64.0, 0.0], [64.0, 128.0]], yellow),
+        ColourGuide::new(vec![[112.0, 0.0], [112.0, 128.0]], blue),
+    ];
+
+    let mut std_doc = Document::new(128, 128);
+    assert!(std_doc.paint_gradient_freeform_multi(&guides, &Ramp::two(blue, yellow)));
+    let mut perc = Ramp::two(blue, yellow);
+    perc.opts.mix = MixMode::Perceptual;
+    let mut perc_doc = Document::new(128, 128);
+    assert!(perc_doc.paint_gradient_freeform_multi(&guides, &perc));
+    let (a, b) = (px(&std_doc, 40, 64), px(&perc_doc, 40, 64));
+    let chroma = |c: [f32; 4]| {
+        let m = (c[0] + c[1] + c[2]) / 3.0;
+        (0..3).map(|k| (c[k] - m).abs()).sum::<f32>()
+    };
+    assert!(chroma(b) > chroma(a), "Perceptual reaches the field: {a:?} {b:?}");
+
+    // FLIP, the interior stops and the edge process describe positions along
+    // a ramp, and there is no ramp here: the page is unchanged by them.
+    let mut positional = Ramp::two(blue, yellow);
+    positional.opts.flip = true;
+    positional.opts.edge = crate::gradient::EdgeProcess::Repeat;
+    positional.mid.insert(crate::gradient::GradStop {
+        pos: 0.5,
+        color: [0.0, 1.0, 0.0, 1.0],
+    });
+    let mut other = Document::new(128, 128);
+    assert!(other.paint_gradient_freeform_multi(&guides, &positional));
+    for x in [20, 40, 64, 90, 120] {
+        assert_eq!(px(&other, x, 64), px(&std_doc, x, 64), "x={x} moved");
+    }
+}
+
 /// The cost of a real page, measured rather than guessed. Ignored by
 /// default: it allocates a whole B4/600 layer, which is minutes in a debug
 /// build and hundreds of MB either way.
@@ -378,5 +579,44 @@ fn freeform_full_page_timing() {
             t0.elapsed(),
             kept as f64 / tiles as f64,
         );
+    }
+}
+
+/// `FI-051`'s cost, on the same page: N guides means N distance queries per
+/// pixel and N−1 colour mixes, and no guide can be culled away from a tile.
+/// So the field scales with the LINE COUNT, which is the number the artist
+/// controls — measured here rather than guessed at.
+///
+///     cargo test -p mn-core --release -- --ignored freeform_multi_full_page
+#[test]
+#[ignore = "timing measurement — release only, allocates a full B4/600 page"]
+fn freeform_multi_full_page_timing() {
+    let (w, h) = (6071u32, 8598u32);
+    let guide = |x: f32, n: usize| -> Vec<[f32; 2]> {
+        (0..=n)
+            .map(|i| {
+                let y = i as f32 * (h as f32 / n as f32);
+                [x + (i as f32 * 60.0 / n as f32).sin() * 120.0, y]
+            })
+            .collect()
+    };
+    let colours = [
+        RED,
+        BLUE,
+        [0.0, 1.0, 0.0, 1.0],
+        [1.0, 1.0, 0.0, 1.0],
+        [0.0, 1.0, 1.0, 1.0],
+    ];
+    for lines in [3usize, 5] {
+        let guides: Vec<crate::freeform::ColourGuide> = (0..lines)
+            .map(|k| {
+                let x = 800.0 + k as f32 * (4000.0 / lines as f32);
+                crate::freeform::ColourGuide::new(guide(x, 40), colours[k])
+            })
+            .collect();
+        let mut doc = Document::new(w, h);
+        let t0 = std::time::Instant::now();
+        assert!(doc.paint_gradient_freeform_multi(&guides, &Ramp::two(RED, BLUE)));
+        println!("freeform field, {lines} lines of 40 segments: {:?}", t0.elapsed());
     }
 }

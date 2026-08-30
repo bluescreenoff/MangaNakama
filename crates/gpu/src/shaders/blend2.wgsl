@@ -291,25 +291,50 @@ fn layer_colour_tint(px: vec4<f32>, tint: u32, fx: u32) -> vec4<f32> {
 }
 
 // --- Blend If -------------------------------------------------------------
-// The twin of mn_core::blendif (`weight` + `dst_luma`). The coefficients are
-// `lum3`'s, deliberately: one answer per application to "how bright is this
-// pixel". `bi` arrives NORMALISED (lo <= hi, all clamped 0..1) — the CPU
-// normalises at every door into the document, so the shader never has to.
+// The twin of mn_core::blendif (`weight_for` = `channel_value` + `weight`).
+// The luma coefficients are `lum3`'s, deliberately: one answer per
+// application to "how bright is this pixel". `bi` arrives NORMALISED
+// (lo <= hi, all clamped 0..1) — the CPU normalises at every door into the
+// document, so the shader never has to.
 //
 // (0, 1, f) is the OPEN gate and every ungated draw carries it, which is why
 // there is no sentinel: the feather points outward, so an open range stays
-// open at any feather and the early-out below is exact.
-fn blendif_weight(bi: vec3<f32>, d: vec4<f32>) -> f32 {
+// open at any feather and the early-out below is exact. The arms word `m`
+// (`BlendIf::mode_bits`) is 0 for the underlying-luma pair, so an ungated
+// draw passes a plain zero there too.
+
+// One channel of a PREMULTIPLIED pixel, straight and clamped — the twin of
+// `blendif::channel_value`. Channel codes: 0 luma, 1 R, 2 G, 3 B.
+fn gate_value(px: vec4<f32>, ch: u32) -> f32 {
+    if px.a <= 0.0 {
+        return 0.0;
+    }
+    var v = dot(px.rgb, vec3<f32>(0.3, 0.59, 0.11));
+    if ch == 1u {
+        v = px.r;
+    } else if ch == 2u {
+        v = px.g;
+    } else if ch == 3u {
+        v = px.b;
+    }
+    return clamp(v / px.a, 0.0, 1.0);
+}
+
+// `s` is the layer's FINISHED source (reduce, tint and opacity already in
+// it) and `d` the destination snapshot — the same two pixels, at the same
+// point, that core::export hands `BlendIf::weight_for`.
+fn blendif_weight(bi: vec3<f32>, m: u32, s: vec4<f32>, d: vec4<f32>) -> f32 {
     let lo = bi.x;
     let hi = bi.y;
     let f = bi.z;
     if lo <= 0.0 && hi >= 1.0 {
         return 1.0;
     }
-    var l = 0.0;
-    if d.a > 0.0 {
-        l = clamp(dot(d.rgb, vec3<f32>(0.3, 0.59, 0.11)) / d.a, 0.0, 1.0);
+    var px = d;
+    if (m & 1u) != 0u {
+        px = s;
     }
+    let l = gate_value(px, (m >> 1u) & 3u);
     if l >= lo && l <= hi {
         return 1.0;
     }
@@ -332,6 +357,7 @@ struct VsIn {
     @location(4) tint: u32,
     @location(5) fx: u32,
     @location(6) blendif: vec3<f32>,
+    @location(7) blendif_mode: u32,
 }
 
 struct VsOut {
@@ -342,6 +368,7 @@ struct VsOut {
     @location(3) @interpolate(flat) tint: u32,
     @location(4) @interpolate(flat) fx: u32,
     @location(5) @interpolate(flat) blendif: vec3<f32>,
+    @location(6) @interpolate(flat) blendif_mode: u32,
 }
 
 @vertex
@@ -355,6 +382,7 @@ fn vs_main(in: VsIn) -> VsOut {
     out.tint = in.tint;
     out.fx = in.fx;
     out.blendif = in.blendif;
+    out.blendif_mode = in.blendif_mode;
     return out;
 }
 
@@ -373,7 +401,12 @@ fn fs_tile(in: VsOut) -> @location(0) vec4<f32> {
     // Blend If LAST, on the finished source — the same point in the same
     // order as the CPU compositor (core::export's plain-layer loop), where
     // the gate weighs `src` after opacity/mask/clip and before the blend.
-    let s = src * in.opacity * blendif_weight(in.blendif, d);
+    // The THIS-layer arm reads that same finished source: opacity is folded
+    // in FIRST so the pixel the gate reads here is the pixel core::export
+    // hands `weight_for`. (Unpremultiplied, so the scale does not move the
+    // value — but the two sides read the same number, not a similar one.)
+    let s0 = src * in.opacity;
+    let s = s0 * blendif_weight(in.blendif, in.blendif_mode, s0, d);
     return blend2(s, d, in.blend_mode);
 }
 
@@ -391,7 +424,7 @@ fn fs_blit(in: VsOut) -> @location(0) vec4<f32> {
     // the same point the CPU applies it, since core::export multiplies the
     // clip base's alpha into `src` before the gate. Folder blits always pass
     // the open gate: v1 offers Blend If on painted layers only.
-    let s = textureSample(group_tex, group_smp, uv) * in.opacity
-        * blendif_weight(in.blendif, d);
+    let s0 = textureSample(group_tex, group_smp, uv) * in.opacity;
+    let s = s0 * blendif_weight(in.blendif, in.blendif_mode, s0, d);
     return blend2(s, d, in.blend_mode);
 }

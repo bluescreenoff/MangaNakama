@@ -16,11 +16,13 @@ const SHADOWS: BlendIf = BlendIf {
     lo: 0.0,
     hi: 0.4,
     feather: 0.1,
+    ..BlendIf::FULL
 };
 const HIGHLIGHTS: BlendIf = BlendIf {
     lo: 0.6,
     hi: 1.0,
     feather: 0.1,
+    ..BlendIf::FULL
 };
 
 /// A fresh page with one ordinary layer. Returns the layer index and the
@@ -79,6 +81,7 @@ fn a_drags_many_ticks_coalesce_into_one_step() {
                 lo: 0.0,
                 hi: i as f32 / 10.0,
                 feather: 0.1,
+                ..BlendIf::FULL
             },
         );
     }
@@ -216,6 +219,7 @@ fn a_crossed_range_is_normalised_by_the_command() {
                 lo: 0.9,
                 hi: 0.1,
                 feather: 2.0,
+                ..BlendIf::FULL
             }),
         ),
     );
@@ -224,7 +228,8 @@ fn a_crossed_range_is_normalised_by_the_command() {
         Some(BlendIf {
             lo: 0.1,
             hi: 0.9,
-            feather: 1.0
+            feather: 1.0,
+            ..BlendIf::FULL
         })
     );
 }

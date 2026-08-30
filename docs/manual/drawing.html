@@ -507,24 +507,39 @@ moved inwards. Click the bar to add an interior stop, drag a stop down
 out of the bar to delete it. Six interior stops is the maximum.
 <span class="why">On a gradient LAYER the two ends are editable too —
 they are that layer's own parameters, not the tool's.</span></div>
-<div class="quirk"><b>Freeform takes TWO strokes, and needs no
+<div class="quirk"><b>Freeform is drawn lines, and needs no
 anti-aliasing switch.</b> Pick Gradient &#9656; Freeform and draw two
 lines: the first takes your main colour, the second your sub colour, and
-the ramp between them follows both shapes. Nothing is painted until the
-second line is released, so <kbd>Esc</kbd> (or switching tools) in the
-gap throws the whole thing away with nothing to undo &mdash; and the
-finished gradient is one undo press. <span class="why">Clip Studio's
-version of this reads two lines that are already pixels on a layer, which
-is why it makes you draw them with anti-aliasing turned OFF or it refuses
-to fill. Here the two lines are the gesture, never pixels, so there is no
-setting to get wrong and the result is smooth by construction.</span></div>
+the ramp between them follows both shapes. Press <kbd>Enter</kbd> &mdash;
+or click once away from the lines &mdash; to paint it. Nothing is painted
+before that, so <kbd>Esc</kbd> (or switching tools) throws the whole
+thing away with nothing to undo &mdash; and the finished gradient is one
+undo press. <span class="why">Clip Studio's version of this reads lines
+that are already pixels on a layer, which is why it makes you draw them
+with anti-aliasing turned OFF or it refuses to fill. Here the lines are
+the gesture, never pixels, so there is no setting to get wrong and the
+result is smooth by construction.</span></div>
+<div class="quirk"><b>A THIRD line and up carries its own colour.</b>
+Before pressing <kbd>Enter</kbd>, just draw another line: it takes your
+main colour as it stands at that moment, so the way to a four-colour
+field is pick, draw, pick, draw. With three or more lines there is no
+&ldquo;from&rdquo; and no &ldquo;to&rdquo; any more &mdash; every pixel
+is a blend of ALL the line colours, weighted by how near each line is, so
+the colour on a line is exactly that line's colour and the space between
+belongs to whichever lines are closest. <kbd>Backspace</kbd> takes the
+last line back one at a time. <span class="why">Because every line pulls
+on every pixel, even a far-away one, adding a line changes the whole
+page a little &mdash; that is the model, not a bug.</span></div>
 <div class="quirk"><b>Freeform ignores Edge process and Start from
 centre, and always bakes.</b> Those two describe what happens outside the
 length you dragged, and a freeform gradient has no outside &mdash; every
-pixel sits between the two guides. Everything else on the ramp (interior
-stops, Flip, mixing mode, mixing rate, dithering) works normally.
+pixel sits among the guides. With TWO lines everything else on the ramp
+(interior stops, Flip, mixing mode, mixing rate, dithering) works
+normally. With THREE or more the ramp's positions have nothing to
+describe, so interior stops, Flip and mixing rate are ignored as well;
+the mixing mode, brightness and dithering still apply.
 &ldquo;Create live layer&rdquo; is also ignored: a live gradient layer
-stores two endpoints, and there is nowhere in it to keep two drawn lines,
+stores two endpoints, and there is nowhere in it to keep drawn lines,
 so Freeform paints pixels and says so in the status bar. Beyond the two
 lines the colour eases back toward the middle of the ramp rather than
 holding flat &mdash; make a selection first if that reaches somewhere you

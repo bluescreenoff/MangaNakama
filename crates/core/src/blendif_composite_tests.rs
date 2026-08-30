@@ -8,7 +8,7 @@
 //! Its own file rather than more of `export.rs`, which is already 2400 lines
 //! and is the last module that wants another 250.
 
-use crate::blendif::BlendIf;
+use crate::blendif::{BlendIf, GateChannel, GateSource};
 use crate::doc::{Document, Layer};
 use crate::export::{self, Background};
 use crate::tile::{TILE_SIZE, TileIdx};
@@ -83,6 +83,7 @@ fn a_shadows_gate_shows_on_the_dark_page_and_hides_on_the_light_one() {
             lo: 0.0,
             hi: 0.5,
             feather: 0.0,
+            ..BlendIf::FULL
         }),
     );
 
@@ -104,6 +105,7 @@ fn a_highlights_gate_is_the_exact_complement() {
             lo: 0.5,
             hi: 1.0,
             feather: 0.0,
+            ..BlendIf::FULL
         }),
     );
     assert_eq!(px(&doc, 0, 0), [0, 0, 0], "black page: gated out");
@@ -125,6 +127,7 @@ fn the_feather_lands_the_layer_at_a_measured_half_strength() {
             lo: 0.0,
             hi: 0.5,
             feather: 0.5,
+            ..BlendIf::FULL
         }),
     );
     // Underlying luma 0.75, hi 0.5, feather 0.5 ⇒ w = 1 - 0.25/0.5 = 0.5.
@@ -172,6 +175,7 @@ fn the_full_composite_the_export_and_composite_pixel_agree() {
             lo: 0.1,
             hi: 0.6,
             feather: 0.3,
+            ..BlendIf::FULL
         }),
     );
     let screen = export::composite(&doc, Background::White);
@@ -213,6 +217,7 @@ fn folder_fixture(through: bool) -> Document {
             lo: 0.0,
             hi: 0.5,
             feather: 0.0,
+            ..BlendIf::FULL
         }),
     );
 
@@ -282,7 +287,8 @@ fn a_folders_gate_is_ignored_by_the_compositor() {
             Some(BlendIf {
                 lo: 0.9,
                 hi: 1.0,
-                feather: 0.0
+                feather: 0.0,
+                ..BlendIf::FULL
             })
         ),
         "the document door refuses a folder"
@@ -292,6 +298,7 @@ fn a_folders_gate_is_ignored_by_the_compositor() {
         lo: 0.9,
         hi: 1.0,
         feather: 0.0,
+        ..BlendIf::FULL
     });
     assert_eq!(doc.layers[f].gate(), None, "Layer::gate refuses folders");
     assert_eq!(px(&doc, 0, 0), [255, 0, 0], "the picture is unchanged");
@@ -313,9 +320,328 @@ fn the_gate_rides_the_stack_snapshot() {
             lo: 0.2,
             hi: 0.4,
             feather: 0.0,
+            ..BlendIf::FULL
         }),
     );
     assert!(doc.layers[1].gate().is_some());
     doc.undo();
     assert_eq!(doc.layers[1].blend_if, None, "one press took the gate off");
+}
+
+// --- round 2: the THIS-LAYER arm and the per-channel arms -----------------
+
+/// A flat mid-grey page under a layer whose four tiles are four different
+/// inks: black, white, pure red, pure blue. One render exercises both new
+/// arms — the this-layer luma (black vs white) and the channels (red vs
+/// blue, which a luma gate cannot tell apart from each other by brightness
+/// alone in the way a channel can).
+///
+/// Returns the document; layer 0 is the page, layer 1 the ink.
+fn grey_page_and_four_inks() -> Document {
+    let mut doc = Document::new(128, 128);
+    for ty in 0..2 {
+        for tx in 0..2 {
+            fill(&mut doc, 0, TileIdx::new(tx, ty), [0.5, 0.5, 0.5]);
+        }
+    }
+    doc.add_layer("ink");
+    fill(&mut doc, 1, TileIdx::new(0, 0), [0.0, 0.0, 0.0]);
+    fill(&mut doc, 1, TileIdx::new(1, 0), [1.0, 1.0, 1.0]);
+    fill(&mut doc, 1, TileIdx::new(0, 1), [1.0, 0.0, 0.0]);
+    fill(&mut doc, 1, TileIdx::new(1, 1), [0.0, 0.0, 1.0]);
+    doc
+}
+
+/// The page as it looks with the ink layer hidden — what "gated out" has to
+/// equal, exactly, at any pixel the gate closed.
+fn bare(doc: &Document, tx: i32, ty: i32) -> [u8; 3] {
+    let mut d = doc.clone();
+    d.set_layer_visible(1, false);
+    px(&d, tx, ty)
+}
+
+/// THE OTHER ARM. `GateSource::This` reads the layer's OWN ink, so a
+/// "lighter half only" gate keeps the white tile and drops the black one —
+/// on a page that is the same mid grey everywhere, which is what makes this
+/// unmistakably about the layer and not about what is under it.
+#[test]
+fn a_this_layer_gate_keeps_the_layers_own_light_ink_and_drops_its_dark_ink() {
+    let mut doc = grey_page_and_four_inks();
+    // Ungated first, so "dropped" is measured against ink that really was
+    // covering all four tiles.
+    for (tx, ty) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+        assert_ne!(px(&doc, tx, ty), bare(&doc, tx, ty), "ungated: ink shows");
+    }
+
+    doc.set_layer_blend_if(
+        1,
+        Some(BlendIf {
+            lo: 0.5,
+            hi: 1.0,
+            feather: 0.0,
+            source: GateSource::This,
+            ..BlendIf::FULL
+        }),
+    );
+
+    assert_eq!(px(&doc, 1, 0), [255, 255, 255], "its own white ink stays");
+    assert_eq!(
+        px(&doc, 0, 0),
+        bare(&doc, 0, 0),
+        "its own black ink is gone, and the page is untouched where it was"
+    );
+    // The SAME band read from the underlying page instead keeps everything:
+    // the page is 0.5 grey, inside 0.5..1, everywhere. That is the proof
+    // the arm is doing the choosing, not the numbers.
+    doc.set_layer_blend_if(
+        1,
+        Some(BlendIf {
+            lo: 0.5,
+            hi: 1.0,
+            feather: 0.0,
+            ..BlendIf::FULL
+        }),
+    );
+    assert_eq!(px(&doc, 0, 0), [0, 0, 0], "underlying: the black ink shows");
+}
+
+/// The this-layer arm reads the STRAIGHT value, so pulling the layer's
+/// opacity down does not slide its own gate along the range. A gate that
+/// read the premultiplied pixel would drop this white ink the moment the
+/// opacity left 100%, which is the bug this test exists for.
+#[test]
+fn a_this_layer_gate_does_not_move_when_the_opacity_comes_down() {
+    let mut doc = grey_page_and_four_inks();
+    doc.set_layer_blend_if(
+        1,
+        Some(BlendIf {
+            lo: 0.9,
+            hi: 1.0,
+            feather: 0.0,
+            source: GateSource::This,
+            ..BlendIf::FULL
+        }),
+    );
+    assert_eq!(px(&doc, 1, 0), [255, 255, 255], "full opacity: white ink");
+    doc.set_layer_opacity(1, 0.5);
+    // White at half opacity over 0.5 grey: 0.5 + 0.5·0.5 = 0.75 → 191.
+    assert_eq!(
+        px(&doc, 1, 0),
+        [191, 191, 191],
+        "half opacity: still passing, just half strength"
+    );
+    // …and the ink the gate really does refuse is still refused.
+    assert_eq!(px(&doc, 0, 0), bare(&doc, 0, 0), "black ink still gated out");
+}
+
+/// The per-channel arms, through the compositor. Red ink and blue ink have
+/// nearly the same brightness by the house luma, so a "high red" gate keeps
+/// the red tile and drops the blue one where a brightness gate cannot.
+#[test]
+fn a_channel_gate_picks_the_channel_a_brightness_gate_cannot() {
+    let mut doc = grey_page_and_four_inks();
+    doc.set_layer_blend_if(
+        1,
+        Some(BlendIf {
+            lo: 0.9,
+            hi: 1.0,
+            feather: 0.0,
+            source: GateSource::This,
+            channel: GateChannel::R,
+        }),
+    );
+    assert_eq!(px(&doc, 0, 1), [255, 0, 0], "red ink: red is 1, it shows");
+    assert_eq!(px(&doc, 1, 1), bare(&doc, 1, 1), "blue ink: red is 0, gone");
+    // White has red 1 too, black has red 0 — the channel, not the colour.
+    assert_eq!(px(&doc, 1, 0), [255, 255, 255]);
+    assert_eq!(px(&doc, 0, 0), bare(&doc, 0, 0));
+
+    // The blue channel is the exact mirror, or the test above could pass on
+    // a gate that reads any channel at all.
+    doc.set_layer_blend_if(
+        1,
+        Some(BlendIf {
+            lo: 0.9,
+            hi: 1.0,
+            feather: 0.0,
+            source: GateSource::This,
+            channel: GateChannel::B,
+        }),
+    );
+    assert_eq!(px(&doc, 1, 1), [0, 0, 255], "blue ink shows on blue");
+    assert_eq!(px(&doc, 0, 1), bare(&doc, 0, 1), "red ink does not");
+}
+
+/// The UNDERLYING arm on a channel: the page decides, per channel. A tone
+/// that only lands where the page is blue — the job the luma arm cannot do
+/// at all, because a saturated blue and a mid grey are the same brightness.
+#[test]
+fn a_channel_gate_reads_the_underlying_page_too() {
+    let mut doc = Document::new(128, 128);
+    // Left tiles: blue page. Right tiles: red page. Both are dark by luma.
+    fill(&mut doc, 0, TileIdx::new(0, 0), [0.0, 0.0, 1.0]);
+    fill(&mut doc, 0, TileIdx::new(1, 0), [1.0, 0.0, 0.0]);
+    fill(&mut doc, 0, TileIdx::new(0, 1), [0.0, 0.0, 1.0]);
+    fill(&mut doc, 0, TileIdx::new(1, 1), [1.0, 0.0, 0.0]);
+    doc.add_layer("tone");
+    for ty in 0..2 {
+        for tx in 0..2 {
+            fill(&mut doc, 1, TileIdx::new(tx, ty), [0.0, 1.0, 0.0]);
+        }
+    }
+    doc.set_layer_blend_if(
+        1,
+        Some(BlendIf {
+            lo: 0.5,
+            hi: 1.0,
+            feather: 0.0,
+            channel: GateChannel::B,
+            ..BlendIf::FULL
+        }),
+    );
+    assert_eq!(px(&doc, 0, 0), [0, 255, 0], "over blue page: the tone lands");
+    assert_eq!(px(&doc, 1, 0), [255, 0, 0], "over red page: nothing at all");
+}
+
+// --- the untested corner: a GATED BREAKOUT layer --------------------------
+
+/// A frame folder over the LEFT half of the page with one child that
+/// escapes it, painted solid red across the whole canvas. The page outside
+/// the panel is black in the top tile and white in the bottom one, so the
+/// gate has both answers to give out there — where only the ESCAPED ink can
+/// reach.
+///
+/// Returns `(doc, escapee)`.
+fn escaping_red_over_a_split_page() -> (Document, usize) {
+    let mut doc = Document::new(128, 128);
+    // Under the panel: mid grey. Outside it: black over white.
+    fill(&mut doc, 0, TileIdx::new(0, 0), [0.5, 0.5, 0.5]);
+    fill(&mut doc, 0, TileIdx::new(0, 1), [0.5, 0.5, 0.5]);
+    fill(&mut doc, 0, TileIdx::new(1, 0), [0.0, 0.0, 0.0]);
+    fill(&mut doc, 0, TileIdx::new(1, 1), [1.0, 1.0, 1.0]);
+    // `fill_white = false`: no white base inside the panel, so the page
+    // under the folder is the page, not a fresh sheet.
+    doc.add_frame_folder_with(
+        "panel",
+        crate::frame::FrameSet::single_rect([4.0, 4.0, 60.0, 124.0], 2.0),
+        false,
+    );
+    let escapee = doc.layers.len() - 2;
+    assert!(doc.set_layer_escape(escapee, true), "the breakout is on");
+    for ty in 0..2 {
+        for tx in 0..2 {
+            fill(&mut doc, escapee, TileIdx::new(tx, ty), [1.0, 0.0, 0.0]);
+        }
+    }
+    (doc, escapee)
+}
+
+/// **The corner two features share and neither one owned.** A breakout
+/// layer re-seats itself in `composite_order`, so its gate is evaluated
+/// against a DIFFERENT destination than the one under its own seat — the
+/// page it burst out over. Both halves of that are asserted on the
+/// COMPOSITE, not on the layer's tiles: the tiles are solid red everywhere
+/// either way, so a tile assertion would pass while the page hid the layer
+/// (the part-19 trap).
+#[test]
+fn a_gated_breakout_is_gated_against_the_page_it_burst_out_over() {
+    let (mut doc, escapee) = escaping_red_over_a_split_page();
+
+    // Control 1: with the gate off, the escaped red covers the page outside
+    // the panel — top and bottom alike.
+    assert_eq!(px(&doc, 1, 0), [255, 0, 0], "escaped over the black page");
+    assert_eq!(px(&doc, 1, 1), [255, 0, 0], "escaped over the white page");
+
+    // Control 2: without the BREAKOUT, the panel clips it and nothing of it
+    // reaches out there at all — so the ink asserted on below is genuinely
+    // the escaped half and not some leak.
+    let mut clipped = doc.clone();
+    assert!(clipped.set_layer_escape(escapee, false));
+    assert_eq!(px(&clipped, 1, 0), [0, 0, 0], "clipped: the black page only");
+    assert_eq!(px(&clipped, 1, 1), [255, 255, 255], "and the white page");
+
+    // THE TEST: shadows only. The escaped ink survives over the black page
+    // and is gone over the white one.
+    doc.set_layer_blend_if(
+        escapee,
+        Some(BlendIf {
+            lo: 0.0,
+            hi: 0.5,
+            feather: 0.0,
+            ..BlendIf::FULL
+        }),
+    );
+    assert_eq!(px(&doc, 1, 0), [255, 0, 0], "gate passed over the black page");
+    assert_eq!(
+        px(&doc, 1, 1),
+        [255, 255, 255],
+        "gated out over the white page — the layer's tile there is still \
+         solid red, and the COMPOSITE is what has to show none of it"
+    );
+}
+
+/// The same corner with the mask CAP on: the layer composites twice, so the
+/// gate runs twice against two different destinations — the page at the
+/// escaped seat, and the folder's own (empty) group at its own seat. Both
+/// halves are pinned, because a gate applied to only one of them would look
+/// right in half the page.
+#[test]
+fn a_mask_capped_breakout_is_gated_on_both_of_its_seats() {
+    let (mut doc, escapee) = escaping_red_over_a_split_page();
+    // Let the RIGHT tiles out, hold the left ones in. An absent tile is
+    // full coverage, so both halves have to be written explicitly.
+    let mut m = crate::doc::LayerMask {
+        tiles: std::collections::HashMap::new(),
+        enabled: true,
+        revision: crate::tile::next_revision(),
+    };
+    for (idx, c) in [
+        (TileIdx::new(0, 0), 0u16),
+        (TileIdx::new(0, 1), 0),
+        (TileIdx::new(1, 0), 32768),
+        (TileIdx::new(1, 1), 32768),
+    ] {
+        let mut t = crate::tile::Tile::new_transparent();
+        for y in 0..TILE_SIZE {
+            for x in 0..TILE_SIZE {
+                t.set_pixel(x, y, [c, c, c, c]);
+            }
+        }
+        m.tiles.insert(idx, std::sync::Arc::new(t));
+    }
+    doc.layers[escapee].mask = Some(m);
+    assert!(
+        doc.layers[escapee].breakout_mask().is_some(),
+        "the cap is live, so the layer composites twice"
+    );
+
+    doc.set_layer_blend_if(
+        escapee,
+        Some(BlendIf {
+            lo: 0.0,
+            hi: 0.5,
+            feather: 0.0,
+            ..BlendIf::FULL
+        }),
+    );
+    // The OUT half, at the escaped seat, gated against the page.
+    assert_eq!(px(&doc, 1, 0), [255, 0, 0], "out half over the black page");
+    assert_eq!(px(&doc, 1, 1), [255, 255, 255], "out half over the white one");
+    // The IN half, at its own seat inside the SEALED folder: the underlying
+    // is the group's own content, which is empty — luma 0, in range, so the
+    // shadows gate passes it and the panel shows red over its grey page.
+    assert_eq!(px(&doc, 0, 0), [255, 0, 0], "in half, gated against the group");
+    // And a gate the group cannot satisfy shuts the IN half without
+    // touching the OUT half over the black page.
+    doc.set_layer_blend_if(
+        escapee,
+        Some(BlendIf {
+            lo: 0.9,
+            hi: 1.0,
+            feather: 0.0,
+            ..BlendIf::FULL
+        }),
+    );
+    assert_eq!(px(&doc, 0, 0), [128, 128, 128], "in half gated out: the page");
+    assert_eq!(px(&doc, 1, 1), [255, 0, 0], "out half over the white page");
 }

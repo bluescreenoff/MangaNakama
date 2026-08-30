@@ -519,6 +519,178 @@ fn a_tile_map_separable_agrees_with_the_region_path() {
     }
 }
 
+/// The smear family (`Kernel::Smear`) against `Filter::run`.
+///
+/// **A tolerance, not equality, and the reason is the reverse of the box
+/// passes'.** `BoxPass` is integers all the way down, so those two sides
+/// produce the same bits. A smear averages `n` BILINEAR taps in f32, and the
+/// two things that could have made it much worse are already gone from the
+/// shader: the sample matrices are built on the host, so nothing here
+/// evaluates `sin`/`cos` (WGSL promises them only to 2⁻¹¹ absolute, which at
+/// a page's radius is a large fraction of a pixel of drift), and the tap
+/// weights are applied in the reference's own association (`(p·wx)·wy`, four
+/// corners summed before joining the accumulator).
+///
+/// What is left is sub-ULP: the shader may contract `c + m·u` into an FMA
+/// where the Rust does not, which moves a sample position by ~1e-7 px and
+/// therefore a tap weight by ~1e-7. Against a fix15 range of 32768 that is
+/// ~0.003 of a unit — visible only when the final `+ 0.5` was already sitting
+/// on a rounding boundary, i.e. ±1. Two is the bar, the same one the colour
+/// ops carry for the same class of reason.
+///
+/// Measured, and the two adapters make the argument for it: **max delta 1**
+/// on the Intel UHD 620 / DX12, on ~0.4 % of channels, and **max delta 0** —
+/// exact — on WARP, which does not contract. A transcription error would not
+/// have that shape; it would be wrong on both.
+fn smear_parity(f: Filter, w: usize, h: usize) {
+    let _g = gpu_guard();
+    let Some(mut r) = renderer() else { return };
+    let base = raster(w, h);
+    let mut want = base.clone();
+    f.run(&mut want, 0, 0);
+
+    let s = f.smear_samples(w, h).expect("a smear filter");
+    let mut got = base.clone();
+    assert!(
+        r.run_region_kernel(Kernel::Smear(&s), &mut got.px, w, h),
+        "{} declined on a supported adapter",
+        f.label()
+    );
+
+    let worst = got
+        .px
+        .iter()
+        .zip(&want.px)
+        .map(|(g, c)| (*g as i32 - *c as i32).abs())
+        .max()
+        .unwrap_or(0);
+    let off = got
+        .px
+        .iter()
+        .zip(&want.px)
+        .filter(|(g, c)| g != c)
+        .count();
+    println!(
+        "[parity] {:<26} max delta {worst}  ({off} of {} channels differ)",
+        f.label(),
+        got.px.len()
+    );
+    assert!(
+        worst <= 2,
+        "{}: {worst} fix15 units off the CPU smear — f32 contraction is worth \
+         ±1, not this",
+        f.label()
+    );
+    // …and the result has to BE a smear, not a copy that trivially matches
+    // to within the tolerance.
+    assert_ne!(got.px, base.px, "{} did nothing", f.label());
+}
+
+#[test]
+fn radial_blur_parity_matches_the_cpu_smear() {
+    smear_parity(Filter::RadialBlur { strength: 0.5 }, 200, 160);
+}
+
+#[test]
+fn spin_blur_parity_matches_the_cpu_smear() {
+    // 30° at this size is 48 samples — the clamp's top end, so the tap loop
+    // runs as long as it ever does.
+    smear_parity(Filter::SpinBlur { angle_deg: 30.0 }, 192, 192);
+}
+
+/// A gentle smear is the case where the taps pile up near the pixel itself
+/// and the `+ 0.5` sits on a boundary most often — the worst case for the
+/// tolerance, and the one a real page mostly asks for.
+#[test]
+fn a_gentle_smear_stays_inside_the_tolerance() {
+    smear_parity(Filter::RadialBlur { strength: 0.08 }, 150, 130);
+    smear_parity(Filter::SpinBlur { angle_deg: 2.0 }, 150, 130);
+}
+
+/// A smear cannot be banded — its taps land anywhere in the region — so a
+/// region past the chunk ceiling must DECLINE rather than produce a
+/// per-band answer that would be wrong everywhere the taps crossed a band.
+#[test]
+fn a_smear_past_the_chunk_ceiling_declines() {
+    let _g = gpu_guard();
+    let Some(mut r) = renderer() else { return };
+    let f = Filter::RadialBlur { strength: 0.5 };
+    let s = f.smear_samples(128, 200).expect("a smear filter");
+    let mut px = raster(128, 200);
+    let before = px.clone();
+    r.debug_region_chunk_px(Some(1024)); // 25 600 px of region, 1 024 of budget
+    assert!(!r.run_region_kernel(Kernel::Smear(&s), &mut px.px, 128, 200));
+    assert_eq!(px, before, "a declined smear wrote through the caller's buffer");
+    // The ceiling is the only reason it declined: restore it and the same
+    // job runs.
+    r.debug_region_chunk_px(None);
+    assert!(r.run_region_kernel(Kernel::Smear(&s), &mut px.px, 128, 200));
+}
+
+/// FL-014 end to end: an unsharp applied with the GPU seam lent to
+/// `apply_filter_with` must be the same PAGE as `apply_filter`'s. The seam
+/// never sees the unsharp — it sees the Gaussian half, byte-identical by the
+/// box-pass argument — and `filter::run_split` does the combine, so this is
+/// the pin that the split did not change the operator.
+#[test]
+fn the_unsharp_split_is_byte_identical_through_the_gpu_blur() {
+    let _g = gpu_guard();
+    let Some(mut r) = renderer() else { return };
+    let f = Filter::Unsharp {
+        radius: 4.0,
+        amount: 1.5,
+    };
+    let page = || {
+        let mut doc = mn_core::Document::new(256, 256);
+        let mut s = 24680u32;
+        let mut next = || {
+            s ^= s << 13;
+            s ^= s >> 17;
+            s ^= s << 5;
+            s
+        };
+        for y in 40..200i32 {
+            for x in 30..210i32 {
+                let idx = TileIdx::of_pixel(x, y);
+                let (ox, oy) = idx.origin();
+                let o = ((y - oy) as usize * TILE_SIZE + (x - ox) as usize) * 4;
+                let a = if (x / 9 + y / 6) % 3 == 0 {
+                    32768
+                } else {
+                    next() % 4096
+                };
+                let d = doc.layers[0].tile_mut(idx).data_mut();
+                for c in 0..3 {
+                    d[o + c] = (next() % (a + 1)) as u16;
+                }
+                d[o + 3] = a as u16;
+            }
+        }
+        doc
+    };
+
+    let mut want = page();
+    assert!(want.apply_filter(f));
+
+    let mut halves = 0usize;
+    let mut got = page();
+    assert!(got.apply_filter_with(f, &mut |g, buf| {
+        let Some(passes) = g.separable_passes() else {
+            return false;
+        };
+        halves += 1;
+        r.run_region_kernel(Kernel::Separable(&passes), &mut buf.px, buf.w, buf.h)
+    }));
+    assert_eq!(halves, 1, "the blur half was never offered to the seam");
+
+    let a = mn_core::export::composite(&want, mn_core::export::Background::White);
+    let b = mn_core::export::composite(&got, mn_core::export::Background::White);
+    assert!(
+        a.pixels().zip(b.pixels()).all(|(p, q)| p.0 == q.0),
+        "the GPU-blurred unsharp is a different page from the reference"
+    );
+}
+
 #[test]
 fn routing_declines_software_adapters_and_small_jobs() {
     let _g = gpu_guard();

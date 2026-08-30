@@ -411,6 +411,11 @@ struct QuadInstance {
     /// feather. Only `blend2.wgsl` declares location 6; the fixed-function
     /// pipelines share this vertex layout and simply do not read it.
     blendif: [f32; 3],
+    /// Blend If arms — `BlendIf::mode_bits`: bit 0 = source (underlying /
+    /// this layer), bits 1–2 = channel (blend2.wgsl location 7). `0` is
+    /// underlying-luma, which is both the default pair and what every
+    /// ungated draw carries, so there is no sentinel here either.
+    blendif_mode: u32,
 }
 
 /// The open Blend If gate — `BlendIf::FULL` as the shader reads it, and the
@@ -418,6 +423,11 @@ struct QuadInstance {
 /// of the eight sites that pass it, so "no gate" is one thing with one
 /// definition instead of a literal somebody could get wrong once.
 const BLENDIF_OPEN: [f32; 3] = [0.0, 1.0, 0.0];
+
+/// The arms word an ungated draw carries: underlying, luma — the pair
+/// `BlendIf::mode_bits` numbers 0. Paired with [`BLENDIF_OPEN`] at every one
+/// of those sites, never apart from it.
+const BLENDIF_MODE_NONE: u32 = 0;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -561,7 +571,7 @@ struct LayerSig {
     /// `Layer::gate()` and not the raw field, so that turning the gate OFF
     /// (the dangerous direction — the tiles stop being weighted and nothing
     /// is damaged) and widening it to the open range are the same event.
-    blend_if: Option<[u32; 3]>,
+    blend_if: Option<[u32; 4]>,
 }
 
 /// Which raster of a layer a cached tile texture holds.
@@ -1175,6 +1185,12 @@ impl Renderer {
                     format: wgpu::VertexFormat::Float32x3,
                     offset: 36,
                     shader_location: 6,
+                },
+                // Blend If arms (source + channel), likewise blend2-only.
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Uint32,
+                    offset: 48,
+                    shader_location: 7,
                 },
             ],
         };
@@ -2691,6 +2707,7 @@ impl Renderer {
                     opacity: if paper.visible { 1.0 } else { 0.0 },
                     blend_mode: 0,
                     blendif: BLENDIF_OPEN,
+                    blendif_mode: BLENDIF_MODE_NONE,
                 });
             }
         } else {
@@ -2747,6 +2764,7 @@ impl Renderer {
                                 opacity: layer.opacity.clamp(0.0, 1.0),
                                 blend_mode: 0,
                                 blendif: BLENDIF_OPEN,
+                                blendif_mode: BLENDIF_MODE_NONE,
                             });
                         }
                         if cd > 0 {
@@ -2790,6 +2808,7 @@ impl Renderer {
                                 opacity: layer.opacity.clamp(0.0, 1.0),
                                 blend_mode: 0,
                                 blendif: BLENDIF_OPEN,
+                                blendif_mode: BLENDIF_MODE_NONE,
                             });
                         }
                         if d > 0 {
@@ -2817,6 +2836,7 @@ impl Renderer {
                                 opacity: 1.0,
                                 blend_mode: 0,
                                 blendif: BLENDIF_OPEN,
+                                blendif_mode: BLENDIF_MODE_NONE,
                             });
                         }
                     }
@@ -2861,6 +2881,7 @@ impl Renderer {
                                 opacity: layer.opacity.clamp(0.0, 1.0),
                                 blend_mode: slot as u32,
                                 blendif: BLENDIF_OPEN,
+                                blendif_mode: BLENDIF_MODE_NONE,
                             });
                         }
                         if d > 0 {
@@ -2904,6 +2925,7 @@ impl Renderer {
                             opacity: layer.opacity.clamp(0.0, 1.0),
                             blend_mode: 0,
                             blendif: BLENDIF_OPEN,
+                            blendif_mode: BLENDIF_MODE_NONE,
                         });
                     }
                     if d > 0 {
@@ -2954,6 +2976,7 @@ impl Renderer {
                             opacity: 1.0,
                             blend_mode: 0,
                             blendif: BLENDIF_OPEN,
+                            blendif_mode: BLENDIF_MODE_NONE,
                         });
                     }
                     for idx in &touched {
@@ -2986,6 +3009,7 @@ impl Renderer {
                             opacity: 1.0,
                             blend_mode: 0,
                             blendif: BLENDIF_OPEN,
+                            blendif_mode: BLENDIF_MODE_NONE,
                         });
                     }
                 }
@@ -3016,6 +3040,7 @@ impl Renderer {
                         opacity: layer.opacity.clamp(0.0, 1.0),
                         blend_mode: slot as u32,
                         blendif: gate.map_or(BLENDIF_OPEN, |b| b.packed()),
+                        blendif_mode: gate.map_or(BLENDIF_MODE_NONE, |b| b.mode_bits()),
                     });
                 }
                 if d > 0 {
@@ -3087,6 +3112,7 @@ impl Renderer {
                     opacity: layer.opacity.clamp(0.0, 1.0),
                     blend_mode: slot as u32,
                     blendif: gate.map_or(BLENDIF_OPEN, |b| b.packed()),
+                    blendif_mode: gate.map_or(BLENDIF_MODE_NONE, |b| b.mode_bits()),
                 });
             }
             if any && cd > 0 {

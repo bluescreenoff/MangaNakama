@@ -3,7 +3,7 @@
 //! entry point is still reached through [`super::Filter`]'s dispatch, and
 //! the halo each one needs is still declared by [`super::Filter::reach`].
 
-use super::{MAX_SIGMA, MotionDir, MotionMode, Raster, sample_bilinear};
+use super::{Filter, MAX_SIGMA, MotionDir, MotionMode, Raster, RasterKernel, Smear, sample_bilinear};
 use crate::tile::TILE_CHANNELS;
 
 // ----------------------------------------------------------------- kernels --
@@ -251,26 +251,90 @@ pub(super) fn motion(buf: &mut Raster, angle_deg: f32, length: f32, dir: MotionD
     }
 }
 
+/// The centre both smears turn about: the buffer's own centre.
+fn smear_centre(w: usize, h: usize) -> [f32; 2] {
+    [(w as f32 - 1.0) * 0.5, (h as f32 - 1.0) * 0.5]
+}
+
 /// FL-016: the zoom smear — dest pixel p averages the segment of its own
 /// ray from `p · (1−k)` to `p` (k = strength), uniformly weighted over
 /// taps that scale with the smear. Premultiplied averaging, exactly the
 /// motion blur's arithmetic walked radially instead of linearly.
-pub(super) fn radial_blur(buf: &mut Raster, strength: f32) {
+///
+/// Expressed as a [`Smear`] — one scale matrix per sample — because that is
+/// the form the GPU kernel can run; [`super::Filter::smear_samples`] is the
+/// seam and this is the only place the numbers live.
+pub(super) fn radial_samples(w: usize, h: usize, strength: f32) -> Option<Smear> {
     let k = strength.clamp(0.0, 0.95);
     if k <= 0.02 {
+        return None;
+    }
+    let n = ((k * w.min(h) as f32).ceil() as usize).clamp(8, 48);
+    Some(Smear {
+        centre: smear_centre(w, h),
+        mats: (0..n)
+            .map(|i| {
+                let t = 1.0 - k * (i as f32) / ((n - 1) as f32);
+                [t, 0.0, 0.0, t]
+            })
+            .collect(),
+    })
+}
+
+/// FL-017: the rotational smear — dest pixel p averages the arc of ±a
+/// about the centre at its own radius. Near the centre the arc is short
+/// (the samples collapse onto p), which is physically right: a spin
+/// blurs the rim far more than the axle.
+///
+/// The arc is spelled as a ROTATION MATRIX per sample rather than as the
+/// polar round trip (`r = hypot(u)`, `θ₀ = atan2(u)`, sample at
+/// `c + r·(cos, sin)(θ₀ + φ)`) it started as. Same operator — rotating `u`
+/// by φ is what that computes — but the per-sample form has two properties
+/// the polar one lacks: the transcendentals are evaluated `n` times for the
+/// whole buffer instead of `2n + 2` times per pixel, and the inner loop is
+/// left with nothing but multiplies and adds, which is what makes the
+/// operator expressible on the GPU at all (WGSL's `sin`/`cos` are only
+/// promised to 2⁻¹¹ absolute, so a shader that recomputed the angle would
+/// land up to `r/2048` pixels away from the CPU and no honest tolerance
+/// could cover it).
+pub(super) fn spin_samples(w: usize, h: usize, angle_deg: f32) -> Option<Smear> {
+    let a = angle_deg.clamp(0.5, 180.0).to_radians();
+    let centre = smear_centre(w, h);
+    let max_r = centre[0].max(centre[1]);
+    let n = ((a * max_r).ceil() as usize).clamp(8, 48);
+    Some(Smear {
+        centre,
+        mats: (0..n)
+            .map(|i| {
+                let t = (i as f32) / ((n - 1) as f32) * 2.0 - 1.0;
+                let (s, c) = (a * t).sin_cos();
+                [c, -s, s, c]
+            })
+            .collect(),
+    })
+}
+
+/// The CPU reference for a [`Smear`]: dest pixel p averages one bilinear tap
+/// per sample matrix, taken at `centre + M·(p − centre)`. Uniform weights —
+/// the `n` samples ARE the weighting, exactly as the two smears had it.
+pub(super) fn smear(buf: &mut Raster, s: &Smear) {
+    let n = s.mats.len();
+    if n == 0 {
         return;
     }
-    let n = ((k * buf.w.min(buf.h) as f32).ceil() as usize).clamp(8, 48);
-    let c = [(buf.w as f32 - 1.0) * 0.5, (buf.h as f32 - 1.0) * 0.5];
+    let c = s.centre;
     let mut src = Raster::new(buf.w, buf.h);
     std::mem::swap(buf, &mut src);
     for y in 0..src.h {
         for x in 0..src.w {
             let (ux, uy) = (x as f32 - c[0], y as f32 - c[1]);
             let mut acc = [0f32; TILE_CHANNELS];
-            for i in 0..n {
-                let t = 1.0 - k * (i as f32) / ((n - 1) as f32);
-                let p = sample_bilinear(&src, c[0] + ux * t, c[1] + uy * t);
+            for m in &s.mats {
+                let p = sample_bilinear(
+                    &src,
+                    c[0] + m[0] * ux + m[1] * uy,
+                    c[1] + m[2] * ux + m[3] * uy,
+                );
                 for (a, v) in acc.iter_mut().zip(p) {
                     *a += v;
                 }
@@ -278,40 +342,6 @@ pub(super) fn radial_blur(buf: &mut Raster, strength: f32) {
             let mut out = [0u16; TILE_CHANNELS];
             for (o, a) in out.iter_mut().zip(acc) {
                 *o = (a / n as f32 + 0.5).clamp(0.0, u16::MAX as f32) as u16;
-            }
-            buf.set_pixel(x, y, out);
-        }
-    }
-}
-
-/// FL-017: the rotational smear — dest pixel p averages the arc of ±a
-/// about the centre at its own radius. Near the centre the arc is short
-/// (the samples collapse onto p), which is physically right: a spin
-/// blurs the rim far more than the axle.
-pub(super) fn spin_blur(buf: &mut Raster, angle_deg: f32) {
-    let a = angle_deg.clamp(0.5, 180.0).to_radians();
-    let c = [(buf.w as f32 - 1.0) * 0.5, (buf.h as f32 - 1.0) * 0.5];
-    let max_r = (c[0].max(c[1])) as f32;
-    let n = ((a * max_r).ceil() as usize).clamp(8, 48);
-    let mut src = Raster::new(buf.w, buf.h);
-    std::mem::swap(buf, &mut src);
-    for y in 0..src.h {
-        for x in 0..src.w {
-            let (ux, uy) = (x as f32 - c[0], y as f32 - c[1]);
-            let r = ux.hypot(uy);
-            let th0 = uy.atan2(ux);
-            let mut acc = [0f32; TILE_CHANNELS];
-            for i in 0..n {
-                let t = (i as f32) / ((n - 1) as f32) * 2.0 - 1.0;
-                let th = th0 + a * t;
-                let p = sample_bilinear(&src, c[0] + r * th.cos(), c[1] + r * th.sin());
-                for (acc_v, v) in acc.iter_mut().zip(p) {
-                    *acc_v += v;
-                }
-            }
-            let mut out = [0u16; TILE_CHANNELS];
-            for (o, av) in out.iter_mut().zip(acc) {
-                *o = (av / n as f32 + 0.5).clamp(0.0, u16::MAX as f32) as u16;
             }
             buf.set_pixel(x, y, out);
         }
@@ -337,6 +367,41 @@ pub(super) fn unsharp(buf: &mut Raster, radius: f32, amount: f32) {
     }
     let orig = buf.clone();
     gaussian(buf, radius);
+    combine(&orig, buf, amount);
+}
+
+/// FL-014 for a host that has a blur kernel: the blur half goes through the
+/// lent kernel as the [`Filter::Gaussian`] it literally is, and the combine
+/// runs here. Byte-identical to [`unsharp`] by construction — same
+/// `box_radii`, same [`combine`] — as long as the kernel's blur is, which is
+/// what the separable seam already guarantees.
+///
+/// Returns false when the kernel declined, having touched nothing: the
+/// contract is that a declining kernel leaves the buffer alone, so the
+/// caller's `Filter::run` fallback still sees original pixels. Not "blur on
+/// the CPU and combine here" on that path, because that would be the whole
+/// reference anyway with an extra buffer copy.
+pub(super) fn unsharp_split(
+    buf: &mut Raster,
+    radius: f32,
+    amount: f32,
+    run: &mut RasterKernel<'_>,
+) -> bool {
+    let amount = amount.clamp(0.0, 10.0);
+    if amount <= 0.01 || box_radii(radius).iter().all(|&r| r == 0) {
+        return false;
+    }
+    let orig = buf.clone();
+    if !run(Filter::Gaussian { sigma: radius }, buf) {
+        return false;
+    }
+    combine(&orig, buf, amount);
+    true
+}
+
+/// `out = orig + (orig − blur)·amount`, in place over the blurred buffer.
+/// The one copy of the arithmetic both unsharp paths run.
+fn combine(orig: &Raster, buf: &mut Raster, amount: f32) {
     for i in (0..buf.px.len()).step_by(TILE_CHANNELS) {
         let mut out = [0u16; TILE_CHANNELS];
         // Alpha (channel 3) first — it is the ceiling for the other three.

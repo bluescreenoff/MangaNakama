@@ -5536,6 +5536,90 @@ impl Document {
         true
     }
 
+    /// `FI-051` — the freeform gradient with THREE OR MORE guides, each
+    /// carrying its own colour. Every pixel is the inverse-distance blend of
+    /// the guide colours, so the field follows all of the drawn shapes at
+    /// once ([`crate::freeform::Multi`] for the maths and the cull).
+    ///
+    /// TWO guides are NOT blended here: they route to
+    /// [`Self::paint_gradient_freeform`], the shipped ramp path, which is
+    /// what carries the ramp's interior stops, flip and edge process. The
+    /// caller passes `ramp` for that case; with three or more guides only
+    /// its mixing space, brightness lift and dither are read (module doc).
+    ///
+    /// Same layer rules, selection clip and single undo step as the two-line
+    /// form. False on a refusing layer, on fewer than two guides, or when
+    /// any guide has no usable point.
+    pub fn paint_gradient_freeform_multi(
+        &mut self,
+        guides: &[crate::freeform::ColourGuide],
+        ramp: &crate::gradient::Ramp,
+    ) -> bool {
+        if let [a, b] = guides {
+            // The pinned two-line path, byte for byte — the ramp's ends are
+            // the two guides' colours, which is where the gesture put them.
+            let ramp = crate::gradient::Ramp::new(a.colour, b.colour, ramp.mid, ramp.opts);
+            return self.paint_gradient_freeform(&a.pts, &b.pts, &ramp);
+        }
+        if guides.len() < 2 || !self.paint_guard() {
+            return false;
+        }
+        let Some(field) = crate::freeform::Multi::new(guides) else {
+            return false;
+        };
+        let (mix, bright, dither) = (ramp.opts.mix, ramp.opts.bright, ramp.opts.dither);
+        let (w, h) = (self.size.0 as i32, self.size.1 as i32);
+        let sel = self.selection.clone();
+        let li = self.active;
+        let lock_alpha = self.layers[li].lock_alpha;
+        let hd = TILE_SIZE as f32 * 0.5 * std::f32::consts::SQRT_2;
+        let half = TILE_SIZE as f32 * 0.5;
+        self.begin_op();
+        for ty in 0..(h + TILE_SIZE as i32 - 1) / TILE_SIZE as i32 {
+            for tx in 0..(w + TILE_SIZE as i32 - 1) / TILE_SIZE as i32 {
+                let idx = TileIdx::new(tx, ty);
+                if let Some(s) = &sel {
+                    if s.tile_mask(idx).is_none() {
+                        continue;
+                    }
+                }
+                let (ox, oy) = idx.origin();
+                // Cull BEFORE `tile_mut`, as the two-line form does.
+                let win = field.window([ox as f32 + half, oy as f32 + half], hd);
+                let tile = self.layers[li].tile_mut(idx);
+                let data = tile.data_mut();
+                for p in 0..TILE_SIZE * TILE_SIZE {
+                    let x = ox + (p % TILE_SIZE) as i32;
+                    let y = oy + (p / TILE_SIZE) as i32;
+                    if x >= w || y >= h {
+                        continue;
+                    }
+                    let mut s = win.colour_at([x as f32 + 0.5, y as f32 + 0.5], mix, bright);
+                    if dither {
+                        // No ramp parameter to be "inside" of — the whole
+                        // field is interior, so the noise applies flat.
+                        let d = crate::gradient::dither_offset(x, y) / 255.0;
+                        for v in s.iter_mut() {
+                            *v = (*v + d).clamp(0.0, 1.0);
+                        }
+                    }
+                    // Premultiply, for the reason spelled out in
+                    // `paint_gradient_ramp`.
+                    let al = crate::blend::f32_to_fix15(s[3]);
+                    let pr = |v: f32| crate::blend::f32_to_fix15(v * s[3]).min(al);
+                    let c = [pr(s[0]), pr(s[1]), pr(s[2]), al];
+                    Self::over_pixel(&mut data[p * 4..p * 4 + 4], c);
+                }
+            }
+        }
+        self.mask_op_to_selection();
+        if lock_alpha {
+            self.mask_op_to_alpha();
+        }
+        self.end_op();
+        true
+    }
+
     /// Fill a closed polygon on the active layer (even-odd scanline, canvas
     /// px, anti-aliasing by 2x2 subsampling), src-over. Used by the Figure
     /// tool's "fill shape" option. One undo step; false on a refusing layer.

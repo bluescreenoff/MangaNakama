@@ -1186,8 +1186,10 @@ pub enum AppCmd {
     /// `LP-022` decrease-colour PREVIEW: display the layer as grey or 1-bit
     /// mono without converting a pixel. Screen only — never exported.
     SetLayerExpression(usize, mn_core::LayerExpression),
-    /// Blend If: set (or clear, with `None`) the layer's underlying-luminance
-    /// gate — it shows only where the composite BELOW it is in range.
+    /// Blend If: set (or clear, with `None`) the layer's gate — it shows only
+    /// where the pixel it measures is in range. Which pixel (the composite
+    /// BELOW it, or its own ink) and which value (brightness or one channel)
+    /// are the gate's own two arms.
     ///
     /// Unlike the layer colour and the expression preview beside it, this is
     /// NOT display-only: it changes the exported page, so it is undoable.

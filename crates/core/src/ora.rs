@@ -2677,6 +2677,7 @@ mod tests {
             lo: 0.125,
             hi: 0.625,
             feather: 0.25,
+            ..crate::blendif::BlendIf::FULL
         };
         let mut doc = crate::doc::Document::new(256, 256);
         doc.begin_op();
@@ -2706,6 +2707,80 @@ mod tests {
         // …and therefore an absent attribute loads as off, which is what
         // every file written before this round says.
         assert_eq!(roundtrip(&plain).layers[0].blend_if, None);
+    }
+
+    /// Round 2's arms ride the same blob, and — the load-bearing half — an
+    /// underlying-luma gate still writes EXACTLY what round 1 wrote. Both
+    /// new members are omitted at their defaults, so a page that does not
+    /// use the new arms is byte-identical to one saved before this round,
+    /// and a round-1 build reading a round-2 file finds nothing new in it.
+    #[test]
+    fn the_blend_if_arms_round_trip_and_are_omitted_when_unused() {
+        let mut doc = crate::doc::Document::new(128, 128);
+        doc.begin_op();
+        doc.layers[0]
+            .tile_mut(TileIdx::new(0, 0))
+            .set_pixel(4, 4, [0, 0, 0, 32768]);
+        doc.end_op();
+
+        // The default pair writes the round-1 blob and nothing else.
+        assert!(doc.set_layer_blend_if(
+            0,
+            Some(crate::blendif::BlendIf {
+                lo: 0.25,
+                hi: 0.75,
+                feather: 0.0,
+                ..crate::blendif::BlendIf::FULL
+            })
+        ));
+        let xml = stack_xml_of(&doc);
+        assert!(xml.contains("mnc-blendif=\""), "the gate is written");
+        assert!(
+            !xml.contains("source") && !xml.contains("channel"),
+            "an underlying-luma gate must write no arms at all: {xml}"
+        );
+
+        // A gate that DOES use them carries both across the round trip.
+        let g = crate::blendif::BlendIf {
+            lo: 0.125,
+            hi: 0.625,
+            feather: 0.25,
+            source: crate::blendif::GateSource::This,
+            channel: crate::blendif::GateChannel::G,
+        };
+        assert!(doc.set_layer_blend_if(0, Some(g)));
+        assert_eq!(roundtrip(&doc).layers[0].gate(), Some(g), "both arms came back");
+        let xml = stack_xml_of(&doc);
+        // XML-escaped, like every other JSON blob in the attribute list.
+        assert!(
+            xml.contains("&quot;source&quot;:&quot;This&quot;")
+                && xml.contains("&quot;channel&quot;:&quot;G&quot;"),
+            "spelled out: {xml}"
+        );
+    }
+
+    /// DOWNGRADE-SAFETY, from the other side: a file written by a build that
+    /// knows the arms opens on a build that does not (the members are simply
+    /// ignored), and a round-1 file opens here as the underlying-luma gate it
+    /// has always been. The unknown-member half is what serde does by
+    /// default, and a `deny_unknown_fields` added to `BlendIf` in a future
+    /// round would break every file in the wild — so it is pinned.
+    #[test]
+    fn an_unknown_blend_if_member_is_ignored_and_a_round_one_blob_still_loads() {
+        // A round-1 blob: no arms, and it must load as underlying-luma.
+        let old: crate::blendif::BlendIf =
+            serde_json::from_str(r#"{"lo":0.1,"hi":0.4,"feather":0.0}"#).unwrap();
+        assert!(old.source.is_underlying());
+        assert!(old.channel.is_luma());
+
+        // A blob from a FUTURE round with a member this build never heard
+        // of: the gate still loads, rather than the layer opening ungated.
+        let future: crate::blendif::BlendIf = serde_json::from_str(
+            r#"{"lo":0.1,"hi":0.4,"feather":0.0,"source":"This","invert":true}"#,
+        )
+        .expect("unknown members are ignored, not a parse failure");
+        assert_eq!(future.source, crate::blendif::GateSource::This);
+        assert_eq!(future.lo, 0.1);
     }
 
     /// v1 offers the gate on painted layers only. A hand-edited (or future)

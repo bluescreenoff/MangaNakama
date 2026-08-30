@@ -63,6 +63,50 @@ use crate::tile::{TILE_PIXELS, TILE_SIZE, Tile, TileIdx};
 /// worth on the GPU side of the seam.
 const DERIVE_BATCH: usize = 256;
 
+/// Ceiling on the below-composite source cache, in TILES.
+///
+/// The cache had no bound at all: `wanted` is the whole canvas for a
+/// maskless correction and every entry is 16 KB, so the map is canvas-sized
+/// and a big enough canvas is a big enough map. 16 384 tiles is 256 MB, and
+/// the number is picked so the case the cache exists for still fits whole —
+/// a maskless correction on a B4 page at 600 dpi is 6070 × 8598 px, i.e.
+/// 95 × 135 = 12 825 tiles, 205 MB. Above the cap (a 600-dpi double-width
+/// spread is 25 650 tiles; a resampled-up work more) the derive keeps the
+/// sources it already has and stops caching new ones, so a drag degrades to
+/// "the first 16 384 tiles are free" rather than growing until the machine
+/// swaps.
+///
+/// **Keep-what-you-have, not LRU, and the scan order is why.** A derive pass
+/// walks `wanted` once and touches every entry exactly once — the cyclic
+/// scan LRU is famously worst at: with a working set larger than the cache,
+/// each miss evicts precisely the entry the next tick asks for first and the
+/// hit rate is ZERO. A fixed retained set hits `cap / wanted` of the time on
+/// every tick instead, and costs no recency bookkeeping. Entries for tiles
+/// that stopped being wanted are already dropped, by falling out of the
+/// rebuilt map; this cap is only about the size of one pass's own set.
+const SRC_CACHE_TILES: usize = 16_384;
+
+/// The cap in force. Production always answers [`SRC_CACHE_TILES`]; the test
+/// hook is what lets a suite-sized canvas cross a cap without building the
+/// 64 Mpx document a real 16 384-tile crossing would need. Thread-local
+/// because cargo runs a binary's tests in parallel threads, and a global
+/// would leak one test's cap into another test's derive.
+fn src_cache_cap() -> usize {
+    #[cfg(test)]
+    {
+        let n = SRC_CAP_OVERRIDE.with(|c| c.get());
+        if n > 0 {
+            return n;
+        }
+    }
+    SRC_CACHE_TILES
+}
+
+#[cfg(test)]
+thread_local! {
+    static SRC_CAP_OVERRIDE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// One tile of correction work, as a kernel host sees it.
 ///
 /// `src` is the below-composite over paper (premultiplied fix15 RGBA,
@@ -328,6 +372,7 @@ impl Document {
 
         // Pass 1: keep what is still fresh, and collect the rest. Nothing is
         // composited or corrected here — this is the pointer-traffic pass.
+        let cap = src_cache_cap();
         let mut todo: Vec<TileIdx> = Vec::new();
         for idx in wanted {
             let key = tile_keys.get(&idx).copied().unwrap_or((0, 0));
@@ -336,7 +381,10 @@ impl Document {
             // empty tile re-derives on every pass.
             let old_key = old.tile_keys.get(&idx).copied().unwrap_or((0, 0));
             let src_fresh = !force_src && old_key == key;
-            if src_fresh && let Some(s) = old.src.remove(&idx) {
+            if src_fresh
+                && out_src.len() < cap
+                && let Some(s) = old.src.remove(&idx)
+            {
                 out_src.insert(idx, s);
             }
             if !force
@@ -371,7 +419,12 @@ impl Document {
                             oy,
                         );
                         let s: Arc<[u8]> = Arc::from(img.into_raw().into_boxed_slice());
-                        out_src.insert(idx, Arc::clone(&s));
+                        // Past the cap the source is used for this tile and
+                        // then dropped: correctness never depended on the
+                        // cache, only the drag's cost does.
+                        if out_src.len() < cap {
+                            out_src.insert(idx, Arc::clone(&s));
+                        }
                         s
                     }
                 };
@@ -853,6 +906,81 @@ mod tests {
             reference.pixels().zip(ragged.pixels()).all(|(a, b)| a.0 == b.0),
             "a ragged kernel result changed the page"
         );
+    }
+
+    /// The source cache is bounded. Before the cap it grew to one entry per
+    /// derived tile with nothing ever evicting it — canvas-sized, 16 KB
+    /// apiece — so this asserts the ceiling holds AND that crossing it does
+    /// not change a single derived pixel, because the cache was only ever an
+    /// optimisation.
+    #[test]
+    fn the_source_cache_stops_growing_at_its_cap() {
+        let mut doc = Document::new(256, 256); // 4 × 4 = 16 tiles of source
+        put(&mut doc, 0, 10, 10, [0.6, 0.6, 0.6, 1.0]);
+        let ci = doc.add_correction_layer(Adjust::Invert, false);
+        refresh(&mut doc);
+        assert_eq!(
+            doc.layers[ci].corr.as_ref().unwrap().src.len(),
+            16,
+            "uncapped, every derived tile caches its source"
+        );
+        let uncapped = crate::export::composite(&doc, crate::export::Background::White);
+
+        SRC_CAP_OVERRIDE.with(|c| c.set(5));
+        let mut capped = Document::new(256, 256);
+        put(&mut capped, 0, 10, 10, [0.6, 0.6, 0.6, 1.0]);
+        let ci = capped.add_correction_layer(Adjust::Invert, false);
+        refresh(&mut capped);
+        SRC_CAP_OVERRIDE.with(|c| c.set(0));
+        assert_eq!(
+            capped.layers[ci].corr.as_ref().unwrap().src.len(),
+            5,
+            "the cap did not hold"
+        );
+        let got = crate::export::composite(&capped, crate::export::Background::White);
+        assert!(
+            uncapped.pixels().zip(got.pixels()).all(|(a, b)| a.0 == b.0),
+            "a capped cache changed the derived page"
+        );
+    }
+
+    /// …and the cap must not cost the drag win. Under a cap the retained
+    /// entries are KEPT (rather than cycled the way an LRU would cycle them
+    /// on a full-canvas scan), so a parameter drag still serves those tiles
+    /// from cache tick after tick.
+    #[test]
+    fn a_hot_drag_still_hits_the_capped_cache() {
+        SRC_CAP_OVERRIDE.with(|c| c.set(5));
+        let mut doc = Document::new(256, 256);
+        put(&mut doc, 0, 10, 10, [0.6, 0.6, 0.6, 1.0]);
+        let ci = doc.add_correction_layer(Adjust::Invert, false);
+        refresh(&mut doc);
+        let before: Vec<(TileIdx, Arc<[u8]>)> = doc.layers[ci]
+            .corr
+            .as_ref()
+            .unwrap()
+            .src
+            .iter()
+            .map(|(i, s)| (*i, Arc::clone(s)))
+            .collect();
+        assert_eq!(before.len(), 5);
+
+        // Two ticks of a parameter drag: the cached five must survive both,
+        // by pointer, or the cache is cycling instead of holding.
+        for t in [0.7f32, 0.75] {
+            doc.layers[ci].kind = LayerKind::Correction(Adjust::Binarize { threshold: t });
+            refresh(&mut doc);
+            let after = &doc.layers[ci].corr.as_ref().unwrap().src;
+            assert_eq!(after.len(), 5, "the cap slipped mid-drag");
+            for (idx, s) in &before {
+                assert!(
+                    Arc::ptr_eq(s, after.get(idx).expect("a cached source was evicted")),
+                    "tile {idx:?} re-composited during a drag"
+                );
+            }
+        }
+        SRC_CAP_OVERRIDE.with(|c| c.set(0));
+        assert_eq!(px(&doc, 100, 100), [255, 255, 255], "paper binarizes white");
     }
 
     #[test]

@@ -648,7 +648,7 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                     if d.layers.len() == c.vis.len() {
                         c.apply_to(&mut d.layers, None);
                     }
-                    d.refresh_derived(dpi);
+                    crate::app::refresh_derived_gpu(&mut d, &mut app.renderer, dpi);
                     let img =
                         mn_core::export::composite_for_export(&d, d.paper_export_background());
                     if img

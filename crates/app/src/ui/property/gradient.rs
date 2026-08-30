@@ -20,7 +20,10 @@ pub(crate) fn tool_ends(app: &App) -> ([f32; 4], [f32; 4]) {
         }
         // FI-050: the first guide line carries the main colour, the second
         // the sub colour — the same two ends as Main → Sub, laid on drawn
-        // lines instead of on a straight drag.
+        // lines instead of on a straight drag. (FI-051's third line and up
+        // each carry the main colour as it stands when they are drawn, so
+        // the two-colour preview bar is still the right picture of the ramp
+        // the artist starts from.)
         crate::cmd::GradMode::Freeform => {
             ([fg[0], fg[1], fg[2], 1.0], [bg[0], bg[1], bg[2], 1.0])
         }

@@ -6,6 +6,9 @@
 //                  invocation per pixel, tiles laid end to end in `src`.
 //   sep_main     — one axis of a separable symmetric convolution (the blur
 //                  family), one invocation per pixel of a region.
+//   smear_main   — the radial / spin smear: n bilinear taps at affine
+//                  offsets about a centre, averaged. One invocation per
+//                  pixel of a region.
 //
 // PIXEL FORMAT. Everything is premultiplied fix15 RGBA (0..32768) in u16,
 // packed two channels per u32 exactly as the CPU tiles are laid out in
@@ -56,7 +59,8 @@ struct Params {
     /// u32 index in `src` where the per-tile coverage bytes start, or 0 for
     /// "no window". Four coverage bytes per u32, tile-major.
     cov_base: u32,
-    /// Control-point / stop count for the curve and map ops.
+    /// Control-point / stop count for the curve and map ops; the SAMPLE
+    /// count for `smear_main`.
     n: u32,
     /// This pass's integer divisor — `mn_core::BoxPass::denom`.
     denom: u32,
@@ -77,10 +81,14 @@ struct Params {
 @group(0) @binding(1) var<storage, read_write> dst: array<u32>;
 @group(0) @binding(2) var<storage, read_write> canary: atomic<u32>;
 @group(0) @binding(3) var<uniform> P: Params;
-/// Every separable pass's integer half-kernel, concatenated; `P.k_base`
-/// picks this pass's. A storage binding rather than more uniform block
-/// because the widest legal blur (`Filter::MAX_SIGMA`) needs 750 taps and
-/// the uniform block has to stay inside one dynamic-offset stride.
+/// The pass's coefficient table. For `sep_main`: every separable pass's
+/// integer half-kernel, concatenated, with `P.k_base` picking this pass's. A
+/// storage binding rather than more uniform block because the widest legal
+/// blur (`Filter::MAX_SIGMA`) needs 750 taps and the uniform block has to
+/// stay inside one dynamic-offset stride. For `smear_main`: the sample
+/// matrices as raw f32 bits, four words each — four storage bindings is the
+/// downlevel ceiling and all four are already spoken for, so there was never
+/// a fifth for a float table.
 @group(0) @binding(4) var<storage, read> weights: array<u32>;
 
 fn load_px(p: u32) -> vec4<u32> {
@@ -377,4 +385,79 @@ fn sep_main(@builtin(global_invocation_id) gid: vec3<u32>,
     let bias = vec4<u32>(P.denom / 2u);
     let r = (acc + bias) / vec4<u32>(P.denom);
     store_px(p, min(r, vec4<u32>(65535u)));
+}
+
+/// One corner of a bilinear tap — `mn_core::filter::sample_bilinear`'s inner
+/// body, including its two skips (a non-positive weight and an out-of-buffer
+/// coordinate both contribute nothing, and outside the region is
+/// transparent).
+///
+/// `wx` and `wy` arrive separately, NOT pre-multiplied, because the Rust
+/// spells the product as `p * wx * wy` — left to right — and `(p*wx)*wy` is
+/// not always `p*(wx*wy)` in f32. Anything that changes the association here
+/// widens the parity gap for no reason.
+///
+/// **Single exit, and this one is not a style preference.** Written the
+/// obvious way — `if (out of range) { return vec4(0.0); }` and then the load
+/// — the Windows-10-era WARP (10.0.19041.x) LOSES THE DEVICE on the first
+/// dispatch: not a wrong number, a `DEVICE LOST (Unknown)` and a declined
+/// job. Hardware (Intel UHD 620 / DX12) runs the same shader perfectly, so
+/// only `MN_WARP=1` found it — the second time on this file, after
+/// `gradient_map` below. Writing the guarded load into a `var` and falling
+/// out the bottom fixes it, which reads like the load being hoisted above
+/// its own bounds test and executed with the out-of-range index.
+fn tap(xx: i32, yy: i32, wx: f32, wy: f32) -> vec4<f32> {
+    var out = vec4<f32>(0.0);
+    if (wx > 0.0 && wy > 0.0 && xx >= 0 && yy >= 0 && xx < i32(P.w) && yy < i32(P.h)) {
+        out = vec4<f32>(load_px(u32(yy) * P.w + u32(xx))) * wx * wy;
+    }
+    return out;
+}
+
+/// The smear family — `blur.rs`'s `smear`, transcribed.
+///
+/// `P.n` sample matrices live in `weights` as f32 bits, four words each:
+/// the tap for sample i is at `centre + M_i · (p − centre)`. The matrices
+/// are built on the HOST (`Filter::smear_samples`) precisely so nothing here
+/// evaluates a transcendental — WGSL only promises `sin`/`cos` to 2⁻¹¹
+/// absolute, which at a page's radius is most of a pixel of drift, while
+/// multiply-add divergence is sub-ULP. What is left is a f32 tolerance
+/// argument of the same shape the colour ops already make.
+@compute @workgroup_size(256)
+fn smear_main(@builtin(global_invocation_id) gid: vec3<u32>,
+              @builtin(local_invocation_index) li: u32) {
+    if (li == 0u) {
+        atomicAdd(&canary, 1u);
+    }
+    let p = gid.x;
+    if (p >= P.count) {
+        return;
+    }
+    let ux = f32(p % P.w) - P.a.x;
+    let uy = f32(p / P.w) - P.a.y;
+    var acc = vec4<f32>(0.0);
+    for (var i = 0u; i < P.n; i = i + 1u) {
+        let b = P.k_base + i * 4u;
+        let fx = P.a.x + bitcast<f32>(weights[b]) * ux + bitcast<f32>(weights[b + 1u]) * uy;
+        let fy = P.a.y + bitcast<f32>(weights[b + 2u]) * ux + bitcast<f32>(weights[b + 3u]) * uy;
+        let x0 = floor(fx);
+        let y0 = floor(fy);
+        let tx = fx - x0;
+        let ty = fy - y0;
+        let xi = i32(x0);
+        let yi = i32(y0);
+        // The four corners in the reference's order (row y0 then row y0+1),
+        // spelled out rather than looped: a skipped corner adds exactly
+        // zero, so summing zeros is the same f32 sum the Rust builds by
+        // skipping them. Summed into their OWN value before joining `acc`,
+        // because that is the association `sample_bilinear` has — it
+        // accumulates one tap from zero and the caller adds the total.
+        let s = tap(xi, yi, 1.0 - tx, 1.0 - ty)
+              + tap(xi + 1, yi, tx, 1.0 - ty)
+              + tap(xi, yi + 1, 1.0 - tx, ty)
+              + tap(xi + 1, yi + 1, tx, ty);
+        acc = acc + s;
+    }
+    let v = acc / f32(P.n) + vec4<f32>(0.5);
+    store_px(p, vec4<u32>(clamp(v, vec4<f32>(0.0), vec4<f32>(65535.0))));
 }

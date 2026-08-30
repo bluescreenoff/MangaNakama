@@ -144,13 +144,18 @@ pub(super) fn gradients(
             ));
             painter.add(egui::Shape::line(line, egui::Stroke::new(1.6, col)));
         };
-        // The FIRST guide takes the main colour, the second the sub colour —
-        // the same two ends `tool_ends` hands the ramp.
-        guide(&g.first, rgb(app.active_color()));
-        let second = !g.first.is_empty();
+        // Each finished guide in the colour IT is carrying — recorded when
+        // it was drawn, so the preview is what the apply will lay down even
+        // if the palette has moved since (`GradFree`'s doc).
+        let col4 = |c: [f32; 4]| rgb([c[0], c[1], c[2]]);
+        for done in &g.done {
+            guide(&done.pts, col4(done.colour));
+        }
+        // The live stroke wears the colour it is ABOUT to take: sub for the
+        // second line, main for the first and for every line after that.
         guide(
             &g.cur,
-            if second {
+            if g.done.len() == 1 {
                 rgb(app.sub_color)
             } else {
                 rgb(app.active_color())

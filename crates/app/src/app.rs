@@ -2547,26 +2547,7 @@ impl App {
         // a GPU-derived tile carries the same freshness keys as a CPU one, so
         // the incremental path cannot tell them apart.
         let Self { doc, renderer, .. } = self;
-        doc.refresh_derived_with(dpi, &mut |adj, tiles| {
-            if !renderer.kernels_preferred(tiles.len() * mn_core::tile::TILE_PIXELS) {
-                return None;
-            }
-            // The pointwise kernel never reads a tile index; these are
-            // positional, and the seam hands the results back in order.
-            let src: Vec<(mn_core::TileIdx, &[u16], Option<&[u8]>)> = tiles
-                .iter()
-                .enumerate()
-                .map(|(i, t)| (mn_core::TileIdx::new(i as i32, 0), t.src, t.cov))
-                .collect();
-            let out = renderer.run_tile_kernel(
-                mn_gpu::Kernel::Adjust(adj),
-                &mn_gpu::TileJob {
-                    src: &src,
-                    out: &[],
-                },
-            )?;
-            Some(out.into_iter().map(Vec::into_boxed_slice).collect())
-        });
+        refresh_derived_gpu(doc, renderer, dpi);
     }
 
     /// Remember the document's path (the title bar polls `desired_title`).
@@ -4792,6 +4773,49 @@ fn scan_textures(root: Option<&Path>) -> Vec<String> {
         .collect();
     names.sort();
     names
+}
+
+/// `Document::refresh_derived`, with the correction derive routed through
+/// the shared GPU kernel seam.
+///
+/// **Every** derive in the app goes through this, not just the render loop's
+/// (`App::refresh_tones`). The other three — the resample-work rebuild, the
+/// export-range loop and the comp-export loop — walk pages that are not the
+/// open document, so they used to run `correct_tile` on one thread for every
+/// tile of every page. Nothing about them is a drag, but a batch of twenty
+/// B4 pages is twenty full-page derives back to back, which is exactly the
+/// shape the seam is fastest at.
+///
+/// The freshness keys are the same either way (`refresh_corrections_with`
+/// writes them itself), so a page derived here and one derived on the CPU
+/// are indistinguishable to the next incremental pass — which matters here
+/// more than in the render loop, because these pages get re-encoded and
+/// parked.
+pub(crate) fn refresh_derived_gpu(
+    doc: &mut mn_core::Document,
+    renderer: &mut mn_gpu::Renderer,
+    dpi: u32,
+) {
+    doc.refresh_derived_with(dpi, &mut |adj, tiles| {
+        if !renderer.kernels_preferred(tiles.len() * mn_core::tile::TILE_PIXELS) {
+            return None;
+        }
+        // The pointwise kernel never reads a tile index; these are
+        // positional, and the seam hands the results back in order.
+        let src: Vec<(mn_core::TileIdx, &[u16], Option<&[u8]>)> = tiles
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (mn_core::TileIdx::new(i as i32, 0), t.src, t.cov))
+            .collect();
+        let out = renderer.run_tile_kernel(
+            mn_gpu::Kernel::Adjust(adj),
+            &mn_gpu::TileJob {
+                src: &src,
+                out: &[],
+            },
+        )?;
+        Some(out.into_iter().map(Vec::into_boxed_slice).collect())
+    });
 }
 
 /// A headless renderer for a test — `None` when this machine has no usable

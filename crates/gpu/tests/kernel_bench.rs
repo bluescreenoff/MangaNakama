@@ -190,6 +190,60 @@ fn timed_gaussian_full_width_band() {
     );
 }
 
+/// The smear family at the largest region the seam will take it.
+///
+/// 2000² is 4.0 Mpx, just inside `REGION_CHUNK_PX` — which is the ceiling on
+/// purpose: a smear's taps land anywhere in the region, so unlike the
+/// separable chain it cannot be banded, and a whole B4 page (52 Mpx, 417 MB
+/// of source) is not bindable on any adapter this project targets. This is
+/// therefore the honest headline number: a big marquee, not a page.
+#[test]
+#[ignore = "wall-clock timing; run deliberately with --ignored --nocapture"]
+fn timed_radial_smear_full_chunk() {
+    let Some(mut r) = renderer() else { return };
+    const W: usize = 2000;
+    const H: usize = 2000;
+    let f = Filter::RadialBlur { strength: 0.3 };
+    let s = f.smear_samples(W, H).expect("a smear filter");
+    let px = noise(W * H * 4, 11);
+
+    let mut warm = vec![0u16; 64 * 64 * 4];
+    let warm_s = f.smear_samples(64, 64).expect("a smear filter");
+    let _ = r.run_region_kernel(Kernel::Smear(&warm_s), &mut warm, 64, 64);
+
+    let mut cpu_buf = Raster {
+        w: W,
+        h: H,
+        px: px.clone(),
+    };
+    let t0 = Instant::now();
+    f.run(&mut cpu_buf, 0, 0);
+    let cpu = t0.elapsed().as_secs_f64() * 1000.0;
+
+    let mut gpu_buf = px.clone();
+    let t0 = Instant::now();
+    assert!(
+        r.run_region_kernel(Kernel::Smear(&s), &mut gpu_buf, W, H),
+        "the seam declined mid-benchmark"
+    );
+    let gpu = t0.elapsed().as_secs_f64() * 1000.0;
+
+    let worst = gpu_buf
+        .iter()
+        .zip(&cpu_buf.px)
+        .map(|(g, c)| (*g as i32 - *c as i32).abs())
+        .max()
+        .unwrap_or(0);
+    println!(
+        "\nradial blur k=0.3, {W}×{H} ({:.1} Mpx, {} samples)\n\
+           cpu {cpu:8.1} ms\n  gpu {gpu:8.1} ms\n  ratio {:.2}× ({})  max delta {worst}",
+        (W * H) as f64 / 1.0e6,
+        s.mats.len(),
+        gpu / cpu,
+        if gpu < cpu { "GPU wins" } else { "CPU wins" }
+    );
+}
+
 /// The measurement that decided the design: on a parameter drag, how much of
 /// an uncached correction derive is the below-composite re-walk versus the
 /// correction arithmetic? If the composite dominates, moving only

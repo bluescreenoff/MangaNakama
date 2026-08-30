@@ -332,18 +332,33 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
             // closure returns false, including on a dispatch canary failure
             // mid-job. Everything else (the warps, dust, morphology) has no
             // kernel here yet and takes the false arm every time.
+            //
+            // The unsharp mask arrives here TWICE: once as itself (no kernel
+            // — false), then as the `Gaussian` it blurs with, because
+            // `apply_filter_with` offers the accelerable half of a split
+            // filter separately. Nothing here has to know that.
             let crate::app::App { doc, renderer, .. } = &mut *app;
             let ran = doc.apply_filter_with(f, &mut |f, buf| {
-                let Some(passes) = f.separable_passes() else {
+                if !renderer.kernels_preferred(buf.w * buf.h) {
                     return false;
-                };
-                renderer.kernels_preferred(buf.w * buf.h)
-                    && renderer.run_region_kernel(
+                }
+                if let Some(passes) = f.separable_passes() {
+                    return renderer.run_region_kernel(
                         mn_gpu::Kernel::Separable(&passes),
                         &mut buf.px,
                         buf.w,
                         buf.h,
-                    )
+                    );
+                }
+                if let Some(s) = f.smear_samples(buf.w, buf.h) {
+                    return renderer.run_region_kernel(
+                        mn_gpu::Kernel::Smear(&s),
+                        &mut buf.px,
+                        buf.w,
+                        buf.h,
+                    );
+                }
+                false
             });
             if ran {
                 app.set_status(format!("{} applied", f.label()));

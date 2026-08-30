@@ -1130,6 +1130,7 @@ fn cpu_matches_gpu_for_a_gated_layer_in_the_fixed_function_modes() {
                 lo: 0.0,
                 hi: 0.4,
                 feather: 0.3,
+                ..mn_core::BlendIf::FULL
             }),
         );
         for ty in 0..2 {
@@ -1159,6 +1160,7 @@ fn cpu_matches_gpu_for_a_gated_layer_in_a_shader_blend_mode() {
             lo: 0.5,
             hi: 1.0,
             feather: 0.25,
+            ..mn_core::BlendIf::FULL
         }),
     );
     for ty in 0..2 {
@@ -1188,6 +1190,7 @@ fn cpu_matches_gpu_with_two_gated_layers_stacked() {
             lo: 0.0,
             hi: 0.4,
             feather: 0.2,
+            ..mn_core::BlendIf::FULL
         }),
     );
     doc.add_layer("highlights");
@@ -1197,6 +1200,7 @@ fn cpu_matches_gpu_with_two_gated_layers_stacked() {
             lo: 0.6,
             hi: 1.0,
             feather: 0.2,
+            ..mn_core::BlendIf::FULL
         }),
     );
     for ty in 0..2 {
@@ -1281,6 +1285,7 @@ fn cpu_matches_gpu_with_a_gated_clip_layer() {
             lo: 0.2,
             hi: 0.7,
             feather: 0.15,
+            ..mn_core::BlendIf::FULL
         }),
     );
     for ty in 0..2 {
@@ -1322,6 +1327,7 @@ fn cpu_matches_gpu_with_a_gated_layer_inside_a_folder() {
             lo: 0.0,
             hi: 0.3,
             feather: 0.2,
+            ..mn_core::BlendIf::FULL
         }),
     );
     for ty in 0..2 {
@@ -1363,6 +1369,7 @@ fn toggling_a_gate_rebuilds_the_canvas() {
             lo: 0.0,
             hi: 0.4,
             feather: 0.0,
+            ..mn_core::BlendIf::FULL
         }),
     );
     assert_agrees_tol(&mut r, &doc, "gate on", 2);
@@ -1371,4 +1378,180 @@ fn toggling_a_gate_rebuilds_the_canvas() {
     // still carry the same revisions, and only the signature notices.
     doc.set_layer_blend_if(1, None);
     assert_agrees_tol(&mut r, &doc, "gate off again", 2);
+}
+
+// --- round 2: the THIS-layer arm and the per-channel arms ------------------
+// The shader reads a different pixel now (`gate_value` + the mode word), and
+// the THIS arm reads the source AFTER opacity is folded in — which is the one
+// place the two sides could drift, because the CPU folds opacity in earlier
+// in its own loop. These are the tests that would catch it.
+
+/// Every source×channel pair, on a page and an ink that make all eight
+/// answers different: a coloured wedge under a ramped colour layer, gated on
+/// a band that bites in the middle of both.
+#[test]
+fn cpu_matches_gpu_for_every_blend_if_arm() {
+    let _serial = gpu_guard();
+    let Some(mut r) = renderer() else { return };
+
+    for source in mn_core::blendif::GateSource::ALL {
+        for channel in mn_core::blendif::GateChannel::ALL {
+            let mut doc = Document::new(128, 128);
+            // A destination with the three channels far apart, per tile.
+            for (i, c) in [
+                [0.9f32, 0.2, 0.1],
+                [0.1, 0.8, 0.3],
+                [0.2, 0.3, 0.95],
+                [0.5, 0.5, 0.5],
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                fill(
+                    &mut doc,
+                    0,
+                    TileIdx::new((i % 2) as i32, (i / 2) as i32),
+                    [c[0], c[1], c[2], 1.0],
+                );
+            }
+            doc.add_layer("gated");
+            doc.set_layer_blend_if(
+                1,
+                Some(mn_core::BlendIf {
+                    lo: 0.3,
+                    hi: 0.7,
+                    feather: 0.25,
+                    source,
+                    channel,
+                }),
+            );
+            for ty in 0..2 {
+                for tx in 0..2 {
+                    fill_ramp(&mut doc, 1, TileIdx::new(tx, ty), [0.85, 0.45, 0.7]);
+                }
+            }
+            assert_agrees_tol(&mut r, &doc, &format!("{source:?}/{channel:?}"), 3);
+        }
+    }
+}
+
+/// The THIS arm at partial opacity, which is where the two compositors fold
+/// the opacity in at different moments. Both read the STRAIGHT value, so the
+/// gate must not move at all — and a shader that gated on the premultiplied
+/// pixel would drift here and nowhere else.
+#[test]
+fn cpu_matches_gpu_for_a_this_layer_gate_at_partial_opacity() {
+    let _serial = gpu_guard();
+    let Some(mut r) = renderer() else { return };
+
+    let mut doc = Document::new(128, 128);
+    luma_steps(&mut doc);
+    doc.add_layer("gated");
+    doc.set_layer_opacity(1, 0.45);
+    doc.set_layer_blend_if(
+        1,
+        Some(mn_core::BlendIf {
+            lo: 0.55,
+            hi: 1.0,
+            feather: 0.2,
+            source: mn_core::blendif::GateSource::This,
+            ..mn_core::BlendIf::FULL
+        }),
+    );
+    for ty in 0..2 {
+        for tx in 0..2 {
+            fill_ramp(&mut doc, 1, TileIdx::new(tx, ty), [0.95, 0.6, 0.25]);
+        }
+    }
+    assert_agrees_tol(&mut r, &doc, "this-layer gate at 45%", 3);
+}
+
+/// The arms are in `LayerSig`, so swapping the CHANNEL — which moves no
+/// float and no tile revision — has to rebuild the canvas. Same trap as
+/// `toggling_a_gate_rebuilds_the_canvas`, one level down.
+#[test]
+fn swapping_the_gate_channel_rebuilds_the_canvas() {
+    let _serial = gpu_guard();
+    let Some(mut r) = renderer() else { return };
+
+    let mut doc = Document::new(128, 128);
+    for (i, c) in [
+        [0.9f32, 0.1, 0.1],
+        [0.1, 0.9, 0.1],
+        [0.1, 0.1, 0.9],
+        [0.6, 0.6, 0.6],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        fill(
+            &mut doc,
+            0,
+            TileIdx::new((i % 2) as i32, (i / 2) as i32),
+            [c[0], c[1], c[2], 1.0],
+        );
+    }
+    doc.add_layer("gated");
+    for ty in 0..2 {
+        for tx in 0..2 {
+            fill(&mut doc, 1, TileIdx::new(tx, ty), [0.2, 0.2, 0.2, 1.0]);
+        }
+    }
+    let band = mn_core::BlendIf {
+        lo: 0.5,
+        hi: 1.0,
+        feather: 0.0,
+        ..mn_core::BlendIf::FULL
+    };
+    doc.set_layer_blend_if(1, Some(band));
+    assert_agrees_tol(&mut r, &doc, "red channel", 2);
+    // Only the channel moves: the three floats and every tile revision stay
+    // exactly where they were.
+    doc.set_layer_blend_if(
+        1,
+        Some(mn_core::BlendIf {
+            channel: mn_core::blendif::GateChannel::B,
+            ..band
+        }),
+    );
+    assert_agrees_tol(&mut r, &doc, "blue channel", 2);
+}
+
+/// The THIS arm down the CLIP path — the `fs_blit` half of the shader,
+/// which reads its source from a scratch GROUP rather than a tile. The CPU
+/// folds the clip base's alpha into `src` before the gate; the blit's
+/// source has it folded in already, so the two must read the same straight
+/// value. Tolerance as `cpu_matches_gpu_with_a_gated_clip_layer` (the same
+/// 8-bit snapshot through the same steep knee).
+#[test]
+fn cpu_matches_gpu_for_a_this_layer_gate_on_a_clip_layer() {
+    let _serial = gpu_guard();
+    let Some(mut r) = renderer() else { return };
+
+    let mut doc = Document::new(128, 128);
+    luma_steps(&mut doc);
+    doc.add_layer("base");
+    for ty in 0..2 {
+        for tx in 0..2 {
+            fill_ramp(&mut doc, 1, TileIdx::new(tx, ty), [0.9, 0.9, 0.9]);
+        }
+    }
+    doc.add_layer("gated clip");
+    doc.set_layer_clip(2, true);
+    doc.set_layer_blend_if(
+        2,
+        Some(mn_core::BlendIf {
+            lo: 0.2,
+            hi: 0.7,
+            feather: 0.15,
+            source: mn_core::blendif::GateSource::This,
+            channel: mn_core::blendif::GateChannel::G,
+        }),
+    );
+    for ty in 0..2 {
+        for tx in 0..2 {
+            fill_ramp(&mut doc, 2, TileIdx::new(tx, ty), [0.2, 0.8, 0.5]);
+        }
+    }
+    assert_agrees_tol(&mut r, &doc, "this-layer gated clip", 6);
 }

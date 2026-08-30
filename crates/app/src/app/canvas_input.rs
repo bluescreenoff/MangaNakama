@@ -2152,14 +2152,33 @@ impl App {
         }
     }
 
-    // --- `FI-050`: the freeform gradient's two-stroke gesture ---------------
+    // --- `FI-050`/`FI-051`: the freeform gradient's multi-stroke gesture ----
 
-    /// One guide stroke ended. The FIRST is banked and the tool waits for
-    /// the second; the second applies the gradient and clears the gesture.
+    /// The colour the NEXT guide will carry: main, then sub, then main
+    /// again for every line after that.
     ///
-    /// A tap is not a guide: it is refused with a status line and the stage
-    /// it would have filled stays open, so a stray click during a two-stroke
-    /// gesture costs nothing rather than painting a page-wide radial ramp.
+    /// Guide 2 taking the sub colour is what keeps the two-line gesture
+    /// exactly the ramp it always was (main → sub). From the third line on
+    /// there is no "other end" to reach for, so each line takes the main
+    /// colour as it stands when it is drawn — pick, draw, pick, draw.
+    fn grad_free_next_colour(&self, drawn: usize) -> [f32; 4] {
+        let c = if drawn == 1 {
+            self.sub_color
+        } else {
+            self.active_color()
+        };
+        [c[0], c[1], c[2], 1.0]
+    }
+
+    /// One guide stroke ended: bank it and wait for the next. Two banked
+    /// lines are already a gradient — Enter, or a click away from the lines,
+    /// paints it ([`Self::commit_grad_free`]); another drag adds another
+    /// colour instead.
+    ///
+    /// A tap is not a guide. With fewer than two lines down it is refused
+    /// outright (a stray click must not paint a page-wide radial ramp); once
+    /// the gesture is ready a tap is the COMMIT, which is the figure tool's
+    /// "click elsewhere finishes" idiom.
     pub fn release_grad_free(&mut self, cx: f32, cy: f32) {
         let Some(g) = &mut self.grad_free else {
             return;
@@ -2181,56 +2200,110 @@ impl App {
             }
             (hi[0] - lo[0]) + (hi[1] - lo[1])
         };
+        let (drawn, ready) = (g.done.len(), g.ready());
         if stroke.len() < 2 || span(&stroke) < 3.0 {
-            let first_done = !g.first.is_empty();
-            if !first_done {
+            if ready {
+                // The click-elsewhere commit.
+                self.commit_grad_free();
+                return;
+            }
+            if drawn == 0 {
                 self.grad_free = None;
             }
-            self.set_status(if first_done {
-                "draw the SECOND guide line — a tap is not a line"
-            } else {
+            self.set_status(if drawn == 0 {
                 "draw the FIRST guide line — a tap is not a line"
+            } else {
+                "draw the SECOND guide line — a tap is not a line"
             });
             return;
         }
-        if g.first.is_empty() {
-            g.first = stroke;
-            self.set_status(
-                "now draw the second line — the sub colour lands on it; Esc cancels",
-            );
+        let colour = self.grad_free_next_colour(drawn);
+        let Some(g) = &mut self.grad_free else {
             return;
-        }
-        let first = std::mem::take(&mut g.first);
-        self.grad_free = None;
-        self.finish_gradient_freeform(&first, &stroke);
+        };
+        g.done.push(mn_core::freeform::ColourGuide::new(stroke, colour));
+        let n = g.done.len();
+        self.set_status(match n {
+            1 => "now draw the second line — the sub colour lands on it; Esc cancels".to_string(),
+            _ => format!(
+                "{n} lines — Enter (or a click) paints; draw another line to add the main \
+                 colour to it, Backspace takes one back"
+            ),
+        });
     }
 
-    /// `FI-050`: both guides are in, apply the ramp. One undo press — the
-    /// gesture itself was never history.
-    pub fn finish_gradient_freeform(&mut self, l1: &[[f32; 2]], l2: &[[f32; 2]]) {
-        // Re-guard at the COMMIT: the gesture spans two strokes with the
+    /// `FI-050`/`FI-051`: paint what the gesture has drawn. Enter, or a
+    /// click away from the lines. Two guides run the ramp, three and up the
+    /// colour-per-guide field — one undo press either way.
+    pub fn commit_grad_free(&mut self) {
+        let Some(g) = self.grad_free.take() else {
+            return;
+        };
+        if !g.ready() {
+            // Enter pressed too early: the gesture is put back, not thrown
+            // away, and nothing was painted to undo.
+            self.grad_free = Some(g);
+            self.set_status("a freeform gradient needs two drawn lines — Esc cancels");
+            return;
+        }
+        self.finish_gradient_freeform_multi(&g.done);
+        self.needs_redraw = true;
+    }
+
+    /// `FI-051`: Backspace takes the LAST guide back — the figure tool's
+    /// `FG-012` rule, including its ending: at the first line there is
+    /// nothing left to walk back to, so the gesture cancels rather than
+    /// leaving a dead key.
+    pub fn grad_free_undo_guide(&mut self) {
+        let Some(g) = &mut self.grad_free else {
+            return;
+        };
+        g.done.pop();
+        let left = g.done.len();
+        if left == 0 {
+            self.cancel_grad_free();
+            return;
+        }
+        self.set_status(format!(
+            "line removed — {left} left, Backspace again to keep walking back"
+        ));
+        self.needs_redraw = true;
+    }
+
+    /// `FI-050`/`FI-051`: the guides are in, apply them. TWO route to the shipped
+    /// ramp (byte for byte — `mn_core::doc::paint_gradient_freeform_multi`
+    /// dispatches, so there is one place that decides); three and up blend
+    /// by proximity with a colour per guide. One undo press either way.
+    pub fn finish_gradient_freeform_multi(&mut self, guides: &[mn_core::freeform::ColourGuide]) {
+        // Re-guard at the COMMIT: the gesture spans several strokes with the
         // Layers palette live throughout (`finish_figure_stage2`'s reason).
         if self.guard_frame_layer() {
             return;
         }
-        let fg = self.active_color();
-        let bg = self.sub_color;
+        // The ramp's ENDS are ignored by the multi door (each guide carries
+        // its own colour); what it reads off this is the authored stops and
+        // options — mixing space, brightness lift and dither for a field,
+        // all of them for the two-line ramp.
         let ramp = mn_core::Ramp::new(
-            [fg[0], fg[1], fg[2], 1.0],
-            [bg[0], bg[1], bg[2], 1.0],
+            guides.first().map_or([0.0, 0.0, 0.0, 1.0], |g| g.colour),
+            guides.get(1).map_or([1.0, 1.0, 1.0, 1.0], |g| g.colour),
             self.grad_mid,
             self.grad_opts,
         );
-        if self.doc.paint_gradient_freeform(l1, l2, &ramp) {
+        if self.doc.paint_gradient_freeform_multi(guides, &ramp) {
             self.mark_dirty();
             // `fill_live` is a LINEAR-ramp switch: `FillKind::Gradient` is
-            // two endpoints, and there is nowhere in it to put two drawn
+            // two endpoints, and there is nowhere in it to put drawn
             // polylines. Freeform always bakes, and says so rather than
             // silently ignoring the toggle.
+            let n = guides.len();
             self.set_status(if self.fill_live {
                 "freeform gradient painted — baked, live gradient layers are straight-line only"
+                    .to_string()
+            } else if n > 2 {
+                format!("freeform gradient painted — {n} lines, a colour each")
             } else {
-                "freeform gradient painted"
+                "freeform gradient painted".to_string()
             });
         } else {
             self.set_status("gradient needs a raster layer (unlocked)");

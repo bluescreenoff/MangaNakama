@@ -1,5 +1,7 @@
-//! `FI-050` — the FREEFORM gradient: two drawn guide lines, and colour that
-//! flows from one to the other following their shapes.
+//! `FI-050`/`FI-051` — the FREEFORM gradient: drawn guide lines, and colour
+//! that flows between them following their shapes. TWO guides run a ramp from
+//! one to the other; THREE OR MORE carry a colour each and blend by
+//! proximity, which is CSP's model.
 //!
 //! ## The anti-aliasing trap, designed away
 //!
@@ -73,6 +75,56 @@
 //! 1.8 s of a normal apply. Single-threaded and CPU-side; the wave-5 GPU
 //! tile-kernel seam has a pointwise entry that this would fit, which is a
 //! follow-up rather than part of this row.
+
+//! ## `FI-051` — three guides and up: colour per guide
+//!
+//! With N ≥ 3 there is no "from" and no "to", so there is no ramp parameter
+//! to compute: each guide carries its own colour and a pixel is the
+//! INVERSE-DISTANCE-WEIGHTED blend of them ([`Multi::colour_at`]), Shepard's
+//! method with p = 2:
+//!
+//! ```text
+//! c(p) = Σ (c_i / d_i²) / Σ (1 / d_i²)
+//! ```
+//!
+//! p = 2 rather than p = 1 for the same reason the two-guide path has a
+//! smoothstep: at p = 2 the field's gradient goes to ZERO at each guide, so
+//! the colour meets the drawn stroke flat instead of creasing along it. (At
+//! p = 1 the weights are exactly the two-guide `d1/(d1+d2)` ratio when N = 2
+//! — the raw one, BEFORE the smoothstep, and without the `Ramp` around it.)
+//!
+//! **N = 2 does not come through here.** The two-line path is the shipped,
+//! pinned one: `t = smoothstep(d1/(d1+d2))` through the one
+//! [`crate::gradient::Ramp`], which
+//! is what carries interior stops, flip, the mixing rate and the edge
+//! process. IDW would reproduce neither the easing nor any of those, so
+//! `Document::paint_gradient_freeform_multi` ROUTES two guides to
+//! [`Freeform`] instead of degenerating into them, and a test paints both
+//! ways and compares the tiles byte for byte
+//! (`two_guides_still_take_the_pinned_ramp_path`).
+//!
+//! What a colour-per-guide field cannot carry, and does not pretend to: the
+//! ramp's interior stops, `flip`, `EdgeProcess` and the mixing RATE all
+//! describe positions along one ramp, and there is no ramp here. The mixing
+//! SPACE ([`crate::mix::MixMode`]), the brightness lift and dithering do
+//! apply — they are per-mix, not per-position. With `bright > 0` the lift
+//! is applied at each pairwise step of the fold rather than once, so it is
+//! stronger than on a two-stop ramp; that is a taste knob, not a promise.
+//!
+//! ## The cull, with N guides
+//!
+//! Every guide contributes to every pixel — a weight is only ever small, it
+//! is never zero — so **no guide may be dropped from a tile**, however far
+//! away it is. Dropping the far one is exactly the naive "two nearest"
+//! cull, and it shifts the colour of a tile that sits between two near
+//! guides while a third pulls on it
+//! (`a_far_guide_still_tints_a_tile_so_the_cull_keeps_it`).
+//!
+//! What IS culled is what was culled before: SEGMENTS inside each guide,
+//! because a guide's contribution depends only on its nearest segment. That
+//! bound is exact ([`Guide::near`]), so the windowed answer equals the
+//! all-segments one to the bit, and a long shaky guide still costs a
+//! handful of segments per tile.
 
 /// One segment of a guide, pre-chewed for the distance query. `inv_l2` is
 /// `1 / |d|²` (0 for a degenerate segment) so the innermost loop — which runs
@@ -254,6 +306,141 @@ impl Window {
     }
 }
 
+// --- `FI-051`: N guides, a colour each ------------------------------------
+
+/// One guide of an N-line freeform gradient: the polyline as drawn, and the
+/// straight RGBA that lands ON it. The app's gesture stores these directly,
+/// so the preview overlay and the paint see the same colours.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ColourGuide {
+    pub pts: Vec<[f32; 2]>,
+    pub colour: [f32; 4],
+}
+
+impl ColourGuide {
+    pub fn new(pts: Vec<[f32; 2]>, colour: [f32; 4]) -> Self {
+        Self { pts, colour }
+    }
+}
+
+/// The inverse-distance blend at one point, given each guide's SQUARED
+/// distance and colour. One pass, no allocation: the running mix is exact
+/// for any lerp-in-a-fixed-space [`MixMode`], which is what all three modes
+/// are (see the module doc for the `bright > 0` caveat).
+///
+/// A pixel sitting exactly ON a guide takes that guide's colour outright —
+/// the limit the weights are heading for anyway, and the only way to avoid
+/// dividing by zero without perturbing the field.
+fn idw_colour(
+    it: impl Iterator<Item = (f32, [f32; 4])>,
+    mix: crate::mix::MixMode,
+    bright: u8,
+) -> [f32; 4] {
+    let mut acc = [0.0f32; 4];
+    let mut wsum = 0.0f32;
+    let mut started = false;
+    for (d2, c) in it {
+        if !(d2 > 0.0) {
+            return c;
+        }
+        let w = 1.0 / d2;
+        if !started {
+            acc = c;
+            wsum = w;
+            started = true;
+            continue;
+        }
+        let s = w / (wsum + w);
+        acc = crate::mix::mix_rgba(mix, acc, c, s, bright);
+        wsum += w;
+    }
+    acc
+}
+
+/// `FI-051` — three or more guides, each carrying its own colour.
+///
+/// Two guides never reach this type; see the module doc for why the shipped
+/// [`Freeform`] ramp path is kept instead of degenerating into it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Multi {
+    lines: Vec<(Guide, [f32; 4])>,
+}
+
+impl Multi {
+    /// `None` when any guide has no usable point — the same rule
+    /// [`Freeform::new`] follows, and for the same reason: a gradient with a
+    /// missing guide is not a gradient with one fewer.
+    pub fn new(lines: &[ColourGuide]) -> Option<Self> {
+        if lines.is_empty() {
+            return None;
+        }
+        let mut out = Vec::with_capacity(lines.len());
+        for l in lines {
+            out.push((Guide::new(&l.pts)?, l.colour));
+        }
+        Some(Self { lines: out })
+    }
+
+    pub fn len(&self) -> usize {
+        self.lines.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.lines.is_empty()
+    }
+
+    /// The colour at `p`, consulting every segment of every guide. Correct
+    /// everywhere and the reference [`Self::window`] is tested against; the
+    /// painter uses the window.
+    pub fn colour_at(&self, p: [f32; 2], mix: crate::mix::MixMode, bright: u8) -> [f32; 4] {
+        idw_colour(
+            self.lines
+                .iter()
+                .map(|(g, c)| (list_dist2(&g.segs, p), *c)),
+            mix,
+            bright,
+        )
+    }
+
+    /// Every guide culled to one box — the per-tile evaluator. EVERY guide
+    /// survives (a far one still tints the tile); what is dropped is the
+    /// segments inside each that cannot be its nearest one, which is exact.
+    pub fn window(&self, c: [f32; 2], hd: f32) -> MultiWindow {
+        MultiWindow {
+            lines: self
+                .lines
+                .iter()
+                .map(|(g, col)| (g.near(c, hd), *col))
+                .collect(),
+        }
+    }
+}
+
+/// [`Multi`] narrowed to one box. Inside that box `colour_at` agrees with
+/// [`Multi::colour_at`] exactly; outside it may not, so a window is used for
+/// the box it was built for and thrown away.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MultiWindow {
+    lines: Vec<(Vec<Seg>, [f32; 4])>,
+}
+
+impl MultiWindow {
+    pub fn colour_at(&self, p: [f32; 2], mix: crate::mix::MixMode, bright: u8) -> [f32; 4] {
+        idw_colour(
+            self.lines.iter().map(|(s, c)| (list_dist2(s, p), *c)),
+            mix,
+            bright,
+        )
+    }
+
+    /// How many segments survived, per guide — the speed-up, measurable,
+    /// and the proof that no GUIDE was dropped (the length is the guide
+    /// count, always).
+    pub fn segment_counts(&self) -> Vec<usize> {
+        self.lines.iter().map(|(s, _)| s.len()).collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -419,5 +606,191 @@ mod tests {
         let f = Freeform::new(&same, &same).unwrap();
         assert_eq!(f.t_at([5.0, 0.0]), 0.5);
         assert!(f.t_at([5.0, 20.0]).is_finite());
+    }
+
+    // --- `FI-051`: N guides, a colour each --------------------------------
+
+    use crate::mix::MixMode;
+
+    const RED: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
+    const GREEN: [f32; 4] = [0.0, 1.0, 0.0, 1.0];
+    const BLUE: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
+
+    fn cg(pts: Vec<[f32; 2]>, colour: [f32; 4]) -> ColourGuide {
+        ColourGuide::new(pts, colour)
+    }
+
+    /// Three vertical guides at x = 0, 200 and 400 — red, blue, green.
+    fn three() -> Multi {
+        Multi::new(&[
+            cg(line(0.0, -500.0, 0.0, 500.0), RED),
+            cg(line(200.0, -500.0, 200.0, 500.0), BLUE),
+            cg(line(400.0, -500.0, 400.0, 500.0), GREEN),
+        ])
+        .expect("three real guides")
+    }
+
+    /// The defining property, the N-guide version: ON a guide you get that
+    /// guide's colour EXACTLY — not nearly, which is what an unguarded
+    /// 1/d² would give (a division by zero, and a NaN across the page).
+    #[test]
+    fn each_guide_owns_its_colour_exactly_on_the_line() {
+        let m = three();
+        assert_eq!(m.colour_at([0.0, 0.0], MixMode::Standard, 0), RED);
+        assert_eq!(m.colour_at([200.0, 123.0], MixMode::Standard, 0), BLUE);
+        assert_eq!(m.colour_at([400.0, -80.0], MixMode::Standard, 0), GREEN);
+        // …and just off a guide it is still overwhelmingly that colour,
+        // which is the p = 2 "meets the stroke flat" property.
+        let near = m.colour_at([1.0, 0.0], MixMode::Standard, 0);
+        assert!(near[0] > 0.99, "a pixel off the line is still red: {near:?}");
+    }
+
+    /// Between two guides the blend leans toward the nearer one, and every
+    /// channel stays a real colour — no NaN, nothing outside 0..1.
+    #[test]
+    fn the_blend_leans_toward_the_nearer_guide() {
+        let m = three();
+        let close_to_red = m.colour_at([40.0, 0.0], MixMode::Standard, 0);
+        let close_to_blue = m.colour_at([160.0, 0.0], MixMode::Standard, 0);
+        assert!(
+            close_to_red[0] > close_to_red[2],
+            "nearer red than blue: {close_to_red:?}"
+        );
+        assert!(
+            close_to_blue[2] > close_to_blue[0],
+            "nearer blue than red: {close_to_blue:?}"
+        );
+        for c in [close_to_red, close_to_blue] {
+            assert!(c.iter().all(|v| (0.0..=1.0).contains(v)), "{c:?}");
+        }
+        // Alpha rides the same blend: a transparent guide really is
+        // transparent on its own line.
+        let fade = Multi::new(&[
+            cg(line(0.0, -50.0, 0.0, 50.0), RED),
+            cg(line(100.0, -50.0, 100.0, 50.0), [1.0, 0.0, 0.0, 0.0]),
+            cg(line(200.0, -50.0, 200.0, 50.0), BLUE),
+        ])
+        .unwrap();
+        assert_eq!(fade.colour_at([100.0, 0.0], MixMode::Standard, 0)[3], 0.0);
+    }
+
+    /// **The cull rule, stated as a test.** A guide is never dropped from a
+    /// tile however far away it is: its weight is small, not zero. A naive
+    /// "keep the two nearest guides" cull would change this pixel, and the
+    /// window must not.
+    #[test]
+    fn a_far_guide_still_tints_a_tile_so_the_cull_keeps_it() {
+        let m = three();
+        // Halfway between red and blue, with green 300 px further out.
+        let p = [100.0, 0.0];
+        let all = m.colour_at(p, MixMode::Standard, 0);
+        let two_nearest = Multi::new(&[
+            cg(line(0.0, -500.0, 0.0, 500.0), RED),
+            cg(line(200.0, -500.0, 200.0, 500.0), BLUE),
+        ])
+        .unwrap()
+        .colour_at(p, MixMode::Standard, 0);
+        assert!(
+            all[1] > 0.01,
+            "the far guide really does tint this pixel: {all:?}"
+        );
+        assert!(
+            (all[1] - two_nearest[1]).abs() > 0.01,
+            "dropping it changes the answer, so a 2-nearest cull is wrong: \
+             {all:?} vs {two_nearest:?}"
+        );
+
+        // The window keeps EVERY guide — the count, and the same answer.
+        let hd = 32.0 * std::f32::consts::SQRT_2;
+        let w = m.window(p, hd);
+        assert_eq!(w.segment_counts().len(), 3, "no guide may be culled away");
+        assert_eq!(w.colour_at(p, MixMode::Standard, 0), all);
+    }
+
+    /// The per-tile cull is exact inside its box — the same claim the
+    /// two-line window makes, now per guide — and still throws away most of
+    /// a long shaky guide.
+    #[test]
+    fn the_multi_window_is_exact_inside_its_box_and_still_culls_segments() {
+        let zig = |x: f32, phase: f32| -> Vec<[f32; 2]> {
+            (0..=200)
+                .map(|i| {
+                    let y = i as f32 * 30.0;
+                    [x + (i as f32 * 0.7 + phase).sin() * 12.0, y]
+                })
+                .collect()
+        };
+        let m = Multi::new(&[
+            cg(zig(400.0, 0.0), RED),
+            cg(zig(1200.0, 2.0), BLUE),
+            cg(zig(2000.0, 4.0), GREEN),
+        ])
+        .unwrap();
+        let hd = 32.0 * std::f32::consts::SQRT_2;
+        for (cx, cy) in [(800.0f32, 3000.0f32), (420.0, 120.0), (2600.0, 5800.0)] {
+            let w = m.window([cx, cy], hd);
+            assert_eq!(w.segment_counts().len(), 3);
+            for dx in [-31.5f32, -10.0, 0.0, 17.0, 31.5] {
+                for dy in [-31.5f32, -3.0, 0.0, 22.0, 31.5] {
+                    let p = [cx + dx, cy + dy];
+                    assert_eq!(
+                        w.colour_at(p, MixMode::Perceptual, 0),
+                        m.colour_at(p, MixMode::Perceptual, 0),
+                        "the cull changed the answer at {p:?} (box {cx},{cy})"
+                    );
+                }
+            }
+        }
+        let kept = m.window([800.0, 3000.0], hd).segment_counts();
+        assert!(
+            kept.iter().all(|&n| n >= 1 && n < 40),
+            "every guide keeps a few of its 200 segments: {kept:?}"
+        );
+    }
+
+    /// Degenerate N-guide input: a guide with nothing usable refuses the
+    /// whole field (a gradient missing a guide is not a gradient with one
+    /// fewer), a dot is legal, and coincident guides do not NaN.
+    #[test]
+    fn degenerate_multi_guides_are_handled_not_crashed() {
+        assert!(Multi::new(&[]).is_none(), "no guides, no field");
+        assert!(
+            Multi::new(&[
+                cg(line(0.0, 0.0, 10.0, 0.0), RED),
+                cg(vec![[f32::NAN, 0.0]], BLUE),
+            ])
+            .is_none(),
+            "one unusable guide refuses the field"
+        );
+        // A dot guide is radial and legal, mixed with real lines.
+        let m = Multi::new(&[
+            cg(vec![[50.0, 50.0]], RED),
+            cg(line(200.0, 0.0, 200.0, 100.0), BLUE),
+            cg(line(0.0, 200.0, 100.0, 200.0), GREEN),
+        ])
+        .unwrap();
+        assert_eq!(m.len(), 3);
+        assert!(!m.is_empty());
+        assert_eq!(m.colour_at([50.0, 50.0], MixMode::Standard, 0), RED);
+        assert!(
+            m.colour_at([500.0, 500.0], MixMode::Standard, 0)
+                .iter()
+                .all(|v| v.is_finite())
+        );
+        // Two guides in the same place with different colours: a pixel ON
+        // them takes the first rather than dividing by zero twice.
+        let same = line(0.0, 0.0, 10.0, 0.0);
+        let dup = Multi::new(&[
+            cg(same.clone(), RED),
+            cg(same.clone(), BLUE),
+            cg(line(0.0, 100.0, 10.0, 100.0), GREEN),
+        ])
+        .unwrap();
+        assert_eq!(dup.colour_at([5.0, 0.0], MixMode::Standard, 0), RED);
+        assert!(
+            dup.colour_at([5.0, 50.0], MixMode::Standard, 0)
+                .iter()
+                .all(|v| v.is_finite())
+        );
     }
 }

@@ -43,8 +43,8 @@ mod distort;
 mod lines;
 
 pub(crate) use lines::dust_max;
-use blur::{box_radii, gaussian, gaussian_reach, motion, motion_span, radial_blur, smoothing};
-use blur::{spin_blur, unsharp};
+use blur::{box_radii, gaussian, gaussian_reach, motion, motion_span, smoothing};
+use blur::{radial_samples, smear, spin_samples, unsharp, unsharp_split};
 use distort::{pinch, ripple, twirl, wave, wave_amplitude};
 use lines::{line_width, line_width_radius, remove_dust};
 
@@ -361,8 +361,11 @@ impl Filter {
                 mode,
             } => motion(buf, angle, length, dir, mode),
             Filter::Mosaic { cell } => mosaic(buf, cell.clamp(1, 4096) as i32, ox, oy),
-            Filter::RadialBlur { strength } => radial_blur(buf, strength),
-            Filter::SpinBlur { angle_deg } => spin_blur(buf, angle_deg),
+            Filter::RadialBlur { .. } | Filter::SpinBlur { .. } => {
+                if let Some(s) = self.smear_samples(buf.w, buf.h) {
+                    smear(buf, &s);
+                }
+            }
             Filter::Unsharp { radius, amount } => unsharp(buf, radius, amount),
             Filter::Pinch { amount } => pinch(buf, amount),
             Filter::Ripple {
@@ -458,6 +461,54 @@ impl Filter {
             })
             .collect();
         (!passes.is_empty()).then_some(passes)
+    }
+
+    /// The per-sample transforms this filter is, when it is a uniformly
+    /// averaged affine resample about the buffer's centre — the two smears.
+    /// `None` for everything else. Depends on the buffer size because both
+    /// smears centre themselves on it and pick their sample count from it.
+    ///
+    /// [`separable_passes`](Self::separable_passes)'s counterpart for the
+    /// filters that cannot be separated: same contract (the CPU reference is
+    /// built from this too, so the two paths cannot drift), different shape.
+    pub fn smear_samples(self, w: usize, h: usize) -> Option<Smear> {
+        match self {
+            Filter::RadialBlur { strength } => radial_samples(w, h, strength),
+            Filter::SpinBlur { angle_deg } => spin_samples(w, h, angle_deg),
+            _ => None,
+        }
+    }
+}
+
+/// A uniformly averaged affine resample about a centre: destination pixel `p`
+/// averages one bilinear tap per matrix, taken at
+/// `centre + M · (p − centre)`, and divides by the matrix count.
+///
+/// Radial blur is a chain of SCALES (`M = t·I`, t walking inward from 1) and
+/// spin blur a chain of ROTATIONS; writing both as a matrix list is what
+/// lets one GPU kernel serve them, and it moves every transcendental to the
+/// host, where there are `n` of them for a whole buffer instead of `n` per
+/// pixel.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Smear {
+    /// Buffer-pixel coordinate every sample is taken relative to.
+    pub centre: [f32; 2],
+    /// One 2×2 matrix per sample, row-major `[a, b, c, d]`.
+    pub mats: Vec<[f32; 4]>,
+}
+
+/// A filter the seam can run PART of: the accelerable half goes back through
+/// `run` and the rest is arithmetic done here. Returns false — having
+/// touched nothing — when the kernel declined, so the caller's
+/// [`Filter::run`] fallback still sees original pixels.
+///
+/// Only the unsharp mask today. It is not a [`Filter::separable_passes`]
+/// arm because that method answers "this filter IS this chain", and an
+/// unsharp whose output was the blur would be a blur.
+fn run_split(f: Filter, buf: &mut Raster, run: &mut RasterKernel<'_>) -> bool {
+    match f {
+        Filter::Unsharp { radius, amount } => unsharp_split(buf, radius, amount, run),
+        _ => false,
     }
 }
 
@@ -888,7 +939,10 @@ impl Document {
         let gw = ((tx1 - tx0) * t + 2 * reach) as usize;
         let gh = ((ty1 - ty0) * t + 2 * reach) as usize;
         let mut buf = gather(&self.layers[li], gx, gy, gw, gh);
-        if !run(f, &mut buf) {
+        // Whole filter through the kernel, else the accelerable half of one
+        // (`run_split`), else the CPU reference. Each arm only runs when the
+        // one before it declined, and a decline never writes.
+        if !run(f, &mut buf) && !run_split(f, &mut buf, run) {
             f.run(&mut buf, gx, gy);
         }
 
@@ -1432,6 +1486,53 @@ mod tests {
             doc.undo_labels().last().map(String::as_str),
             Some("Unsharp mask")
         );
+    }
+
+    /// FL-014's split: `apply_filter_with` offers the unsharp's BLUR half to
+    /// a lent kernel and combines here, so an accelerated unsharp has to be
+    /// the same page — byte for byte — as the one-piece reference. The
+    /// stand-in kernel runs the CPU Gaussian, which is precisely what the GPU
+    /// seam reproduces bit for bit, so any difference this catches is in the
+    /// split rather than in a shader.
+    #[test]
+    fn the_unsharp_split_is_byte_identical_to_the_reference() {
+        let f = Filter::Unsharp {
+            radius: 3.0,
+            amount: 1.5,
+        };
+        let build = |run: &mut RasterKernel<'_>| {
+            let mut doc = Document::new(256, 256);
+            paint_rect(&mut doc, 40, 100, 88, 140);
+            assert!(doc.apply_filter(Filter::Gaussian { sigma: 6.0 }));
+            assert!(doc.apply_filter_with(f, run));
+            doc
+        };
+        let reference = build(&mut |_, _| false);
+        // Declining the WHOLE filter and accepting only its blur half is the
+        // shape a GPU host has: it has a separable kernel and no unsharp one.
+        let mut halves = 0usize;
+        let split = build(&mut |g, buf| match g {
+            Filter::Gaussian { sigma } => {
+                halves += 1;
+                gaussian(buf, sigma);
+                true
+            }
+            _ => false,
+        });
+        assert_eq!(halves, 1, "the blur half was never offered to the kernel");
+        for y in [100, 110, 120, 130] {
+            for x in 30..100 {
+                assert_eq!(
+                    px_at(&reference, x, y),
+                    px_at(&split, x, y),
+                    "the split unsharp differs at ({x}, {y})"
+                );
+            }
+        }
+        // A kernel that declines the blur half too must fall all the way
+        // back — not half-apply, and not skip the filter.
+        let declined = build(&mut |_, _| false);
+        assert_eq!(px_at(&declined, 60, 120), px_at(&reference, 60, 120));
     }
 
     /// One opaque pixel on an otherwise empty square raster, for the distort

@@ -427,10 +427,12 @@ pub enum GradMode {
     FgToTransparent,
     /// Transparent fades into the main colour.
     TransparentToFg,
-    /// `FI-050`: two DRAWN guide lines instead of one straight drag — the
-    /// main colour on the first, the sub colour on the second, and the ramp
-    /// between them follows both shapes. Takes two strokes, so it is the one
-    /// gradient mode with a staged gesture ([`GradFree`]).
+    /// `FI-050`/`FI-051`: DRAWN guide lines instead of one straight drag —
+    /// the main colour on the first, the sub colour on the second, and the
+    /// ramp between them follows both shapes. A third line and up carries
+    /// the main colour as it stands when that line is drawn, and the field
+    /// blends by proximity. Takes several strokes, so it is the one gradient
+    /// mode with a staged gesture ([`GradFree`]).
     Freeform,
 }
 
@@ -440,7 +442,7 @@ impl GradMode {
             GradMode::FgToBg => "Main → Sub",
             GradMode::FgToTransparent => "Main → Transparent",
             GradMode::TransparentToFg => "Transparent → Main",
-            GradMode::Freeform => "Freeform (two lines)",
+            GradMode::Freeform => "Freeform (drawn lines)",
         }
     }
 
@@ -450,25 +452,41 @@ impl GradMode {
     }
 }
 
-/// `FI-050`: the live state of a freeform gradient's two-stroke gesture —
-/// the same shape as [`FigureStage2`], for the same reason. It is a
-/// SEPARATE field from `App::grad_drag` and the two are mutually exclusive
+/// `FI-050`/`FI-051`: the live state of a freeform gradient's multi-stroke
+/// gesture — the same shape as [`FigureStage2`], for the same reason. It is
+/// a SEPARATE field from `App::grad_drag` and the two are mutually exclusive
 /// by construction (the press picks one on `grad_mode`), so the three
 /// one-drag modes run exactly the path they always did.
 ///
-/// Nothing here is history: no pixels move until the second stroke is
-/// released, so Esc or a tool switch throws the whole gesture away with
-/// nothing to undo.
+/// Nothing here is history: no pixels move until the gesture is COMMITTED
+/// (Enter, or a click away from the last line), so Esc or a tool switch
+/// throws the whole thing away with nothing to undo.
+///
+/// **The colour rides with the line.** Each guide records the colour it will
+/// lay down at the moment it is drawn — guide 1 the main colour, guide 2 the
+/// sub colour (so the two-line ramp is exactly what it always was), guide 3
+/// and up the main colour as it stands then. That is what lets the artist
+/// pick a colour, draw a line, pick another, draw another; and it is what
+/// makes the overlay preview honest, since it draws each finished guide in
+/// the colour that guide is actually carrying.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct GradFree {
-    /// The finished FIRST guide (the main colour's line), canvas px. Empty
-    /// while the first stroke is still down.
-    pub first: Vec<[f32; 2]>,
+    /// The guides drawn so far, in order, each with its colour. Empty while
+    /// the first stroke is still down.
+    pub done: Vec<mn_core::freeform::ColourGuide>,
     /// The stroke under the pointer right now. Empty between strokes.
     pub cur: Vec<[f32; 2]>,
-    /// Is a stroke in progress? Distinguishes "waiting for the second
-    /// press" from "drawing", which `cur` alone cannot.
+    /// Is a stroke in progress? Distinguishes "waiting for the next press"
+    /// from "drawing", which `cur` alone cannot.
     pub drawing: bool,
+}
+
+impl GradFree {
+    /// Enough lines to paint? Two is the ramp, three and up the
+    /// colour-per-guide field.
+    pub fn ready(&self) -> bool {
+        self.done.len() >= 2
+    }
 }
 
 /// What a pending ruler drag creates (TODO #3).

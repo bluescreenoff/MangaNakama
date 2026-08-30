@@ -10,7 +10,10 @@
 //!   on the GPU instead of in a scalar loop.
 //! * **The blur family** — `Document::apply_filter_with` lends this the
 //!   gathered halo buffer, and Gaussian / Blur / Blur (strong) / Smoothing
-//!   run as one separable convolution per axis.
+//!   run as one separable convolution per axis. The unsharp mask rides the
+//!   same path for its blur half and combines on the CPU
+//!   (`filter::run_split`), and radial / spin blur run as
+//!   [`Kernel::Smear`] — the one arm here that samples rather than gathers.
 //!
 //! # Design decisions, and why
 //!
@@ -85,7 +88,7 @@
 
 use mn_core::TileIdx;
 use mn_core::adjust::{Adjust, TONE_CURVE_MAX, curve_tangents};
-use mn_core::filter::BoxPass;
+use mn_core::filter::{BoxPass, Smear};
 use mn_core::tile::{TILE_LEN, TILE_PIXELS, TILE_SIZE};
 
 /// Threads per workgroup — one pixel each. 256 is the downlevel-defaults
@@ -128,6 +131,23 @@ pub enum Kernel<'a> {
     /// and then along y in order — `Filter::separable_passes` produces
     /// these, and the arithmetic is bit-identical to the CPU's.
     Separable(&'a [BoxPass]),
+    /// The smear family (radial / spin blur): one bilinear tap per sample
+    /// matrix about a centre, uniformly averaged —
+    /// `Filter::smear_samples` produces these.
+    ///
+    /// **Sampled from the storage buffer by hand, not through a texture
+    /// sampler.** A `textureSampleLevel` variant is the obvious answer to
+    /// "this one needs arbitrary source coordinates", and it is the wrong
+    /// one here for three reasons already recorded in this module's header:
+    /// the region can exceed `max_texture_dimension_2d` (a B4 page is 8598
+    /// rows against this adapter's 8192 cap) while a buffer only has to
+    /// clear the storage-binding limit; a texture would need its own bind
+    /// group layout, an upload pass and a format that survives fix15, none
+    /// of which the seam has; and the hardware filter is fixed-point (8-bit
+    /// fractional weights on most parts), so it could not reproduce
+    /// `sample_bilinear`'s f32 weights at all. Four manual taps in the
+    /// shader are the SAME four the CPU takes, in the same order.
+    Smear(&'a Smear),
 }
 
 /// One tile of a [`TileJob`]: its index, its `TILE_LEN` fix15 RGBA pixels,
@@ -327,11 +347,21 @@ impl Slot {
     }
 }
 
+/// Which entry point a dispatch runs. One bind group layout serves all
+/// three; only the shader function differs.
+#[derive(Clone, Copy)]
+enum Pipe {
+    Adjust,
+    Sep,
+    Smear,
+}
+
 /// The kernel machinery, owned by the Renderer. `None` when the adapter has
 /// no compute shaders.
 pub struct KernelGpu {
     adjust_pipe: wgpu::ComputePipeline,
     sep_pipe: wgpu::ComputePipeline,
+    smear_pipe: wgpu::ComputePipeline,
     bgl: wgpu::BindGroupLayout,
     canary_buf: wgpu::Buffer,
     canary_read: wgpu::Buffer,
@@ -420,6 +450,7 @@ impl KernelGpu {
         Self {
             adjust_pipe: pipe("adjust_main"),
             sep_pipe: pipe("sep_main"),
+            smear_pipe: pipe("smear_main"),
             bgl,
             canary_buf: mk(
                 wgpu::BufferUsages::STORAGE
@@ -511,7 +542,8 @@ impl crate::Renderer {
         }
         match kernel {
             Kernel::Adjust(adj) => self.tile_adjust(adj, job),
-            Kernel::Separable(half) => self.tile_separable(half, job),
+            // Both neighbourhood kernels want one flat region, not tiles.
+            Kernel::Separable(_) | Kernel::Smear(_) => self.tile_region(kernel, job),
         }
     }
 
@@ -580,7 +612,7 @@ impl crate::Renderer {
             params.count = (n * TILE_PIXELS) as u32;
             // In u32 units — what the shader indexes `src` by.
             params.cov_base = if any_cov { (pixels / 2) as u32 } else { 0 };
-            let out = self.dispatch(&up, &[], &[params], false, pixels)?;
+            let out = self.dispatch(&up, &[], &[params], Pipe::Adjust, pixels)?;
             for i in 0..n {
                 done.push(out[i * TILE_LEN..(i + 1) * TILE_LEN].to_vec());
             }
@@ -603,11 +635,11 @@ impl crate::Renderer {
 
     // ----------------------------------------------------------- neighbourhood --
 
-    /// [`Kernel::Separable`] over a tile map: assemble the tiles' bounding
+    /// A neighbourhood kernel over a tile map: assemble the tiles' bounding
     /// box into one region, run the region path, slice the wanted tiles back
     /// out. Tiles the caller did not supply read transparent — the same
     /// "outside is transparent" convention `Raster` has.
-    fn tile_separable(&mut self, passes: &[BoxPass], job: &TileJob<'_>) -> Option<Vec<Vec<u16>>> {
+    fn tile_region(&mut self, kernel: Kernel<'_>, job: &TileJob<'_>) -> Option<Vec<Vec<u16>>> {
         let (mut x0, mut y0, mut x1, mut y1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
         for (i, _, _) in job.src {
             x0 = x0.min(i.x);
@@ -634,7 +666,7 @@ impl crate::Renderer {
                 region[d..d + TILE_SIZE * 4].copy_from_slice(&tile[s..s + TILE_SIZE * 4]);
             }
         }
-        let out = self.region_result(Kernel::Separable(passes), &region, w, h)?;
+        let out = self.region_result(kernel, &region, w, h)?;
 
         let wanted: Vec<TileIdx> = if job.out.is_empty() {
             job.src.iter().map(|(i, _, _)| *i).collect()
@@ -686,8 +718,13 @@ impl crate::Renderer {
                     let n = chunk_px.min(w * h - start);
                     let mut params = base;
                     params.count = n as u32;
-                    let got =
-                        self.dispatch(&px[start * 4..(start + n) * 4], &[], &[params], false, n * 4)?;
+                    let got = self.dispatch(
+                        &px[start * 4..(start + n) * 4],
+                        &[],
+                        &[params],
+                        Pipe::Adjust,
+                        n * 4,
+                    )?;
                     out[start * 4..(start + n) * 4].copy_from_slice(&got);
                 }
             }
@@ -731,11 +768,40 @@ impl crate::Renderer {
                             plan.push(p);
                         }
                     }
-                    let band = self.dispatch(up, &weights, &plan, true, w * bh * 4)?;
+                    let band = self.dispatch(up, &weights, &plan, Pipe::Sep, w * bh * 4)?;
                     let keep = (y0 - g0) * w * 4;
                     out[y0 * w * 4..y1 * w * 4]
                         .copy_from_slice(&band[keep..keep + (y1 - y0) * w * 4]);
                 }
+            }
+            Kernel::Smear(s) => {
+                if s.mats.is_empty() {
+                    return None;
+                }
+                // NOT banded, and it cannot be: a smear's taps land anywhere
+                // in the region (a corner pixel's arc reaches the far side),
+                // so there is no halo width that would make a band
+                // self-sufficient — the whole source has to be resident.
+                // Above the chunk ceiling this therefore declines and the CPU
+                // reference runs, which is the honest answer for a full-page
+                // smear: 52 Mpx of source is 417 MB and no adapter here will
+                // bind it.
+                if w * h > chunk_px {
+                    return None;
+                }
+                let mut p = Params::zeroed();
+                p.count = (w * h) as u32;
+                p.w = w as u32;
+                p.h = h as u32;
+                p.n = s.mats.len() as u32;
+                p.a = [s.centre[0], s.centre[1], 0.0, 0.0];
+                // The matrices ride the weights buffer as raw f32 bits: four
+                // storage bindings is the downlevel ceiling and all four are
+                // spoken for, so a fifth for coefficients was never
+                // available. `bitcast<f32>` on the shader side.
+                let coef: Vec<u32> = s.mats.iter().flatten().map(|v| v.to_bits()).collect();
+                let got = self.dispatch(px, &coef, &[p], Pipe::Smear, w * h * 4)?;
+                out.copy_from_slice(&got);
             }
         }
         Some(out)
@@ -782,7 +848,7 @@ impl crate::Renderer {
         up: &[u16],
         weights: &[u32],
         plan: &[Params],
-        sep: bool,
+        pipe: Pipe,
         out_len: usize,
     ) -> Option<Vec<u16>> {
         if plan.is_empty() {
@@ -867,7 +933,11 @@ impl crate::Renderer {
                 label: Some("mn.kernel.pass"),
                 timestamp_writes: None,
             });
-            cp.set_pipeline(if sep { &k.sep_pipe } else { &k.adjust_pipe });
+            cp.set_pipeline(match pipe {
+                Pipe::Adjust => &k.adjust_pipe,
+                Pipe::Sep => &k.sep_pipe,
+                Pipe::Smear => &k.smear_pipe,
+            });
             cp.set_bind_group(
                 0,
                 if i % 2 == 0 { &bg_ab } else { &bg_ba },

@@ -525,11 +525,12 @@ fn composite_size(
                     }
                     let hold_in = step.part == crate::doc::SpillPart::In;
                     // Blend If. The gate itself is resolved once per layer;
-                    // what has to be per-pixel is the LUMA READ, because the
+                    // what has to be per-pixel is the VALUE READ, because the
                     // gate asks about the destination accumulator —
-                    // everything composited below this layer so far. `None`
-                    // (the overwhelmingly common case) costs one Option test
-                    // per layer and nothing per pixel.
+                    // everything composited below this layer so far — or
+                    // about this layer's own finished ink. `None` (the
+                    // overwhelmingly common case) costs one Option test per
+                    // layer and nothing per pixel.
                     let gate = layer.gate();
                     for (i, slot) in accs[cd].iter_mut().enumerate() {
                         let o = i * 4;
@@ -571,7 +572,12 @@ fn composite_size(
                         // artist had turned the opacity down at this one
                         // pixel. `blend2.wgsl` scales `s` at the same point.
                         if let Some(g) = gate {
-                            let w = g.weight(crate::blendif::dst_luma(*slot));
+                            // `weight_for` and not a luma read: WHICH pixel
+                            // (underlying composite or this layer's own ink)
+                            // and WHICH channel are the gate's business, not
+                            // the compositor's — one answer, shared with the
+                            // shader.
+                            let w = g.weight_for(src, *slot);
                             for c in src.iter_mut() {
                                 *c *= w;
                             }

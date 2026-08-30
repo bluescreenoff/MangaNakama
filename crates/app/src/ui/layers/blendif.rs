@@ -6,16 +6,18 @@
 //! only bites on the flats — without painting a mask and without touching a
 //! pixel.
 //!
-//! # Why three controls and not a dialog
+//! # Why five controls and not a dialog
 //!
 //! Photoshop's Blend If is two split sliders (*This Layer* and *Underlying
-//! Layer*) times four channels. The owner's ruling on 2026-08-30 was "build
-//! it but keep it super basic for now", so this is the one arm anybody
-//! actually uses — Underlying, on luminance — as **Show from / Show to /
-//! Feather**, sitting in the property panel with the other layer switches
-//! rather than behind a modal. The other arms are recorded as deferred in
-//! `mn_core::blendif`'s module doc; the struct is shaped so they can be added
-//! without moving a call site.
+//! Layer*) times four channels, in a modal. The owner's ruling on 2026-08-30
+//! was "build it but keep it super basic for now", so round 1 shipped the one
+//! arm anybody actually uses — Underlying, on luminance — as **Show from /
+//! Show to / Feather** in the property panel. Round 2 adds the deferred arms
+//! as two COMBO BOXES over those same three bars (*Measure* = Underlying or
+//! This layer, *by* = Brightness/Red/Green/Blue) rather than as a second set
+//! of sliders: one band that can be pointed at any of the eight
+//! source×channel pairs. Photoshop's two arms LIVE AT ONCE; that remains
+//! deferred, for the reasons in `mn_core::blendif`'s module doc.
 //!
 //! The two range bars are clamped against each other HERE rather than left
 //! to `BlendIf::normalized`. Normalising a crossed range is the right thing
@@ -36,6 +38,7 @@ use super::super::widgets::group_caption;
 use crate::app::App;
 use crate::cmd::AppCmd;
 use mn_core::BlendIf;
+use mn_core::blendif::{GateChannel, GateSource};
 
 /// The Layer Property section. Offered on painted layers only — a folder's
 /// gate is refused by `Document::set_layer_blend_if` and ignored by every
@@ -50,16 +53,17 @@ pub(super) fn section(ui: &mut egui::Ui, app: &mut App, i: usize) {
     let cur = l.blend_if;
 
     ui.add_space(3.0);
-    group_caption(ui, "Blend if (underlying)");
+    group_caption(ui, "Blend if");
 
     let mut on = cur.is_some();
     if ui
-        .checkbox(&mut on, "Only where the page below is in range")
+        .checkbox(&mut on, "Only where the measured value is in range")
         .on_hover_text(
-            "the layer is hidden wherever the composite UNDERNEATH it falls outside the \
-             brightness range below — tone that lands only in the shadows, a highlight that \
-             stays off the ink. Nothing is erased and no mask is painted; switch it off and \
-             the layer is back in full.",
+            "the layer is hidden wherever the pixel it is measuring — the composite \
+             UNDERNEATH it, or its own ink — falls outside the range below: tone that lands \
+             only in the shadows, a highlight that stays off the ink, a colour that bites on \
+             one channel. Nothing is erased and no mask is painted; switch it off and the \
+             layer is back in full.",
         )
         .changed()
     {
@@ -76,6 +80,46 @@ pub(super) fn section(ui: &mut egui::Ui, app: &mut App, i: usize) {
     let mut g = cur;
     let mut bars: Vec<egui::Response> = Vec::new();
 
+    // The two arms, on one row above the bars: WHICH pixel, then WHAT of it.
+    // Discrete picks, so they record their own undo step (`arms` below) —
+    // the coalescing session is for things that fire every frame.
+    let mut arms: Option<BlendIf> = None;
+    ui.horizontal(|ui| {
+        ui.label("Measure");
+        egui::ComboBox::from_id_salt("mn.blendif.source")
+            .width(92.0)
+            .selected_text(g.source.label())
+            .show_ui(ui, |ui| {
+                for s in GateSource::ALL {
+                    if ui.selectable_label(g.source == s, s.label()).clicked() && s != g.source {
+                        arms = Some(BlendIf { source: s, ..g });
+                    }
+                }
+            });
+        ui.label("by");
+        egui::ComboBox::from_id_salt("mn.blendif.channel")
+            .width(92.0)
+            .selected_text(g.channel.label())
+            .show_ui(ui, |ui| {
+                for c in GateChannel::ALL {
+                    if ui.selectable_label(g.channel == c, c.label()).clicked() && c != g.channel {
+                        arms = Some(BlendIf { channel: c, ..g });
+                    }
+                }
+            });
+    })
+    .response
+    .on_hover_text(
+        "WHICH pixel the range is read from — the composite under this layer (the usual \
+         one: land a tone in the page's shadows) or this layer's OWN ink (drop your darkest \
+         strokes and keep the rest) — and WHAT of it: overall brightness, or one colour \
+         channel. A channel is what gates a tone off a blue sky without touching the greys.",
+    );
+    if let Some(g) = arms {
+        app.push_cmd(AppCmd::SetLayerBlendIf(i, Some(g)));
+        return;
+    }
+
     let mut lo = g.lo * 100.0;
     let r = ValueBar::new("Show from", 0.0, 100.0)
         .decimals(0)
@@ -86,8 +130,8 @@ pub(super) fn section(ui: &mut egui::Ui, app: &mut App, i: usize) {
         g.lo = (lo / 100.0).min(g.hi);
     }
     bars.push(r.on_hover_text(
-        "the DARKEST underlying brightness this layer still shows on. 0% = no lower limit; \
-         raise it and the layer lifts off the blacks.",
+        "the LOWEST measured value this layer still shows on. 0% = no lower limit; raise it \
+         and the layer lifts off the blacks (or off the channel's dark end).",
     ));
 
     let mut hi = g.hi * 100.0;
@@ -99,8 +143,8 @@ pub(super) fn section(ui: &mut egui::Ui, app: &mut App, i: usize) {
         g.hi = (hi / 100.0).max(g.lo);
     }
     bars.push(r.on_hover_text(
-        "the BRIGHTEST underlying brightness this layer still shows on. 100% = no upper \
-         limit; lower it and the layer drops off the paper white.",
+        "the HIGHEST measured value this layer still shows on. 100% = no upper limit; lower \
+         it and the layer drops off the paper white (or off the channel's bright end).",
     ));
 
     let mut feather = g.feather * 100.0;
@@ -118,9 +162,10 @@ pub(super) fn section(ui: &mut egui::Ui, app: &mut App, i: usize) {
     ));
 
     ui.weak(describe(g)).on_hover_text(
-        "brightness of the COMPOSITE below this layer, not of the layer itself. Inside a \
-         folder that means the folder's own contents — unless the folder is set to Through, \
-         where it means the page.",
+        "Underlying reads the COMPOSITE below this layer, not the layer itself — and inside a \
+         folder that means the folder's own contents, unless the folder is set to Through, \
+         where it means the page. This layer reads its own ink, and reads it BEFORE opacity, \
+         so turning the layer down does not slide the gate.",
     );
 
     if ui
@@ -152,18 +197,32 @@ pub(super) fn section(ui: &mut egui::Ui, app: &mut App, i: usize) {
     }
 }
 
-/// The current range in words. A percentage pair says what the numbers are;
+/// The current gate in words. A percentage pair says what the numbers are;
 /// this says what they DO, which is the part that is hard to read off two
-/// bars — especially "this is currently doing nothing".
-fn describe(g: BlendIf) -> &'static str {
-    let lo = g.lo > 0.0;
-    let hi = g.hi < 1.0;
-    match (lo, hi) {
-        (false, false) => "full range — showing everywhere (no gate)",
-        (true, false) => "shows on the LIGHTER parts of the page below",
-        (false, true) => "shows on the DARKER parts of the page below",
-        (true, true) => "shows on the mid-tones of the page below",
+/// bars — especially "this is currently doing nothing". With eight
+/// source×channel pairs behind two combo boxes it also has to say WHAT is
+/// being measured, or the same three numbers describe eight different
+/// pictures.
+fn describe(g: BlendIf) -> String {
+    if g.lo <= 0.0 && g.hi >= 1.0 {
+        return "full range — showing everywhere (no gate)".into();
     }
+    let band = match (g.lo > 0.0, g.hi < 1.0) {
+        (true, false) => "the HIGH end",
+        (false, true) => "the LOW end",
+        _ => "the middle",
+    };
+    let what = match g.channel {
+        GateChannel::Luma => "brightness",
+        GateChannel::R => "red",
+        GateChannel::G => "green",
+        GateChannel::B => "blue",
+    };
+    let whose = match g.source {
+        GateSource::Underlying => "the page below",
+        GateSource::This => "this layer's own ink",
+    };
+    format!("shows on {band} of {whose}'s {what}")
 }
 
 #[cfg(test)]
@@ -179,26 +238,79 @@ mod tests {
             describe(BlendIf {
                 lo: 0.0,
                 hi: 0.4,
-                feather: 0.1
+                feather: 0.1,
+                ..BlendIf::FULL
             }),
-            "shows on the DARKER parts of the page below"
+            "shows on the LOW end of the page below's brightness"
         );
         assert_eq!(
             describe(BlendIf {
                 lo: 0.6,
                 hi: 1.0,
-                feather: 0.1
+                feather: 0.1,
+                ..BlendIf::FULL
             }),
-            "shows on the LIGHTER parts of the page below"
+            "shows on the HIGH end of the page below's brightness"
         );
         assert_eq!(
             describe(BlendIf {
                 lo: 0.3,
                 hi: 0.7,
-                feather: 0.0
+                feather: 0.0,
+                ..BlendIf::FULL
             }),
-            "shows on the mid-tones of the page below"
+            "shows on the middle of the page below's brightness"
         );
+    }
+
+    /// …and the words have to follow the two COMBO BOXES as well. The same
+    /// three numbers describe eight different pictures now, so a caption
+    /// that only reported the band would be wrong seven times out of eight.
+    #[test]
+    fn the_caption_follows_the_arms() {
+        let band = BlendIf {
+            lo: 0.0,
+            hi: 0.4,
+            feather: 0.0,
+            ..BlendIf::FULL
+        };
+        assert_eq!(
+            describe(BlendIf {
+                source: GateSource::This,
+                ..band
+            }),
+            "shows on the LOW end of this layer's own ink's brightness"
+        );
+        assert_eq!(
+            describe(BlendIf {
+                channel: GateChannel::B,
+                ..band
+            }),
+            "shows on the LOW end of the page below's blue"
+        );
+        assert_eq!(
+            describe(BlendIf {
+                source: GateSource::This,
+                channel: GateChannel::R,
+                ..band
+            }),
+            "shows on the LOW end of this layer's own ink's red"
+        );
+        // Every pair says something different, or the caption is decoration.
+        let mut seen = std::collections::HashSet::new();
+        for source in GateSource::ALL {
+            for channel in GateChannel::ALL {
+                assert!(
+                    seen.insert(describe(BlendIf {
+                        source,
+                        channel,
+                        ..band
+                    })),
+                    "{source:?}/{channel:?} reads the same as another pair"
+                );
+            }
+        }
+        assert_eq!(seen.len(), 8);
     }
 
     /// The feather is not part of "is this doing anything": it points

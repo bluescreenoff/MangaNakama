@@ -96,7 +96,7 @@ pub use dust::DustMode;
 pub use fill::{AutoFill, FillClose, FillOpts, FillRefer};
 pub use file_object::FileObject;
 pub use fill_layer::FillKind;
-pub use filter::{Filter, MotionDir, MotionMode, Raster, WaveDir};
+pub use filter::{Filter, MotionDir, MotionMode, Raster, Smear, WaveDir};
 pub use frame::{Frame, FrameSet};
 pub use genlines::{FocusLinesParams, SpeedLinesParams, render_focus, render_speed};
 pub use gradient::{
