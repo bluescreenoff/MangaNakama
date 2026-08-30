@@ -952,6 +952,10 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                     color,
                     opts,
                     op_label: "Fill",
+                    // The label alone is not identity — Alt+Del also
+                    // pushes "Fill". Depth + label together are (the
+                    // stack is uncapped).
+                    undo_len: app.doc.undo_len(),
                 });
                 app.set_status(format!("filled {n} px{}", auto_note(&opts, auto)));
             }

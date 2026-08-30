@@ -101,6 +101,26 @@ impl State {
             .collect();
         (keymap::serialize_entries(&entries).unwrap_or_default(), notes)
     }
+
+    /// The save gate for the round-trip guarantee's other half: two rows
+    /// edited onto the SAME key (or a key emptied) would collapse in the
+    /// JSON object and silently drop a binding. `Some` is the complaint;
+    /// the save refuses instead of writing.
+    fn key_complaint(&self) -> Option<String> {
+        let mut seen = std::collections::BTreeSet::new();
+        for r in &self.rows {
+            let k = r.key.trim();
+            if k.is_empty() {
+                return Some("a row's chord is empty — give it a key or delete the row".into());
+            }
+            if !seen.insert(k) {
+                return Some(format!(
+                    "two rows share \"{k}\" — a save would drop one; merge or delete first"
+                ));
+            }
+        }
+        None
+    }
 }
 
 fn row_of(e: Entry) -> Row {
@@ -376,6 +396,10 @@ pub(super) fn tab(ui: &mut egui::Ui, app: &mut App) {
             app.shortcut_edit.reload_from_file();
         }
         Some(Action::Save) => {
+            if let Some(complaint) = app.shortcut_edit.key_complaint() {
+                app.shortcut_edit.status = complaint;
+                return;
+            }
             let (text, notes) = app.shortcut_edit.serialize();
             let path = keymap::keys_file();
             let written = path
@@ -671,5 +695,34 @@ mod tests {
             }
         }
         assert!(all.iter().any(|(l, _)| l == "tool: Figure / Direct draw / Ellipse"));
+    }
+
+    /// Two rows edited onto ONE key would collapse in the JSON object and
+    /// silently drop a binding — the save refuses instead (the round-trip
+    /// guarantee's other half). An emptied key refuses too.
+    #[test]
+    fn a_duplicate_or_empty_key_refuses_to_save() {
+        let row = |k: &str| Row {
+            key: k.into(),
+            text: "Undo".into(),
+            was_string: true,
+            loaded: serde_json::Value::String("Undo".into()),
+        };
+        let dup = State {
+            rows: vec![row("ctrl+1"), row("ctrl+1")],
+            ..Default::default()
+        };
+        let c = dup.key_complaint().expect("a duplicate complains");
+        assert!(c.contains("ctrl+1"), "{c}");
+        let empty = State {
+            rows: vec![row("ctrl+1"), row("  ")],
+            ..Default::default()
+        };
+        assert!(empty.key_complaint().is_some(), "an empty key complains");
+        let fine = State {
+            rows: vec![row("ctrl+1"), row("ctrl+2")],
+            ..Default::default()
+        };
+        assert!(fine.key_complaint().is_none(), "distinct keys save");
     }
 }

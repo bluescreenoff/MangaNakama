@@ -83,8 +83,14 @@ struct Slot {
 impl Drop for Slot {
     fn drop(&mut self) {
         // Same thread issued the reads, so a plain cancel reaches them.
+        // The kernel delivers the cancelled completion INTO `ov` (and may
+        // still be filling `buf`), so both Boxes must outlive it: wait
+        // for the completion before the handles close and the memory
+        // frees, or a rebuild races a use-after-free.
         unsafe {
             CancelIoEx(self.dir as _, &*self.ov);
+            let mut bytes = 0u32;
+            GetOverlappedResult(self.dir as _, &*self.ov, &mut bytes, 1);
             CloseHandle(self.ev as _);
             CloseHandle(self.dir as _);
         }

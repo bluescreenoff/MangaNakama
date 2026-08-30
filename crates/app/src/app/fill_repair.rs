@@ -53,6 +53,12 @@ pub(crate) struct LeakFill {
     /// The undo label the fill pushed ("Fill") — the arm's newest-step
     /// check compares against it.
     pub op_label: &'static str,
+    /// `Document::undo_len` right after the fill pushed — the label
+    /// alone is not identity ("Fill" is also Alt+Del's selection fill),
+    /// and undoing THAT would destroy it, not the leak. The stack is
+    /// uncapped, so a later op can only return to this depth by undoing
+    /// back to this very step.
+    pub undo_len: usize,
 }
 
 /// The armed repair gesture.
@@ -65,6 +71,12 @@ pub(crate) struct FillRepair {
     /// Brush radius at stroke start — the barrier's thickness, so the
     /// wall matches the stroke the user thinks they drew.
     pub radius: f32,
+    /// `Document::undo_len` right after the arm's undo — how many ops
+    /// the closing stroke actually pushed is measured against it, so the
+    /// real-ink wrap never swallows earlier work when a stroke changed
+    /// nothing (the row-95 discipline: an all-paper stroke pushes NO
+    /// step).
+    pub armed_undo_len: usize,
 }
 
 impl App {
@@ -98,7 +110,11 @@ impl App {
             self.set_status("the filled layer no longer takes pixels (folder or derived)");
             return;
         }
-        if self.doc.peek_undo_label() != Some(f.op_label) {
+        // Label AND depth: "Fill" is also Alt+Del's selection-fill label,
+        // and undoing one of those here would silently destroy it. The
+        // uncapped stack makes the depth an identity check — only undoing
+        // back to this very step can match both.
+        if self.doc.peek_undo_label() != Some(f.op_label) || self.doc.undo_len() != f.undo_len {
             self.set_status(
                 "the fill is no longer the newest undo step — undo your later work, or fill again",
             );
@@ -118,6 +134,7 @@ impl App {
             virtual_barrier,
             pts: Vec::new(),
             radius: 1.0,
+            armed_undo_len: self.doc.undo_len(),
         });
         self.set_status(if virtual_barrier {
             "fill repair armed — draw the closing stroke; the fill re-runs on release \
@@ -158,6 +175,11 @@ impl App {
         }
         self.refresh_tones();
         self.doc.set_active(li);
+        // How many ops the closing stroke pushed since the arm — an
+        // all-paper stroke pushes NONE (the row-95 discipline), and the
+        // real-ink wrap below must never reach past the arm point and
+        // swallow earlier work.
+        let stroke_ops = self.doc.undo_len().saturating_sub(repair.armed_undo_len);
         let seed = (f.seed.0 as i32, f.seed.1 as i32);
         let (n, _auto) = if repair.virtual_barrier {
             let mask = if repair.pts.len() >= 2 {
@@ -188,8 +210,12 @@ impl App {
         if !repair.virtual_barrier {
             // The user's stroke op + the refill: one press takes both
             // back to the pre-leak state (the leak itself was undone at
-            // arm time).
-            self.doc.wrap_recent("Repair fill", 2);
+            // arm time). Only when the stroke actually pushed one —
+            // wrapping past the arm point would fold earlier work into
+            // "Repair fill".
+            if stroke_ops >= 1 {
+                self.doc.wrap_recent("Repair fill", 2);
+            }
             self.set_status("fill repaired — ink kept; one undo takes it all back");
         } else {
             self.set_status("fill repaired (virtual barrier) — one undo takes it all back");

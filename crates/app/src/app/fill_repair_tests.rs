@@ -312,3 +312,118 @@ fn arming_refuses_when_it_cannot_be_safe() {
     assert!(app.status.contains("layer is gone"), "{:?}", app.status);
     assert!(app.fill_repair.is_none());
 }
+
+/// The newest-step check is IDENTITY, not label: Alt+Del's selection
+/// fill ALSO pushes "Fill", and arming after one must refuse — undoing
+/// it here would silently destroy the artist's selection fill, refill
+/// the remembered click, and clear the redo that could bring it back.
+#[test]
+fn arming_after_a_selection_fill_refuses() {
+    let Some(mut app) = headless() else { return };
+    u_shaped_gap(&mut app);
+    let flats = fill_layer(&app);
+    dispatch(&mut app, AppCmd::SetSlotColor([1.0, 0.0, 0.0]));
+    dispatch(&mut app, AppCmd::Fill(60.0, 60.0));
+
+    // Alt+Del with no selection: the whole layer, label "Fill" too.
+    dispatch(&mut app, AppCmd::FillSelection);
+    assert!(px(&app, flats, 5, 5)[3] > 0, "the layer fill reached outside the U");
+    let depth = app.doc.undo_len();
+
+    dispatch(
+        &mut app,
+        AppCmd::ArmFillRepair {
+            virtual_barrier: true,
+        },
+    );
+    assert!(
+        app.status.contains("no longer the newest"),
+        "{:?}",
+        app.status
+    );
+    assert!(app.fill_repair.is_none(), "nothing armed");
+    assert_eq!(app.doc.undo_len(), depth, "the refusal undid nothing");
+    assert!(
+        px(&app, flats, 5, 5)[3] > 0,
+        "the selection fill survived the refusal"
+    );
+}
+
+/// The row-95 discipline reaches the real-ink wrap: a closing stroke
+/// that changed no pixels pushes NO op, and the wrap must not reach past
+/// the arm point and fold the artist's earlier work into "Repair fill".
+#[test]
+fn a_no_op_closing_stroke_wraps_nothing_extra() {
+    let Some(mut app) = headless() else { return };
+    u_shaped_gap(&mut app);
+    let flats = fill_layer(&app);
+    let lineart = lineart_layer(&app);
+    dispatch(&mut app, AppCmd::SetSlotColor([1.0, 0.0, 0.0]));
+
+    // Earlier work that must survive: a pen stroke ABOVE the U, on the
+    // lineart, as its own undo step.
+    dispatch(&mut app, AppCmd::SetTool(crate::cmd::Tool::Pen));
+    dispatch(&mut app, AppCmd::SetBrushSizePx(5.0));
+    app.doc.set_active(lineart);
+    let (ax, ay) = s(&app, 24.0, 6.0);
+    app.canvas_down(ax, ay, PointerKind::Mouse, &[]);
+    for x in [30.0, 36.0, 42.0] {
+        let (mx, my) = s(&app, x, 6.0);
+        app.canvas_move(
+            mx,
+            my,
+            &[crate::app::PenSample {
+                x: mx,
+                y: my,
+                pressure: 0.9,
+                tilt_x: 0.0,
+                tilt_y: 0.0,
+                t_ms: 0.0,
+            }],
+        );
+    }
+    let (ux, uy) = s(&app, 48.0, 6.0);
+    app.canvas_up(ux, uy, &[]);
+    assert!(px(&app, lineart, 36, 6)[3] > 0, "the earlier stroke inked");
+
+    app.doc.set_active(flats);
+    dispatch(&mut app, AppCmd::Fill(60.0, 60.0));
+    dispatch(
+        &mut app,
+        AppCmd::ArmFillRepair {
+            virtual_barrier: false,
+        },
+    );
+    // The "closing stroke": an eraser over empty flats — all paper, no op.
+    dispatch(&mut app, AppCmd::SetTool(crate::cmd::Tool::Eraser));
+    let (ax, ay) = s(&app, 90.0, 6.0);
+    app.canvas_down(ax, ay, PointerKind::Mouse, &[]);
+    let (mx, my) = s(&app, 100.0, 6.0);
+    app.canvas_move(
+        mx,
+        my,
+        &[crate::app::PenSample {
+            x: mx,
+            y: my,
+            pressure: 0.9,
+            tilt_x: 0.0,
+            tilt_y: 0.0,
+            t_ms: 0.0,
+        }],
+    );
+    let (ux, uy) = s(&app, 110.0, 6.0);
+    app.canvas_up(ux, uy, &[]);
+
+    assert!(app.fill_repair.is_none(), "the gesture closed");
+    assert!(px(&app, flats, 60, 60)[3] > 0, "the refill ran");
+    assert_eq!(
+        app.doc.peek_undo_label(),
+        Some("Fill"),
+        "no stroke op landed, so the refill stands alone — unwrapped"
+    );
+    dispatch(&mut app, AppCmd::Undo);
+    assert!(
+        px(&app, lineart, 36, 6)[3] > 0,
+        "one undo took only the refill — the earlier stroke survived"
+    );
+}
