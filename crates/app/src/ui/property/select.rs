@@ -338,6 +338,50 @@ pub(crate) fn sec_fill(ui: &mut egui::Ui, app: &mut App) {
     if changed {
         app.push_cmd(AppCmd::SetFillOpts(o));
     }
+    // Leak repair's door where the eyes already are (owner UX call
+    // 2026-08-31): a fill that leaked is fixed from HERE, one tap — the
+    // palette rows stay for keys.json. Greyed with the arm's own refusal
+    // as the hover, so the button can never lie about why.
+    ui.add_space(4.0);
+    if let Some(r) = &app.fill_repair {
+        let kind = if r.virtual_barrier {
+            "virtual barrier"
+        } else {
+            "real ink"
+        };
+        ui.horizontal(|ui| {
+            ui.weak(format!("repair armed ({kind}) — draw the closing stroke"));
+            if ui.small_button("Cancel").clicked() {
+                app.cancel_fill_repair();
+            }
+        });
+    } else {
+        let ok = app.fill_repairable();
+        ui.horizontal(|ui| {
+            let b = ui.add_enabled(ok.is_ok(), egui::Button::new("Repair last fill"));
+            let b = match ok {
+                Ok(_) => b.on_hover_text(
+                    "leaked through a gap? this undoes the fill and waits for ONE stroke \
+                     across the gap — a barrier only the fill sees; release re-runs the \
+                     fill from the same click, and one undo takes it all back",
+                ),
+                Err(e) => b.on_disabled_hover_text(e),
+            };
+            if b.clicked() {
+                app.push_cmd(AppCmd::ArmFillRepair {
+                    virtual_barrier: true,
+                });
+            }
+            let b2 = ui
+                .add_enabled(ok.is_ok(), egui::Button::new("as ink"))
+                .on_hover_text("the same repair, but the closing stroke stays as real ink");
+            if b2.clicked() {
+                app.push_cmd(AppCmd::ArmFillRepair {
+                    virtual_barrier: false,
+                });
+            }
+        });
+    }
 }
 
 /// Row 160 — the Remove-dust sub tool's Tool Property: RD-002's one

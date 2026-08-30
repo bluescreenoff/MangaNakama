@@ -427,3 +427,21 @@ fn a_no_op_closing_stroke_wraps_nothing_extra() {
         "one undo took only the refill — the earlier stroke survived"
     );
 }
+
+/// The Tool Property button asks the SAME check the arm uses
+/// (`fill_repairable`) — dark before any fill, lit right after one,
+/// dark again once later work buries it.
+#[test]
+fn the_repair_button_lights_exactly_when_arming_would_work() {
+    let Some(mut app) = headless() else { return };
+    u_shaped_gap(&mut app);
+    assert!(app.fill_repairable().is_err(), "nothing to repair yet");
+    dispatch(&mut app, AppCmd::SetSlotColor([1.0, 0.0, 0.0]));
+    dispatch(&mut app, AppCmd::Fill(60.0, 60.0));
+    assert!(app.fill_repairable().is_ok(), "lit right after the fill");
+    scribble(&mut app);
+    assert!(
+        app.fill_repairable().is_err(),
+        "dark once the fill is no longer the newest step"
+    );
+}

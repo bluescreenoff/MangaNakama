@@ -83,6 +83,37 @@ impl App {
     /// The palette command. Refuses with a status line (never a dialog)
     /// when there is nothing safely repairable; otherwise undoes the
     /// leaked fill and waits for the stroke.
+    /// Could a repair arm RIGHT NOW? `Ok` is the leaked layer's index;
+    /// `Err` is the refusal, worded for a status line and for the Tool
+    /// Property button's disabled hover. Side-effect free — the arm and
+    /// the UI both ask HERE, so the button can never grey for a reason
+    /// the command would not refuse.
+    pub(crate) fn fill_repairable(&self) -> Result<usize, &'static str> {
+        let Some(f) = &self.last_fill else {
+            return Err("no fill to repair yet — click a fill first");
+        };
+        let page_uid = self.pages.get(self.page_index).map(|p| p.uid).unwrap_or(0);
+        if page_uid != f.page_uid {
+            return Err("the remembered fill is on another page");
+        }
+        let Some(li) = self.doc.layer_index_of(f.layer_id) else {
+            return Err("the filled layer is gone");
+        };
+        if !self.doc.layers[li].paintable() {
+            return Err("the filled layer no longer takes pixels (folder or derived)");
+        }
+        // Label AND depth: "Fill" is also Alt+Del's selection-fill label,
+        // and undoing one of those here would silently destroy it. The
+        // uncapped stack makes the depth an identity check — only undoing
+        // back to this very step can match both.
+        if self.doc.peek_undo_label() != Some(f.op_label) || self.doc.undo_len() != f.undo_len {
+            return Err(
+                "the fill is no longer the newest undo step — undo your later work, or fill again",
+            );
+        }
+        Ok(li)
+    }
+
     pub(crate) fn arm_fill_repair(&mut self, virtual_barrier: bool) {
         if let Some(r) = &mut self.fill_repair {
             // Re-arming swaps the mode; the undo already happened and
@@ -93,34 +124,14 @@ impl App {
             self.set_status(format!("repair re-armed: {kind} barrier — draw the closing stroke"));
             return;
         }
-        let Some(f) = &self.last_fill else {
-            self.set_status("no fill to repair yet — click a fill first");
-            return;
+        let li = match self.fill_repairable() {
+            Ok(li) => li,
+            Err(e) => {
+                self.set_status(e);
+                return;
+            }
         };
-        let page_uid = self.pages.get(self.page_index).map(|p| p.uid).unwrap_or(0);
-        if page_uid != f.page_uid {
-            self.set_status("the remembered fill is on another page");
-            return;
-        }
-        let Some(li) = self.doc.layer_index_of(f.layer_id) else {
-            self.set_status("the filled layer is gone");
-            return;
-        };
-        if !self.doc.layers[li].paintable() {
-            self.set_status("the filled layer no longer takes pixels (folder or derived)");
-            return;
-        }
-        // Label AND depth: "Fill" is also Alt+Del's selection-fill label,
-        // and undoing one of those here would silently destroy it. The
-        // uncapped stack makes the depth an identity check — only undoing
-        // back to this very step can match both.
-        if self.doc.peek_undo_label() != Some(f.op_label) || self.doc.undo_len() != f.undo_len {
-            self.set_status(
-                "the fill is no longer the newest undo step — undo your later work, or fill again",
-            );
-            return;
-        }
-        let f = f.clone();
+        let f = self.last_fill.clone().expect("fill_repairable checked it");
         if !self.doc.undo() {
             self.set_status("nothing to undo — the fill already went");
             return;
