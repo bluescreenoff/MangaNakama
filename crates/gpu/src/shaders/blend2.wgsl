@@ -19,6 +19,11 @@
 //   destination keeps the source — see core::blend's Subtract arm).
 // Separable: 16..22, 26..34 and 38. Nonseparable: 23..25 and 35..37.
 //
+// Slots 0..3 (Normal, Multiply, Screen, Add) normally never reach this pass —
+// they have fixed-function blend states. They arrive here for one reason:
+// a layer carrying a **Blend If** gate, which must read the destination and
+// therefore needs the snapshot this pass provides. See `blend2`'s first arm.
+//
 // Same oversized-triangle + scissor geometry as tiles.wgsl (the driver note
 // there). Everything is premultiplied f32 in and out, opacity folded into
 // the source exactly like tiles.wgsl/group.wgsl do.
@@ -143,6 +148,30 @@ fn blend2(s: vec4<f32>, d: vec4<f32>, m: u32) -> vec4<f32> {
     let da = d.a;
     var out = vec4<f32>(0.0, 0.0, 0.0, sa + da * (1.0 - sa));
 
+    // The FIXED-FUNCTION four (slots 0..3), reached here only when the layer
+    // carries a Blend If gate: the gate has to read the destination, and the
+    // destination snapshot only exists on this pass, so a gated Normal layer
+    // composites through the shader like an exotic one.
+    //
+    // These are the premultiplied forms from mn_core::blend transcribed line
+    // for line — NOT routed through the general separable frame below, so
+    // that an ungated Normal draw (fixed-function blend state) and a gated
+    // one (here) are the same arithmetic and cannot drift. Slot 4 is the
+    // retired ReverseSubtract state and is unreachable.
+    if m <= 3u {
+        var rgb = vec3<f32>(0.0);
+        if m == 0u {
+            rgb = s.rgb + d.rgb * (1.0 - sa);
+        } else if m == 1u {
+            rgb = s.rgb * d.rgb + s.rgb * (1.0 - da) + d.rgb * (1.0 - sa);
+        } else if m == 2u {
+            rgb = s.rgb + d.rgb - s.rgb * d.rgb;
+        } else {
+            rgb = min(s.rgb + d.rgb, vec3<f32>(1.0));
+        }
+        return vec4<f32>(rgb, out.a);
+    }
+
     // The general separable frame shared with Darken/Lighten (core::blend):
     //   out.rgb = s.rgb*(1-da) + sa*da*B(cs,cb) + d.rgb*(1-sa)
     if (m >= 16u && m <= 22u) || (m >= 26u && m <= 34u) || m == 38u {
@@ -261,6 +290,39 @@ fn layer_colour_tint(px: vec4<f32>, tint: u32, fx: u32) -> vec4<f32> {
     return vec4<f32>(px.a * (main * (1.0 - lum) + sub * lum), px.a);
 }
 
+// --- Blend If -------------------------------------------------------------
+// The twin of mn_core::blendif (`weight` + `dst_luma`). The coefficients are
+// `lum3`'s, deliberately: one answer per application to "how bright is this
+// pixel". `bi` arrives NORMALISED (lo <= hi, all clamped 0..1) — the CPU
+// normalises at every door into the document, so the shader never has to.
+//
+// (0, 1, f) is the OPEN gate and every ungated draw carries it, which is why
+// there is no sentinel: the feather points outward, so an open range stays
+// open at any feather and the early-out below is exact.
+fn blendif_weight(bi: vec3<f32>, d: vec4<f32>) -> f32 {
+    let lo = bi.x;
+    let hi = bi.y;
+    let f = bi.z;
+    if lo <= 0.0 && hi >= 1.0 {
+        return 1.0;
+    }
+    var l = 0.0;
+    if d.a > 0.0 {
+        l = clamp(dot(d.rgb, vec3<f32>(0.3, 0.59, 0.11)) / d.a, 0.0, 1.0);
+    }
+    if l >= lo && l <= hi {
+        return 1.0;
+    }
+    if f <= 0.0 {
+        return 0.0;
+    }
+    var dist = lo - l;
+    if l > hi {
+        dist = l - hi;
+    }
+    return clamp(1.0 - dist / f, 0.0, 1.0);
+}
+
 struct VsIn {
     @builtin(vertex_index) vi: u32,
     @location(0) rect: vec4<f32>,
@@ -269,6 +331,7 @@ struct VsIn {
     @location(3) blend_mode: u32,
     @location(4) tint: u32,
     @location(5) fx: u32,
+    @location(6) blendif: vec3<f32>,
 }
 
 struct VsOut {
@@ -278,6 +341,7 @@ struct VsOut {
     @location(2) @interpolate(flat) blend_mode: u32,
     @location(3) @interpolate(flat) tint: u32,
     @location(4) @interpolate(flat) fx: u32,
+    @location(5) @interpolate(flat) blendif: vec3<f32>,
 }
 
 @vertex
@@ -290,6 +354,7 @@ fn vs_main(in: VsIn) -> VsOut {
     out.blend_mode = in.blend_mode;
     out.tint = in.tint;
     out.fx = in.fx;
+    out.blendif = in.blendif;
     return out;
 }
 
@@ -303,9 +368,12 @@ fn fs_tile(in: VsOut) -> @location(0) vec4<f32> {
     var src = vec4<f32>(raw) / 32768.0;
     src = expression_reduce(src, (in.fx >> 24u) & 3u);
     src = layer_colour_tint(src, in.tint, in.fx);
-    let s = src * in.opacity;
     // The destination snapshot: framebuffer coords ARE canvas pixels.
     let d = textureLoad(snap_tex, vec2<i32>(in.pos.xy), 0);
+    // Blend If LAST, on the finished source — the same point in the same
+    // order as the CPU compositor (core::export's plain-layer loop), where
+    // the gate weighs `src` after opacity/mask/clip and before the blend.
+    let s = src * in.opacity * blendif_weight(in.blendif, d);
     return blend2(s, d, in.blend_mode);
 }
 
@@ -317,7 +385,13 @@ fn fs_tile(in: VsOut) -> @location(0) vec4<f32> {
 @fragment
 fn fs_blit(in: VsOut) -> @location(0) vec4<f32> {
     let uv = in.pos.xy / canvas.size;
-    let s = textureSample(group_tex, group_smp, uv) * in.opacity;
     let d = textureLoad(snap2_tex, vec2<i32>(in.pos.xy), 0);
+    // A CLIP layer reaches the canvas through here (its scratch group is the
+    // source), so its Blend If gate has to be applied at the blit — which is
+    // the same point the CPU applies it, since core::export multiplies the
+    // clip base's alpha into `src` before the gate. Folder blits always pass
+    // the open gate: v1 offers Blend If on painted layers only.
+    let s = textureSample(group_tex, group_smp, uv) * in.opacity
+        * blendif_weight(in.blendif, d);
     return blend2(s, d, in.blend_mode);
 }

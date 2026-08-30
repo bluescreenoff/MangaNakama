@@ -408,6 +408,17 @@ pub struct Layer {
     /// LP-022 decrease-colour PREVIEW. Display only: no pixel changes, and
     /// the export composite ignores it.
     pub expression: LayerExpression,
+    /// Blend If (`crate::blendif`): `Some` = this layer only shows where the
+    /// composite UNDERNEATH it has luminance inside the range, feathered at
+    /// both knees. `None` — the default — shows everywhere.
+    ///
+    /// Unlike the layer colour and the expression preview this is NOT a
+    /// display-only tint: it changes what the exported page holds, so every
+    /// compositor applies it (`export::composite_size`, and the GPU through
+    /// `blend2.wgsl`). Offered on non-folder layers only in v1; a folder
+    /// carrying one is ignored everywhere, so a hand-edited file cannot
+    /// smuggle in a behaviour the UI would never show.
+    pub blend_if: Option<crate::blendif::BlendIf>,
     /// Nesting level: 0 = root. A layer at depth d+1 belongs to the nearest
     /// folder above it in the stack at depth d (children sit *below* their
     /// folder header in `Document::layers`, so the header consumes their
@@ -532,6 +543,7 @@ impl Layer {
             layer_colour: None,
             layer_sub_colour: None,
             expression: LayerExpression::Colour,
+            blend_if: None,
             depth: 0,
             folder: false,
             through: false,
@@ -583,6 +595,28 @@ impl Layer {
             return None;
         }
         self.mask.as_ref().filter(|m| m.enabled)
+    }
+
+    /// The LIVE Blend If gate, or `None` when this layer shows everywhere.
+    ///
+    /// **The single door every compositor asks** — CPU (`export`), GPU
+    /// (`LayerSig` + the blend2 routing) and any future one. It folds in the
+    /// two cases that are "off" without being `None`:
+    ///
+    /// * a FOLDER carrying a gate (v1 offers it on painted layers only, and
+    ///   a hand-edited or future file must not sneak one in — the same
+    ///   defence `edge` gets on frame folders at load), and
+    /// * an OPEN range, which passes every luminance and would otherwise
+    ///   cost the GPU a whole destination-snapshot pass for a no-op.
+    ///
+    /// If the two compositors asked this question separately they would
+    /// eventually answer it differently, and the screen would stop matching
+    /// the exported page.
+    pub fn gate(&self) -> Option<crate::blendif::BlendIf> {
+        self.blend_if
+            .filter(|_| !self.folder)
+            .map(|b| b.normalized())
+            .filter(|b| !b.is_open())
     }
 
     /// The frame folder's derived coverage mask, if any.
@@ -4683,6 +4717,32 @@ impl Document {
         true
     }
 
+    /// Blend If: set (or clear) this layer's underlying-luminance gate.
+    ///
+    /// Folders refuse — v1 offers the gate on painted layers only, and the
+    /// compositors read `Layer::blend_if` through [`Layer::gate`], which
+    /// refuses folders too. Returns false on a no-op so a slider tick that
+    /// did not move the value records no undo step.
+    ///
+    /// The value is [`crate::blendif::BlendIf::normalized`] on the way in:
+    /// no compositor ever sees `hi < lo` (it would hide the layer outright).
+    pub fn set_layer_blend_if(
+        &mut self,
+        index: usize,
+        gate: Option<crate::blendif::BlendIf>,
+    ) -> bool {
+        let gate = gate.map(|g| g.normalized());
+        let Some(l) = self.layers.get_mut(index) else {
+            return false;
+        };
+        if l.folder || l.blend_if == gate {
+            return false;
+        }
+        l.blend_if = gate;
+        self.touch();
+        true
+    }
+
     /// Toggle clip-to-layer-below. Folders refuse (their group already
     /// isolates). Like visibility, not undoable.
     pub fn set_layer_clip(&mut self, index: usize, clip: bool) -> bool {
@@ -5387,6 +5447,80 @@ impl Document {
                     // toward white, and the LIVE gradient layer (which does
                     // premultiply, `fill_layer::build_fill_tile`) disagreed
                     // with the destructive tool on the same parameters.
+                    let al = crate::blend::f32_to_fix15(s[3]);
+                    let pr = |v: f32| crate::blend::f32_to_fix15(v * s[3]).min(al);
+                    let c = [pr(s[0]), pr(s[1]), pr(s[2]), al];
+                    Self::over_pixel(&mut data[p * 4..p * 4 + 4], c);
+                }
+            }
+        }
+        self.mask_op_to_selection();
+        if lock_alpha {
+            self.mask_op_to_alpha();
+        }
+        self.end_op();
+        true
+    }
+
+    /// `FI-050` — the FREEFORM gradient. The ramp runs from guide polyline
+    /// `l1` (parameter 0) to guide polyline `l2` (parameter 1), FOLLOWING
+    /// their shapes: every pixel takes the ratio of its distances to the two
+    /// guides. Same layer rules, selection clip and single undo step as
+    /// [`Self::paint_gradient_ramp`]. False on a refusing layer, or when
+    /// either guide has no usable point.
+    ///
+    /// See [`crate::freeform`] for the geometry, the per-tile segment cull
+    /// that makes a full page affordable, and why this needs no
+    /// anti-aliasing switch on the guides (they are never pixels).
+    ///
+    /// Unlike the linear ramp there is no tile to skip: the parameter is
+    /// defined over the whole canvas, so "do not draw" has no outside to
+    /// leave alone and every selected tile is painted.
+    pub fn paint_gradient_freeform(
+        &mut self,
+        l1: &[[f32; 2]],
+        l2: &[[f32; 2]],
+        ramp: &crate::gradient::Ramp,
+    ) -> bool {
+        if !self.paint_guard() {
+            return false;
+        }
+        let Some(field) = crate::freeform::Freeform::new(l1, l2) else {
+            return false;
+        };
+        let (w, h) = (self.size.0 as i32, self.size.1 as i32);
+        let sel = self.selection.clone();
+        let li = self.active;
+        let lock_alpha = self.layers[li].lock_alpha;
+        // Half the diagonal of one tile: no pixel in a tile is further than
+        // this from its centre, which is exactly what the cull's bound needs.
+        let hd = TILE_SIZE as f32 * 0.5 * std::f32::consts::SQRT_2;
+        let half = TILE_SIZE as f32 * 0.5;
+        self.begin_op();
+        for ty in 0..(h + TILE_SIZE as i32 - 1) / TILE_SIZE as i32 {
+            for tx in 0..(w + TILE_SIZE as i32 - 1) / TILE_SIZE as i32 {
+                let idx = TileIdx::new(tx, ty);
+                if let Some(s) = &sel {
+                    if s.tile_mask(idx).is_none() {
+                        continue;
+                    }
+                }
+                let (ox, oy) = idx.origin();
+                // Cull BEFORE `tile_mut`: a guide with hundreds of segments
+                // is otherwise re-scanned 4096 times per tile.
+                let win = field.window([ox as f32 + half, oy as f32 + half], hd);
+                let tile = self.layers[li].tile_mut(idx);
+                let data = tile.data_mut();
+                for p in 0..TILE_SIZE * TILE_SIZE {
+                    let x = ox + (p % TILE_SIZE) as i32;
+                    let y = oy + (p / TILE_SIZE) as i32;
+                    if x >= w || y >= h {
+                        continue;
+                    }
+                    let t = win.t_at([x as f32 + 0.5, y as f32 + 0.5]);
+                    let s = ramp.eval_unit(t, x, y);
+                    // Premultiply, for the reason spelled out in
+                    // `paint_gradient_ramp`.
                     let al = crate::blend::f32_to_fix15(s[3]);
                     let pr = |v: f32| crate::blend::f32_to_fix15(v * s[3]).min(al);
                     let c = [pr(s[0]), pr(s[1]), pr(s[2]), al];

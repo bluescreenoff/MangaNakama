@@ -1370,7 +1370,7 @@ impl FigureLineOpts {
     }
 }
 
-/// Gradient-tool colour modes (CSP's three).
+/// Gradient-tool colour modes (CSP's three), plus `FI-050`'s freeform.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum GradMode {
     /// Main colour fades into the sub colour.
@@ -1379,6 +1379,11 @@ pub enum GradMode {
     FgToTransparent,
     /// Transparent fades into the main colour.
     TransparentToFg,
+    /// `FI-050`: two DRAWN guide lines instead of one straight drag — the
+    /// main colour on the first, the sub colour on the second, and the ramp
+    /// between them follows both shapes. Takes two strokes, so it is the one
+    /// gradient mode with a staged gesture ([`GradFree`]).
+    Freeform,
 }
 
 impl GradMode {
@@ -1387,8 +1392,35 @@ impl GradMode {
             GradMode::FgToBg => "Main → Sub",
             GradMode::FgToTransparent => "Main → Transparent",
             GradMode::TransparentToFg => "Transparent → Main",
+            GradMode::Freeform => "Freeform (two lines)",
         }
     }
+
+    /// Does this mode take a two-stroke gesture rather than one drag?
+    pub fn is_freeform(self) -> bool {
+        self == GradMode::Freeform
+    }
+}
+
+/// `FI-050`: the live state of a freeform gradient's two-stroke gesture —
+/// the same shape as [`FigureStage2`], for the same reason. It is a
+/// SEPARATE field from `App::grad_drag` and the two are mutually exclusive
+/// by construction (the press picks one on `grad_mode`), so the three
+/// one-drag modes run exactly the path they always did.
+///
+/// Nothing here is history: no pixels move until the second stroke is
+/// released, so Esc or a tool switch throws the whole gesture away with
+/// nothing to undo.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct GradFree {
+    /// The finished FIRST guide (the main colour's line), canvas px. Empty
+    /// while the first stroke is still down.
+    pub first: Vec<[f32; 2]>,
+    /// The stroke under the pointer right now. Empty between strokes.
+    pub cur: Vec<[f32; 2]>,
+    /// Is a stroke in progress? Distinguishes "waiting for the second
+    /// press" from "drawing", which `cur` alone cannot.
+    pub drawing: bool,
 }
 
 /// What a pending ruler drag creates (TODO #3).
@@ -1838,6 +1870,7 @@ impl SubTool {
             SubTool::Gradient(GradMode::FgToBg),
             SubTool::Gradient(GradMode::FgToTransparent),
             SubTool::Gradient(GradMode::TransparentToFg),
+            SubTool::Gradient(GradMode::Freeform),
             SubTool::Eyedrop(All),
             SubTool::Eyedrop(Active),
             SubTool::Eyedrop(Reference),
@@ -3380,6 +3413,15 @@ pub enum AppCmd {
     /// `LP-022` decrease-colour PREVIEW: display the layer as grey or 1-bit
     /// mono without converting a pixel. Screen only — never exported.
     SetLayerExpression(usize, mn_core::LayerExpression),
+    /// Blend If: set (or clear, with `None`) the layer's underlying-luminance
+    /// gate — it shows only where the composite BELOW it is in range.
+    ///
+    /// Unlike the layer colour and the expression preview beside it, this is
+    /// NOT display-only: it changes the exported page, so it is undoable.
+    /// The property panel's bars fire every frame, so they coalesce through
+    /// [`AppCmd::ParamEditSession`] exactly like the live-layer sliders —
+    /// one press per drag. Folders are refused.
+    SetLayerBlendIf(usize, Option<mn_core::BlendIf>),
     // --- paper (PA-001, TRIAGE 100 / OL-005) --------------------------------
     /// Toggle the paper's eye. View state, like a layer's eye: no undo, and
     /// no effect on what a PNG export writes. Off ⇒ the transparency checker
@@ -3872,7 +3914,10 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
     // undo pre-image. ANY other command means the drag cannot still be
     // running, so the next param edit starts a fresh session — the belt to
     // `ParamEditSession(None)`'s braces.
-    if !matches!(cmd, AppCmd::SetFillParams(..) | AppCmd::ParamEditSession(_)) {
+    if !matches!(
+        cmd,
+        AppCmd::SetFillParams(..) | AppCmd::SetLayerBlendIf(..) | AppCmd::ParamEditSession(_)
+    ) {
         app.param_session = None;
     }
     // docs/CLIPPING-SCENARIOS.md 5b: a structure edit that silences or
@@ -7890,6 +7935,37 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 app.mark_dirty();
             }
         }
+        AppCmd::SetLayerBlendIf(i, gate) => {
+            // Undoable, unlike its neighbours: the gate decides what the
+            // EXPORTED page holds, not just what the screen shows.
+            //
+            // ONE undo step per drag, the `SetFillParams` shape: the
+            // pre-image is a whole-stack snapshot taken on the first tick,
+            // and ticks inside an open session skip it because the snapshot
+            // already on the stack is the pre-SESSION state — which is what
+            // Ctrl+Z owes the hand that dragged the slider. (The drag's
+            // first tick lands before the panel reports the session, so it
+            // is the one that records.)
+            //
+            // The change test comes first so a tick that moved nothing —
+            // the bar re-emitting the same value, a reset on an already
+            // reset gate — leaves no do-nothing step in the History palette.
+            let gate = gate.map(|g| g.normalized());
+            let changes = app
+                .doc
+                .layers
+                .get(i)
+                .is_some_and(|l| !l.folder && l.blend_if != gate);
+            if changes {
+                if app.param_session != Some(i) {
+                    let before = app.doc.stack_snapshot();
+                    let active = app.doc.active;
+                    app.doc.record_structure("Blend if", before, active);
+                }
+                app.doc.set_layer_blend_if(i, gate);
+                app.mark_dirty();
+            }
+        }
         // The index-free door (keymap follow-up (a)): resolve the row HERE,
         // at execute time, then hand straight to the indexed command so
         // there is one implementation of each verb.
@@ -8882,6 +8958,9 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
                 // gesture left to commit it once the tool changes, and it
                 // would keep painting its preview over the new tool.
                 app.figure_stage2 = None;
+                // FI-050: same for a freeform gradient waiting on its second
+                // guide line — the tool that would draw it is gone.
+                app.grad_free = None;
                 // L-001: a half-traced magnetic outline has no gesture left
                 // to close it once the tool changes — and it holds an edge
                 // cache, so dropping it frees that too.

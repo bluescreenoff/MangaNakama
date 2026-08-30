@@ -233,7 +233,13 @@ pub fn apply_state(app: &mut App, s: SubTool) {
             app.figure_stage2 = None;
             app.smart_shape = None;
         }
-        SubTool::Gradient(m) => app.grad_mode = m,
+        SubTool::Gradient(m) => {
+            app.grad_mode = m;
+            // FI-050: a half-drawn freeform gesture belongs to the row that
+            // started it — leaving it armed would let the second guide line
+            // land in a mode that has no use for it.
+            app.grad_free = None;
+        }
         SubTool::Eyedrop(r) => app.eyedrop_opts.refer = r,
         SubTool::EyedropSize(n) => app.eyedrop_opts.size = n,
         SubTool::Pan(m) => app.pan_mode = m,

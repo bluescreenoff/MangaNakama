@@ -18,6 +18,12 @@ pub(crate) fn tool_ends(app: &App) -> ([f32; 4], [f32; 4]) {
         crate::cmd::GradMode::TransparentToFg => {
             ([fg[0], fg[1], fg[2], 0.0], [fg[0], fg[1], fg[2], 1.0])
         }
+        // FI-050: the first guide line carries the main colour, the second
+        // the sub colour — the same two ends as Main → Sub, laid on drawn
+        // lines instead of on a straight drag.
+        crate::cmd::GradMode::Freeform => {
+            ([fg[0], fg[1], fg[2], 1.0], [bg[0], bg[1], bg[2], 1.0])
+        }
     }
 }
 

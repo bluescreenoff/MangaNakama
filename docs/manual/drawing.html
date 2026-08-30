@@ -507,6 +507,29 @@ moved inwards. Click the bar to add an interior stop, drag a stop down
 out of the bar to delete it. Six interior stops is the maximum.
 <span class="why">On a gradient LAYER the two ends are editable too —
 they are that layer's own parameters, not the tool's.</span></div>
+<div class="quirk"><b>Freeform takes TWO strokes, and needs no
+anti-aliasing switch.</b> Pick Gradient &#9656; Freeform and draw two
+lines: the first takes your main colour, the second your sub colour, and
+the ramp between them follows both shapes. Nothing is painted until the
+second line is released, so <kbd>Esc</kbd> (or switching tools) in the
+gap throws the whole thing away with nothing to undo &mdash; and the
+finished gradient is one undo press. <span class="why">Clip Studio's
+version of this reads two lines that are already pixels on a layer, which
+is why it makes you draw them with anti-aliasing turned OFF or it refuses
+to fill. Here the two lines are the gesture, never pixels, so there is no
+setting to get wrong and the result is smooth by construction.</span></div>
+<div class="quirk"><b>Freeform ignores Edge process and Start from
+centre, and always bakes.</b> Those two describe what happens outside the
+length you dragged, and a freeform gradient has no outside &mdash; every
+pixel sits between the two guides. Everything else on the ramp (interior
+stops, Flip, mixing mode, mixing rate, dithering) works normally.
+&ldquo;Create live layer&rdquo; is also ignored: a live gradient layer
+stores two endpoints, and there is nowhere in it to keep two drawn lines,
+so Freeform paints pixels and says so in the status bar. Beyond the two
+lines the colour eases back toward the middle of the ramp rather than
+holding flat &mdash; make a selection first if that reaches somewhere you
+care about. <span class="why">A full B4 page takes a few seconds; the
+straight-line gradient takes about half that on the same page.</span></div>
 <div class="quirk warn"><b>Edge process &ldquo;Do not draw&rdquo; leaves
 the outside alone — it does not erase it.</b> Everything past the length
 you dragged keeps whatever was already on the layer. The default,

@@ -901,11 +901,21 @@ impl App {
                 self.needs_redraw = true;
             }
             Tool::Gradient => {
+                // Re-guards on EVERY press, which is what covers the
+                // freeform gesture's second stroke: the Layers palette is
+                // live between the two lines, so the layer under the first
+                // need not be the layer under the second.
                 if self.guard_frame_layer() {
                     return;
                 }
                 let (cx, cy) = self.viewport.to_canvas(x, y);
-                self.grad_drag = Some(((cx, cy), (cx, cy)));
+                if self.grad_mode.is_freeform() {
+                    let g = self.grad_free.get_or_insert_with(Default::default);
+                    g.cur = vec![[cx, cy]];
+                    g.drawing = true;
+                } else {
+                    self.grad_drag = Some(((cx, cy), (cx, cy)));
+                }
                 self.needs_redraw = true;
             }
             Tool::Liquify => {
@@ -2105,6 +2115,12 @@ impl App {
             GradMode::FgToBg => ([fg[0], fg[1], fg[2], 1.0], [bg[0], bg[1], bg[2], 1.0]),
             GradMode::FgToTransparent => ([fg[0], fg[1], fg[2], 1.0], [fg[0], fg[1], fg[2], 0.0]),
             GradMode::TransparentToFg => ([fg[0], fg[1], fg[2], 0.0], [fg[0], fg[1], fg[2], 1.0]),
+            // FI-050 never arrives here — the press routes a freeform
+            // gesture to `grad_free`, not `grad_drag`. The arm exists so
+            // that a caller who reaches `finish_gradient` directly (a test,
+            // a screenshot script) gets the straight Main → Sub drag rather
+            // than a panic.
+            GradMode::Freeform => ([fg[0], fg[1], fg[2], 1.0], [bg[0], bg[1], bg[2], 1.0]),
         };
         if self.fill_live {
             // I-016 / NL-006's live switch (TRIAGE 137): the drag defines the
@@ -2133,6 +2149,101 @@ impl App {
             self.set_status("gradient painted");
         } else {
             self.set_status("gradient needs a raster layer (unlocked)");
+        }
+    }
+
+    // --- `FI-050`: the freeform gradient's two-stroke gesture ---------------
+
+    /// One guide stroke ended. The FIRST is banked and the tool waits for
+    /// the second; the second applies the gradient and clears the gesture.
+    ///
+    /// A tap is not a guide: it is refused with a status line and the stage
+    /// it would have filled stays open, so a stray click during a two-stroke
+    /// gesture costs nothing rather than painting a page-wide radial ramp.
+    pub fn release_grad_free(&mut self, cx: f32, cy: f32) {
+        let Some(g) = &mut self.grad_free else {
+            return;
+        };
+        g.drawing = false;
+        g.cur.push([cx, cy]);
+        // Simplify in CANVAS px scaled by zoom, exactly as the frame pen
+        // does — the tremor is in screen px, and a shorter guide is a
+        // cheaper distance field (see `mn_core::freeform`).
+        let eps = (2.0 / self.viewport.zoom.max(0.01)).max(1.0);
+        let stroke = mn_core::balloon::simplify_polyline(&std::mem::take(&mut g.cur), eps);
+        let span = |pts: &[[f32; 2]]| -> f32 {
+            let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
+            for p in pts {
+                for k in 0..2 {
+                    lo[k] = lo[k].min(p[k]);
+                    hi[k] = hi[k].max(p[k]);
+                }
+            }
+            (hi[0] - lo[0]) + (hi[1] - lo[1])
+        };
+        if stroke.len() < 2 || span(&stroke) < 3.0 {
+            let first_done = !g.first.is_empty();
+            if !first_done {
+                self.grad_free = None;
+            }
+            self.set_status(if first_done {
+                "draw the SECOND guide line — a tap is not a line"
+            } else {
+                "draw the FIRST guide line — a tap is not a line"
+            });
+            return;
+        }
+        if g.first.is_empty() {
+            g.first = stroke;
+            self.set_status(
+                "now draw the second line — the sub colour lands on it; Esc cancels",
+            );
+            return;
+        }
+        let first = std::mem::take(&mut g.first);
+        self.grad_free = None;
+        self.finish_gradient_freeform(&first, &stroke);
+    }
+
+    /// `FI-050`: both guides are in, apply the ramp. One undo press — the
+    /// gesture itself was never history.
+    pub fn finish_gradient_freeform(&mut self, l1: &[[f32; 2]], l2: &[[f32; 2]]) {
+        // Re-guard at the COMMIT: the gesture spans two strokes with the
+        // Layers palette live throughout (`finish_figure_stage2`'s reason).
+        if self.guard_frame_layer() {
+            return;
+        }
+        let fg = self.active_color();
+        let bg = self.sub_color;
+        let ramp = mn_core::Ramp::new(
+            [fg[0], fg[1], fg[2], 1.0],
+            [bg[0], bg[1], bg[2], 1.0],
+            self.grad_mid,
+            self.grad_opts,
+        );
+        if self.doc.paint_gradient_freeform(l1, l2, &ramp) {
+            self.mark_dirty();
+            // `fill_live` is a LINEAR-ramp switch: `FillKind::Gradient` is
+            // two endpoints, and there is nowhere in it to put two drawn
+            // polylines. Freeform always bakes, and says so rather than
+            // silently ignoring the toggle.
+            self.set_status(if self.fill_live {
+                "freeform gradient painted — baked, live gradient layers are straight-line only"
+            } else {
+                "freeform gradient painted"
+            });
+        } else {
+            self.set_status("gradient needs a raster layer (unlocked)");
+        }
+    }
+
+    /// `FI-050`: Esc (or a tool/sub-tool switch) between the two strokes.
+    /// Nothing was painted, so there is nothing to undo and nothing left on
+    /// the canvas.
+    pub fn cancel_grad_free(&mut self) {
+        if self.grad_free.take().is_some() {
+            self.set_status("freeform gradient cancelled");
+            self.needs_redraw = true;
         }
     }
 
@@ -3033,6 +3144,24 @@ impl App {
             self.needs_redraw = true;
             return;
         }
+        if let Some(g) = &mut self.grad_free {
+            if g.drawing {
+                // Thin the trail as it comes in: the per-tile segment cull
+                // that makes a full-page apply affordable is only as good as
+                // the guide is short, and a raw pointer batch at 400% zoom
+                // is hundreds of sub-pixel steps. 1 canvas px is well under
+                // what the distance field can resolve.
+                let far = g
+                    .cur
+                    .last()
+                    .is_none_or(|p| (p[0] - cx).abs() + (p[1] - cy).abs() >= 1.0);
+                if far {
+                    g.cur.push([cx, cy]);
+                }
+            }
+            self.needs_redraw = true;
+            return;
+        }
         if let Some((a, cur)) = &mut self.frame_drag {
             // The rectangle sub tool wants the raw corner; cuts axis-snap.
             *cur = if self.frame_mode == FrameMode::Rect {
@@ -3686,6 +3815,11 @@ impl App {
         }
         if let Some((a, b)) = self.grad_drag.take() {
             self.finish_gradient(a, b);
+            self.needs_redraw = true;
+            return;
+        }
+        if self.grad_free.as_ref().is_some_and(|g| g.drawing) {
+            self.release_grad_free(cx, cy);
             self.needs_redraw = true;
             return;
         }

@@ -341,16 +341,36 @@ impl Ramp {
     pub fn eval(&self, u: f32, x: i32, y: i32) -> Option<[f32; 4]> {
         let t = self.param(u)?;
         let mut c = self.color_at(t);
-        // Dither only INSIDE the ramp. A clamped tail is a flat field the
-        // artist asked for; stippling it would put noise in the very region
-        // "fade to transparent" is supposed to leave clean.
+        self.dither_into(&mut c, t, x, y);
+        Some(c)
+    }
+
+    /// `FI-050` — evaluate at a parameter that is ALREADY 0..=1 by
+    /// construction. The freeform gradient's parameter is a distance RATIO
+    /// between two drawn guides, so it is bounded everywhere on the canvas
+    /// and there is no "outside the drag": [`EdgeProcess`] and
+    /// `from_center` have nothing to act on and are deliberately inert here,
+    /// rather than wrapping the ramp at the guide the artist just drew.
+    /// Interior stops, flip, mixing mode, mixing rate and dithering all
+    /// still apply — it is the same ramp.
+    pub fn eval_unit(&self, t: f32, x: i32, y: i32) -> [f32; 4] {
+        let t = t.clamp(0.0, 1.0);
+        let t = if self.opts.flip { 1.0 - t } else { t };
+        let mut c = self.color_at(t);
+        self.dither_into(&mut c, t, x, y);
+        c
+    }
+
+    /// Dither only INSIDE the ramp. A clamped tail is a flat field the
+    /// artist asked for; stippling it would put noise in the very region
+    /// "fade to transparent" is supposed to leave clean.
+    fn dither_into(&self, c: &mut [f32; 4], t: f32, x: i32, y: i32) {
         if self.opts.dither && t > 0.0 && t < 1.0 {
             let d = dither_offset(x, y) / 255.0;
             for v in c.iter_mut() {
                 *v = (*v + d).clamp(0.0, 1.0);
             }
         }
-        Some(c)
     }
 }
 
@@ -813,6 +833,44 @@ mod tests {
         let mut plain = r;
         plain.opts.bright = 0;
         assert_eq!(r.color_at(0.5), plain.color_at(0.5));
+    }
+
+    /// `FI-050`'s entry point: a bounded parameter keeps flip, stops,
+    /// mixing and dithering, and IGNORES the two options that only mean
+    /// something outside a dragged span.
+    #[test]
+    fn eval_unit_keeps_the_ramp_and_drops_the_edge_options() {
+        let mut r = black_to_white();
+        assert_eq!(r.eval_unit(0.0, 0, 0)[0], 0.0);
+        assert_eq!(r.eval_unit(1.0, 0, 0)[0], 1.0);
+        assert_eq!(r.eval_unit(0.5, 0, 0)[0], 0.5);
+        // Out-of-range input is clamped, never wrapped.
+        assert_eq!(r.eval_unit(-3.0, 0, 0)[0], 0.0);
+        assert_eq!(r.eval_unit(9.0, 0, 0)[0], 1.0);
+
+        // The two options with no "outside" to act on are inert — Repeat
+        // must NOT wrap the far guide back to the near guide's colour, and
+        // "do not draw" must not blank the page.
+        for e in EdgeProcess::ALL {
+            r.opts.edge = e;
+            assert_eq!(r.eval_unit(1.0, 0, 0)[0], 1.0, "{e:?} moved the far end");
+            assert_eq!(r.eval_unit(0.25, 0, 0)[0], 0.25, "{e:?} moved the middle");
+        }
+        r.opts.edge = EdgeProcess::Clamp;
+        r.opts.from_center = true;
+        assert_eq!(r.eval_unit(0.0, 0, 0)[0], 0.0, "centre-out is inert too");
+
+        // Flip, mixing and dithering all still work.
+        r.opts.from_center = false;
+        r.opts.flip = true;
+        assert_eq!(r.eval_unit(0.0, 0, 0)[0], 1.0, "flip swaps the guides");
+        r.opts.flip = false;
+        r.opts.mix = MixMode::Linear;
+        assert!(r.eval_unit(0.5, 0, 0)[0] > 0.65, "linear light in the middle");
+        r.opts.mix = MixMode::Standard;
+        r.opts.dither = true;
+        assert_ne!(r.eval_unit(0.5, 0, 0)[0], r.eval_unit(0.5, 1, 0)[0]);
+        assert_eq!(r.eval_unit(1.0, 0, 0), r.eval_unit(1.0, 1, 0), "not the end");
     }
 
     /// `G-012`'s list ops: duplicate names itself out of the way, Up/Down

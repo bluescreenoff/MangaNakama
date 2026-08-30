@@ -1093,8 +1093,11 @@ pub struct App {
     /// LIVE layer instead of painting. Session-only v1 (not persisted per
     /// sub tool yet — recorded in DECISIONS 8.50).
     pub fill_live: bool,
-    /// In-progress gradient ramp drag, canvas coords `[start, end]`.
+    /// In-progress gradient ramp drag, canvas coords `[start, end]`. The
+    /// three ONE-DRAG modes only; `FI-050`'s freeform uses `grad_free`.
     pub grad_drag: Option<((f32, f32), (f32, f32))>,
+    /// `FI-050`: the freeform gradient's two-stroke gesture, mid-flight.
+    pub grad_free: Option<crate::cmd::GradFree>,
     /// In-progress balloon-tool drag, canvas coords. Ellipse/Round/Tail keep
     /// `[anchor, current]`; Draw appends the freehand trail.
     pub balloon_drag: Option<Vec<[f32; 3]>>,
@@ -1870,6 +1873,7 @@ impl App {
             grad_set_sel: 0,
             fill_live: false,
             grad_drag: None,
+            grad_free: None,
             balloon_drag: None,
             balloon_sel: None,
             balloon_obj_drag: None,
@@ -4430,14 +4434,18 @@ impl App {
                 self.smart_shape = None;
             }
             Tool::Gradient => {
-                const M: [GradMode; 3] = [
+                const M: [GradMode; 4] = [
                     GradMode::FgToBg,
                     GradMode::FgToTransparent,
                     GradMode::TransparentToFg,
+                    // FI-050: rides the cycle like any other row — a stray
+                    // press just starts a gesture that Esc throws away.
+                    GradMode::Freeform,
                 ];
                 let cur = M.iter().position(|m| *m == self.grad_mode).unwrap_or(0);
                 self.grad_mode = M[cycle(cur, M.len())];
                 self.grad_drag = None;
+                self.grad_free = None;
             }
             Tool::Pan => {
                 self.pan_mode = match self.pan_mode {
@@ -4886,6 +4894,11 @@ mod correction_layer_tests;
 #[cfg(test)]
 mod param_undo_tests;
 
+/// Blend If: the one Layer Property switch that is undoable (it changes the
+/// exported page, not just the screen), riding the same session coalescing.
+#[cfg(test)]
+mod blendif_tests;
+
 /// `LP-001` Save as default through the real creation commands.
 #[cfg(test)]
 mod layer_defaults_tests;
@@ -5019,3 +5032,8 @@ mod figure_stage_tests;
 /// undo press, and the much larger set of strokes it must leave alone.
 #[cfg(test)]
 mod smart_shape_tests;
+
+/// Row 125 (`FI-050`): the freeform gradient's two-stroke gesture — the
+/// guide lines, the cancel between strokes, and the one undo press.
+#[cfg(test)]
+mod grad_free_tests;

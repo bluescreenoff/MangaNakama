@@ -1950,6 +1950,14 @@ fn shortcut(app: &mut App, vk: u16, repeat: bool) -> bool {
             app.cancel_figure_stage2();
             true
         }
+        // FI-050: a freeform gradient waiting on (or drawing) its second
+        // guide line. BEFORE the plain drag arm, same as the figure's second
+        // stage — the more specific gesture wins, and this one is the only
+        // gradient that can be mid-gesture with no button held.
+        (false, 0x1B) if app.grad_free.is_some() => {
+            app.cancel_grad_free();
+            true
+        }
         // Esc cancels an in-progress figure/gradient drag.
         (false, 0x1B) if app.figure_drag.is_some() || app.grad_drag.is_some() => {
             app.figure_drag = None;

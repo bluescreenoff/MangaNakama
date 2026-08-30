@@ -13,6 +13,7 @@
 //! * [`stabilize`] — pull-string smoothing, a `StrokeSink` decorator.
 //! * [`curve`] — pressure response curve.
 //! * [`blend`] — the blend formulas, shared with the GPU compositor.
+//! * [`blendif`] — the per-layer underlying-luminance gate (Blend If).
 //! * [`export`] — exact CPU compositing + PNG export.
 //! * [`ora`] — OpenRaster save/load.
 
@@ -20,6 +21,7 @@ pub mod adjust;
 pub mod align;
 pub mod balloon;
 pub mod blend;
+pub mod blendif;
 pub mod convert_lt;
 pub mod correction;
 pub mod curve;
@@ -34,6 +36,7 @@ pub mod fill_layer;
 pub mod filter;
 pub mod frame;
 pub mod frame_order;
+pub mod freeform;
 pub mod genlines;
 pub mod gradient;
 pub mod liquify;
@@ -65,12 +68,23 @@ pub mod undo;
 #[cfg(test)]
 mod resample_work_tests;
 
+/// Blend If through the real compositor (same reason: `export.rs` is already
+/// 2400 lines and this is a whole feature's worth of pixel assertions).
+#[cfg(test)]
+mod blendif_composite_tests;
+
+/// `FI-050` — the freeform gradient's PAINTING half, likewise at document
+/// level and likewise in its own file (`freeform.rs` holds the geometry).
+#[cfg(test)]
+mod freeform_paint_tests;
+
 pub use adjust::{Adjust, TONE_CURVE_MAX};
 pub use balloon::{
     Balloon, BalloonHandle, BalloonInk, BalloonSet, BalloonShape, BalloonTone, Tail, TailGeom,
     TailKind,
 };
 pub use blend::{Rgba, blend_premul, expression_reduce, layer_colour_tint, scale_opacity};
+pub use blendif::BlendIf;
 pub use curve::PressureCurve;
 pub use doc::{
     Blend, CompositeStep, DEFAULT_SIZE, Document, Layer, LayerExpression, LayerKind, Paper,

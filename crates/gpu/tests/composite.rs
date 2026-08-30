@@ -1084,3 +1084,291 @@ fn cpu_matches_gpu_for_a_many_tile_upload() {
         t0.elapsed().as_secs_f32() * 1000.0
     );
 }
+
+// --- Blend If ------------------------------------------------------------
+//
+// The gate reads the DESTINATION, which on the GPU only exists as the
+// snapshot the blend2 pass takes — so a gated layer composites through
+// `blend2.wgsl` whatever its blend mode, and `blend2.wgsl` grew arms for the
+// fixed-function four to make that possible. Every one of those arms is a
+// second copy of a formula `mn_core::blend` already owns, which is exactly
+// the shape of drift these tests exist to catch.
+
+/// A destination the gate can actually discriminate on: four tiles of flat
+/// grey at four luminances, bottom to top of the range.
+fn luma_steps(doc: &mut Document) {
+    for (i, v) in [0.0f32, 0.35, 0.65, 1.0].into_iter().enumerate() {
+        fill(
+            doc,
+            0,
+            TileIdx::new((i % 2) as i32, (i / 2) as i32),
+            [v, v, v, 1.0],
+        );
+    }
+}
+
+/// The headline: a gated layer over a four-step grey wedge, in every blend
+/// mode that has a FIXED-FUNCTION state. Those four (Normal, Multiply,
+/// Screen, Add) never reached `blend2.wgsl` before this round; a gate is the
+/// only thing that sends them there, so this is the test that proves the new
+/// arms compute what `mn_core::blend` computes.
+#[test]
+fn cpu_matches_gpu_for_a_gated_layer_in_the_fixed_function_modes() {
+    let _serial = gpu_guard();
+    let Some(mut r) = renderer() else { return };
+
+    for mode in [Blend::Normal, Blend::Multiply, Blend::Screen, Blend::Add] {
+        let mut doc = Document::new(128, 128);
+        luma_steps(&mut doc);
+        doc.add_layer("gated");
+        doc.set_layer_blend(1, mode);
+        // Shadows only, softly: the wedge crosses the knee, so the render
+        // holds full-strength, feathered and fully-gated pixels at once.
+        doc.set_layer_blend_if(
+            1,
+            Some(mn_core::BlendIf {
+                lo: 0.0,
+                hi: 0.4,
+                feather: 0.3,
+            }),
+        );
+        for ty in 0..2 {
+            for tx in 0..2 {
+                fill_ramp(&mut doc, 1, TileIdx::new(tx, ty), [0.4, 0.8, 0.6]);
+            }
+        }
+        assert_agrees_tol(&mut r, &doc, &format!("gated {mode:?}"), 2);
+    }
+}
+
+/// The gate on top of a mode that ALREADY took the shader path: the two
+/// modifiers have to compose, not fight. (`s` is scaled by the weight before
+/// the part-2 formula sees it, on both sides.)
+#[test]
+fn cpu_matches_gpu_for_a_gated_layer_in_a_shader_blend_mode() {
+    let _serial = gpu_guard();
+    let Some(mut r) = renderer() else { return };
+
+    let mut doc = Document::new(128, 128);
+    luma_steps(&mut doc);
+    doc.add_layer("gated overlay");
+    doc.set_layer_blend(1, Blend::Overlay);
+    doc.set_layer_blend_if(
+        1,
+        Some(mn_core::BlendIf {
+            lo: 0.5,
+            hi: 1.0,
+            feather: 0.25,
+        }),
+    );
+    for ty in 0..2 {
+        for tx in 0..2 {
+            fill_ramp(&mut doc, 1, TileIdx::new(tx, ty), [0.5, 0.3, 0.9]);
+        }
+    }
+    // The part-2 trio's usual 4/255: an 8-bit destination snapshot through
+    // Overlay's slope, now also through the gate's ramp.
+    assert_agrees_tol(&mut r, &doc, "gated Overlay", 4);
+}
+
+/// Two gated layers stacked. This is the ordinary case (a shadow tone and a
+/// highlight tone on the same page) and the one that used to be broken: both
+/// take the snapshot path, so each needs its OWN snapshot of the backdrop.
+#[test]
+fn cpu_matches_gpu_with_two_gated_layers_stacked() {
+    let _serial = gpu_guard();
+    let Some(mut r) = renderer() else { return };
+
+    let mut doc = Document::new(128, 128);
+    luma_steps(&mut doc);
+    doc.add_layer("shadows");
+    doc.set_layer_blend_if(
+        1,
+        Some(mn_core::BlendIf {
+            lo: 0.0,
+            hi: 0.4,
+            feather: 0.2,
+        }),
+    );
+    doc.add_layer("highlights");
+    doc.set_layer_blend_if(
+        2,
+        Some(mn_core::BlendIf {
+            lo: 0.6,
+            hi: 1.0,
+            feather: 0.2,
+        }),
+    );
+    for ty in 0..2 {
+        for tx in 0..2 {
+            fill_ramp(&mut doc, 1, TileIdx::new(tx, ty), [0.9, 0.2, 0.2]);
+            fill_ramp(&mut doc, 2, TileIdx::new(tx, ty), [0.2, 0.4, 0.9]);
+        }
+    }
+    assert_agrees_tol(&mut r, &doc, "two gated layers", 2);
+}
+
+/// THE BUG the `snap_owner` field records, in its own right: two ADJACENT
+/// shader-composite layers with no Blend If anywhere.
+///
+/// Before 2026-08-30 both landed in one snapshot pass, so the upper one
+/// blended against the backdrop from *below the lower one* and — the pass
+/// writes with a REPLACE state — erased it. Verified failing against the old
+/// code on WARP: worst channel delta 102/255 at (63, 0), 9640 pixels out of
+/// budget. Found while routing Blend If through the same machinery.
+#[test]
+fn two_stacked_shader_blend_layers_agree() {
+    let _serial = gpu_guard();
+    let Some(mut r) = renderer() else { return };
+
+    let mut doc = Document::new(128, 128);
+    fill(&mut doc, 0, TileIdx::new(0, 0), [0.8, 0.2, 0.2, 1.0]);
+    fill(&mut doc, 0, TileIdx::new(1, 0), [0.2, 0.6, 0.8, 1.0]);
+    fill(&mut doc, 0, TileIdx::new(0, 1), [1.0, 1.0, 1.0, 1.0]);
+    fill(&mut doc, 0, TileIdx::new(1, 1), [0.2, 0.2, 0.2, 1.0]);
+    doc.add_layer("lower overlay");
+    doc.set_layer_blend(1, Blend::Overlay);
+    doc.add_layer("upper overlay");
+    doc.set_layer_blend(2, Blend::Overlay);
+    for ty in 0..2 {
+        for tx in 0..2 {
+            fill_ramp(&mut doc, 1, TileIdx::new(tx, ty), [0.4, 0.8, 0.6]);
+            fill_ramp(&mut doc, 2, TileIdx::new(tx, ty), [0.6, 0.3, 0.9]);
+        }
+    }
+    // Two stacked 8-bit snapshot round trips through Overlay's slope.
+    assert_agrees_tol(&mut r, &doc, "two overlays", 6);
+}
+
+/// A gated CLIP layer: it reaches the canvas through `fs_blit` (its scratch
+/// group is the source), which is a SECOND copy of the gate call. Nothing
+/// else in this file walks a clip layer through the shader path.
+///
+/// # Why the tolerance is 6 and why that is still a real test
+///
+/// Same story as the dodge/burn family above: the GPU reads the destination
+/// from an `Rgba8Unorm` snapshot, the CPU from full-precision f32, and a
+/// **steep knee multiplies that error**. The gate's slope is `1 / feather`,
+/// here 6.7, and the destination underneath is a RAMP (the clip base), so
+/// there is no way to pick 8-bit-exact bases the way the part-3 test does.
+/// One LSB of snapshot error (0.004 measured) becomes 0.029 of weight,
+/// which on a source at 0.9 premultiplied is 6/255 out.
+///
+/// Measured, not assumed: at `feather: 0.6` (slope 1.7) the same document
+/// agrees inside 2, i.e. the disagreement scales exactly with the slope. A
+/// wrong formula — the feather ramping inward, an unnormalised range, the
+/// gate applied before opacity instead of after — moves whole regions by
+/// tens of levels, not by six.
+#[test]
+fn cpu_matches_gpu_with_a_gated_clip_layer() {
+    let _serial = gpu_guard();
+    let Some(mut r) = renderer() else { return };
+
+    let mut doc = Document::new(128, 128);
+    luma_steps(&mut doc);
+    // The clip BASE: partial coverage so the base-alpha multiply is live.
+    doc.add_layer("base");
+    for ty in 0..2 {
+        for tx in 0..2 {
+            fill_ramp(&mut doc, 1, TileIdx::new(tx, ty), [0.9, 0.9, 0.9]);
+        }
+    }
+    doc.add_layer("gated clip");
+    doc.set_layer_clip(2, true);
+    doc.set_layer_blend_if(
+        2,
+        Some(mn_core::BlendIf {
+            lo: 0.2,
+            hi: 0.7,
+            feather: 0.15,
+        }),
+    );
+    for ty in 0..2 {
+        for tx in 0..2 {
+            fill(&mut doc, 2, TileIdx::new(tx, ty), [0.1, 0.5, 0.9, 1.0]);
+        }
+    }
+    assert_agrees_tol(&mut r, &doc, "gated clip", 6);
+}
+
+/// Inside a sealed folder the "underlying" is the GROUP, not the page. The
+/// CPU gets that from its accumulator model and the GPU from its group
+/// target; this pins that they get the SAME answer, with a page underneath
+/// that is deliberately the wrong brightness for the gate.
+#[test]
+fn cpu_matches_gpu_with_a_gated_layer_inside_a_folder() {
+    let _serial = gpu_guard();
+    let Some(mut r) = renderer() else { return };
+
+    let mut doc = Document::new(128, 128);
+    // Page: solid white. A "shadows only" gate reading the PAGE would hide
+    // the layer entirely; reading the group (dark ink) shows it.
+    for ty in 0..2 {
+        for tx in 0..2 {
+            fill(&mut doc, 0, TileIdx::new(tx, ty), [1.0, 1.0, 1.0, 1.0]);
+        }
+    }
+
+    let inner = doc.add_layer("inner");
+    for ty in 0..2 {
+        for tx in 0..2 {
+            fill(&mut doc, inner, TileIdx::new(tx, ty), [0.1, 0.1, 0.1, 1.0]);
+        }
+    }
+    let gated = doc.add_layer("gated");
+    doc.set_layer_blend_if(
+        gated,
+        Some(mn_core::BlendIf {
+            lo: 0.0,
+            hi: 0.3,
+            feather: 0.2,
+        }),
+    );
+    for ty in 0..2 {
+        for tx in 0..2 {
+            fill_ramp(&mut doc, gated, TileIdx::new(tx, ty), [0.9, 0.4, 0.2]);
+        }
+    }
+    let folder = doc.add_layer("folder");
+    doc.layers[folder].folder = true;
+    doc.layers[inner].depth = 1;
+    doc.layers[gated].depth = 1;
+
+    assert_agrees_tol(&mut r, &doc, "gated inside a folder", 2);
+}
+
+/// `LayerSig` half: turning a gate on (and off again) moves no tile
+/// revision at all, so a canvas that did not watch it would keep showing the
+/// ungated composite. The wave-5 lesson, as a test.
+#[test]
+fn toggling_a_gate_rebuilds_the_canvas() {
+    let _serial = gpu_guard();
+    let Some(mut r) = renderer() else { return };
+
+    let mut doc = Document::new(128, 128);
+    luma_steps(&mut doc);
+    doc.add_layer("gated");
+    for ty in 0..2 {
+        for tx in 0..2 {
+            fill(&mut doc, 1, TileIdx::new(tx, ty), [0.9, 0.2, 0.2, 1.0]);
+        }
+    }
+    // Warm the canvas with the UNGATED picture first — that is the state a
+    // missing signature would leave on screen.
+    assert_agrees_tol(&mut r, &doc, "before the gate", 2);
+
+    doc.set_layer_blend_if(
+        1,
+        Some(mn_core::BlendIf {
+            lo: 0.0,
+            hi: 0.4,
+            feather: 0.0,
+        }),
+    );
+    assert_agrees_tol(&mut r, &doc, "gate on", 2);
+
+    // …and OFF is the dangerous direction: nothing is damaged, the tiles
+    // still carry the same revisions, and only the signature notices.
+    doc.set_layer_blend_if(1, None);
+    assert_agrees_tol(&mut r, &doc, "gate off again", 2);
+}

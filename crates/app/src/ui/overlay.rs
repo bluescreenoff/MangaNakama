@@ -1302,6 +1302,47 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
         painter.circle_filled(pb, 4.0, col);
     }
 
+    // FI-050 / freeform gradient: the two guide lines, each in the colour it
+    // is about to lay down — the preview says which end of the ramp you are
+    // drawing, which a single accent colour could not. A thin dark casing
+    // under each keeps a white or pale guide visible on white paper.
+    if let Some(g) = &app.grad_free {
+        let rgb = |[r, gg, b]: [f32; 3]| {
+            egui::Color32::from_rgb(
+                (r.clamp(0.0, 1.0) * 255.0).round() as u8,
+                (gg.clamp(0.0, 1.0) * 255.0).round() as u8,
+                (b.clamp(0.0, 1.0) * 255.0).round() as u8,
+            )
+        };
+        let casing = egui::Color32::from_rgba_unmultiplied(0, 0, 0, 90);
+        let guide = |pts: &[[f32; 2]], col: egui::Color32| {
+            let line: Vec<egui::Pos2> = pts.iter().map(|p| to_pt(p[0], p[1])).collect();
+            if line.len() < 2 {
+                if let Some(p) = line.first() {
+                    painter.circle_filled(*p, 3.5, col);
+                }
+                return;
+            }
+            painter.add(egui::Shape::line(
+                line.clone(),
+                egui::Stroke::new(3.5, casing),
+            ));
+            painter.add(egui::Shape::line(line, egui::Stroke::new(1.6, col)));
+        };
+        // The FIRST guide takes the main colour, the second the sub colour —
+        // the same two ends `tool_ends` hands the ramp.
+        guide(&g.first, rgb(app.active_color()));
+        let second = !g.first.is_empty();
+        guide(
+            &g.cur,
+            if second {
+                rgb(app.sub_color)
+            } else {
+                rgb(app.active_color())
+            },
+        );
+    }
+
     // Text: wrap-box drag preview, the edited/selected box with its handles,
     // the caret, and the selection highlight.
     if let Some(crate::text_edit::TextGesture::Box { start, cur }) = &app.text_gesture {

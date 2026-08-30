@@ -11,6 +11,7 @@ use crate::app::{App, LayerFilterKind};
 use crate::cmd::{AppCmd, Tool};
 use mn_core::{Blend, FillKind, LayerKind};
 
+mod blendif;
 mod breakout;
 
 // The picker order is OURS, not CSP's: parts 1, 2 and 3 in the order they
@@ -443,6 +444,11 @@ pub(super) fn layer_property(ui: &mut egui::Ui, app: &mut App) {
     // FB-overflow, both parts (the flag, the mask cap, the seat) — see
     // `breakout.rs` for why the seat is one marker and not per-row ticks.
     breakout::section(ui, app, i);
+
+    // Blend If: show this layer only where the composite BELOW it is in a
+    // brightness range. Its own file — see `blendif.rs` for the scope ruling
+    // (one arm, not the split-channel matrix) and the undo coalescing.
+    blendif::section(ui, app, i);
 
     // LP-016 Layer colour: draw black, DISPLAY as the chosen colour (the
     // draft/two-tone workflow — non-destructive; pixels stay black).

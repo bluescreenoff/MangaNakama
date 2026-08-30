@@ -549,9 +549,21 @@ fn mode_sub_tools(ui: &mut egui::Ui, app: &mut App) {
                 GradMode::FgToBg,
                 GradMode::FgToTransparent,
                 GradMode::TransparentToFg,
+                GradMode::Freeform,
             ] {
-                if mode_row(ui, app.grad_mode == m, Icon::Gradient, m.label()).clicked() {
+                let row = mode_row(ui, app.grad_mode == m, Icon::Gradient, m.label());
+                let row = if m == GradMode::Freeform {
+                    row.on_hover_text(
+                        "draw TWO lines: the first takes the main colour, the second the sub \
+                         colour, and the ramp between them follows both shapes. Esc between \
+                         strokes cancels.",
+                    )
+                } else {
+                    row
+                };
+                if row.clicked() {
                     app.grad_mode = m;
+                    app.grad_free = None;
                 }
             }
         }

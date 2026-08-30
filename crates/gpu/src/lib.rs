@@ -405,7 +405,19 @@ struct QuadInstance {
     /// (tiles.wgsl / blend2.wgsl location 5). [`FX_NONE`] on every draw that
     /// is not a plain layer's own tile, for the same reason as `tint`.
     fx: u32,
+    /// Blend If: `[lo, hi, feather]`, normalised (blend2.wgsl location 6).
+    /// [`BLENDIF_OPEN`] on every other draw — and that IS the neutral value,
+    /// not a sentinel, because an open range passes everything at any
+    /// feather. Only `blend2.wgsl` declares location 6; the fixed-function
+    /// pipelines share this vertex layout and simply do not read it.
+    blendif: [f32; 3],
 }
+
+/// The open Blend If gate — `BlendIf::FULL` as the shader reads it, and the
+/// value every ungated draw carries. Named rather than spelled out at each
+/// of the eight sites that pass it, so "no gate" is one thing with one
+/// definition instead of a literal somebody could get wrong once.
+const BLENDIF_OPEN: [f32; 3] = [0.0, 1.0, 0.0];
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -541,6 +553,15 @@ struct LayerSig {
     /// watch them here would keep showing the old paint order until
     /// something else forced a rebuild.
     spill: u64,
+    /// Blend If, bit-exact (`BlendIf::sig`). The gate changes which pixels of
+    /// a layer survive without touching one tile revision — same trap as
+    /// `tint`/`fx`/`spill`, and the one the wave-5 round taught: a field
+    /// missing from this signature is a stale composite on screen.
+    ///
+    /// `Layer::gate()` and not the raw field, so that turning the gate OFF
+    /// (the dangerous direction — the tiles stop being weighted and nothing
+    /// is damaged) and widening it to the open range are the same event.
+    blend_if: Option<[u32; 3]>,
 }
 
 /// Which raster of a layer a cached tile texture holds.
@@ -1145,6 +1166,15 @@ impl Renderer {
                     format: wgpu::VertexFormat::Uint32,
                     offset: 32,
                     shader_location: 5,
+                },
+                // Blend If [lo, hi, feather] — read by blend2.wgsl only. The
+                // fixed-function pipelines share this layout and ignore it,
+                // which wgpu allows (a shader may consume fewer attributes
+                // than the buffer declares, never more).
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x3,
+                    offset: 36,
+                    shader_location: 6,
                 },
             ],
         };
@@ -2192,6 +2222,7 @@ impl Renderer {
                     l.breakout_mask().map(|m| m.revision).hash(&mut h);
                     h.finish()
                 },
+                blend_if: l.gate().map(|b| b.sig()),
             })
             .collect();
         if sig != self.layer_sig {
@@ -2479,6 +2510,15 @@ impl Renderer {
             instance: u32,
             blend: usize,
             kind: DrawKind,
+            /// Does this draw go through the blend2 SHADER pass instead of a
+            /// fixed-function pipeline?
+            ///
+            /// Used to be inferable from `blend >= BLEND2_BASE`. It is not
+            /// any more: a **Blend If** layer needs the destination snapshot
+            /// whatever its blend mode, so a gated Normal layer is a blend2
+            /// draw at slot 0. The flag is set where the pass is chosen, so
+            /// the two can never disagree.
+            blend2: bool,
         }
         struct Pass {
             target: Target,
@@ -2489,6 +2529,19 @@ impl Renderer {
             /// destination and a pass cannot read its own target. Snapshot
             /// passes never merge with neighbours.
             snapshot: bool,
+            /// Which composite STEP owns this snapshot, i.e. whose backdrop
+            /// the copy froze. Only that step's own draws may join the pass.
+            ///
+            /// This was a real bug, found 2026-08-30 while routing Blend If
+            /// through the same machinery: the reuse test used to be "is the
+            /// last pass a snapshot pass on this target?", so two ADJACENT
+            /// shader-composite layers (two Overlay layers, say) landed in
+            /// one pass and both read the snapshot taken before the LOWER
+            /// one. The upper layer then composited against the wrong
+            /// backdrop and — the pass writes with a REPLACE state — wiped
+            /// the lower one outright. WARP measured 102/255 against the CPU
+            /// composite; see `two_stacked_shader_blend_layers_agree`.
+            snap_owner: usize,
             /// Clip-to-folder: copy group `level` into the clip-base capture
             /// before this pass begins (same encoder-op timing as
             /// `snapshot`). Set on an empty pass pushed at the folder's
@@ -2515,6 +2568,17 @@ impl Renderer {
         };
 
         let never_reuse = std::env::var("MN_SPLIT_PASSES").is_ok();
+        // Which composite step the walk is on — `open_snap_pass!` reads it
+        // to keep one step's destination snapshot away from the next step's
+        // draws.
+        //
+        // Declared HERE, before the macros, because a `macro_rules!` body
+        // can only see locals that already exist at its definition site; a
+        // loop variable introduced further down would not resolve. And
+        // declared without a value because the only reader is inside the
+        // walk, after the assignment at the top of each iteration — a
+        // placeholder would be dead, and the compiler says so.
+        let mut step_no: usize;
         macro_rules! open_pass {
             ($target:expr) => {{
                 let t = $target;
@@ -2550,22 +2614,28 @@ impl Renderer {
                         clear,
                         draws: Vec::new(),
                         snapshot: false,
+                        snap_owner: usize::MAX,
                         capture_base: None,
                     });
                 }
                 passes.last_mut().unwrap()
             }};
         }
-        // A blend2 pass: NEVER reuses (each snapshot must see the target as
-        // of exactly this point in the layer order) and never gets appended
-        // to by later normal draws reusing it as "last pass" — the reuse
-        // check above rejects snapshot passes. It CAN absorb further draws
-        // pushed through open_snap_pass! itself (same exotic layer), which
-        // is correct: they all read the same snapshot.
+        // A blend2 pass: each snapshot must see the target as of exactly this
+        // point in the layer order. It never gets appended to by later normal
+        // draws reusing it as "last pass" (the reuse check above rejects
+        // snapshot passes), and it is reused only by further draws from the
+        // SAME composite step — the tile quads of one layer, which land on
+        // disjoint scissor rects and can therefore share one frozen backdrop.
+        //
+        // The `snap_owner` test is what stops the NEXT step from joining. It
+        // was missing until 2026-08-30 and that was a live wrong-pixels bug;
+        // see the field's doc comment.
         macro_rules! open_snap_pass {
             ($target:expr) => {{
                 let t = $target;
-                if !matches!(passes.last(), Some(p) if p.target == t && p.snapshot) {
+                if !matches!(passes.last(), Some(p) if p.target == t && p.snapshot && p.snap_owner == step_no)
+                {
                     let clear = match t {
                         Target::Canvas => {
                             let c = if first_canvas && full {
@@ -2590,6 +2660,7 @@ impl Renderer {
                         clear,
                         draws: Vec::new(),
                         snapshot: true,
+                        snap_owner: step_no,
                         capture_base: None,
                     });
                 }
@@ -2605,6 +2676,7 @@ impl Renderer {
                     instance: instances.len() as u32,
                     blend: 0,
                     kind: DrawKind::Reset,
+                    blend2: false,
                 });
                 instances.push(QuadInstance {
                     // PA-001: the reset quad IS the paper, so it carries the
@@ -2618,6 +2690,7 @@ impl Renderer {
                     mode: 0,
                     opacity: if paper.visible { 1.0 } else { 0.0 },
                     blend_mode: 0,
+                    blendif: BLENDIF_OPEN,
                 });
             }
         } else {
@@ -2630,7 +2703,11 @@ impl Renderer {
         // anchor at the anchor's depth, and a mask-capped one appears TWICE
         // (the halves differ only in which texture variant they sample).
         // Disagreeing with the CPU compositor here is a parity break.
-        for step in doc.composite_order() {
+        for (n, step) in doc.composite_order().into_iter().enumerate() {
+            // Every step gets its own snapshot identity — including the two
+            // halves of a mask-capped breakout, which really are two draws
+            // against two different backdrops.
+            step_no = n;
             let li = step.layer;
             let layer = &doc.layers[li];
             if !vis[li] {
@@ -2660,6 +2737,7 @@ impl Renderer {
                                 instance: instances.len() as u32,
                                 blend: 0,
                                 kind: DrawKind::Tile((li, *idx, TileVariant::Pixels)),
+                                blend2: false,
                             });
                             instances.push(QuadInstance {
                                 tint: crate::TINT_NONE,
@@ -2668,6 +2746,7 @@ impl Renderer {
                                 mode: 1,
                                 opacity: layer.opacity.clamp(0.0, 1.0),
                                 blend_mode: 0,
+                                blendif: BLENDIF_OPEN,
                             });
                         }
                         if cd > 0 {
@@ -2701,6 +2780,7 @@ impl Renderer {
                                 instance: instances.len() as u32,
                                 blend: 0,
                                 kind: DrawKind::Tile((li, *idx, TileVariant::Pixels)),
+                                blend2: false,
                             });
                             instances.push(QuadInstance {
                                 tint: crate::TINT_NONE,
@@ -2709,6 +2789,7 @@ impl Renderer {
                                 mode: 1,
                                 opacity: layer.opacity.clamp(0.0, 1.0),
                                 blend_mode: 0,
+                                blendif: BLENDIF_OPEN,
                             });
                         }
                         if d > 0 {
@@ -2726,6 +2807,7 @@ impl Renderer {
                                 instance: instances.len() as u32,
                                 blend: 0,
                                 kind: DrawKind::Mask(bind),
+                                blend2: false,
                             });
                             instances.push(QuadInstance {
                                 tint: crate::TINT_NONE,
@@ -2734,6 +2816,7 @@ impl Renderer {
                                 mode: 1,
                                 opacity: 1.0,
                                 blend_mode: 0,
+                                blendif: BLENDIF_OPEN,
                             });
                         }
                     }
@@ -2748,6 +2831,7 @@ impl Renderer {
                             clear: None,
                             draws: Vec::new(),
                             snapshot: false,
+                            snap_owner: usize::MAX,
                             capture_base: Some(lvl),
                         });
                     }
@@ -2763,6 +2847,11 @@ impl Renderer {
                                 instance: instances.len() as u32,
                                 blend: slot,
                                 kind: DrawKind::Blit(lvl),
+                                // No Blend If on a folder's group blit: v1
+                                // offers the gate on painted layers only
+                                // (`Layer::gate` refuses folders), so this
+                                // draw is blend2 for the old reason alone.
+                                blend2: slot >= BLEND2_BASE,
                             });
                             instances.push(QuadInstance {
                                 tint: crate::TINT_NONE,
@@ -2771,6 +2860,7 @@ impl Renderer {
                                 mode: 1,
                                 opacity: layer.opacity.clamp(0.0, 1.0),
                                 blend_mode: slot as u32,
+                                blendif: BLENDIF_OPEN,
                             });
                         }
                         if d > 0 {
@@ -2789,6 +2879,7 @@ impl Renderer {
                         clear: Some(TRANSPARENT),
                         draws: Vec::new(),
                         snapshot: false,
+                        snap_owner: usize::MAX,
                         capture_base: None,
                     });
                 }
@@ -2803,6 +2894,7 @@ impl Renderer {
                             instance: instances.len() as u32,
                             blend: 0,
                             kind: DrawKind::Tile((li, *idx, TileVariant::Pixels)),
+                            blend2: false,
                         });
                         instances.push(QuadInstance {
                             tint: crate::TINT_NONE,
@@ -2811,6 +2903,7 @@ impl Renderer {
                             mode: 1,
                             opacity: layer.opacity.clamp(0.0, 1.0),
                             blend_mode: 0,
+                            blendif: BLENDIF_OPEN,
                         });
                     }
                     if d > 0 {
@@ -2851,6 +2944,7 @@ impl Renderer {
                             instance: instances.len() as u32,
                             blend: 0,
                             kind: DrawKind::Tile((li, *idx, variant)),
+                            blend2: false,
                         });
                         instances.push(QuadInstance {
                             tint: crate::TINT_NONE,
@@ -2859,6 +2953,7 @@ impl Renderer {
                             mode: 1,
                             opacity: 1.0,
                             blend_mode: 0,
+                            blendif: BLENDIF_OPEN,
                         });
                     }
                     for idx in &touched {
@@ -2881,6 +2976,7 @@ impl Renderer {
                             instance: instances.len() as u32,
                             blend: 0,
                             kind,
+                            blend2: false,
                         });
                         instances.push(QuadInstance {
                             tint: crate::TINT_NONE,
@@ -2889,11 +2985,18 @@ impl Renderer {
                             mode: 1,
                             opacity: 1.0,
                             blend_mode: 0,
+                            blendif: BLENDIF_OPEN,
                         });
                     }
                 }
                 let slot = blend_slot(layer.blend);
-                let pass = if slot >= BLEND2_BASE {
+                // A CLIPPED layer reaches its backdrop through this blit, so
+                // its Blend If gate rides here — the same point the CPU
+                // applies it (core::export folds the base alpha into `src`
+                // and then weighs the result).
+                let gate = layer.gate();
+                let use_blend2 = slot >= BLEND2_BASE || gate.is_some();
+                let pass = if use_blend2 {
                     open_snap_pass!(target_of(cd))
                 } else {
                     open_pass!(target_of(cd))
@@ -2903,6 +3006,7 @@ impl Renderer {
                         instance: instances.len() as u32,
                         blend: slot,
                         kind: DrawKind::Blit(lvl),
+                        blend2: use_blend2,
                     });
                     instances.push(QuadInstance {
                         tint: crate::TINT_NONE,
@@ -2911,6 +3015,7 @@ impl Renderer {
                         mode: 1,
                         opacity: layer.opacity.clamp(0.0, 1.0),
                         blend_mode: slot as u32,
+                        blendif: gate.map_or(BLENDIF_OPEN, |b| b.packed()),
                     });
                 }
                 if d > 0 {
@@ -2923,7 +3028,13 @@ impl Renderer {
 
             // Plain layer.
             let slot = blend_slot(layer.blend);
-            let pass = if slot >= BLEND2_BASE {
+            // Blend If reads the DESTINATION, and only the blend2 pass has
+            // one (a render pass cannot read its own target). So a gated
+            // layer takes the shader path whatever its blend mode — which is
+            // why `blend2.wgsl` grew arms for the fixed-function four.
+            let gate = layer.gate();
+            let use_blend2 = slot >= BLEND2_BASE || gate.is_some();
+            let pass = if use_blend2 {
                 open_snap_pass!(target_of(cd))
             } else {
                 open_pass!(target_of(cd))
@@ -2954,6 +3065,7 @@ impl Renderer {
                     instance: instances.len() as u32,
                     blend: slot,
                     kind: DrawKind::Tile((li, *idx, variant)),
+                    blend2: use_blend2,
                 });
                 instances.push(QuadInstance {
                     // LP-016/017/022: the plain-layer draw is the only one
@@ -2974,6 +3086,7 @@ impl Renderer {
                     mode: 1,
                     opacity: layer.opacity.clamp(0.0, 1.0),
                     blend_mode: slot as u32,
+                    blendif: gate.map_or(BLENDIF_OPEN, |b| b.packed()),
                 });
             }
             if any && cd > 0 {
@@ -3122,7 +3235,7 @@ impl Renderer {
                         rp.set_pipeline(&self.tile_pipeline_reset);
                         rp.set_bind_group(1, &self.dummy_tile_bg, &[]);
                     }
-                    DrawKind::Tile(key) if d.blend >= BLEND2_BASE => {
+                    DrawKind::Tile(key) if d.blend2 => {
                         // Blend part 2: shader composite against the snapshot.
                         // Bind group built per draw (tile view + snap view —
                         // a bg must fill its whole layout; exotic layers are
@@ -3183,7 +3296,7 @@ impl Renderer {
                         rp.set_pipeline(&self.mask_base_pipeline);
                         rp.set_bind_group(1, &cb.blit_bg, &[]);
                     }
-                    DrawKind::Blit(level) if d.blend >= BLEND2_BASE => {
+                    DrawKind::Blit(level) if d.blend2 => {
                         let Some((_, snap_view)) = &self.snap else {
                             continue;
                         };

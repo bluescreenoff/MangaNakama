@@ -268,6 +268,10 @@ pub fn save_to_with<W: Write + Seek>(
                 .layer_sub_colour
                 .map(|c| format!("{:02x}{:02x}{:02x}", c[0], c[1], c[2])),
             expression: layer.expression,
+            // `Layer::gate` and not the raw field: a folder's gate and an
+            // open range are both "off", and writing them would put state in
+            // the file that no compositor reads back.
+            blend_if: layer.gate().and_then(|b| serde_json::to_string(&b).ok()),
             depth: layer.depth,
             folder: layer.folder,
             open: layer.open,
@@ -439,6 +443,16 @@ struct LayerEntry {
     layer_sub_colour: Option<String>,
     /// LP-022 decrease-colour preview; the default writes no attribute.
     expression: crate::doc::LayerExpression,
+    /// Blend If, one serde blob (`mnc-blendif`) — the `mnc-tone` idiom, so a
+    /// second range or a channel arm later needs no new attribute. `None` =
+    /// off, and the attribute is omitted entirely.
+    ///
+    /// DOWNGRADE-SAFE, with an honest consequence: a build that predates
+    /// this round ignores the attribute and shows the layer EVERYWHERE, so
+    /// the page opens (never a load failure, never a blank layer) but a tone
+    /// that was gated into the shadows covers the whole panel. Re-saving
+    /// from the old build drops the attribute for good.
+    blend_if: Option<String>,
 }
 
 fn encode_png(img: &image::RgbaImage) -> Result<Vec<u8>, OraError> {
@@ -546,6 +560,12 @@ fn stack_xml(
         }
         if let Some(j) = e.genlines.as_deref() {
             extra.push_str(&format!(" mnc-genlines=\"{}\"", xml_escape(j)));
+        }
+        // Blend If. The SPELLING is `mnc-blendif` (one word, no hyphen
+        // inside) and a round-trip test pins it: rename it and every gated
+        // layer in every saved page silently opens.
+        if let Some(j) = e.blend_if.as_deref() {
+            extra.push_str(&format!(" mnc-blendif=\"{}\"", xml_escape(j)));
         }
         if let Some([r, g, b]) = e.label {
             extra.push_str(&format!(" mnc-label=\"#{r:02x}{g:02x}{b:02x}\""));
@@ -776,6 +796,13 @@ pub fn load_from<R: Read + Seek>(source: R) -> Result<Document, OraError> {
         layer.layer_colour = e.layer_colour;
         layer.layer_sub_colour = e.layer_sub_colour;
         layer.expression = e.expression;
+        // Blend If: normalised at the door like every other write path, and
+        // never on a folder (`Layer::gate` would refuse it anyway — this
+        // keeps the document itself honest).
+        layer.blend_if = e
+            .blend_if
+            .filter(|_| !layer.folder)
+            .map(crate::blendif::BlendIf::normalized);
 
         if let Some(fs) = &e.frames {
             // Frame layer: the raster is derived, so rebuild it from the
@@ -1108,6 +1135,10 @@ struct ParsedLayer {
     layer_sub_colour: Option<[u8; 3]>,
     /// LP-022 decrease-colour preview; absent = `Colour`.
     expression: crate::doc::LayerExpression,
+    /// Blend If (`mnc-blendif`); absent = off, which is what every file
+    /// written before this round says. Unparseable = off too: a gate nobody
+    /// can read is better forgotten than guessed at.
+    blend_if: Option<crate::blendif::BlendIf>,
     /// Nesting level: 0 = directly in the root stack.
     depth: u8,
     /// This entry is a group `<stack>` (a folder), not a pixel layer.
@@ -1262,6 +1293,10 @@ fn parse_stack_xml(xml: &str) -> Result<ParsedStack, OraError> {
                         expression: get("mnc-expr")
                             .map(crate::doc::LayerExpression::from_ora_name)
                             .unwrap_or_default(),
+                        // A folder's gate is dropped at the door, not read
+                        // and then ignored: `Layer::gate` refuses folders,
+                        // so keeping it would be dead state in the document.
+                        blend_if: None,
                         depth: stack_level - 1,
                         folder: true,
                         open: get("mnc-open") != Some("0"),
@@ -1319,6 +1354,7 @@ fn parse_stack_xml(xml: &str) -> Result<ParsedStack, OraError> {
                     expression: get("mnc-expr")
                         .map(crate::doc::LayerExpression::from_ora_name)
                         .unwrap_or_default(),
+                    blend_if: get("mnc-blendif").and_then(|j| serde_json::from_str(j).ok()),
                     folder: false,
                     open: true,
                     clip: get("mnc-clip").is_some(),
@@ -2623,6 +2659,81 @@ mod tests {
         for attr in ["mnc-edge", "mnc-lsubcolour", "mnc-expr"] {
             assert!(!s.contains(attr), "{attr} written for a stock layer: {s}");
         }
+    }
+
+    /// Blend If rides the file as one `mnc-blendif` JSON blob, and the
+    /// SPELLING of that attribute is pinned here on purpose: rename it and
+    /// every gated layer in every saved page silently opens, with no error
+    /// and no warning.
+    ///
+    /// The negative halves matter as much as the positive one. An ungated
+    /// document must write no attribute at all (so a file saved after this
+    /// round is shaped exactly like one saved before it), an ABSENT
+    /// attribute must load as off (every file that exists today), and a
+    /// folder must not carry one.
+    #[test]
+    fn blend_if_round_trips_through_ora() {
+        let g = crate::blendif::BlendIf {
+            lo: 0.125,
+            hi: 0.625,
+            feather: 0.25,
+        };
+        let mut doc = crate::doc::Document::new(256, 256);
+        doc.begin_op();
+        doc.layers[0]
+            .tile_mut(TileIdx::new(0, 0))
+            .set_pixel(4, 4, [0, 0, 0, 32768]);
+        doc.end_op();
+        assert!(doc.set_layer_blend_if(0, Some(g)));
+
+        let back = roundtrip(&doc);
+        assert_eq!(back.layers[0].blend_if, Some(g), "the gate came back");
+        assert_eq!(back.layers[0].gate(), Some(g), "…and it is live");
+
+        // The spelling, read off the file itself.
+        let xml = stack_xml_of(&doc);
+        assert!(
+            xml.contains("mnc-blendif=\""),
+            "the attribute spelling is mnc-blendif: {xml}"
+        );
+
+        // An ungated document writes nothing.
+        let plain = crate::doc::Document::new(64, 64);
+        assert!(
+            !stack_xml_of(&plain).contains("mnc-blendif"),
+            "mnc-blendif written for a stock layer"
+        );
+        // …and therefore an absent attribute loads as off, which is what
+        // every file written before this round says.
+        assert_eq!(roundtrip(&plain).layers[0].blend_if, None);
+    }
+
+    /// v1 offers the gate on painted layers only. A hand-edited (or future)
+    /// file must not be able to smuggle one onto a folder, where the
+    /// compositors would ignore it and the panel would never show it — the
+    /// same defence `mnc-edge` gets on frame folders.
+    #[test]
+    fn a_folders_blend_if_is_dropped_at_the_door() {
+        let xml = "<?xml version='1.0' encoding='UTF-8'?>\n\
+             <image version=\"0.0.3\" w=\"64\" h=\"64\">\n\
+             <stack>\n\
+             <stack name=\"grp\" mnc-blendif=\"{&quot;lo&quot;:0.1,&quot;hi&quot;:0.4,&quot;feather&quot;:0.0}\">\n\
+             </stack>\n\
+             </stack>\n\
+             </image>\n";
+        let (_, _, parsed, _, _, _) = parse_stack_xml(xml).unwrap();
+        let folder = parsed.iter().find(|p| p.folder).expect("the folder");
+        assert_eq!(folder.blend_if, None, "a folder's gate never parses in");
+    }
+
+    /// `stack.xml` out of a saved document, for attribute-spelling checks.
+    fn stack_xml_of(doc: &Document) -> String {
+        let mut buf = std::io::Cursor::new(Vec::new());
+        save_to(doc, &mut buf).unwrap();
+        let mut z = zip::ZipArchive::new(std::io::Cursor::new(buf.into_inner())).unwrap();
+        let mut s = String::new();
+        std::io::Read::read_to_string(&mut z.by_name("stack.xml").unwrap(), &mut s).unwrap();
+        s
     }
 
     /// PA-001: the paper is document state, so it rides the ORA round trip —
