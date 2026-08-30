@@ -925,6 +925,9 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
             }
         }
         AppCmd::Fill(x, y) => {
+            // A new fill supersedes any armed repair — the click queued
+            // before this dispatch already released the gesture.
+            app.fill_repair = None;
             app.refresh_tones();
             let color = app.active_color();
             let opts = app.fill_opts;
@@ -938,9 +941,24 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                 app.fill_auto = auto;
             }
             if n > 0 {
+                // Leak repair (app/fill_repair.rs): remember the fill at
+                // its commit point — seed, settings, layer, page. Only
+                // the CLICK family lands here; lasso/enclose gestures
+                // have no seed and must not overwrite a repairable one.
+                app.last_fill = Some(crate::app::fill_repair::LeakFill {
+                    layer_id: app.doc.layers[app.doc.active].id(),
+                    page_uid: app.pages.get(app.page_index).map(|p| p.uid).unwrap_or(0),
+                    seed: (x, y),
+                    color,
+                    opts,
+                    op_label: "Fill",
+                });
                 app.set_status(format!("filled {n} px{}", auto_note(&opts, auto)));
             }
             app.mark_dirty();
+        }
+        AppCmd::ArmFillRepair { virtual_barrier } => {
+            app.arm_fill_repair(virtual_barrier);
         }
         AppCmd::SetFillOpts(o) => {
             app.fill_opts = o;

@@ -2015,6 +2015,14 @@ fn shortcut(app: &mut App, vk: u16, repeat: bool) -> bool {
             app.cancel_frame_poly();
             true
         }
+        // Leak repair (app/fill_repair.rs): Esc stands the armed gesture
+        // down. The leaked fill was already undone at arm time and stays
+        // undone — refilling behind the user's back is the one thing the
+        // feature must never do.
+        (false, 0x1B) if app.fill_repair.is_some() => {
+            app.cancel_fill_repair();
+            true
+        }
         // Figure ▸ Polygon: Enter closes, Esc cancels.
         (false, 0x0D) if app.figure_poly.is_some() => {
             app.finish_figure_poly();

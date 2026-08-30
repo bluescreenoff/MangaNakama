@@ -2828,6 +2828,13 @@ impl Document {
         self.history.can_redo()
     }
 
+    /// The label of the step the next undo would take (`None` when there
+    /// is nothing to undo) — the leak-repair arm's "is the fill still the
+    /// newest step?" check.
+    pub fn peek_undo_label(&self) -> Option<&str> {
+        self.history.peek_undo_label()
+    }
+
     pub fn undo_len(&self) -> usize {
         self.history.undo_len()
     }

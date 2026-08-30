@@ -29,6 +29,10 @@ mod file_object;
 /// (door 5 in that module doc) — `ReadDirectoryChangesW` thread, pure
 /// debounce/basename routing, the `WM_APP` wake.
 pub(crate) mod file_object_watch;
+/// Leak-repair refill (the owner's 2026-08-29 idea): the last click-fill
+/// remembered at its commit point, one command arms repair, the closing
+/// stroke (virtual barrier or real ink), the fill re-runs — one undo.
+pub(crate) mod fill_repair;
 mod frames;
 mod kpp_import;
 /// TRIAGE 36 (`L-001`/`L-002` magnetic lasso) and 38 (`S-001` layer pick),
@@ -1009,6 +1013,12 @@ pub struct App {
     pub fill_auto: Option<mn_core::AutoFill>,
     /// Fill-tool sub tool: click / FI-003 enclose-and-fill / FI-004 lasso fill.
     pub fill_mode: FillMode,
+    /// The last seeded click-fill at its commit point — what the
+    /// leak-repair command re-runs (`app/fill_repair.rs`). Lasso and
+    /// enclose gestures have no seed and never set it.
+    pub last_fill: Option<fill_repair::LeakFill>,
+    /// The armed leak-repair gesture, if any (`app/fill_repair.rs`).
+    pub fill_repair: Option<fill_repair::FillRepair>,
     /// Row 160 / RD-002/RD-003/RD-007: the Remove-dust sub tool's own Tool
     /// Property. Separate from `fill_opts` because it shares none of it —
     /// dust removal runs no flood, so tolerance, gap closing and 参照 have
@@ -1881,6 +1891,8 @@ impl App {
             fill_opts: FillOpts::default(),
             fill_auto: None,
             fill_mode: FillMode::Click,
+            last_fill: None,
+            fill_repair: None,
             dust_opts: crate::cmd::DustOpts::default(),
             fill_drag: None,
             wand_opts: FillOpts::default(),
@@ -5033,6 +5045,12 @@ mod import_placement_tests;
 /// and the save/reload/still-updates round the whole feature exists for.
 #[cfg(test)]
 mod file_object_tests;
+
+/// Leak-repair refill (`app/fill_repair.rs`): the leaked-fill → arm →
+/// closing-stroke → self-refilling gesture, both barrier kinds, and the
+/// refusals — all through the real canvas arms.
+#[cfg(test)]
+mod fill_repair_tests;
 
 /// Workflow audit #4: the batch import — N roughs become N page underlays.
 /// Pins the underlay's placement against a page's White base, the park

@@ -187,6 +187,18 @@ pub fn flood_region_measured(
     seed: (i32, i32),
     opts: &FillOpts,
 ) -> Option<(Vec<bool>, Option<AutoFill>)> {
+    flood_region_measured_with(doc, seed, opts, &[])
+}
+
+/// [`flood_region_measured`] plus a caller-drawn wall mask (the leak-repair
+/// virtual barrier — see [`barrier_mask`]). `extra` is canvas-sized like the
+/// returned region; empty behaves identically to the plain flood.
+pub fn flood_region_measured_with(
+    doc: &Document,
+    seed: (i32, i32),
+    opts: &FillOpts,
+    extra: &[bool],
+) -> Option<(Vec<bool>, Option<AutoFill>)> {
     let (w, h) = (doc.size.0 as usize, doc.size.1 as usize);
     let (sx, sy) = seed;
     if sx < 0 || sy < 0 || sx as usize >= w || sy as usize >= h {
@@ -204,7 +216,49 @@ pub fn flood_region_measured(
     };
     let start = sy as usize * w + sx as usize;
     let (opts, auto) = resolve_with_src(&src, w, h, start, opts);
-    Some((region_from_src(&src, &alpha, w, h, start, &opts), auto))
+    Some((
+        region_from_src(&src, &alpha, w, h, start, &opts, extra),
+        auto,
+    ))
+}
+
+/// Raster a thick polyline into a canvas-sized wall mask: a disc of
+/// `radius` (never below 1) stamped along each segment at ≤1 px spacing.
+/// This is the leak-repair VIRTUAL barrier — the user's gap-closing
+/// stroke as the fill's gather step sees it: composited nowhere, saved
+/// nowhere, alive for exactly one repaired fill.
+pub fn barrier_mask(w: u32, h: u32, pts: &[(f32, f32)], radius: f32) -> Vec<bool> {
+    let mut m = vec![false; (w.max(1) as usize) * (h.max(1) as usize)];
+    let (w, h) = (w.max(1) as i32, h.max(1) as i32);
+    if pts.len() < 2 {
+        return m;
+    }
+    let r = radius.max(1.0);
+    let stamp = |m: &mut [bool], x: f32, y: f32| {
+        let x0 = ((x - r).floor() as i32).max(0);
+        let x1 = ((x + r).ceil() as i32).min(w - 1);
+        let y0 = ((y - r).floor() as i32).max(0);
+        let y1 = ((y + r).ceil() as i32).min(h - 1);
+        for py in y0..=y1 {
+            for px in x0..=x1 {
+                let (dx, dy) = (px as f32 + 0.5 - x, py as f32 + 0.5 - y);
+                if dx * dx + dy * dy <= r * r {
+                    m[(py * w + px) as usize] = true;
+                }
+            }
+        }
+    };
+    for pair in pts.windows(2) {
+        let (ax, ay) = pair[0];
+        let (bx, by) = pair[1];
+        let d = ((bx - ax).powi(2) + (by - ay).powi(2)).sqrt();
+        let steps = (d.ceil() as usize).max(1);
+        for i in 0..=steps {
+            let t = i as f32 / steps as f32;
+            stamp(&mut m, ax + (bx - ax) * t, ay + (by - ay) * t);
+        }
+    }
+    m
 }
 
 /// Resolve `opts.auto` into concrete numbers without flooding for real —
@@ -392,6 +446,7 @@ fn region_from_src(
     h: usize,
     start: usize,
     opts: &FillOpts,
+    extra: &[bool],
 ) -> Vec<bool> {
     let mut barrier = barrier_from(src, src[start], opts.tolerance);
     let mut barrier_orig = barrier.clone();
@@ -460,6 +515,23 @@ fn region_from_src(
         for y in 0..h {
             barrier[y * w] = true;
             barrier[y * w + w - 1] = true;
+        }
+    }
+
+    // 2c. The leak-repair virtual barrier (built by [`barrier_mask`]):
+    // wall pixels the user drew for exactly this fill — composited
+    // nowhere, persisted nowhere. Walled in BOTH barriers like real ink,
+    // so the flood walls at it and the step-4 recovery never crosses it.
+    if !extra.is_empty() {
+        for (b, e) in barrier.iter_mut().zip(extra) {
+            if *e {
+                *b = true;
+            }
+        }
+        for (b, e) in barrier_orig.iter_mut().zip(extra) {
+            if *e {
+                *b = true;
+            }
         }
     }
 
@@ -971,7 +1043,20 @@ pub fn bucket_fill_measured(
     color: [f32; 3],
     opts: &FillOpts,
 ) -> (usize, Option<AutoFill>) {
-    let Some((region, auto)) = flood_region_measured(doc, seed, opts) else {
+    bucket_fill_measured_with(doc, seed, color, opts, &[])
+}
+
+/// [`bucket_fill_measured`] plus a caller-drawn wall mask — the
+/// leak-repair refill (see [`barrier_mask`]). One labelled undo step,
+/// exactly like a plain fill.
+pub fn bucket_fill_measured_with(
+    doc: &mut Document,
+    seed: (i32, i32),
+    color: [f32; 3],
+    opts: &FillOpts,
+    extra: &[bool],
+) -> (usize, Option<AutoFill>) {
+    let Some((region, auto)) = flood_region_measured_with(doc, seed, opts, extra) else {
         return (0, None);
     };
     (paint_region(doc, &region, color, "Fill"), auto)
@@ -2658,5 +2743,55 @@ mod tests {
             "the frame border no longer walls strokes globally"
         );
         assert_eq!(at(20, 64), 255, "just inside the border is paintable");
+    }
+
+    /// The leak-repair virtual barrier, mask half: a thick polyline
+    /// stamps a disc trail, sized to the canvas, touching nothing else.
+    #[test]
+    fn barrier_mask_stamps_only_the_stroke() {
+        let m = barrier_mask(100, 100, &[(10.0, 50.0), (90.0, 50.0)], 3.0);
+        assert_eq!(m.len(), 100 * 100);
+        let at = |x: usize, y: usize| m[y * 100 + x];
+        assert!(at(10, 50) && at(50, 50) && at(90, 50), "the path is walled");
+        assert!(!at(5, 50) && !at(95, 50), "beyond the ends is clear");
+        assert!(!at(50, 40) && !at(50, 60), "off the stroke is clear");
+        // A single point is not a barrier — the gesture needs a drag.
+        assert!(barrier_mask(100, 100, &[(50.0, 50.0)], 3.0).iter().all(|b| !b));
+    }
+
+    /// The leak-repair virtual barrier, flood half: the same box-with-gap
+    /// that leaks naively stays contained behind a barrier stroke across
+    /// the gap — and the barrier acts like REAL ink (the flood walls at
+    /// it, the gap-recovery never crosses it).
+    #[test]
+    fn a_virtual_barrier_contains_the_leak() {
+        let mut doc = Document::new(128, 128);
+        draw_box_with_gap(&mut doc, 10, 10, 118, 118, 12);
+        let opts = FillOpts::default();
+        let inside = (64, 64);
+        let outside = (64, 124);
+
+        // Naive: the 12-px gap swallows the fill — it reaches outside.
+        let plain = flood_region(&doc, inside, &opts).unwrap();
+        assert!(plain[(outside.1 * 128 + outside.0) as usize], "the naive fill leaks");
+
+        // Repaired: a virtual stroke across the gap walls it.
+        let mask = barrier_mask(
+            128,
+            128,
+            &[(58.0, 11.0), (70.0, 11.0)],
+            3.0,
+        );
+        let repaired = flood_region_measured_with(&doc, inside, &opts, &mask)
+            .unwrap()
+            .0;
+        assert!(
+            repaired[(inside.1 * 128 + inside.0) as usize],
+            "the seed still fills"
+        );
+        assert!(
+            !repaired[(outside.1 * 128 + outside.0) as usize],
+            "the repaired fill stays inside"
+        );
     }
 }

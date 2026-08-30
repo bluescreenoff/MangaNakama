@@ -658,6 +658,24 @@ impl App {
         // down and never adjusts their view again (see App::render).
         self.startup_fit_pending = false;
         let clicks = self.click_run(x, y);
+        // Leak repair (app/fill_repair.rs): the armed gesture owns the
+        // next stroke. VIRTUAL mode captures it as points — nothing lands
+        // anywhere; REAL-INK mode lets the normal stroke run below and
+        // the release refills.
+        if self
+            .fill_repair
+            .as_ref()
+            .is_some_and(|r| r.virtual_barrier)
+        {
+            let radius = self.brush_radius();
+            let (cx, cy) = self.viewport.to_canvas(x, y);
+            if let Some(r) = &mut self.fill_repair {
+                r.pts = vec![(cx, cy)];
+                r.radius = radius;
+            }
+            self.needs_redraw = true;
+            return;
+        }
         // TODO #3: an armed ruler creation owns the next drag — CSP's
         // Layer ▸ Ruler ▸ …-then-draw flow. No tool switch, no painting.
         if self.ruler_pending.is_some() {
@@ -3315,6 +3333,17 @@ impl App {
     }
 
     pub fn canvas_move(&mut self, x: f32, y: f32, batch: &[PenSample]) {
+        // Leak repair, virtual mode: the stroke streams into points and
+        // nowhere else — the barrier mask is built from them on release.
+        if let Some(r) = &mut self.fill_repair
+            && r.virtual_barrier
+            && !r.pts.is_empty()
+        {
+            let (cx, cy) = self.viewport.to_canvas(x, y);
+            r.pts.push((cx, cy));
+            self.needs_redraw = true;
+            return;
+        }
         if let Some(d) = self.liquify_drag.as_mut() {
             let (cx, cy) = self.viewport.to_canvas(x, y);
             let (dx, dy) = (cx - d.last.0, cy - d.last.1);
@@ -3629,6 +3658,25 @@ impl App {
     }
 
     pub fn canvas_up(&mut self, x: f32, y: f32, batch: &[PenSample]) {
+        // Leak repair, virtual mode: the release IS the gesture — build
+        // the barrier from the captured stroke and re-run the fill. A
+        // bare tap is not a barrier; the arm stands, waiting for a drag.
+        if let Some(r) = self.fill_repair.take() {
+            if r.virtual_barrier {
+                if r.pts.len() >= 2 {
+                    let mut r = r;
+                    let (cx, cy) = self.viewport.to_canvas(x, y);
+                    r.pts.push((cx, cy));
+                    self.finish_fill_repair(r);
+                } else {
+                    self.fill_repair = Some(r);
+                    self.set_status("fill repair: drag the closing stroke, not a tap");
+                }
+                self.needs_redraw = true;
+                return;
+            }
+            self.fill_repair = Some(r); // real-ink mode: the stroke below runs first
+        }
         // KB-020: the size drag ends with its last readout standing.
         if self.size_drag.take().is_some() {
             self.set_status(format!("brush size: {:.1} px", self.brush_radius() * 2.0));
@@ -3813,6 +3861,12 @@ impl App {
             }
             self.end_stroke();
             self.finish_smart_shape();
+            // Leak repair, real-ink mode: the stroke just committed as its
+            // own op — re-run the fill now and wrap the pair into one
+            // undo press (the leak itself was undone at arm time).
+            if let Some(r) = self.fill_repair.take() {
+                self.finish_fill_repair(r);
+            }
             return;
         }
         let (cx, cy) = self.viewport.to_canvas(x, y);

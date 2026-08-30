@@ -70,6 +70,15 @@ pub(super) fn paint(
             egui::Color32::from_rgba_unmultiplied(255, 214, 110, 200),
         );
     }
+    // Leak repair (app/fill_repair.rs): the virtual barrier stroke as it
+    // streams — drawn ONLY here. The barrier itself never lands anywhere
+    // else; this trace is the whole of its existence outside the fill.
+    if let Some(r) = &app.fill_repair
+        && r.virtual_barrier
+        && r.pts.len() >= 2
+    {
+        ants(&r.pts, (0.0, 0.0), egui::Color32::from_rgba_unmultiplied(255, 120, 190, 220));
+    }
     // Selection-paint live preview (SE round 2026-08-19): the stroke's
     // scratch coverage traced per frame — the ants crawl under the brush
     // while it paints the selection. Bbox-traced over the SPARSE tiles,

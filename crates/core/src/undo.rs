@@ -322,6 +322,12 @@ impl History {
         self.undo.last()
     }
 
+    /// The LABEL of the step the next `undo` would take — the leak-repair
+    /// arm asks it "is the newest step still the fill I remembered?"
+    pub fn peek_undo_label(&self) -> Option<&str> {
+        self.undo_labels.last().map(String::as_str)
+    }
+
     /// Same, for the next `redo`.
     pub fn peek_redo(&self) -> Option<&UndoGroup> {
         self.redo.last()

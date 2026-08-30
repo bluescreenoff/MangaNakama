@@ -801,6 +801,13 @@ pub enum AppCmd {
     PickColor(f32, f32),
     /// Bucket fill at a canvas position with the active colour.
     Fill(f32, f32),
+    /// Leak-repair refill (`app/fill_repair.rs`): undo the last leaked
+    /// click-fill and wait for the closing stroke. The flag picks the
+    /// barrier kind — virtual (a mask only this fill sees) or real ink
+    /// (the user's own stroke). No default chord; keys.json can bind it.
+    ArmFillRepair {
+        virtual_barrier: bool,
+    },
     SetFillOpts(mn_core::FillOpts),
     SetWandOpts(mn_core::FillOpts),
     /// Merge the active layer into the one below it (Ctrl+E).

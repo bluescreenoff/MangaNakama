@@ -49,6 +49,23 @@ pub fn command_index() -> Vec<(&'static str, &'static str, AppCmd)> {
         ("Paste", "Edit (Ctrl+V)", Paste),
         ("Paste to shown position", "Edit (Ctrl+Shift+V)", PasteShown),
         ("Fill with drawing color", "Edit (Alt+Del)", FillSelection),
+        // Leak repair (app/fill_repair.rs). Two rows, not a hidden
+        // modifier — the barrier kind is the whole decision. No default
+        // chord: keys.json binds these, the owner picks his own.
+        (
+            "Repair fill (virtual barrier)",
+            "Fill",
+            ArmFillRepair {
+                virtual_barrier: true,
+            },
+        ),
+        (
+            "Repair fill (real ink)",
+            "Fill",
+            ArmFillRepair {
+                virtual_barrier: false,
+            },
+        ),
         ("Clear", "Edit (Del)", ClearLayer),
         ("Clear outside selection", "Edit (Shift+Del)", ClearOutside),
         ("Transform", "Edit (Ctrl+T)", TransformStart),

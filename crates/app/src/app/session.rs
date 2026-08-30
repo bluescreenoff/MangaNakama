@@ -236,6 +236,8 @@ impl App {
         // `set_doc_path`, and a tab switch fires neither that nor a focus
         // event — this install IS the arrival moment. Quiet door.
         self.refresh_file_objects_quiet();
+        // And an armed leak repair never crosses a tab hop either.
+        self.fill_repair = None;
     }
 
     /// Everything cached against the OLD document's layer indices. Called on

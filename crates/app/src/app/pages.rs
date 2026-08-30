@@ -796,6 +796,12 @@ impl App {
             // door: keeps the "page N" line when nothing changed, and
             // after it when something did.
             self.refresh_file_objects_quiet();
+            // An armed leak repair never survives a page hop — the refill
+            // validates again at run time, but a gesture owed to page A
+            // must not draw its barrier over page B.
+            if self.fill_repair.take().is_some() {
+                self.set_status("fill repair stood down — the page moved");
+            }
         }
         self.needs_redraw = true;
     }
