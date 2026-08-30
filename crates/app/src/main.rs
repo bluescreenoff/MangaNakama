@@ -1769,6 +1769,7 @@ fn shortcut(app: &mut App, vk: u16, repeat: bool) -> bool {
         (true, 0x4E) if shift => Some(AppCmd::AddLayer), // Ctrl+Shift+N
         (true, 0x4E) => Some(AppCmd::NewDoc),  // Ctrl+N
         (true, 0x4F) => Some(AppCmd::OpenOra), // Ctrl+O
+        (true, 0x50) => Some(AppCmd::Print),   // Ctrl+P (CSP print)
         (true, 0x30) if alt => Some(AppCmd::Zoom100), // Ctrl+Alt+0 (CSP pixel size)
         (true, 0x30) => Some(AppCmd::ZoomFit), // Ctrl+0
         (true, 0x31) => Some(AppCmd::Zoom100), // Ctrl+1

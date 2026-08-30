@@ -383,6 +383,10 @@ pub fn command_index() -> Vec<(&'static str, &'static str, AppCmd)> {
         ("Save Duplicate (a copy, stay in this file)…", "File", SaveDuplicate),
         ("Open…", "File (Ctrl+O)", OpenOra),
         ("New…", "File (Ctrl+N)", NewDoc),
+        // The §8 print pair — rows so `keys.json` can NAME them, and the
+        // default Ctrl+P lives in the built-in table.
+        ("Print…", "File (Ctrl+P)", Print),
+        ("Print size (1:1 on paper)", "View", ZoomPrintSize),
         ("Zoom fit", "View (Ctrl+0)", ZoomFit),
         ("Pixel size (100%)", "View (Ctrl+1)", Zoom100),
         ("Flip view", "View (Ctrl+9)", FlipView),

@@ -175,7 +175,7 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
             // output format: printing at actual size is how tone density
             // and 級数 legibility get judged, and the red-pen mark-up pass
             // needs a sheet in a hand.
-            if item(ui, "Print…", "") {
+            if item(ui, "Print…", "Ctrl+P") {
                 app.push_cmd(AppCmd::Print);
                 ui.close();
             }
