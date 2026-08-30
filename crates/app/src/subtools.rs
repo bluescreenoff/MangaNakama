@@ -77,9 +77,9 @@ pub fn group_of(s: SubTool) -> &'static str {
         SubTool::Balloon(_) => group::BALLOON,
         SubTool::Text => group::TEXT,
         SubTool::Object(_) => group::OPERATION,
-        SubTool::Figure(FM::Line | FM::Rect | FM::Ellipse | FM::Polygon | FM::Arc | FM::Curve) => {
-            group::DIRECT_DRAW
-        }
+        SubTool::Figure(
+            FM::Line | FM::Rect | FM::Ellipse | FM::Polygon | FM::Arc | FM::Curve | FM::Smart,
+        ) => group::DIRECT_DRAW,
         SubTool::Figure(FM::Stream) => group::STREAM_LINE,
         SubTool::Figure(FM::Focus | FM::Urchin | FM::SolidFlash) => group::SATURATED_LINE,
         SubTool::Gradient(_) => group::GRADIENT,
@@ -231,6 +231,7 @@ pub fn apply_state(app: &mut App, s: SubTool) {
             app.figure_mode = m;
             app.figure_poly = None;
             app.figure_stage2 = None;
+            app.smart_shape = None;
         }
         SubTool::Gradient(m) => app.grad_mode = m,
         SubTool::Eyedrop(r) => app.eyedrop_opts.refer = r,

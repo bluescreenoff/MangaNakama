@@ -229,6 +229,46 @@ The recurring failure shapes, in order of how often they have shipped:
   layouts produce silent no-op dispatches. Rust and WGSL structs must
   agree to the byte (padding included).
 
+## The tile-kernel seam (`gpu/kernel.rs` + `kernel.wgsl` ⇄ core `adjust.rs`, `filter.rs`)
+
+- **The CPU function is the specification, and every caller keeps it as
+  the fallback.** `Document::refresh_corrections_with` and
+  `Document::apply_filter_with` take a kernel the caller lends; it may
+  decline at any moment (unsupported adapter, below the size floor, a
+  dispatch canary failure mid-job) and the CPU reference then runs. Both
+  entry points assemble GPU results OFF TO THE SIDE and hand them over
+  only when the whole job passed — a declined job must leave the
+  caller's pixels untouched, or the fallback filters already-filtered
+  pixels (`a_dropped_dispatch_declines_and_leaves_the_caller_untouched`).
+- **A GPU-derived correction tile carries the same freshness keys as a
+  CPU one.** The stamps and per-tile `(max-rev, count)` keys are written
+  identically whoever computed the pixels; a tile that did not carry
+  them would re-derive every frame, or never.
+- **`kernel.wgsl` transcribes core, it does not reinvent it.** The colour
+  ops mirror `Adjust::map` expression for expression, and the tone
+  curve's Fritsch–Carlson tangents come from `adjust::curve_tangents` on
+  the CPU so the limiter has ONE implementation. Editing either side
+  alone breaks parity; `gpu/tests/kernel_parity.rs` is what catches it.
+- **The blur family is a CHAIN of integer passes, not one composite
+  kernel.** `Filter::separable_passes` mirrors `box_radii` pass for
+  pass, because each CPU pass re-zero-pads its own output and throws
+  away the ink the previous pass pushed past the buffer edge. Folding
+  the three boxes into one wide kernel is the same operator in the
+  interior and a different one within `3 × reach` of every border —
+  measured at 4015/32768 before the chain replaced it. The integer
+  weights are also what make GPU parity exact rather than a tolerance.
+- **Routing is a judgement, not a measurement** (unlike inking's
+  per-adapter verdict): GPU when compute exists, the adapter is not a
+  software rasterizer, and the job clears `KERNEL_FLOOR_PX`. The reason
+  the dab verdict does not apply is written out in `kernel.rs`'s module
+  docs — a kernel job is one upload/dispatch/readback for a whole page,
+  not a stall inside an interactive stroke.
+- Storage BUFFERS, not tile textures: a B4/600 page is 8598 px tall and
+  exceeds this adapter's 8192 `max_texture_dimension_2d`. Region jobs
+  chunk into horizontal bands with a halo equal to the summed pass
+  reach; a band must read ORIGINAL pixels, which is the other reason the
+  output is assembled separately.
+
 ## Input (`app/canvas_input.rs`, `input.rs`, `win32.rs`)
 
 - Pen input is raw `WM_POINTER` history batches; mouse is one sample
@@ -260,6 +300,23 @@ The recurring failure shapes, in order of how often they have shipped:
   must never record a step (its retract-by-value bookkeeping,
   `App::frame_rulers`, stays on the App and stays in step because ruler
   and frame snapshots interleave on the same history).
+- **Smart Shape (row 156 / `FG-020`) presses Undo on the user's behalf**, so
+  its interlock is a seam across three files. The gesture inks a real
+  freehand stroke; if the hold recognizes a figure, `finish_smart_shape`
+  (`app/canvas_input.rs`) undoes that stroke and inks the figure in its
+  place, which is ONE net history entry only because two things hold at
+  once. First, the undo goes through `cmd::dispatch(AppCmd::Undo)`, never
+  `Document::undo` — the command arm carries the cache-invalidation doors.
+  Second, the replacement ink must CLEAR the redo branch (`history::push_
+  labeled`, both the raster and `end_op_vector_stroke` paths do); close that
+  op with `push_undo_keep_redo` instead and a Ctrl+Y would paint the wobble
+  back on top of the clean figure, silently and much later
+  (`smart_shape_tests::the_swap_leaves_nothing_to_redo`).
+  The interlock that decides whether to undo at all is `Document::op_count`,
+  NOT `undo_len`: `undo_len` stops moving once the depth cap is reached, so
+  a `undo_len == before + 1` test would refuse the swap for every user with
+  a deep session — and a check that was merely wrong in the other direction
+  would undo somebody else's operation.
 - Selection coverage is weighted, not boolean, and selection ops go
   through coverage-based bounds — a new op that derives its region from
   one outline loop breaks multi-island selections.

@@ -49,6 +49,7 @@ pub mod project;
 pub mod psd;
 pub mod ruler;
 pub mod selection;
+pub mod shape_fit;
 pub mod stabilize;
 pub mod stroke;
 pub mod stroke_set;

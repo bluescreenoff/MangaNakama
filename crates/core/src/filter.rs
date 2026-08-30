@@ -46,6 +46,12 @@ const BLUR_STRONG_SIGMA: f32 = 4.0;
 
 // ------------------------------------------------------------------ raster --
 
+/// A kernel the caller lends [`Document::apply_filter_with`]: filter the
+/// gathered buffer in place and return `true`, or return `false` to let the
+/// CPU reference run. Declining is always legal — the GPU seam declines
+/// whenever the adapter, the size floor or its dispatch canary says so.
+pub type RasterKernel<'a> = dyn FnMut(Filter, &mut Raster) -> bool + 'a;
+
 /// A flat rectangle of premultiplied fix15 RGBA — the scratch space filters
 /// work in. Row-major, `w * h * 4` `u16`s, no tiles, no gaps.
 ///
@@ -390,6 +396,67 @@ impl Filter {
             _ => false,
         }
     }
+
+    /// The chain of integer symmetric passes this filter is, when it is a
+    /// separable convolution: every pass along x in order, then every pass
+    /// along y in order — exactly [`gaussian`]'s and [`smoothing`]'s shape.
+    /// `None` for everything else.
+    ///
+    /// This is the blur family's ticket through the GPU kernel seam
+    /// (`mn_gpu::Kernel::Separable`), and it is deliberately built from the
+    /// same [`box_radii`] the CPU passes use, so the two can only disagree by
+    /// arithmetic — and, because [`BoxPass`] carries the *integer* weights and
+    /// denominator, not even by that.
+    ///
+    /// **Why the chain and not one composite kernel.** The obvious GPU move
+    /// is to convolve the three boxes into one wide kernel and run a single
+    /// gather per axis: zero-padded convolution composes, so on paper it is
+    /// the same operator for the same tap count. It is not, and the parity
+    /// test caught it at 4015/32768. Each CPU pass re-zero-pads its own
+    /// *output*, throwing away the ink the previous pass pushed past the
+    /// buffer edge, so the three-pass result differs from the composite one
+    /// within `3 × reach` of every border. The chain reproduces that
+    /// truncation because it *is* the truncation, it costs the same taps (the
+    /// composite kernel is exactly as wide as the three boxes together), and
+    /// it makes the GPU result bit-identical rather than merely close.
+    pub fn separable_passes(self) -> Option<Vec<BoxPass>> {
+        let radii = match self {
+            // The 3×3 binomial: `tent_h` sums `(l + 2m + r + 2) / 4`.
+            Filter::Smoothing => {
+                return Some(vec![BoxPass {
+                    half: vec![2, 1],
+                    denom: 4,
+                }]);
+            }
+            Filter::Blur => box_radii(BLUR_SIGMA),
+            Filter::BlurStrong => box_radii(BLUR_STRONG_SIGMA),
+            Filter::Gaussian { sigma } => box_radii(sigma),
+            _ => return None,
+        };
+        let passes: Vec<BoxPass> = radii
+            .iter()
+            .filter(|&&r| r > 0)
+            .map(|&r| BoxPass {
+                half: vec![1; r + 1],
+                denom: (2 * r + 1) as u32,
+            })
+            .collect();
+        (!passes.is_empty()).then_some(passes)
+    }
+}
+
+/// One integer symmetric convolution pass, as [`box_h`] and [`tent_h`]
+/// compute it: `half[0]` is the centre weight, `half[k]` the weight at ±k,
+/// samples outside the buffer count as transparent (and do **not** reduce
+/// `denom`), and each output channel is `(Σ w·s + denom/2) / denom` in u32.
+///
+/// Spelled in integers on purpose. A float kernel would have made GPU parity
+/// a tolerance argument; this way the two paths produce the same bits, and
+/// the parity test asserts equality rather than closeness.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BoxPass {
+    pub half: Vec<u32>,
+    pub denom: u32,
 }
 
 // ----------------------------------------------------------------- kernels --
@@ -1351,6 +1418,18 @@ impl Document {
     /// hundred MB transient; a selection-scoped one is proportional to the
     /// marquee, which is the case that actually happens while drawing.
     pub fn apply_filter(&mut self, f: Filter) -> bool {
+        self.apply_filter_with(f, &mut |_, _| false)
+    }
+
+    /// [`Self::apply_filter`] with a kernel lent by the caller — the GPU
+    /// seam's door into the filter path.
+    ///
+    /// `run` is handed the gathered halo buffer (step 3 below) and returns
+    /// `true` if it filtered it in place; `false` — always legal, always
+    /// correct — runs [`Filter::run`], the CPU reference. Everything around
+    /// it (write region, halo, selection clip, the single undo step) is
+    /// unchanged and unaware of which one ran.
+    pub fn apply_filter_with(&mut self, f: Filter, run: &mut RasterKernel<'_>) -> bool {
         let li = self.active;
         let Some(layer) = self.layers.get(li) else {
             return false;
@@ -1423,7 +1502,9 @@ impl Document {
         let gw = ((tx1 - tx0) * t + 2 * reach) as usize;
         let gh = ((ty1 - ty0) * t + 2 * reach) as usize;
         let mut buf = gather(&self.layers[li], gx, gy, gw, gh);
-        f.run(&mut buf, gx, gy);
+        if !run(f, &mut buf) {
+            f.run(&mut buf, gx, gy);
+        }
 
         let lock_alpha = self.layers[li].lock_alpha;
         self.begin_op();
@@ -2295,6 +2376,70 @@ mod tests {
             }
         }
         assert!(saw_ramp, "there was a partial-coverage ramp to check");
+    }
+
+    /// The GPU seam's door: a lent kernel that declines must leave a page
+    /// byte-identical to the plain call, and one that runs must be what the
+    /// page shows. Both halves matter — the first is the fallback contract,
+    /// the second proves the door is actually wired to the pixels.
+    #[test]
+    fn a_lent_raster_kernel_replaces_the_filter_or_declines_cleanly() {
+        let page = |run: &mut RasterKernel<'_>| {
+            let mut doc = Document::new(192, 192);
+            paint_rect(&mut doc, 40, 40, 90, 90);
+            assert!(doc.apply_filter_with(Filter::Gaussian { sigma: 5.0 }, run));
+            doc
+        };
+        let mut plain = Document::new(192, 192);
+        paint_rect(&mut plain, 40, 40, 90, 90);
+        assert!(plain.apply_filter(Filter::Gaussian { sigma: 5.0 }));
+
+        let declined = page(&mut |_, _| false);
+        for y in (0..192).step_by(7) {
+            for x in (0..192).step_by(7) {
+                assert_eq!(
+                    alpha_at(&declined, x, y),
+                    alpha_at(&plain, x, y),
+                    "a declined kernel changed ({x},{y})"
+                );
+            }
+        }
+
+        // A kernel that blanks the buffer: the page must be empty, which is
+        // only true if the lent closure's output is what gets scattered back.
+        let ran = page(&mut |_, buf| {
+            buf.px.fill(0);
+            true
+        });
+        assert_eq!(alpha_at(&ran, 64, 64), 0, "the lent kernel's buffer was ignored");
+    }
+
+    /// The pass chain the GPU seam runs has to be the same shape the CPU
+    /// runs — same radii, same denominators — or parity is an accident.
+    #[test]
+    fn separable_passes_mirror_the_box_radii() {
+        assert_eq!(Filter::Gaussian { sigma: 0.0 }.separable_passes(), None);
+        assert_eq!(Filter::Mosaic { cell: 8 }.separable_passes(), None);
+        assert_eq!(
+            Filter::Smoothing.separable_passes(),
+            Some(vec![BoxPass {
+                half: vec![2, 1],
+                denom: 4
+            }])
+        );
+        for sigma in [1.4f32, 4.0, 12.0, 60.0, MAX_SIGMA] {
+            let radii = box_radii(sigma);
+            let passes = Filter::Gaussian { sigma }
+                .separable_passes()
+                .unwrap_or_default();
+            let want: Vec<usize> = radii.iter().copied().filter(|&r| r > 0).collect();
+            assert_eq!(passes.len(), want.len(), "pass count at σ={sigma}");
+            for (p, r) in passes.iter().zip(&want) {
+                assert_eq!(p.half.len(), r + 1, "reach at σ={sigma}");
+                assert!(p.half.iter().all(|&w| w == 1), "a box is flat");
+                assert_eq!(p.denom, (2 * r + 1) as u32, "denominator at σ={sigma}");
+            }
+        }
     }
 
     #[test]

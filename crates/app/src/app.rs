@@ -155,6 +155,63 @@ pub struct SpringLoad {
     pub pointer_seen: bool,
 }
 
+/// Row 156 / `FG-020`: how long the pointer must stand still at the end of a
+/// Smart shape stroke before the recognizer runs. CSP calls this the hold
+/// duration and makes it a preference; one tuned constant for v1.
+pub const SMART_HOLD_MS: u64 = 300;
+/// How far the pointer may drift and still count as held, in SCREEN px — a
+/// pen resting on glass is never perfectly still, and the threshold is in
+/// screen px (not canvas px) because the hand's tremor is.
+pub const SMART_HOLD_SLOP_PX: f32 = 4.0;
+
+/// Row 156 / `FG-020`: one Smart shape gesture in flight.
+///
+/// The stroke is inking LIVE the whole time (this sub tool draws with the
+/// brush exactly like the pen), so this carries only what the hold needs:
+/// the path as canvas points, when the pointer last came to rest, and —
+/// once the hold matures — what the recognizer made of it.
+///
+/// `ripe` and `hit` are separate fields rather than one `Option<Option<_>>`
+/// because "held long enough and it is not a shape" is a real state that has
+/// to be distinguishable from "not held yet": it is what stops the
+/// recognizer re-running on every frame of a long hold, and what puts the
+/// honest "no shape recognized" on the status line.
+pub struct SmartShape {
+    /// The freehand path in canvas px, as drawn.
+    pub pts: Vec<[f32; 2]>,
+    /// Screen px the stillness is measured from.
+    pub anchor: (f32, f32),
+    /// When the pointer last came to rest at `anchor`. Tests wind this back
+    /// (`Instant::checked_sub`) instead of sleeping — the `SpringLoad`
+    /// idiom, and the reason the hold has no wall clock in its test path.
+    pub still_since: std::time::Instant,
+    /// Has the hold matured? Set once, cleared whenever the hand moves on.
+    pub ripe: bool,
+    /// What the recognizer made of it, valid only while `ripe`.
+    pub hit: Option<mn_core::shape_fit::Recognized>,
+    /// `FG-024`: this stroke's shape was already decided — Shift was held
+    /// (which means "the straight line I asked for" everywhere else in the
+    /// Figure tool) or a ruler is snapping it. Sticky once set, and sampled
+    /// at the pointer events rather than read inside the hold: that keeps
+    /// `smart_shape_tick` free of `GetKeyState`, which is both cleaner and
+    /// the difference between a deterministic test and one that fails
+    /// whenever the developer happens to be holding Shift.
+    pub refused: bool,
+    /// `Document::op_count` before the stroke began. The swap refuses to
+    /// undo anything unless the count says the newest history entry is
+    /// exactly this stroke and nothing else — see `finish_smart_shape`.
+    pub ops_at_start: u64,
+}
+
+impl SmartShape {
+    /// The shape the release would ink right now, or `None` while the hold
+    /// has not matured (or matured on something unrecognizable). ONE
+    /// accessor, so the overlay preview and the commit cannot disagree.
+    pub fn preview(&self) -> Option<&mn_core::shape_fit::Recognized> {
+        self.ripe.then(|| self.hit.as_ref()).flatten()
+    }
+}
+
 pub struct App {
     pub doc: Document,
     /// The brush, behind the stabilizer and the entry taper. Both decorators
@@ -1000,6 +1057,11 @@ pub struct App {
     /// Ellipse drag does not ink on release — the pointer spins it first and
     /// a click commits. Session-only, like every other Tool Property knob.
     pub figure_adjust_angle: bool,
+    /// Row 156 / `FG-020`: the live Smart shape gesture, while the button is
+    /// down. `None` at every other moment — there is no such thing as a
+    /// Smart shape that outlives its stroke (that is the deferred
+    /// editable-object model, see [`SmartShape`]).
+    pub smart_shape: Option<SmartShape>,
     /// Figure ▸ Stream line: parameters the next drag generates with
     /// (session-only, like every other Tool Property knob here).
     pub figure_stream: crate::cmd::FigureLineOpts,
@@ -1787,6 +1849,7 @@ impl App {
             figure_poly: None,
             figure_stage2: None,
             figure_adjust_angle: false,
+            smart_shape: None,
             figure_stream: crate::cmd::FigureLineOpts::stream_default(),
             figure_focus: crate::cmd::FigureLineOpts::focus_default(),
             grad_mode: GradMode::FgToBg,
@@ -2468,7 +2531,34 @@ impl App {
     /// this every frame; sampling/export commands call it before compositing.
     pub fn refresh_tones(&mut self) {
         let dpi = self.tone_dpi();
-        self.doc.refresh_derived(dpi);
+        // Correction layers derive through the shared GPU kernel seam when
+        // the adapter and the size floor allow. This is the choke point that
+        // matters: the render loop calls it every frame, so it is where a
+        // parameter drag's re-derive lands. `refresh_derived_with` runs the
+        // CPU reference (`correct_tile`) for any batch the seam declines, and
+        // a GPU-derived tile carries the same freshness keys as a CPU one, so
+        // the incremental path cannot tell them apart.
+        let Self { doc, renderer, .. } = self;
+        doc.refresh_derived_with(dpi, &mut |adj, tiles| {
+            if !renderer.kernels_preferred(tiles.len() * mn_core::tile::TILE_PIXELS) {
+                return None;
+            }
+            // The pointwise kernel never reads a tile index; these are
+            // positional, and the seam hands the results back in order.
+            let src: Vec<(mn_core::TileIdx, &[u16], Option<&[u8]>)> = tiles
+                .iter()
+                .enumerate()
+                .map(|(i, t)| (mn_core::TileIdx::new(i as i32, 0), t.src, t.cov))
+                .collect();
+            let out = renderer.run_tile_kernel(
+                mn_gpu::Kernel::Adjust(adj),
+                &mn_gpu::TileJob {
+                    src: &src,
+                    out: &[],
+                },
+            )?;
+            Some(out.into_iter().map(Vec::into_boxed_slice).collect())
+        });
     }
 
     /// Remember the document's path (the title bar polls `desired_title`).
@@ -2844,6 +2934,20 @@ impl App {
             self.shell
                 .ctx
                 .request_repaint_after(std::time::Duration::from_millis(8));
+        }
+
+        // Row 156 / `FG-020`: the Smart shape hold, same shape as the
+        // liquify accumulation above and for the same reason — a pointer
+        // that has stopped moving sends no events, so the hold can only
+        // mature on a frame, and there is only a next frame if we ask for
+        // one. A mouse in particular reports nothing at all while still.
+        if self.smart_shape.is_some() {
+            self.smart_shape_tick();
+            if self.smart_shape.as_ref().is_some_and(|g| !g.ripe) {
+                self.shell
+                    .ctx
+                    .request_repaint_after(std::time::Duration::from_millis(16));
+            }
         }
 
         // The undo-depth preference, applied at the frame head rather than
@@ -4306,19 +4410,24 @@ impl App {
                 // line too would make the shortcut a six-stop tour where a
                 // stray press generates a layer — those two are a deliberate
                 // sub-tool-list (or Ctrl+K) pick.
-                const M: [FigureMode; 6] = [
+                const M: [FigureMode; 7] = [
                     FigureMode::Line,
                     FigureMode::Rect,
                     FigureMode::Ellipse,
                     FigureMode::Polygon,
                     FigureMode::Arc,
                     FigureMode::Curve,
+                    // Row 156: Smart shape rides the cycle — unlike the two
+                    // generator groups it inks the active layer with the
+                    // brush, so a stray press costs one ordinary stroke.
+                    FigureMode::Smart,
                 ];
                 let cur = M.iter().position(|m| *m == self.figure_mode).unwrap_or(0);
                 self.figure_mode = M[cycle(cur, M.len())];
                 self.figure_drag = None;
                 self.figure_poly = None;
                 self.figure_stage2 = None;
+                self.smart_shape = None;
             }
             Tool::Gradient => {
                 const M: [GradMode; 3] = [
@@ -4904,3 +5013,9 @@ mod gen_lines_object_tests;
 /// figure back one point at a time.
 #[cfg(test)]
 mod figure_stage_tests;
+
+/// Row 156 (`FG-020`–`024`): Smart Shape — the hold that turns a freehand
+/// stroke into the figure it was approximating, the swap that costs one
+/// undo press, and the much larger set of strokes it must leave alone.
+#[cfg(test)]
+mod smart_shape_tests;

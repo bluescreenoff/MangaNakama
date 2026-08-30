@@ -1275,6 +1275,23 @@ pub(super) fn canvas_overlay(ui: &egui::Ui, app: &App, canvas_pts: egui::Rect) {
         }
     }
 
+    // Row 156 / `FG-020`: the Smart shape hold. The wobble is already inked
+    // underneath (this sub tool draws live), so what the overlay adds is the
+    // ANSWER — the clean figure the release would put in its place, drawn
+    // through the recognizer's own path so the preview and the swap cannot
+    // disagree. Nothing is drawn until the hold matures, which is what makes
+    // "keep moving and nothing happens" legible.
+    if let Some(hit) = app.smart_shape.as_ref().and_then(|g| g.preview()) {
+        let col = theme::c().accent;
+        let mut pts: Vec<egui::Pos2> = hit.path.iter().map(|p| to_pt(p[0], p[1])).collect();
+        if hit.closed() && !pts.is_empty() {
+            pts.push(pts[0]);
+        }
+        if pts.len() >= 2 {
+            painter.add(egui::Shape::line(pts, egui::Stroke::new(1.5, col)));
+        }
+    }
+
     // Gradient tool: the ramp line with end markers.
     if let Some((a, b)) = &app.grad_drag {
         let col = theme::c().accent;

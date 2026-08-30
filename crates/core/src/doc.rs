@@ -3707,6 +3707,18 @@ impl Document {
     /// compositing — render, export, fill/wand/eyedropper sampling, save-side
     /// composites.
     pub fn refresh_derived(&mut self, dpi: u32) {
+        self.refresh_derived_with(dpi, &mut |_, _| None);
+    }
+
+    /// [`Self::refresh_derived`] with a correction kernel lent by the caller
+    /// (`crate::correction::CorrKernel`). Only the correction stage consults
+    /// it; every other derived raster is CPU-only and unaffected. The app's
+    /// render loop passes the GPU seam here — see `App::refresh_tones`.
+    pub fn refresh_derived_with(
+        &mut self,
+        dpi: u32,
+        corr: &mut crate::correction::CorrKernel<'_>,
+    ) {
         let size = self.size;
         for l in &mut self.layers {
             if l.tone.is_some() {
@@ -3733,7 +3745,7 @@ impl Document {
         // Correction layers LAST of all: their derivation composites the
         // layers below through the real compositor, so every other derived
         // raster must already be fresh when they read it.
-        self.refresh_corrections(dpi);
+        self.refresh_corrections_with(dpi, corr);
     }
 
     /// FB-knockout: derive a plain folder's border-effect raster from the

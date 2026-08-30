@@ -852,6 +852,39 @@ impl App {
                             }
                         }
                     }
+                    // Row 156 / `FG-020`: the one Figure gesture that is a
+                    // freehand STROKE. It begins exactly like a pen stroke
+                    // — same guard, same `begin_stroke`, same live ink —
+                    // and `smart_shape` rides alongside recording the path
+                    // so the hold has something to recognize. Releasing
+                    // without holding therefore costs nothing and changes
+                    // nothing: the stroke is simply already drawn.
+                    FigureMode::Smart => {
+                        if self.guard_frame_layer() {
+                            return;
+                        }
+                        let ops_at_start = self.doc.op_count();
+                        self.begin_stroke(kind);
+                        // `begin_stroke` REFUSES on a file object, a maskless
+                        // live layer and mid-correction — arming the gesture
+                        // regardless would leave state behind that no release
+                        // ever clears (canvas_up only finishes while drawing).
+                        if self.drawing() {
+                            self.push_batch(batch);
+                            self.doc.mask_stroke_to_selection();
+                            let refused =
+                                self.shell.sync_modifiers().shift || self.rulers_deciding();
+                            self.smart_shape = Some(crate::app::SmartShape {
+                                pts: vec![[cx, cy]],
+                                anchor: (x, y),
+                                still_since: std::time::Instant::now(),
+                                ripe: false,
+                                hit: None,
+                                refused,
+                                ops_at_start,
+                            });
+                        }
+                    }
                     m if m.generates() => {
                         // No frame-layer guard: these never ink the active
                         // layer — the release generates a fresh effect-line
@@ -1491,8 +1524,12 @@ impl App {
             // and shows as one. The bend is stage two's business.
             FigureMode::Arc => vec![[a.0, a.1], [b.0, b.1]],
             // Both click-list gestures: no drag geometry to preview, the
-            // commit builds their path (see finish_figure_poly).
-            FigureMode::Polygon | FigureMode::Curve => vec![],
+            // commit builds their path (see finish_figure_poly). Smart
+            // shape joins them for the opposite reason — its gesture is a
+            // freehand stroke that inks itself, so there is no a→b drag
+            // here to turn into geometry (the overlay previews the
+            // RECOGNIZED shape instead; see `SmartShape::preview`).
+            FigureMode::Polygon | FigureMode::Curve | FigureMode::Smart => vec![],
             // Stream line: the drag reads as the motion arrow it sets.
             FigureMode::Stream => vec![[a.0, a.1], [b.0, b.1]],
             // Saturated line and the two flashes: a circle around the
@@ -1568,6 +1605,9 @@ impl App {
             FigureMode::Ellipse => "ellipse inked",
             FigureMode::Polygon => "polygon inked",
             FigureMode::Curve | FigureMode::Arc => "curve inked",
+            // Row 156: the swap writes its own, richer line right after
+            // this one (it names the shape it recognized).
+            FigureMode::Smart => "shape inked",
             // A generating release never reaches ink_figure (it makes a
             // layer instead) — arms exist for exhaustiveness only.
             FigureMode::Stream | FigureMode::Focus => "lines generated",
@@ -1697,6 +1737,152 @@ impl App {
             self.set_status("figure cancelled");
             self.needs_redraw = true;
         }
+    }
+
+    // --- row 156 / `FG-020`: Smart shape -------------------------------------
+
+    /// The pointer moved during a Smart shape stroke: record the path, and
+    /// restart the hold if the hand has actually gone somewhere. The slop is
+    /// in SCREEN px because that is where the tremor is — a canvas-px
+    /// threshold would be four times as strict at 400% zoom.
+    pub fn smart_shape_move(&mut self, x: f32, y: f32) {
+        let (cx, cy) = self.viewport.to_canvas(x, y);
+        // Sampled out here, before the borrow — and sticky: Shift held for
+        // any part of the stroke means the artist asked for the straight
+        // line, so the recognizer keeps out of it (`FG-024`).
+        let shift = self.shell.sync_modifiers().shift;
+        let Some(g) = &mut self.smart_shape else {
+            return;
+        };
+        g.pts.push([cx, cy]);
+        g.refused |= shift;
+        if (x - g.anchor.0).hypot(y - g.anchor.1) <= crate::app::SMART_HOLD_SLOP_PX {
+            return;
+        }
+        // Moved on: the armed preview is stale, and the clock restarts here.
+        let was_ripe = g.ripe;
+        g.anchor = (x, y);
+        g.still_since = std::time::Instant::now();
+        g.ripe = false;
+        g.hit = None;
+        if was_ripe {
+            self.needs_redraw = true;
+        }
+    }
+
+    /// Has the pointer stood still long enough? Called from the frame head
+    /// (a still pointer sends no events) and once more at the release.
+    /// Idempotent: `ripe` latches, so the recognizer runs ONCE per hold
+    /// however many frames the artist holds for.
+    pub fn smart_shape_tick(&mut self) {
+        let Some(g) = self.smart_shape.as_ref() else {
+            return;
+        };
+        if g.ripe
+            || g.still_since.elapsed() < std::time::Duration::from_millis(crate::app::SMART_HOLD_MS)
+        {
+            return;
+        }
+        // `FG-024`, where the row refuses — decided at the pointer events
+        // (see `SmartShape::refused`), never re-read here.
+        let refuse = g.refused;
+        let pts = g.pts.clone();
+        let hit = if refuse {
+            None
+        } else {
+            mn_core::shape_fit::recognize(&pts)
+        };
+        let msg = match &hit {
+            Some(r) => format!(
+                "hold: release to make it a {} — keep moving to keep the stroke",
+                r.kind.label()
+            ),
+            None if refuse => "held, but this stroke is snapped — it stays as drawn".to_string(),
+            None => "held, but that is not a shape — it stays as drawn".to_string(),
+        };
+        if let Some(g) = self.smart_shape.as_mut() {
+            g.ripe = true;
+            g.hit = hit;
+        }
+        self.set_status(msg);
+        self.needs_redraw = true;
+    }
+
+    /// `FG-024`: is a ruler or guide currently deciding where ink may land?
+    /// Snapped strokes are the one family Smart shape must keep its hands
+    /// off — the artist already said what shape they wanted.
+    fn rulers_deciding(&self) -> bool {
+        let r = &self.doc.rulers;
+        r.on && !(r.items.is_empty() && r.curves.is_empty())
+    }
+
+    /// The release. Either the hold matured on something recognizable — in
+    /// which case the freehand ink comes back off the page and the figure
+    /// goes down in its place — or nothing happens at all and the stroke
+    /// the artist drew is the stroke they keep.
+    ///
+    /// ONE undo press for the pair. The freehand stroke is a finished undo
+    /// group by now, so the swap is: undo it (through `dispatch`, which
+    /// carries the cache-invalidation doors a raw `Document::undo` would
+    /// skip), then ink the figure — and a push CLEARS the redo branch, so
+    /// the group we just undid is gone rather than sitting one Ctrl+Y away.
+    /// Net history movement: +1.
+    pub fn finish_smart_shape(&mut self) {
+        let Some(g) = self.smart_shape.take() else {
+            return;
+        };
+        let Some(hit) = g.preview() else {
+            return; // no hold, or no shape: the stroke stands, always.
+        };
+        // The safety interlock. We are about to press Undo on the user's
+        // behalf, so we must be certain the newest history entry is OUR
+        // stroke and nothing else. `op_count` is the monotonic tally — NOT
+        // `undo_len`, which stops moving once the depth cap is reached and
+        // would make this check fail silently for anyone with a deep
+        // session. Exactly one op since the press = that op is the stroke.
+        if self.doc.op_count() != g.ops_at_start + 1 || self.doc.undo_len() == 0 {
+            self.set_status(
+                "smart shape: the stroke could not be swapped cleanly — kept it as drawn",
+            );
+            self.needs_redraw = true;
+            return;
+        }
+        let kind = hit.kind;
+        let path = hit.path.clone();
+        let closed = hit.closed();
+        let bbox = hit.bbox();
+        crate::cmd::dispatch(self, AppCmd::Undo);
+        self.ink_figure(&path, closed);
+        let armed = self.arm_smart_transform(bbox);
+        let mut msg = format!("smart shape: your stroke became a {}", kind.label());
+        if armed {
+            msg.push_str(" — drag to adjust it, Enter commits, Esc cancels");
+        }
+        self.set_status(msg);
+        self.needs_redraw = true;
+    }
+
+    /// `FG-022`/`FG-023`, this round's edit mode: open the Transform float
+    /// over the figure that just landed, so scale and rotate are one drag
+    /// away (the import-as-layer precedent — art lands, handles arm).
+    ///
+    /// The lift is the figure's BOUNDING BOX, so any art already inside that
+    /// box comes along for the ride. That is the honest v1 consequence of
+    /// inking into the raster instead of keeping a shape object, and it is
+    /// the same bargain the Object tool's raster-ink grab already makes.
+    fn arm_smart_transform(&mut self, b: [f32; 4]) -> bool {
+        let l = self.doc.active_layer();
+        if l.lock || l.is_vector() || l.records_strokes() || l.folder {
+            return false;
+        }
+        let pad = self.brush_radius().max(1.0) + 2.0;
+        let r = [
+            (b[0] - pad).floor().max(0.0) as i32,
+            (b[1] - pad).floor().max(0.0) as i32,
+            (b[2] + pad).ceil().min(self.doc.size.0 as f32) as i32,
+            (b[3] + pad).ceil().min(self.doc.size.1 as f32) as i32,
+        ];
+        r[0] < r[2] && r[1] < r[3] && crate::cmd::open_layer_transform(self, self.doc.active, r)
     }
 
     /// Row 157 / `FG-012`: Backspace (or a right-click) takes back the LAST
@@ -2663,6 +2849,9 @@ impl App {
         if self.drawing() {
             self.push_batch(batch);
             self.doc.mask_stroke_to_selection();
+            // Row 156: a Smart shape stroke records its path beside the ink
+            // and restarts the hold whenever the hand moves on.
+            self.smart_shape_move(x, y);
             return;
         }
         let (cx, cy) = self.viewport.to_canvas(x, y);
@@ -3071,7 +3260,17 @@ impl App {
         }
         if self.drawing() {
             self.push_batch(batch);
+            // Row 156: fold the lift-off point in and give the hold one last
+            // chance to mature (a hold that ripened between the final frame
+            // and the release still counts), THEN close the stroke — the
+            // swap needs a finished undo group to take back.
+            if let Some(g) = &mut self.smart_shape {
+                let (cx, cy) = self.viewport.to_canvas(x, y);
+                g.pts.push([cx, cy]);
+            }
+            self.smart_shape_tick();
             self.end_stroke();
+            self.finish_smart_shape();
             return;
         }
         let (cx, cy) = self.viewport.to_canvas(x, y);

@@ -45,6 +45,9 @@ use mn_core::{Document, Paper, TILE_SIZE, TileIdx};
 mod dabs;
 pub use dabs::{WASH_LAYER_KEY, dab_tiles};
 
+mod kernel;
+pub use kernel::{KERNEL_FLOOR_PX, Kernel, TileJob};
+
 /// Canvas texture format. Non-sRGB so `render_offscreen` readback is exact.
 const CANVAS_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 /// Tile texture format: the fix15 data verbatim, scaled in the shader.
@@ -806,6 +809,9 @@ pub struct Renderer {
     /// GPU-dab compute path (P1); `None` when the adapter's rgba16uint
     /// textures lack STORAGE_BINDING (`--gpu-dabs` is then inert).
     dabs: Option<dabs::DabGpu>,
+    /// The shared tile-kernel seam (correction derives, the blur family);
+    /// `None` when the adapter has no compute shaders. See `kernel.rs`.
+    kernels: Option<kernel::KernelGpu>,
     /// Canvas-side freshness: the revision each tile was last COMPOSITED at,
     /// keyed like the texture cache. The second half of the freshness
     /// question `CachedTile.revision` used to answer alone (the round-31
@@ -1620,6 +1626,20 @@ impl Renderer {
             None
         };
 
+        // The kernel seam needs only compute + storage BUFFERS, which is a
+        // weaker ask than the dab path's storage TEXTURES — an adapter can
+        // legitimately have one and not the other, so this gate is its own.
+        let kernels = if adapter
+            .get_downlevel_capabilities()
+            .flags
+            .contains(wgpu::DownlevelFlags::COMPUTE_SHADERS)
+        {
+            Some(kernel::KernelGpu::new(&device))
+        } else {
+            println!("[gpu] no compute shaders — kernel seam disabled (CPU corrections/filters)");
+            None
+        };
+
         Ok(Self {
             device,
             queue,
@@ -1652,6 +1672,7 @@ impl Renderer {
             canvas: None,
             tiles: HashMap::new(),
             dabs,
+            kernels,
             canvas_shown: HashMap::new(),
             frame_stats: FrameStats::default(),
             blend2_tile_pipe,

@@ -381,39 +381,28 @@ impl Adjust {
     }
 }
 
-/// Monotone cubic (Fritsch–Carlson) through `pts`, evaluated at `x`.
+/// The Fritsch–Carlson tangents for `pts`, `m[..n]`.
 ///
-/// The limiter is the whole point: it clips the Hermite tangents so a segment
-/// between two monotone points can never leave the box those points bound.
-/// Straight Catmull-Rom does leave it, and the ringing lands in the midtones
-/// of a gradient where it reads as a band the artist did not draw.
+/// Hoisted out of [`curve_eval`] and made public for exactly one reason: the
+/// GPU tone-curve kernel (`mn-gpu`'s `kernel.wgsl`) precomputes these on the
+/// CPU and uploads them, so the shader evaluates the *same* Hermite segment
+/// arithmetic instead of a second, drifting implementation. Changing the
+/// limiter here without changing the shader breaks tone-curve parity — the
+/// parity test in `crates/gpu/tests/kernel_parity.rs` is what catches it.
 ///
-/// Fewer than two points degenerates gracefully: none = identity, one = the
-/// constant that point names.
-fn curve_eval(pts: &[[f32; 2]], x: f32) -> f32 {
-    let n = pts.len();
-    if n == 0 {
-        return x.clamp(0.0, 1.0);
+/// `pts` must hold at least two points (the callers check); fewer degenerates
+/// to zero tangents, which the boundary guards in `curve_eval` never reach.
+pub fn curve_tangents(pts: &[[f32; 2]]) -> [f32; TONE_CURVE_MAX] {
+    let n = pts.len().min(TONE_CURVE_MAX);
+    let mut m = [0.0f32; TONE_CURVE_MAX];
+    if n < 2 {
+        return m;
     }
-    if n == 1 {
-        return pts[0][1].clamp(0.0, 1.0);
-    }
-    // Outside the control range the end value stands — the ends are pinned to
-    // x = 0 and x = 1 by the editor, so this is the boundary guard, not a
-    // routine path.
-    if x <= pts[0][0] {
-        return pts[0][1].clamp(0.0, 1.0);
-    }
-    if x >= pts[n - 1][0] {
-        return pts[n - 1][1].clamp(0.0, 1.0);
-    }
-
     let mut d = [0.0f32; TONE_CURVE_MAX]; // secant slopes, d[..n-1]
     for i in 0..n - 1 {
         let h = (pts[i + 1][0] - pts[i][0]).max(1e-6);
         d[i] = (pts[i + 1][1] - pts[i][1]) / h;
     }
-    let mut m = [0.0f32; TONE_CURVE_MAX]; // tangents, m[..n]
     m[0] = d[0];
     m[n - 1] = d[n - 2];
     for i in 1..n - 1 {
@@ -446,6 +435,37 @@ fn curve_eval(pts: &[[f32; 2]], x: f32) -> f32 {
         m[i] = a * d[i];
         m[i + 1] = b * d[i];
     }
+    m
+}
+
+/// Monotone cubic (Fritsch–Carlson) through `pts`, evaluated at `x`.
+///
+/// The limiter is the whole point: it clips the Hermite tangents so a segment
+/// between two monotone points can never leave the box those points bound.
+/// Straight Catmull-Rom does leave it, and the ringing lands in the midtones
+/// of a gradient where it reads as a band the artist did not draw.
+///
+/// Fewer than two points degenerates gracefully: none = identity, one = the
+/// constant that point names.
+fn curve_eval(pts: &[[f32; 2]], x: f32) -> f32 {
+    let n = pts.len();
+    if n == 0 {
+        return x.clamp(0.0, 1.0);
+    }
+    if n == 1 {
+        return pts[0][1].clamp(0.0, 1.0);
+    }
+    // Outside the control range the end value stands — the ends are pinned to
+    // x = 0 and x = 1 by the editor, so this is the boundary guard, not a
+    // routine path.
+    if x <= pts[0][0] {
+        return pts[0][1].clamp(0.0, 1.0);
+    }
+    if x >= pts[n - 1][0] {
+        return pts[n - 1][1].clamp(0.0, 1.0);
+    }
+
+    let m = curve_tangents(pts);
 
     let i = pts[..n - 1]
         .iter()

@@ -114,6 +114,10 @@ pub enum Icon {
     /// Figure ▸ curve (row 157 / `FG-002`): the two-stage arc — the straight
     /// baseline you drag, ghosted, with the bend it becomes over it.
     Arc,
+    /// Figure ▸ Smart shape (row 156 / `FG-020`): the gesture in one glyph,
+    /// the same way `Arc` draws its own — the wobbly loop you drew, ghosted,
+    /// with the clean circle it becomes over it.
+    SmartShape,
     /// Gradient tool: a ramp square.
     Gradient,
     /// Vector layer (docs/VECTOR-INKING.md): a curve with its control points
@@ -226,6 +230,7 @@ impl Icon {
             | Self::Ellipse
             | Self::Poly
             | Self::Arc
+            | Self::SmartShape
             | Self::Gradient
             | Self::Liquify
             | Self::Tone
@@ -1142,6 +1147,28 @@ pub fn paint_role(p: &Painter, r: Rect, icon: Icon, base: Color32, accent: Optio
             for (x, y) in ends {
                 p.circle_filled(pt(r, x, y), w * 0.09, a);
             }
+        }
+        Icon::SmartShape => {
+            // Same construction as `Arc`: what you drew, faint, and what you
+            // get, solid. Here that is a lumpy hand-drawn loop under a true
+            // circle — the row's whole promise, at 16 px.
+            let wob: Vec<Pos2> = (0..=28)
+                .map(|i| {
+                    let t = i as f32 / 28.0 * std::f32::consts::TAU;
+                    // Two low harmonics = "hand-drawn" without reading as
+                    // noise; deterministic, so the glyph never shimmers.
+                    let rr = 0.30 + (t * 3.0).sin() * 0.045 + (t * 5.0).cos() * 0.03;
+                    pt(r, 0.5 + rr * t.cos(), 0.5 + rr * t.sin())
+                })
+                .collect();
+            p.add(Shape::line(wob, a_thin));
+            let round: Vec<Pos2> = (0..=32)
+                .map(|i| {
+                    let t = i as f32 / 32.0 * std::f32::consts::TAU;
+                    pt(r, 0.5 + 0.30 * t.cos(), 0.5 + 0.30 * t.sin())
+                })
+                .collect();
+            p.add(Shape::line(round, line));
         }
         Icon::Gradient => {
             // A ramp square: dark to light, top-left to bottom-right.

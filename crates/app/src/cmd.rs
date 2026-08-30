@@ -1072,6 +1072,19 @@ pub enum FigureMode {
     Urchin,
     /// ベタフラッシュ Solid flash: the same teeth cut OUT of a solid ring.
     SolidFlash,
+    /// Row 156 / `FG-020` **Smart shape**: draw freehand, then HOLD still at
+    /// the end and the stroke becomes the clean figure it was approximating
+    /// (`mn_core::shape_fit`). The one Figure sub tool whose gesture is a
+    /// FREEHAND stroke rather than a drag or a click list — it inks live
+    /// with the brush like the pen does, and the hold is what turns that
+    /// ink into a figure. Releasing without holding leaves the stroke
+    /// exactly as drawn, always.
+    ///
+    /// It is a sub tool rather than a preference on the Pen (which is where
+    /// CSP puts it) on purpose: here it costs one registry row and cannot
+    /// surprise a pen stroke, and `FG-020`'s own preference exists mainly
+    /// to let CSP users turn the surprise OFF.
+    Smart,
 }
 
 impl FigureMode {
@@ -1117,6 +1130,7 @@ impl FigureMode {
             FigureMode::Focus => "Saturated line",
             FigureMode::Urchin => "Sea urchin flash",
             FigureMode::SolidFlash => "Solid flash",
+            FigureMode::Smart => "Smart shape",
         }
     }
 
@@ -1816,6 +1830,7 @@ impl SubTool {
             SubTool::Figure(FigureMode::Polygon),
             SubTool::Figure(FigureMode::Arc),
             SubTool::Figure(FigureMode::Curve),
+            SubTool::Figure(FigureMode::Smart),
             SubTool::Figure(FigureMode::Stream),
             SubTool::Figure(FigureMode::Focus),
             SubTool::Figure(FigureMode::Urchin),
@@ -4080,7 +4095,26 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
         }
         AppCmd::FilterApply(f) => {
             app.filter_draft = None;
-            if app.doc.apply_filter(f) {
+            // The blur family goes through the shared GPU kernel seam when
+            // the adapter and the size floor allow; `apply_filter_with`
+            // falls back to `Filter::run` — the reference — the moment the
+            // closure returns false, including on a dispatch canary failure
+            // mid-job. Everything else (the warps, dust, morphology) has no
+            // kernel here yet and takes the false arm every time.
+            let crate::app::App { doc, renderer, .. } = &mut *app;
+            let ran = doc.apply_filter_with(f, &mut |f, buf| {
+                let Some(passes) = f.separable_passes() else {
+                    return false;
+                };
+                renderer.kernels_preferred(buf.w * buf.h)
+                    && renderer.run_region_kernel(
+                        mn_gpu::Kernel::Separable(&passes),
+                        &mut buf.px,
+                        buf.w,
+                        buf.h,
+                    )
+            });
+            if ran {
                 app.set_status(format!("{} applied", f.label()));
                 app.mark_dirty();
             } else {

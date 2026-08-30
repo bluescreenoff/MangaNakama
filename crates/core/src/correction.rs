@@ -54,6 +54,37 @@ use crate::doc::{Document, Layer, LayerKind};
 use crate::fill_layer::mask_from_selection;
 use crate::tile::{TILE_PIXELS, TILE_SIZE, Tile, TileIdx};
 
+/// How many tiles one derive pass hands the kernel at a time.
+///
+/// The batch exists so the fix15 source buffers are transient: a full-page
+/// B4/600 correction is ~12 800 tiles and materialising every source at once
+/// would be ~410 MB of scratch. 256 tiles is 8 MB, and it is deliberately the
+/// same number as the compositor's `UPLOAD_BATCH` — one staging buffer's
+/// worth on the GPU side of the seam.
+const DERIVE_BATCH: usize = 256;
+
+/// One tile of correction work, as a kernel host sees it.
+///
+/// `src` is the below-composite over paper (premultiplied fix15 RGBA,
+/// `TILE_LEN` long); `cov` is the window's per-pixel coverage
+/// (`TILE_PIXELS` bytes), `None` meaning "no window, correct everything".
+/// Exactly the two arguments [`correct_tile`] takes — the CPU function IS
+/// the specification of what a kernel must reproduce.
+pub struct CorrTile<'a> {
+    pub src: &'a [u16],
+    pub cov: Option<&'a [u8]>,
+}
+
+/// A kernel the caller lends the correction derive: given the parameters and
+/// a batch of tiles, return one `TILE_LEN` buffer per tile — or `None` to
+/// decline the whole batch, in which case [`correct_tile`] runs on the CPU.
+///
+/// Declining is always legal and always correct. That is the contract that
+/// lets `mn-gpu` hand over a compute path whose adapter, size floor or
+/// dispatch canary can veto at any moment without the document ever seeing a
+/// half-derived page.
+pub type CorrKernel<'a> = dyn FnMut(&Adjust, &[CorrTile<'_>]) -> Option<Vec<Box<[u16]>>> + 'a;
+
 /// The derived state riding a correction layer. Never serialized — ORA
 /// stores only the `mnc-correction` params and the mask; everything here
 /// rebuilds on load.
@@ -64,6 +95,29 @@ pub struct CorrDerived {
     /// (params, window-mask revision, dpi, canvas size, below props key)
     /// — a mismatch on any of these rebuilds EVERY tile.
     stamp: Option<(Adjust, Option<u64>, u32, (u32, u32), u64)>,
+    /// The same stamp WITHOUT the parameters — everything the below-composite
+    /// depends on. This is the whole point of the split: a slider drag moves
+    /// `stamp` and leaves this alone, so every tile's source survives and the
+    /// drag pays for the correction arithmetic only.
+    ///
+    /// Before the split, a param drag re-walked the real compositor once per
+    /// tile. Measured on a 2560² page with three art layers
+    /// (`gpu/tests/kernel_bench.rs`, release): an uncached tone-curve derive
+    /// is 1642 ms, a cached one 1115 ms — the composite is ~32 % of the CPU
+    /// figure. That share is small only because the CPU's own tone-curve
+    /// arithmetic is expensive; the GPU kernel cuts that term by ~6×, at
+    /// which point the composite would be roughly two thirds of every drag
+    /// tick. The two changes only pay off together, which is why they shipped
+    /// together.
+    src_stamp: Option<(Option<u64>, u32, (u32, u32), u64)>,
+    /// The below-composite each derived tile was made from, kept 8-bit
+    /// exactly as `composite_rect_export` produced it — the derive converts
+    /// to fix15 on the way in, so caching the wide form would double the cost
+    /// for no information. 16 KB per tile: ~205 MB for a full-page maskless
+    /// B4/600 correction, against the ~410 MB the derived tiles themselves
+    /// already cost. Windowed corrections (the convention) pay in proportion
+    /// to the window.
+    src: HashMap<TileIdx, Arc<[u8]>>,
     /// Per-tile (max revision, entry count) of the below layers' tile maps
     /// — a mismatch rebuilds THAT tile. This is what keeps a brush stroke
     /// under a correction layer from re-compositing the whole page.
@@ -181,11 +235,26 @@ impl Document {
     /// Runs from `refresh_derived` AFTER tone/fill/edge refreshes — the
     /// below-composite must read what those layers actually display.
     pub fn refresh_corrections(&mut self, dpi: u32) {
+        self.refresh_corrections_with(dpi, &mut |_, _| None);
+    }
+
+    /// [`Self::refresh_corrections`] with a kernel lent by the caller — the
+    /// GPU seam's door into the derive.
+    ///
+    /// `run` sees one batch of tiles at a time and may decline any of them
+    /// (`None`), which runs the CPU reference for that batch instead. Nothing
+    /// else changes: the freshness stamps, the source cache and the derived
+    /// tiles are written the same way whoever computed the pixels, so a tile
+    /// the GPU produced carries exactly the keys a CPU-produced one would and
+    /// the next incremental pass cannot tell them apart. That is deliberate —
+    /// a GPU-derived tile that did not carry the same keys would re-derive
+    /// forever, or worse, never.
+    pub fn refresh_corrections_with(&mut self, dpi: u32, run: &mut CorrKernel<'_>) {
         let idxs: Vec<usize> = (0..self.layers.len())
             .filter(|&i| matches!(self.layers[i].kind, LayerKind::Correction(_)))
             .collect();
         for i in idxs {
-            self.refresh_correction_at(i, dpi);
+            self.refresh_correction_at(i, dpi, run);
         }
         // A layer that stopped being a correction sheds its derived state.
         for l in &mut self.layers {
@@ -195,7 +264,7 @@ impl Document {
         }
     }
 
-    fn refresh_correction_at(&mut self, i: usize, dpi: u32) {
+    fn refresh_correction_at(&mut self, i: usize, dpi: u32, run: &mut CorrKernel<'_>) {
         let LayerKind::Correction(adj) = self.layers[i].kind else {
             return;
         };
@@ -206,8 +275,14 @@ impl Document {
             .map(|m| m.revision);
         let props = below_props_key(self, i);
         let stamp = (adj, mask_rev, dpi, self.size, props);
+        // The source half of the stamp — the same fields minus the params.
+        let src_stamp = (mask_rev, dpi, self.size, props);
         let tile_keys = below_tile_keys(self, i);
         let force = self.layers[i].corr.as_ref().and_then(|c| c.stamp) != Some(stamp);
+        // A slider drag lands here: `force` (params moved) but not
+        // `force_src` (nothing under the layer moved), so every tile's cached
+        // below-composite stands and only the correction re-runs.
+        let force_src = self.layers[i].corr.as_ref().and_then(|c| c.src_stamp) != Some(src_stamp);
         if !force
             && self.layers[i]
                 .corr
@@ -249,12 +324,21 @@ impl Document {
 
         let mut old = self.layers[i].corr.take().unwrap_or_default();
         let mut out: HashMap<TileIdx, Arc<Tile>> = HashMap::new();
+        let mut out_src: HashMap<TileIdx, Arc<[u8]>> = HashMap::new();
+
+        // Pass 1: keep what is still fresh, and collect the rest. Nothing is
+        // composited or corrected here — this is the pointer-traffic pass.
+        let mut todo: Vec<TileIdx> = Vec::new();
         for idx in wanted {
             let key = tile_keys.get(&idx).copied().unwrap_or((0, 0));
             // Both maps are sparse — a tile with no below content is absent
             // from both, and absent must compare EQUAL to absent or every
             // empty tile re-derives on every pass.
             let old_key = old.tile_keys.get(&idx).copied().unwrap_or((0, 0));
+            let src_fresh = !force_src && old_key == key;
+            if src_fresh && let Some(s) = old.src.remove(&idx) {
+                out_src.insert(idx, s);
+            }
             if !force
                 && old_key == key
                 && let Some(t) = old.tiles.remove(&idx)
@@ -262,48 +346,108 @@ impl Document {
                 out.insert(idx, t);
                 continue;
             }
-            let (ox, oy) = idx.origin();
-            let img = crate::export::composite_rect_export(
-                &below,
-                bg,
-                TILE_SIZE as u32,
-                TILE_SIZE as u32,
-                ox,
-                oy,
-            );
-            // The below-composite as an opaque fix15 tile. Off-canvas pixels
-            // stay transparent (the image is zero there) and `correct_tile`
-            // passes them through; the compositor clips them anyway.
-            let mut src = vec![0u16; TILE_PIXELS * 4];
-            for p in 0..TILE_PIXELS {
-                let (x, y) = (p % TILE_SIZE, p / TILE_SIZE);
-                let px = img.get_pixel(x as u32, y as u32).0;
-                if px[3] == 0 {
-                    continue;
+            todo.push(idx);
+        }
+
+        // Pass 2: derive the stale ones, `DERIVE_BATCH` at a time so the
+        // fix15 sources stay transient (see the constant).
+        let mut src_px = vec![0u16; DERIVE_BATCH * TILE_PIXELS * 4];
+        for chunk in todo.chunks(DERIVE_BATCH) {
+            let mut covs: Vec<Option<Box<[u8; TILE_PIXELS]>>> = Vec::with_capacity(chunk.len());
+            for (n, &idx) in chunk.iter().enumerate() {
+                // The source: the cache when the pass-1 compare kept it,
+                // otherwise a fresh walk of the real compositor.
+                let cached = out_src.get(&idx).map(Arc::clone);
+                let bytes = match cached {
+                    Some(s) => s,
+                    None => {
+                        let (ox, oy) = idx.origin();
+                        let img = crate::export::composite_rect_export(
+                            &below,
+                            bg,
+                            TILE_SIZE as u32,
+                            TILE_SIZE as u32,
+                            ox,
+                            oy,
+                        );
+                        let s: Arc<[u8]> = Arc::from(img.into_raw().into_boxed_slice());
+                        out_src.insert(idx, Arc::clone(&s));
+                        s
+                    }
+                };
+                // The below-composite as an opaque fix15 tile. Off-canvas
+                // pixels stay transparent (the image is zero there) and
+                // `correct_tile` passes them through; the compositor clips
+                // them anyway.
+                let dst = &mut src_px[n * TILE_PIXELS * 4..(n + 1) * TILE_PIXELS * 4];
+                dst.fill(0);
+                for p in 0..TILE_PIXELS {
+                    let o = p * 4;
+                    if bytes[o + 3] == 0 {
+                        continue;
+                    }
+                    for c in 0..3 {
+                        dst[o + c] = ((bytes[o + c] as u32 * 32768 + 127) / 255) as u16;
+                    }
+                    dst[o + 3] = 32768;
                 }
-                let o = p * 4;
-                for c in 0..3 {
-                    src[o + c] = ((px[c] as u32 * 32768 + 127) / 255) as u16;
-                }
-                src[o + 3] = 32768;
+                covs.push(mask_tiles.as_ref().map(|mt| {
+                    let mut cov = Box::new([0u8; TILE_PIXELS]);
+                    if let Some(m) = mt.get(&idx) {
+                        let d = m.data();
+                        for (p, c) in cov.iter_mut().enumerate() {
+                            *c = ((d[p * 4 + 3] as u32 * 255 + 16384) / 32768).min(255) as u8;
+                        }
+                    }
+                    cov
+                }));
             }
-            let cov: Option<Box<[u8; TILE_PIXELS]>> = mask_tiles.as_ref().map(|mt| {
-                let mut cov = Box::new([0u8; TILE_PIXELS]);
-                if let Some(m) = mt.get(&idx) {
-                    let d = m.data();
-                    for (p, c) in cov.iter_mut().enumerate() {
-                        *c = ((d[p * 4 + 3] as u32 * 255 + 16384) / 32768).min(255) as u8;
+
+            let job: Vec<CorrTile<'_>> = chunk
+                .iter()
+                .enumerate()
+                .map(|(n, _)| CorrTile {
+                    src: &src_px[n * TILE_PIXELS * 4..(n + 1) * TILE_PIXELS * 4],
+                    cov: covs[n].as_deref().map(|c| &c[..]),
+                })
+                .collect();
+            let lent = run(&adj, &job);
+            drop(job);
+
+            let usable = lent.filter(|t| {
+                t.len() == chunk.len() && t.iter().all(|px| px.len() == TILE_PIXELS * 4)
+            });
+            match usable {
+                Some(tiles) => {
+                    for (&idx, px) in chunk.iter().zip(tiles) {
+                        let mut tile = Tile::new_transparent();
+                        tile.data_mut().copy_from_slice(&px);
+                        out.insert(idx, Arc::new(tile));
                     }
                 }
-                cov
-            });
-            let mut tile = Tile::new_transparent();
-            correct_tile(tile.data_mut(), &src, &adj, cov.as_deref());
-            out.insert(idx, Arc::new(tile));
+                // Declined, or a host that returned the wrong count / wrong
+                // tile length (a bug on its side, never a reason to write
+                // short tiles): the CPU reference stands.
+                None => {
+                    for (n, &idx) in chunk.iter().enumerate() {
+                        let mut tile = Tile::new_transparent();
+                        correct_tile(
+                            tile.data_mut(),
+                            &src_px[n * TILE_PIXELS * 4..(n + 1) * TILE_PIXELS * 4],
+                            &adj,
+                            covs[n].as_deref(),
+                        );
+                        out.insert(idx, Arc::new(tile));
+                    }
+                }
+            }
         }
+
         self.layers[i].corr = Some(CorrDerived {
             tiles: out,
             stamp: Some(stamp),
+            src_stamp: Some(src_stamp),
+            src: out_src,
             tile_keys,
         });
     }
@@ -525,6 +669,189 @@ mod tests {
         assert!(
             before.pixels().zip(after.pixels()).all(|(a, b)| a.0 == b.0),
             "and it derives the same page"
+        );
+    }
+
+    /// The parameter-drag win, asserted where it actually lives: a param-only
+    /// change must NOT re-walk the compositor. The below-composite sources
+    /// are `Arc`s, so pointer identity across the change is proof the cache
+    /// served them — and pointer INequality after a stroke below is proof the
+    /// cache still invalidates.
+    #[test]
+    fn a_param_change_reuses_the_cached_below_composite() {
+        let mut doc = Document::new(128, 128);
+        put(&mut doc, 0, 10, 10, [0.6, 0.6, 0.6, 1.0]);
+        let ci = doc.add_correction_layer(Adjust::Invert, false);
+        refresh(&mut doc);
+        let before: Vec<(TileIdx, Arc<[u8]>)> = doc.layers[ci]
+            .corr
+            .as_ref()
+            .unwrap()
+            .src
+            .iter()
+            .map(|(i, s)| (*i, Arc::clone(s)))
+            .collect();
+        assert_eq!(before.len(), 4, "a 128² canvas is four tiles of source");
+
+        // Params move, nothing below does.
+        doc.layers[ci].kind = LayerKind::Correction(Adjust::Binarize { threshold: 0.7 });
+        refresh(&mut doc);
+        let after = &doc.layers[ci].corr.as_ref().unwrap().src;
+        for (idx, s) in &before {
+            assert!(
+                Arc::ptr_eq(s, after.get(idx).expect("the source survived")),
+                "tile {idx:?} re-composited for a parameter change"
+            );
+        }
+        // …and the pixels really did change, so this is not a stale-derive
+        // test passing for the wrong reason.
+        assert_eq!(px(&doc, 100, 100), [255, 255, 255], "paper binarizes white");
+
+        // A stroke below must still throw its tile's source away.
+        put(&mut doc, 0, 12, 12, [0.2, 0.2, 0.2, 1.0]);
+        refresh(&mut doc);
+        let after = &doc.layers[ci].corr.as_ref().unwrap().src;
+        let near = TileIdx::new(0, 0);
+        let far = TileIdx::new(1, 1);
+        let old = |i: TileIdx| before.iter().find(|(k, _)| *k == i).map(|(_, s)| s).unwrap();
+        assert!(
+            !Arc::ptr_eq(old(near), after.get(&near).unwrap()),
+            "the stroked tile kept a stale below-composite"
+        );
+        assert!(
+            Arc::ptr_eq(old(far), after.get(&far).unwrap()),
+            "an untouched tile re-composited anyway"
+        );
+    }
+
+    /// The source cache's one real hazard: a correction stacked ON another
+    /// correction derives from the lower one's DERIVED raster, so moving the
+    /// lower one's parameters has to invalidate the upper one's cached
+    /// sources — even though nobody painted anything and the upper layer's
+    /// own parameters did not move.
+    ///
+    /// It holds because a re-derived tile is a fresh `Tile`, which takes a
+    /// fresh monotonic revision, and a correction's derived tiles ARE its
+    /// `display_tiles()` — so `below_tile_keys` sees the change. That is a
+    /// load-bearing coincidence of three separate decisions, which is
+    /// exactly the kind of thing that stops being true silently.
+    #[test]
+    fn a_correction_above_another_sees_the_lower_ones_params_move() {
+        let mut doc = Document::new(128, 128);
+        put(&mut doc, 0, 10, 10, [0.6, 0.6, 0.6, 1.0]);
+        let lower = doc.add_correction_layer(Adjust::Invert, false);
+        doc.set_active(lower);
+        let upper = doc.add_correction_layer(
+            Adjust::BrightnessContrast {
+                brightness: 0.0,
+                contrast: 0.0,
+            },
+            false,
+        );
+        assert!(upper > lower, "the second correction stacks above the first");
+        refresh(&mut doc);
+        // White paper, inverted by the lower layer, passed through by the
+        // upper one's neutral brightness.
+        assert!(px(&doc, 100, 100)[0] <= 2, "the stack starts inverted");
+        let src_before: Vec<Arc<[u8]>> = doc.layers[upper]
+            .corr
+            .as_ref()
+            .unwrap()
+            .src
+            .values()
+            .cloned()
+            .collect();
+
+        // Only the LOWER layer's parameters move.
+        doc.layers[lower].kind = LayerKind::Correction(Adjust::Binarize { threshold: 0.9 });
+        refresh(&mut doc);
+        assert_eq!(
+            px(&doc, 100, 100),
+            [255, 255, 255],
+            "the upper correction is still deriving from a stale source"
+        );
+        let after = &doc.layers[upper].corr.as_ref().unwrap().src;
+        assert!(
+            src_before
+                .iter()
+                .all(|s| !after.values().any(|t| Arc::ptr_eq(s, t))),
+            "the upper layer kept a source that predates the lower layer's edit"
+        );
+    }
+
+    /// The lent kernel replaces `correct_tile` and nothing else: the derived
+    /// tiles are whatever it returned, and the freshness bookkeeping around
+    /// it is unchanged, so the next pass still rebuilds nothing.
+    #[test]
+    fn a_lent_kernel_derives_the_tiles_and_keeps_the_freshness_keys() {
+        let mut doc = Document::new(128, 128);
+        put(&mut doc, 0, 10, 10, [0.6, 0.6, 0.6, 1.0]);
+        doc.add_correction_layer(Adjust::Invert, false);
+        let mut calls = 0usize;
+        doc.refresh_derived_with(600, &mut |_, tiles| {
+            calls += 1;
+            // A recognisable constant: mid-grey, fully opaque.
+            Some(
+                (0..tiles.len())
+                    .map(|_| {
+                        let mut t = vec![0u16; TILE_PIXELS * 4];
+                        for p in 0..TILE_PIXELS {
+                            t[p * 4] = 16384;
+                            t[p * 4 + 1] = 16384;
+                            t[p * 4 + 2] = 16384;
+                            t[p * 4 + 3] = 32768;
+                        }
+                        t.into_boxed_slice()
+                    })
+                    .collect(),
+            )
+        });
+        assert_eq!(calls, 1, "one batch for a four-tile canvas");
+        let got = px(&doc, 10, 10);
+        assert!(
+            (got[0] as i32 - 128).abs() <= 2,
+            "the kernel's pixels are what the page shows: {got:?}"
+        );
+
+        // Nothing moved, so a second pass must not call the kernel at all.
+        let mut again = 0usize;
+        doc.refresh_derived_with(600, &mut |_, _| {
+            again += 1;
+            None
+        });
+        assert_eq!(
+            again, 0,
+            "a GPU-derived tile did not carry the freshness keys — it would \
+             re-derive on every frame"
+        );
+    }
+
+    /// A kernel that declines — or hands back the wrong shape, which is the
+    /// same thing — must leave the CPU reference in charge, byte for byte.
+    #[test]
+    fn a_declining_or_malformed_kernel_falls_back_to_the_cpu() {
+        let build = |k: &mut CorrKernel<'_>| {
+            let mut doc = Document::new(128, 128);
+            put(&mut doc, 0, 10, 10, [0.6, 0.6, 0.6, 1.0]);
+            doc.add_correction_layer(Adjust::Binarize { threshold: 0.7 }, false);
+            doc.refresh_derived_with(600, k);
+            crate::export::composite(&doc, crate::export::Background::White)
+        };
+        let reference = build(&mut |_, _| None);
+        // Too few tiles back.
+        let short = build(&mut |_, _| Some(Vec::new()));
+        // Right count, wrong length — a host bug that must never be written
+        // into a tile.
+        let ragged = build(&mut |_, tiles| {
+            Some((0..tiles.len()).map(|_| vec![0u16; 7].into_boxed_slice()).collect())
+        });
+        assert!(
+            reference.pixels().zip(short.pixels()).all(|(a, b)| a.0 == b.0),
+            "a short kernel result changed the page"
+        );
+        assert!(
+            reference.pixels().zip(ragged.pixels()).all(|(a, b)| a.0 == b.0),
+            "a ragged kernel result changed the page"
         );
     }
 

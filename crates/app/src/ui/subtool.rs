@@ -451,11 +451,15 @@ fn mode_sub_tools(ui: &mut egui::Ui, app: &mut App) {
                 // is what it does — it inks with your brush, unlike the
                 // generator groups below.
                 (FigureMode::Curve, Icon::Vector),
+                // Row 156 / FG-020: also Direct draw — it inks the active
+                // layer with your brush; the hold is what makes it a figure.
+                (FigureMode::Smart, Icon::SmartShape),
             ] {
                 if mode_row(ui, app.figure_mode == m, icon, m.label()).clicked() {
                     app.figure_mode = m;
                     app.figure_poly = None;
                     app.figure_stage2 = None;
+                    app.smart_shape = None;
                 }
             }
             // The preset rows carry a WHOLE `FigureLineOpts` now, built in

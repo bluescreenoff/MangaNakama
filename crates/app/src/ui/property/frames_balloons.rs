@@ -1055,6 +1055,10 @@ pub(crate) fn sec_figure_guide(ui: &mut egui::Ui, app: &mut App) {
         FigureMode::Curve => {
             "click along the curve; Enter (or the last point twice) inks it, Backspace takes one back"
         }
+        FigureMode::Smart => {
+            "draw freehand, then HOLD still at the end — the stroke becomes the shape it \
+             was approximating; release without holding and it stays as drawn"
+        }
         FigureMode::Stream => "drag along the motion — angle and length come from the drag",
         FigureMode::Focus => "drag from the convergence point out to the lines' reach",
         FigureMode::Urchin => "drag from the flash's centre out to the spikes' reach",
