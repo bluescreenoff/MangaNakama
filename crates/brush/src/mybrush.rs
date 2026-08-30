@@ -378,9 +378,12 @@ pub struct MyBrush {
     /// The live record (owned here; the C hook reaches it through a
     /// thread-local pointer valid for one `stroke_to`).
     record: DabRecord,
-    /// Preset uses a mode the P1 GPU path does not port (spectral paint,
-    /// colorize, posterize) — stroke routing consults this (`gpu_ready`);
-    /// the CPU path is the reference, not a fallback.
+    /// Preset uses a mode the P1 GPU path does not port — stroke routing
+    /// consults this (`gpu_ready`); the CPU path is the reference, not a
+    /// fallback. Colorize/posterize left the list in the P4 round and
+    /// STATIC spectral paint left it in the wave-4 spectral-shader port
+    /// (dab.wgsl grew the three `*_Paint` arms); what remains is a
+    /// DYNAMIC `paint_mode` (input-mapped at load, see `paint_mapped`).
     exotic: bool,
     /// CSP Ink ▸ Mixing mode (I-014, triage rows 58 + 167): additive or
     /// spectral pigment. Owns `exotic` — see [`MyBrush::set_color_mixing`].
@@ -665,9 +668,10 @@ impl MyBrush {
             // `smudge` is NOT here since #0.1 part 3: its dabs are ordinary
             // (the canvas sample happens engine-side, before the record), and
             // the app serves the sampler through the GPU tile oracle.
-            // `colorize`/`posterize` left this list in the P4 round — their
-            // stamps are ported (dab.wgsl + cpu_raster mirror); only the
-            // spectral `paint` mode remains CPU-bound.
+            // `colorize`/`posterize` left this list in the P4 round and
+            // static spectral `paint` left it in the wave-4 spectral-shader
+            // port — all three stamps live in dab.wgsl + the cpu_raster
+            // mirror now; only an input-MAPPED paint_mode remains CPU-bound.
             //
             // BUG, found while wiring rows 58/167 (2026-08-30): this arm
             // matched `"paint"`, and libmypaint's setting is `"paint_mode"`
@@ -683,16 +687,17 @@ impl MyBrush {
             // against the old name should still route CPU rather than
             // silently paint additively.
             if setting_name.as_str() == "paint_mode" || setting_name.as_str() == "paint" {
-                let base = body
-                    .get("base_value")
-                    .and_then(Value::as_f64)
-                    .unwrap_or(0.0);
+                // Wave-4 spectral port: a STATIC paint_mode base value is
+                // GPU-portable now (dab.wgsl's *_Paint arms; the record
+                // carries `paint` per dab). Only a preset whose spectral
+                // weight is INPUT-MAPPED stays CPU-routed — see the
+                // `paint_mapped` field doc.
                 let mapped = body
                     .get("inputs")
                     .and_then(Value::as_object)
                     .is_some_and(|m| !m.is_empty());
                 paint_mapped = mapped;
-                if base > 0.0 || mapped {
+                if mapped {
                     exotic = true;
                 }
             }
@@ -1473,17 +1478,15 @@ impl MyBrush {
     /// CSP's claim for the mode and it is why `I-006`'s note says Dynamics
     /// go away under Blend — the mixing, not the opacity, is doing the work.
     ///
-    /// # This setter decides the RASTERIZER, not just a colour
+    /// # Routing
     ///
-    /// The P1 GPU dab shader ports the additive blends only; there is no
-    /// spectral arm in `dab.wgsl` and adding one would be a shader rewrite,
-    /// not a knob. So Perceptual sets [`Self::gpu_ready`]'s `exotic` flag
-    /// with itself and the stroke routes to the CPU dab path — the
-    /// established rule (`set_water_edge`, `set_paint_density`) that a knob
-    /// which decides the path is set where the knob is set. Standard clears
-    /// it again, unless the preset's own `paint_mode` was DYNAMIC at load
-    /// (`paint_mapped`), in which case zeroing a base value would not
-    /// actually switch the mode off and the brush stays CPU-bound.
+    /// Since the wave-4 spectral port, `dab.wgsl` carries the three
+    /// `*_Paint` arms (WGM mix, `fastpow` reproduced bit for bit) and the
+    /// dab record carries `paint` per dab — so Perceptual rides the GPU
+    /// path like Standard does, parity-pinned against the C rasterizer.
+    /// The one exception is a preset whose `paint_mode` was INPUT-MAPPED at
+    /// load (`paint_mapped`): that stays `exotic`/CPU-routed — see the
+    /// field doc.
     ///
     /// The base value is written as well as the flag, so a saved preset
     /// round-trips through the ordinary `settings` path and stays readable
@@ -1497,7 +1500,7 @@ impl MyBrush {
                 mix.paint_weight(),
             )
         };
-        self.exotic = self.paint_mapped || mix != crate::BrushMix::Standard;
+        self.exotic = self.paint_mapped;
     }
 
     /// The mixing mode as the engine holds it.
@@ -1923,9 +1926,11 @@ impl MyBrush {
     /// by construction), and — since #0.1 part 3 — SMUDGE strokes (the
     /// per-dab canvas sample is served from the GPU tile cache through the
     /// surface's tile oracle; the dabs themselves were always ordinary).
+    /// The P4 round ported colorize/posterize; the wave-4 spectral port
+    /// added the `*_Paint` arms, so static Perceptual mixing rides too.
     /// Still CPU: smudge+wash (v1: the sampler would have to read the
     /// sentinel wash buffer, not the layer — deferred with the twins-wash
-    /// case), spectral paint, colorize, posterize.
+    /// case), the watercolour rim, and input-MAPPED `paint_mode` presets.
     pub fn gpu_ready(&self) -> bool {
         // wash+smudge stays CPU — MEASURED, not assumed (P4 attempt,
         // 2026-08-21): the C's `get_color` PROCESSES THE PENDING OP QUEUE

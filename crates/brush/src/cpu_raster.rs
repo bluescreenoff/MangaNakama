@@ -232,6 +232,152 @@ fn set_lum(topr: i32, topg: i32, topb: i32, botr: i32, botg: i32, botb: i32) -> 
     (r, g, b)
 }
 
+// --- Spectral paint (the WGM pigment engine, brushmodes.c *_Paint arms) ---
+// The C's pow is fastapprox's `fastpow` (bit tricks, not libm) — mirrored
+// exactly, like the shader's port; a real powf here would be MORE accurate
+// and drift off the reference.
+
+const WGM_EPSILON: f32 = 0.001;
+const SPEC_R: [f32; 10] = [
+    0.009281362787953,
+    0.009732627042016,
+    0.011254252737167,
+    0.015105578649573,
+    0.024797924177217,
+    0.083622585502406,
+    0.977865045723212,
+    1.0,
+    0.999961046144372,
+    0.999999992756822,
+];
+const SPEC_G: [f32; 10] = [
+    0.002854127435775,
+    0.003917589679914,
+    0.012132151699187,
+    0.748259205918013,
+    1.0,
+    0.865695937531795,
+    0.037477469241101,
+    0.022816789725717,
+    0.021747419446456,
+    0.021384940572308,
+];
+const SPEC_B: [f32; 10] = [
+    0.537052150373386,
+    0.546646402401469,
+    0.575501819073983,
+    0.258778829633924,
+    0.041709923751716,
+    0.012662638828324,
+    0.007485593127390,
+    0.006766900622462,
+    0.006699764779016,
+    0.006676219883241,
+];
+const T_MATRIX_SMALL: [[f32; 10]; 3] = [
+    [
+        0.026595621243689,
+        0.049779426257903,
+        0.022449850859496,
+        -0.218453689278271,
+        -0.256894883201278,
+        0.445881722194840,
+        0.772365886289756,
+        0.194498761382537,
+        0.014038157587820,
+        0.007687264480513,
+    ],
+    [
+        -0.032601672674412,
+        -0.061021043498478,
+        -0.052490001018404,
+        0.206659098273522,
+        0.572496335158169,
+        0.317837248815438,
+        -0.021216624031211,
+        -0.019387668756117,
+        -0.001521339050858,
+        -0.000835181622534,
+    ],
+    [
+        0.339475473216284,
+        0.635401374177222,
+        0.771520797089589,
+        0.113222640692379,
+        -0.055251113343776,
+        -0.048222578468680,
+        -0.012966666339586,
+        -0.001523814504223,
+        -0.000094718948810,
+        -0.000051604594741,
+    ],
+];
+
+/// fastapprox `fastlog2` (fastlog.h), bit for bit.
+fn fastlog2(x: f32) -> f32 {
+    let vx = x.to_bits();
+    let mx = f32::from_bits((vx & 0x007F_FFFF) | 0x3f00_0000);
+    let y = vx as f32 * 1.1920928955078125e-7;
+    y - 124.22551499 - 1.498030302 * mx - 1.72587999 / (0.3520887068 + mx)
+}
+
+/// fastapprox `fastpow2` (fastexp.h): the (1<<23)*(...) float built straight
+/// into the exponent field; `as` casts truncate like the C's.
+fn fastpow2(p: f32) -> f32 {
+    let offset = if p < 0.0 { 1.0f32 } else { 0.0 };
+    let clipp = if p < -126.0 { -126.0 } else { p };
+    let w = clipp as i32;
+    let z = clipp - w as f32 + offset;
+    let e = 8388608.0 * (clipp + 121.2740575 + 27.7280233 / (4.84252568 - z) - 1.49012907 * z);
+    f32::from_bits(e as u32)
+}
+
+fn fastpow(x: f32, p: f32) -> f32 {
+    fastpow2(p * fastlog2(x))
+}
+
+/// helpers.c `rgb_to_spectral`: straight rgb 0..1 upsampled to 10 bands.
+fn rgb_to_spectral(r0: f32, g0: f32, b0: f32) -> [f32; 10] {
+    let off = 1.0 - WGM_EPSILON;
+    let r = r0 * off + WGM_EPSILON;
+    let g = g0 * off + WGM_EPSILON;
+    let b = b0 * off + WGM_EPSILON;
+    let mut out = [0.0f32; 10];
+    for i in 0..10 {
+        out[i] = SPEC_R[i] * r + SPEC_G[i] * g + SPEC_B[i] * b;
+    }
+    out
+}
+
+/// helpers.c `spectral_to_rgb`: 3x10 matrix, sequential accumulation.
+fn spectral_to_rgb(spec: &[f32; 10]) -> [f32; 3] {
+    let off = 1.0 - WGM_EPSILON;
+    let mut tmp = [0.0f32; 3];
+    for i in 0..10 {
+        tmp[0] += T_MATRIX_SMALL[0][i] * spec[i];
+        tmp[1] += T_MATRIX_SMALL[1][i] * spec[i];
+        tmp[2] += T_MATRIX_SMALL[2][i] * spec[i];
+    }
+    tmp.map(|t| ((t - WGM_EPSILON) / off).clamp(0.0, 1.0))
+}
+
+/// brushmodes.c `spectral_blend_factor`: the additive->spectral fade the
+/// eraser-paint arm runs on canvas alpha.
+fn spectral_blend_factor(x: f32) -> f32 {
+    let b = x * 8.0 - 3.0;
+    0.5 + b / (1.0 + b.abs() * 1.65)
+}
+
+/// The WGM mix at one pixel, back to rgb — shared by the three paint arms.
+fn wgm_mix(spec_a: &[f32; 10], spec_b: &[f32; 10], fac_a: f32) -> [f32; 3] {
+    let fac_b = 1.0 - fac_a;
+    let mut mixed = [0.0f32; 10];
+    for i in 0..10 {
+        mixed[i] = fastpow(spec_a[i], fac_a) * fastpow(spec_b[i], fac_b);
+    }
+    spectral_to_rgb(&mixed)
+}
+
 /// Stamp a dab list onto one layer's tiles — the repair path's pixel writer.
 /// Call inside the stroke's open undo op: `tile_mut` snapshots pre-images,
 /// exactly as the vendored rasterizer's would have.
@@ -247,13 +393,14 @@ pub fn rasterize_dabs(
         return;
     };
     for d in dabs {
-        // The C dispatch's precomputed opacities (process_op, paint<1 arm —
-        // paint>0 dabs never take the GPU path, so (1-paint) is 1 there, but
-        // the formula stays faithful). `op->normal` in the C is scaled by
+        // The C dispatch's precomputed opacities (process_op), BOTH halves:
+        // the (1-paint) additive stamps and the paint>0 spectral stamps.
+        // `op->normal` in the C is scaled by
         // (1-lock_alpha)(1-colorize)(1-posterize); the LockAlpha stamp's
         // opacity carries the (1-colorize)(1-posterize) factors too.
         let cp = (1.0 - d.colorize) * (1.0 - d.posterize);
-        let normal = (1.0 - d.lock_alpha) * cp * d.opaque * (1.0 - d.paint);
+        let normal_knob = (1.0 - d.lock_alpha) * cp;
+        let normal = normal_knob * d.opaque * (1.0 - d.paint);
         let lock = d.lock_alpha * d.opaque * cp * (1.0 - d.paint);
         let f15 = |v: f32| (v.clamp(0.0, 1.0) * 32768.0) as u32;
         let opa_normal = f15(normal);
@@ -262,6 +409,20 @@ pub fn rasterize_dabs(
         let opa_posterize = f15(d.posterize * d.opaque);
         let poster_n = d.posterize_num.max(1) as u32;
         let color_a = f15(d.alpha);
+        // Paint-arm CALL conditions mirror the C's, separate from the u16
+        // opacity: a called Normal/LockAlpha_Paint clamps its opacity up to
+        // 150 even when the conversion rounded it to 0.
+        let paint_normal_on = d.paint > 0.0 && normal_knob != 0.0;
+        let paint_lock_on = d.paint > 0.0 && d.lock_alpha > 0.0 && d.alpha != 0.0;
+        let opa_paint = f15(normal_knob * d.opaque * d.paint);
+        let opa_lock_paint = f15(d.lock_alpha * d.opaque * cp * d.paint);
+        let spec_brush = (paint_normal_on || paint_lock_on).then(|| {
+            rgb_to_spectral(
+                d.color[0] as f32 / 32768.0,
+                d.color[1] as f32 / 32768.0,
+                d.color[2] as f32 / 32768.0,
+            )
+        });
 
         let stamp = texture.is_some_and(|(_, _, a)| a);
         for (tx, ty) in dab_tiles(d, stamp) {
@@ -334,6 +495,114 @@ pub fn rasterize_dabs(
                         px[0] = ((opa_a * d.color[0] as u32 + opa_b * px[0] as u32) / 32768) as u16;
                         px[1] = ((opa_a * d.color[1] as u32 + opa_b * px[1] as u32) / 32768) as u16;
                         px[2] = ((opa_a * d.color[2] as u32 + opa_b * px[2] as u32) / 32768) as u16;
+                    }
+
+                    // Spectral paint arms (the paint>0 half of process_op),
+                    // in the C's dispatch order: after the (1-paint) stamps,
+                    // before Colorize/Posterize.
+                    if paint_normal_on {
+                        let spec_a = spec_brush.as_ref().unwrap();
+                        if d.alpha >= 1.0 {
+                            // draw_dab_pixels_BlendMode_Normal_Paint, incl.
+                            // the C's min-opacity clamp (150).
+                            let opacity = opa_paint.max(150);
+                            let opa_a = mask * opacity / 32768;
+                            let opa_b = 32768 - opa_a;
+                            if px[3] == 0 {
+                                px[3] = (opa_a + opa_b * px[3] as u32 / 32768) as u16;
+                                px[0] = ((opa_a * d.color[0] as u32 + opa_b * px[0] as u32)
+                                    / 32768) as u16;
+                                px[1] = ((opa_a * d.color[1] as u32 + opa_b * px[1] as u32)
+                                    / 32768) as u16;
+                                px[2] = ((opa_a * d.color[2] as u32 + opa_b * px[2] as u32)
+                                    / 32768) as u16;
+                            } else {
+                                let fac_a = opa_a as f32
+                                    / (opa_a + opa_b * px[3] as u32 / 32768) as f32;
+                                let spec_b = rgb_to_spectral(
+                                    px[0] as f32 / px[3] as f32,
+                                    px[1] as f32 / px[3] as f32,
+                                    px[2] as f32 / px[3] as f32,
+                                );
+                                let rgb = wgm_mix(spec_a, &spec_b, fac_a);
+                                // Alpha first — the C re-premultiplies with
+                                // the NEW alpha; +0.5 is its round-on-store.
+                                px[3] = (opa_a + opa_b * px[3] as u32 / 32768) as u16;
+                                px[0] = (rgb[0] * px[3] as f32 + 0.5) as u16;
+                                px[1] = (rgb[1] * px[3] as f32 + 0.5) as u16;
+                                px[2] = (rgb[2] * px[3] as f32 + 0.5) as u16;
+                            }
+                        } else {
+                            // draw_dab_pixels_BlendMode_Normal_and_Eraser_
+                            // Paint: no min clamp; additive/spectral fade on
+                            // canvas alpha.
+                            let opa_a = mask * opa_paint / 32768;
+                            let opa_b = 32768 - opa_a;
+                            let opa_a2 = opa_a * color_a / 32768;
+                            let opa_out = opa_a2 + opa_b * px[3] as u32 / 32768;
+                            let sf =
+                                spectral_blend_factor(px[3] as f32 / 32768.0).clamp(0.0, 1.0);
+                            let af = 1.0 - sf;
+                            let mut out = [0u32; 3];
+                            if af != 0.0 {
+                                for c in 0..3 {
+                                    out[c] = (opa_a2 * d.color[c] as u32
+                                        + opa_b * px[c] as u32)
+                                        / 32768;
+                                }
+                            }
+                            if sf != 0.0 && px[3] != 0 {
+                                let spec_b = rgb_to_spectral(
+                                    px[0] as f32 / px[3] as f32,
+                                    px[1] as f32 / px[3] as f32,
+                                    px[2] as f32 / px[3] as f32,
+                                );
+                                let mut fac_a = opa_a as f32
+                                    / (opa_a + opa_b * px[3] as u32 / 32768) as f32;
+                                fac_a *= color_a as f32 / 32768.0;
+                                let rgb = wgm_mix(spec_a, &spec_b, fac_a);
+                                for c in 0..3 {
+                                    out[c] = (af * out[c] as f32
+                                        + sf * rgb[c] * opa_out as f32)
+                                        as u32;
+                                }
+                            }
+                            px[3] = opa_out as u16;
+                            px[0] = out[0] as u16;
+                            px[1] = out[1] as u16;
+                            px[2] = out[2] as u16;
+                        }
+                    }
+                    if paint_lock_on {
+                        // draw_dab_pixels_BlendMode_LockAlpha_Paint. NOTE
+                        // the C DOES rewrite alpha here (a truncating
+                        // near-identity — opa_a was pre-scaled by it);
+                        // mirrored, not "fixed".
+                        let spec_a = spec_brush.as_ref().unwrap();
+                        let opacity = opa_lock_paint.max(150);
+                        let opa_a0 = mask * opacity / 32768;
+                        let opa_b = 32768 - opa_a0;
+                        let opa_a = opa_a0 * px[3] as u32 / 32768;
+                        if px[3] == 0 {
+                            // opa_a is 0 here; the C still runs the blend.
+                            for c in 0..3 {
+                                px[c] = ((opa_a * d.color[c] as u32 + opa_b * px[c] as u32)
+                                    / 32768) as u16;
+                            }
+                        } else {
+                            let fac_a =
+                                opa_a as f32 / (opa_a + opa_b * px[3] as u32 / 32768) as f32;
+                            let spec_b = rgb_to_spectral(
+                                px[0] as f32 / px[3] as f32,
+                                px[1] as f32 / px[3] as f32,
+                                px[2] as f32 / px[3] as f32,
+                            );
+                            let rgb = wgm_mix(spec_a, &spec_b, fac_a);
+                            px[3] = (opa_a + opa_b * px[3] as u32 / 32768) as u16;
+                            px[0] = (rgb[0] * px[3] as f32 + 0.5) as u16;
+                            px[1] = (rgb[1] * px[3] as f32 + 0.5) as u16;
+                            px[2] = (rgb[2] * px[3] as f32 + 0.5) as u16;
+                        }
                     }
 
                     // draw_dab_pixels_BlendMode_Color: de-premult, set the

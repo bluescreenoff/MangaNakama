@@ -83,12 +83,12 @@ pub const MAX_BRIGHT: u8 = 4;
 ///
 /// # The routing consequence
 ///
-/// [`Self::Perceptual`] is not a colour tweak, it is a different rasterizer.
-/// The GPU dab shader ports the additive blends only, so a brush in this mode
-/// MUST be routed to the CPU dab path — `MyBrush::set_color_mixing` sets the
-/// `exotic` flag with the mode, the same "a knob that decides the path is set
-/// where the knob is set" rule the watercolour rim and paint density follow.
-/// Standard leaves every byte of the existing path alone.
+/// [`Self::Perceptual`] is not a colour tweak, it is a different rasterizer —
+/// but since the wave-4 spectral port the GPU dab shader carries it too
+/// (`dab.wgsl`'s `*_Paint` arms, parity-pinned against the C), so the mode no
+/// longer forces the CPU path. Only a preset whose `paint_mode` was
+/// input-mapped at load stays CPU-routed (`MyBrush::paint_mapped`). Standard
+/// leaves every byte of the existing path alone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum BrushMix {
     /// Additive mixing in sRGB — libmypaint's classic behaviour, and what

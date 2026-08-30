@@ -23,15 +23,16 @@ use std::collections::BTreeSet;
 /// fix15 colour) precomputed on the CPU so the shader stays dumb integer
 /// math.
 ///
-/// **80 bytes** — 8 × f32 + 10 × u32 + i32 × 2 (texture crawl), no pad
-/// (storage-buffer stride aligns to 4, so 80 is legal on both sides)
+/// **88 bytes** — 8 × f32 + 12 × u32 + i32 × 2 (texture crawl), no pad
+/// (storage-buffer stride aligns to 4, so 88 is legal on both sides)
 /// — and WGSL's `DabG` must agree to the byte or the array stride desyncs
 /// and every dab after the first in a flush reads garbage. Round 28 lost
 /// real time to exactly that (56 vs 64), which is why the number is
 /// spelled out with its arithmetic. The two i32 slots were the first two
 /// pad u32s before #0.1 — same layout, now carrying the per-dab texture
 /// scroll; #10 amendment 2 appended the stamp sin/cos pair; the P4
-/// colorize/posterize port appended its three u32s.
+/// colorize/posterize port appended its three u32s; the spectral-paint
+/// port (row 58's GPU half) appended its two.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct GpuDab {
@@ -63,17 +64,26 @@ struct GpuDab {
     opa_colorize: u32,
     opa_posterize: u32,
     poster_num: u32,
+    /// Spectral-paint stamp opacities (the paint>0 half of process_op):
+    ///   opa_paint      = normal_knob * opaque * paint * 32768
+    ///   opa_lock_paint = lock_alpha * opaque * cp * paint * 32768
+    opa_paint: u32,
+    opa_lock_paint: u32,
 }
 
 impl GpuDab {
     fn from(p: &mn_core::dab::DabParams) -> Self {
-        // The C dispatch (process_op) for the paint<1 branch — paint>0 dabs
-        // never reach the GPU (MyBrush::gpu_ready routes them CPU-side).
-        // `op->normal` folds in (1-colorize)(1-posterize); the LockAlpha
-        // stamp opacity carries those factors too (brushmodes dispatch).
+        // The C dispatch (process_op), BOTH halves: the (1-paint) additive
+        // stamps and — since the spectral port — the paint>0 WGM stamps.
+        // `op->normal` folds in (1-lock_alpha)(1-colorize)(1-posterize); the
+        // LockAlpha stamp opacity carries the (1-colorize)(1-posterize)
+        // factors too (brushmodes dispatch).
         let cp = (1.0 - p.colorize) * (1.0 - p.posterize);
-        let normal = (1.0 - p.lock_alpha) * cp * p.opaque * (1.0 - p.paint);
+        let normal_knob = (1.0 - p.lock_alpha) * cp;
+        let normal = normal_knob * p.opaque * (1.0 - p.paint);
         let lock = p.lock_alpha * p.opaque * cp * (1.0 - p.paint);
+        let paint_n = normal_knob * p.opaque * p.paint;
+        let paint_l = p.lock_alpha * p.opaque * cp * p.paint;
         let f15 = |v: f32| (v.clamp(0.0, 1.0) * 32768.0) as u32;
         Self {
             x: p.x,
@@ -88,9 +98,15 @@ impl GpuDab {
             color_a: f15(p.alpha),
             opa_normal: f15(normal),
             opa_lock: f15(lock),
-            // bit0: colour_a < 1 (Normal_and_Eraser); bit1: LockAlpha applies.
+            // bit0: colour_a < 1 (Normal_and_Eraser); bit1: LockAlpha
+            // applies; bits 2/3: the paint arms' CALL conditions (the C
+            // clamps a called Normal/LockAlpha_Paint's opacity up to 150,
+            // so "called with ~0" and "not called" differ — the u16 value
+            // alone cannot encode that).
             flags: u32::from(p.alpha < 1.0)
-                | (u32::from(p.lock_alpha > 0.0 && p.alpha != 0.0) << 1),
+                | (u32::from(p.lock_alpha > 0.0 && p.alpha != 0.0) << 1)
+                | (u32::from(p.paint > 0.0 && normal_knob != 0.0) << 2)
+                | (u32::from(p.paint > 0.0 && p.lock_alpha > 0.0 && p.alpha != 0.0) << 3),
             tex_u: p.tex_off[0],
             tex_v: p.tex_off[1],
             tex_sn: (p.tex_angle / 360.0 * 2.0 * std::f32::consts::PI).sin(),
@@ -98,6 +114,8 @@ impl GpuDab {
             opa_colorize: f15(p.colorize * p.opaque),
             opa_posterize: f15(p.posterize * p.opaque),
             poster_num: p.posterize_num.max(1) as u32,
+            opa_paint: f15(paint_n),
+            opa_lock_paint: f15(paint_l),
         }
     }
 }

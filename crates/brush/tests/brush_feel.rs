@@ -852,22 +852,21 @@ fn mixing_defaults_to_standard_and_stays_gpu_ready() {
     assert!(b.gpu_ready(), "a stock pen must still take the GPU path");
 }
 
-/// Row 58's routing requirement, stated as a test because getting it wrong
-/// is invisible until someone draws: the spectral blend has no arm in
-/// `dab.wgsl`, so selecting it MUST clear `gpu_ready`, and going back to
-/// Standard must give the GPU path back rather than stranding the brush on
-/// the CPU for the rest of the session.
+/// Row 58's routing, RETARGETED by the wave-4 spectral port: `dab.wgsl`
+/// carries the `*_Paint` arms now (parity-pinned in dab_parity.rs), so
+/// Perceptual keeps the GPU path — routing it CPU again would silently
+/// throw away the port on every Paint-mode stroke.
 #[test]
-fn perceptual_mixing_routes_the_stroke_to_the_cpu_and_back() {
+fn perceptual_mixing_keeps_the_gpu_path_since_the_spectral_port() {
     let mut b = pen();
     b.set_color_mixing(mn_brush::BrushMix::Perceptual);
     assert_eq!(b.color_mixing(), mn_brush::BrushMix::Perceptual);
     assert!(
-        !b.gpu_ready(),
-        "spectral mixing has no GPU arm — the stroke must route CPU"
+        b.gpu_ready(),
+        "static spectral mixing has a GPU arm since wave 4 — it must ride"
     );
     b.set_color_mixing(mn_brush::BrushMix::Standard);
-    assert!(b.gpu_ready(), "Standard hands the GPU path back");
+    assert!(b.gpu_ready(), "and Standard stays GPU-ready as ever");
 }
 
 /// THE BYTE-PIN. Standard is not "close to" the old behaviour, it IS the old
@@ -1081,11 +1080,12 @@ fn the_mixing_mode_also_governs_colour_jitter() {
 }
 
 /// A preset authored with libmypaint's own `paint_mode` setting loads as
-/// Perceptual AND as `exotic` — the load-time detection that had been dead
-/// since round 27 because it matched the wrong key (`"paint"`, while
-/// libmypaint's setting is `"paint_mode"`).
+/// Perceptual — and, since the wave-4 spectral port, a STATIC base value
+/// keeps the GPU path while an INPUT-MAPPED one still routes CPU (the one
+/// spectral shape `dab.wgsl` does not carry; nothing in the tree ships one,
+/// this pins the import door).
 #[test]
-fn a_preset_authored_with_paint_mode_loads_spectral_and_cpu_bound() {
+fn a_preset_authored_with_paint_mode_loads_spectral_and_routes_by_mapping() {
     let raw = std::fs::read_to_string(csp("real-g-pen.myb")).unwrap();
     let mut json: serde_json::Value = serde_json::from_str(&raw).unwrap();
     json["settings"]["paint_mode"] = serde_json::json!({ "base_value": 1.0 });
@@ -1095,7 +1095,27 @@ fn a_preset_authored_with_paint_mode_loads_spectral_and_cpu_bound() {
     std::fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
     let b = MyBrush::load(&path).expect("the pigment preset must load");
     assert_eq!(b.color_mixing(), mn_brush::BrushMix::Perceptual);
-    assert!(!b.gpu_ready(), "an authored spectral preset routes CPU");
+    assert!(
+        b.gpu_ready(),
+        "a static authored spectral preset rides the GPU arms"
+    );
+
+    // The mapped shape: a pressure->paint_mode curve. Dynamic weight, no
+    // GPU expression — and switching to Standard must NOT hand the GPU
+    // back, because zeroing a base value does not switch a mapping off.
+    json["settings"]["paint_mode"] = serde_json::json!({
+        "base_value": 0.5,
+        "inputs": { "pressure": [[0.0, 0.0], [1.0, 1.0]] }
+    });
+    let path2 = dir.join("pigment-mapped.myb");
+    std::fs::write(&path2, serde_json::to_vec(&json).unwrap()).unwrap();
+    let mut m = MyBrush::load(&path2).expect("the mapped preset must load");
+    assert!(!m.gpu_ready(), "a MAPPED spectral preset routes CPU");
+    m.set_color_mixing(mn_brush::BrushMix::Standard);
+    assert!(
+        !m.gpu_ready(),
+        "Standard cannot un-map the preset — it stays CPU-bound"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

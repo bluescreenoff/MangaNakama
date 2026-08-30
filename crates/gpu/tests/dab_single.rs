@@ -80,6 +80,95 @@ fn check_against_mirror_over(renderer: &mut Renderer, mut mirror: Document, dabs
     );
 }
 
+/// As `check_against_mirror_over`, but with the dab-parity ≤1 bar instead
+/// of bit-exactness: the spectral paint arms run a float pow chain
+/// (fastapprox `fastpow`) whose GPU evaluation may land one quantization
+/// step off the Rust mirror at a rounding boundary — the same reason
+/// dab_parity.rs has a tolerance at all. Structure bugs (stride, flags,
+/// wrong arm) still move whole channels, not one step.
+fn check_against_mirror_over_tol(
+    renderer: &mut Renderer,
+    mut mirror: Document,
+    dabs: &[DabParams],
+) {
+    renderer.begin_dab_stroke(0);
+    renderer.flush_dabs(&mirror, dabs, false, None);
+    let (layer, _wash, tiles) = renderer.end_dab_stroke().expect("stroke was open");
+    let (px, canary_ok) = renderer.readback_dab_tiles(layer, &tiles);
+    assert!(canary_ok, "canary must match the dispatched workgroup count");
+
+    mn_brush::rasterize_dabs(&mut mirror, 0, dabs, false, None);
+    let zero = [0u16; TILE_LEN];
+    let mut max = 0u32;
+    for (idx, data) in &px {
+        let m = mirror.layers[0]
+            .tile(*idx)
+            .map(|t| t.data())
+            .unwrap_or(&zero);
+        for (o, (g, r)) in data.iter().zip(m.iter()).enumerate() {
+            let d = g.abs_diff(*r) as u32;
+            assert!(d <= 1, "tile {idx:?} value {o}: gpu={g} mirror={r}");
+            max = max.max(d);
+        }
+    }
+    println!("[test] paint-arm mirror max diff: {max}");
+    assert!(
+        px.iter().any(|(_, d)| d.iter().any(|&v| v != 0)),
+        "gpu painted nothing"
+    );
+}
+
+/// Wave-4 spectral port: all three `*_Paint` arms against the Rust mirror
+/// with synthetic dabs (LockAlpha has no brush-level knob in the parity
+/// harness, so this is where its arm gets pinned). Over pre-existing ink so
+/// the WGM actually mixes.
+#[test]
+fn gpu_dab_paint_arms_match_the_mirror() {
+    let _g = gpu_guard();
+    let Some(mut renderer) = renderer() else {
+        return;
+    };
+    if !renderer.gpu_dabs_supported() {
+        println!("[test] SKIP: rgba16uint storage unsupported");
+        return;
+    }
+    let mut doc = Document::default();
+    let tile = doc.layers[0].tile_mut(TileIdx::new(0, 1));
+    for y in 0..64 {
+        for x in 0..64 {
+            // A left half at full alpha, a right half translucent: the
+            // eraser arm's additive/spectral fade and the zero-alpha
+            // shortcut both run.
+            if x < 32 {
+                tile.set_pixel(x, y, [6000, 15000, 28000, 32768]);
+            } else if x < 48 {
+                tile.set_pixel(x, y, [2000, 5000, 9000, 11000]);
+            }
+        }
+    }
+    let paint = |x: f32, y: f32, alpha: f32, lock: f32| -> DabParams {
+        DabParams {
+            color: [29000, 26000, 3000],
+            alpha,
+            lock_alpha: lock,
+            paint: 1.0,
+            ..make(x, y, 5.0)
+        }
+    };
+    check_against_mirror_over_tol(
+        &mut renderer,
+        doc,
+        &[
+            paint(20.0, 100.0, 1.0, 0.0),  // Normal_Paint over opaque ink
+            paint(40.0, 100.0, 1.0, 0.0),  // ... over translucent + blank
+            paint(24.0, 104.0, 0.6, 0.0),  // Normal_and_Eraser_Paint
+            paint(44.0, 104.0, 0.6, 0.0),  // ... on the low-alpha side
+            paint(20.0, 110.0, 1.0, 1.0),  // LockAlpha_Paint pure
+            paint(40.0, 110.0, 1.0, 0.5),  // both arms on one dab
+        ],
+    );
+}
+
 #[test]
 fn gpu_dab_single_dab_is_bit_exact() {
     let _g = gpu_guard();

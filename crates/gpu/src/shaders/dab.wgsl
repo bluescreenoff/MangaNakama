@@ -25,7 +25,11 @@ struct DabG {
     //   opa_lock   =  lock_alpha     *opaque*(1-paint) * 32768
     opa_normal: u32,
     opa_lock: u32,
-    // bit0: colour_a < 1 (Normal_and_Eraser); bit1: LockAlpha applies.
+    // bit0: colour_a < 1 (Normal_and_Eraser); bit1: LockAlpha applies;
+    // bit2: the spectral Normal/Eraser_Paint arm is called (paint > 0 and
+    // op->normal nonzero — the C's CALL condition, kept separate from
+    // opa_paint because Normal_Paint clamps its opacity up to 150 even when
+    // the u16 conversion rounded it to 0); bit3: LockAlpha_Paint is called.
     flags: u32,
     // Texture-tip crawl offset (mask px) this dab sees; 0 when off.
     tex_u: i32,
@@ -36,12 +40,18 @@ struct DabG {
     tex_sn: f32,
     tex_cs: f32,
     // Colorize / Posterize stamp opacities, fix15, and the posterize level
-    // count (1..=128, C-clamped). 20 scalars = 80 bytes, matching Rust's
+    // count (1..=128, C-clamped). 22 scalars = 88 bytes, matching Rust's
     // `GpuDab` exactly; the array stride must agree or dabs[1..] read
     // misaligned.
     opa_colorize: u32,
     opa_posterize: u32,
     poster_num: u32,
+    // Spectral-paint stamp opacities, fix15 (the paint>0 half of process_op):
+    //   opa_paint      = normal   *opaque*paint * 32768   (normal = the
+    //                    (1-lock)(1-colorize)(1-posterize) knob)
+    //   opa_lock_paint = lock_alpha*opaque*(1-colorize)(1-posterize)*paint
+    opa_paint: u32,
+    opa_lock_paint: u32,
 };
 
 struct TileUni {
@@ -80,6 +90,127 @@ fn luma(r: i32, g: i32, b: i32) -> f32 {
     return f32(r) * (0.2126 * 32768.0)
         + f32(g) * (0.7152 * 32768.0)
         + f32(b) * (0.0722 * 32768.0);
+}
+
+// --- Spectral paint (the WGM pigment engine, brushmodes.c *_Paint arms) ---
+//
+// The C reference mixes through a 10-band spectral upsampling with a
+// weighted geometric mean, and its pow is NOT libm's — it is fastapprox's
+// `fastpow` (Mineiro), a bit-trick approximation. The port below reproduces
+// those bit tricks exactly (bitcast for the union casts, i32()/u32() for the
+// C's truncating conversions); a real pow() here would be MORE accurate and
+// fail the <=1 parity bar against the C rasterizer.
+
+const WGM_EPSILON: f32 = 0.001;
+// helpers.c: spectral_r_small / spectral_g_small / spectral_b_small.
+const SPEC_R = array<f32, 10>(
+    0.009281362787953, 0.009732627042016, 0.011254252737167,
+    0.015105578649573, 0.024797924177217, 0.083622585502406,
+    0.977865045723212, 1.0, 0.999961046144372, 0.999999992756822);
+const SPEC_G = array<f32, 10>(
+    0.002854127435775, 0.003917589679914, 0.012132151699187,
+    0.748259205918013, 1.0, 0.865695937531795,
+    0.037477469241101, 0.022816789725717, 0.021747419446456,
+    0.021384940572308);
+const SPEC_B = array<f32, 10>(
+    0.537052150373386, 0.546646402401469, 0.575501819073983,
+    0.258778829633924, 0.041709923751716, 0.012662638828324,
+    0.007485593127390, 0.006766900622462, 0.006699764779016,
+    0.006676219883241);
+// helpers.c: T_MATRIX_SMALL, row-major.
+const T_ROW0 = array<f32, 10>(
+    0.026595621243689, 0.049779426257903, 0.022449850859496,
+    -0.218453689278271, -0.256894883201278, 0.445881722194840,
+    0.772365886289756, 0.194498761382537, 0.014038157587820,
+    0.007687264480513);
+const T_ROW1 = array<f32, 10>(
+    -0.032601672674412, -0.061021043498478, -0.052490001018404,
+    0.206659098273522, 0.572496335158169, 0.317837248815438,
+    -0.021216624031211, -0.019387668756117, -0.001521339050858,
+    -0.000835181622534);
+const T_ROW2 = array<f32, 10>(
+    0.339475473216284, 0.635401374177222, 0.771520797089589,
+    0.113222640692379, -0.055251113343776, -0.048222578468680,
+    -0.012966666339586, -0.001523814504223, -0.000094718948810,
+    -0.000051604594741);
+
+// fastapprox fastlog2: exponent bits read as a float plus a rational
+// correction on the mantissa (fastlog.h, bit for bit).
+fn fastlog2(x: f32) -> f32 {
+    let vx = bitcast<u32>(x);
+    let mx = bitcast<f32>((vx & 0x007FFFFFu) | 0x3f000000u);
+    let y = f32(vx) * 1.1920928955078125e-7;
+    return y - 124.22551499 - 1.498030302 * mx - 1.72587999 / (0.3520887068 + mx);
+}
+
+// fastapprox fastpow2 (fastexp.h): the (1<<23)*(...) float built straight
+// into the exponent field. i32()/u32() truncate toward zero like C casts.
+fn fastpow2(p: f32) -> f32 {
+    let offset = select(0.0, 1.0, p < 0.0);
+    let clipp = select(p, -126.0, p < -126.0);
+    let w = i32(clipp);
+    let z = clipp - f32(w) + offset;
+    let e = 8388608.0 * (clipp + 121.2740575 + 27.7280233 / (4.84252568 - z) - 1.49012907 * z);
+    return bitcast<f32>(u32(e));
+}
+
+fn fastpow(x: f32, p: f32) -> f32 {
+    return fastpow2(p * fastlog2(x));
+}
+
+// helpers.c rgb_to_spectral: straight rgb 0..1 upsampled to 10 reflectance
+// bands. Sum order matches the C ((r-term + g-term) + b-term).
+fn rgb_to_spectral(r0: f32, g0: f32, b0: f32) -> array<f32, 10> {
+    let off = 1.0 - WGM_EPSILON;
+    let r = r0 * off + WGM_EPSILON;
+    let g = g0 * off + WGM_EPSILON;
+    let b = b0 * off + WGM_EPSILON;
+    // Local copies: dynamic indexing needs an addressable array.
+    var sr = SPEC_R;
+    var sg = SPEC_G;
+    var sb = SPEC_B;
+    var out: array<f32, 10>;
+    for (var i = 0; i < 10; i++) {
+        out[i] = sr[i] * r + sg[i] * g + sb[i] * b;
+    }
+    return out;
+}
+
+// helpers.c spectral_to_rgb: 3x10 matrix, sequential accumulation like the
+// C loop, then the epsilon un-offset and clamp.
+fn spectral_to_rgb(spec: array<f32, 10>) -> vec3<f32> {
+    let off = 1.0 - WGM_EPSILON;
+    var t0 = T_ROW0;
+    var t1 = T_ROW1;
+    var t2 = T_ROW2;
+    var s = spec;
+    var tmp = vec3<f32>(0.0);
+    for (var i = 0; i < 10; i++) {
+        tmp.x += t0[i] * s[i];
+        tmp.y += t1[i] * s[i];
+        tmp.z += t2[i] * s[i];
+    }
+    return clamp((tmp - vec3<f32>(WGM_EPSILON)) / off, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+// brushmodes.c spectral_blend_factor: the sigmoid-ish additive->spectral
+// fade the eraser-paint arm runs on canvas alpha.
+fn spectral_blend_factor(x: f32) -> f32 {
+    let b = x * 8.0 - 3.0;
+    return 0.5 + b / (1.0 + abs(b) * 1.65);
+}
+
+// The WGM mix at one pixel: spectral_result[i] = a[i]^fac_a * b[i]^fac_b,
+// converted back to rgb. Factored out because all three paint arms run it.
+fn wgm_mix(spec_a: array<f32, 10>, spec_b: array<f32, 10>, fac_a: f32) -> vec3<f32> {
+    let fac_b = 1.0 - fac_a;
+    var a = spec_a;
+    var b = spec_b;
+    var mixed: array<f32, 10>;
+    for (var i = 0; i < 10; i++) {
+        mixed[i] = fastpow(a[i], fac_a) * fastpow(b[i], fac_b);
+    }
+    return spectral_to_rgb(mixed);
 }
 
 // calculate_r_sample: squared (unnormalized) distance from the dab centre,
@@ -320,6 +451,117 @@ fn main(
                 rgba.x = (opa_a * d.color_r + opa_b * rgba.x) / FIX15;
                 rgba.y = (opa_a * d.color_g + opa_b * rgba.y) / FIX15;
                 rgba.z = (opa_a * d.color_b + opa_b * rgba.z) / FIX15;
+            }
+
+            // --- Spectral paint arms (the paint>0 half of process_op).
+            // Dispatch order matches the C: after the (1-paint) Normal +
+            // LockAlpha stamps, before Colorize/Posterize.
+            if ((d.flags & 4u) != 0u) {
+                // spectral_a of the straight brush colour — the C hoists it
+                // out of the pixel loop; recomputing per pixel is the same
+                // numbers (pure function of the dab).
+                let spec_a = rgb_to_spectral(
+                    f32(d.color_r) / 32768.0,
+                    f32(d.color_g) / 32768.0,
+                    f32(d.color_b) / 32768.0,
+                );
+                if ((d.flags & 1u) == 0u) {
+                    // draw_dab_pixels_BlendMode_Normal_Paint (colour_a == 1).
+                    // The C clamps a too-low stamp opacity up to 150 — int->
+                    // float->int rounding artifacts, its comment says.
+                    let opacity = max(d.opa_paint, 150u);
+                    let opa_a = mask * opacity / FIX15;
+                    let opa_b = FIX15 - opa_a;
+                    if (rgba.w == 0u) {
+                        // Nothing to mix with: plain additive, the C's
+                        // zero-alpha shortcut.
+                        rgba.w = opa_a + opa_b * rgba.w / FIX15;
+                        rgba.x = (opa_a * d.color_r + opa_b * rgba.x) / FIX15;
+                        rgba.y = (opa_a * d.color_g + opa_b * rgba.y) / FIX15;
+                        rgba.z = (opa_a * d.color_b + opa_b * rgba.z) / FIX15;
+                    } else {
+                        let fac_a = f32(opa_a) / f32(opa_a + opa_b * rgba.w / FIX15);
+                        let spec_b = rgb_to_spectral(
+                            f32(rgba.x) / f32(rgba.w),
+                            f32(rgba.y) / f32(rgba.w),
+                            f32(rgba.z) / f32(rgba.w),
+                        );
+                        let rgb = wgm_mix(spec_a, spec_b, fac_a);
+                        // Alpha first — the C re-premultiplies with the NEW
+                        // alpha; the +0.5 is its round-on-store.
+                        rgba.w = opa_a + opa_b * rgba.w / FIX15;
+                        rgba.x = u32(rgb.x * f32(rgba.w) + 0.5);
+                        rgba.y = u32(rgb.y * f32(rgba.w) + 0.5);
+                        rgba.z = u32(rgb.z * f32(rgba.w) + 0.5);
+                    }
+                } else {
+                    // draw_dab_pixels_BlendMode_Normal_and_Eraser_Paint: no
+                    // min-opacity clamp; additive and spectral cross-fade on
+                    // the canvas alpha (the low-alpha artifact patch).
+                    let opa_a = mask * d.opa_paint / FIX15;
+                    let opa_b = FIX15 - opa_a;
+                    let opa_a2 = opa_a * d.color_a / FIX15;
+                    let opa_out = opa_a2 + opa_b * rgba.w / FIX15;
+                    let sf = clamp(spectral_blend_factor(f32(rgba.w) / 32768.0), 0.0, 1.0);
+                    let af = 1.0 - sf;
+                    var outc = vec3<u32>(0u);
+                    if (af != 0.0) {
+                        outc.x = (opa_a2 * d.color_r + opa_b * rgba.x) / FIX15;
+                        outc.y = (opa_a2 * d.color_g + opa_b * rgba.y) / FIX15;
+                        outc.z = (opa_a2 * d.color_b + opa_b * rgba.z) / FIX15;
+                    }
+                    if (sf != 0.0 && rgba.w != 0u) {
+                        let spec_b = rgb_to_spectral(
+                            f32(rgba.x) / f32(rgba.w),
+                            f32(rgba.y) / f32(rgba.w),
+                            f32(rgba.z) / f32(rgba.w),
+                        );
+                        var fac_a = f32(opa_a) / f32(opa_a + opa_b * rgba.w / FIX15);
+                        fac_a = fac_a * (f32(d.color_a) / 32768.0);
+                        let rgb = wgm_mix(spec_a, spec_b, fac_a);
+                        // The C's combine, float then truncate on store.
+                        outc.x = u32(af * f32(outc.x) + sf * rgb.x * f32(opa_out));
+                        outc.y = u32(af * f32(outc.y) + sf * rgb.y * f32(opa_out));
+                        outc.z = u32(af * f32(outc.z) + sf * rgb.z * f32(opa_out));
+                    }
+                    rgba.w = opa_out;
+                    rgba.x = outc.x;
+                    rgba.y = outc.y;
+                    rgba.z = outc.z;
+                }
+            }
+            if ((d.flags & 8u) != 0u) {
+                // draw_dab_pixels_BlendMode_LockAlpha_Paint. NOTE the C DOES
+                // rewrite alpha here (opa_a was pre-scaled by it, so the
+                // rewrite is a truncating near-identity) — mirrored, not
+                // "fixed".
+                let opacity = max(d.opa_lock_paint, 150u);
+                let opa_a0 = mask * opacity / FIX15;
+                let opa_b = FIX15 - opa_a0;
+                let opa_a = opa_a0 * rgba.w / FIX15;
+                if (rgba.w == 0u) {
+                    // opa_a is 0 here; the C still runs the rgb blend.
+                    rgba.x = (opa_a * d.color_r + opa_b * rgba.x) / FIX15;
+                    rgba.y = (opa_a * d.color_g + opa_b * rgba.y) / FIX15;
+                    rgba.z = (opa_a * d.color_b + opa_b * rgba.z) / FIX15;
+                } else {
+                    let spec_a = rgb_to_spectral(
+                        f32(d.color_r) / 32768.0,
+                        f32(d.color_g) / 32768.0,
+                        f32(d.color_b) / 32768.0,
+                    );
+                    let fac_a = f32(opa_a) / f32(opa_a + opa_b * rgba.w / FIX15);
+                    let spec_b = rgb_to_spectral(
+                        f32(rgba.x) / f32(rgba.w),
+                        f32(rgba.y) / f32(rgba.w),
+                        f32(rgba.z) / f32(rgba.w),
+                    );
+                    let rgb = wgm_mix(spec_a, spec_b, fac_a);
+                    rgba.w = opa_a + opa_b * rgba.w / FIX15;
+                    rgba.x = u32(rgb.x * f32(rgba.w) + 0.5);
+                    rgba.y = u32(rgb.y * f32(rgba.w) + 0.5);
+                    rgba.z = u32(rgb.z * f32(rgba.w) + 0.5);
+                }
             }
 
             // --- Colorize (draw_dab_pixels_BlendMode_Color): de-premult,

@@ -388,6 +388,157 @@ fn gpu_dab_parity_posterize_over_ink() {
     check(canary_ok, max);
 }
 
+/// Wave-4 spectral port: Perceptual (Paint) mixing over existing ink — the
+/// WGM arm proper. The base is a saturated mid-colour so the un-premult,
+/// `rgb_to_spectral`, `fastpow` WGM and re-premult paths all run with real
+/// numbers; the brush colour is far from the base so a wrong mix is a
+/// large-scale hue error, not one ulp. The repair leg pins the pure-Rust
+/// mirror (cpu_raster's paint arms) against the same C reference.
+#[test]
+fn gpu_dab_parity_paint_over_ink() {
+    let _g = gpu_guard();
+    let Some(mut renderer) = renderer() else {
+        return;
+    };
+    if !renderer.gpu_dabs_supported() {
+        println!("[test] SKIP: rgba16uint storage unsupported");
+        return;
+    }
+    let paint_base = |doc: &mut Document| {
+        let tile = doc.layers[0].tile_mut(TileIdx::new(1, 1));
+        for px in tile.data_mut().chunks_exact_mut(4) {
+            px[0] = 6000;
+            px[1] = 15000;
+            px[2] = 28000;
+            px[3] = 32768;
+        }
+    };
+    let pigment = |mut b: MyBrush| -> MyBrush {
+        b.set_color_mixing(mn_brush::BrushMix::Perceptual);
+        b.set_color_rgb([0.9, 0.8, 0.1]);
+        b
+    };
+    let mut ref_doc = Document::default();
+    paint_base(&mut ref_doc);
+    run_stock(pigment(pen()), &mut ref_doc);
+    assert_inked(&ref_doc);
+
+    let mut gpu_doc = Document::default();
+    paint_base(&mut gpu_doc);
+    let mut gpu_brush = pigment(pen());
+    let (canary_ok, all_dabs) =
+        run_gpu_maybe_composited(&mut gpu_brush, &mut gpu_doc, &mut renderer, false, false, None);
+
+    let (max, over) = max_diff(&ref_doc, &gpu_doc);
+    println!("[test] paint parity: max channel diff {max}, over 1: {over}");
+    check(canary_ok, max);
+
+    let mut repair_doc = Document::default();
+    paint_base(&mut repair_doc);
+    repair_doc.begin_op();
+    mn_brush::rasterize_dabs(&mut repair_doc, 0, &all_dabs, false, None);
+    repair_doc.end_op();
+    let (max, over) = max_diff(&ref_doc, &repair_doc);
+    println!("[test] paint repair parity: max channel diff {max}, over 1: {over}");
+    assert!(max <= 1, "repair parity bar is <= 1, got {max}");
+}
+
+/// Paint mode on a FRESH canvas: the first dabs take the C's zero-alpha
+/// additive shortcut, the overlapping ones mix spectrally with the stroke's
+/// own ink — both branches of Normal_Paint, plus the low-opacity 150 clamp
+/// at the stroke's faded pressure ends.
+#[test]
+fn gpu_dab_parity_paint_fresh_canvas() {
+    let _g = gpu_guard();
+    let Some(mut renderer) = renderer() else {
+        return;
+    };
+    if !renderer.gpu_dabs_supported() {
+        println!("[test] SKIP: rgba16uint storage unsupported");
+        return;
+    }
+    let pigment = |mut b: MyBrush| -> MyBrush {
+        b.set_color_mixing(mn_brush::BrushMix::Perceptual);
+        b.set_color_rgb([0.2, 0.5, 0.9]);
+        b
+    };
+    let mut ref_doc = Document::default();
+    run_stock(pigment(pen()), &mut ref_doc);
+    assert_inked(&ref_doc);
+
+    let mut gpu_doc = Document::default();
+    let mut gpu_brush = pigment(pen());
+    let (canary_ok, all_dabs) =
+        run_gpu_maybe_composited(&mut gpu_brush, &mut gpu_doc, &mut renderer, false, false, None);
+
+    let (max, over) = max_diff(&ref_doc, &gpu_doc);
+    println!("[test] paint fresh-canvas parity: max channel diff {max}, over 1: {over}");
+    check(canary_ok, max);
+
+    let mut repair_doc = Document::default();
+    repair_doc.begin_op();
+    mn_brush::rasterize_dabs(&mut repair_doc, 0, &all_dabs, false, None);
+    repair_doc.end_op();
+    let (max, over) = max_diff(&ref_doc, &repair_doc);
+    println!("[test] paint fresh-canvas repair parity: max diff {max}, over 1: {over}");
+    assert!(max <= 1, "repair parity bar is <= 1, got {max}");
+}
+
+/// Paint-mode ERASER (colour_a < 1) over ink: Normal_and_Eraser_Paint — the
+/// additive/spectral cross-fade on canvas alpha, the `fac_a *= color_a`
+/// erase adjustment, and no min-opacity clamp. The pre-ink alpha varies by
+/// row so the sigmoid fade runs at several points, not one.
+#[test]
+fn gpu_dab_parity_paint_eraser_over_ink() {
+    let _g = gpu_guard();
+    let Some(mut renderer) = renderer() else {
+        return;
+    };
+    if !renderer.gpu_dabs_supported() {
+        println!("[test] SKIP: rgba16uint storage unsupported");
+        return;
+    }
+    let paint_base = |doc: &mut Document| {
+        let tile = doc.layers[0].tile_mut(TileIdx::new(1, 1));
+        for (i, px) in tile.data_mut().chunks_exact_mut(4).enumerate() {
+            // Straight colour premultiplied by a per-row alpha ramp.
+            let a = ((i / 64) * 512).min(32768) as u32;
+            px[0] = (20000 * a / 32768) as u16;
+            px[1] = (15000 * a / 32768) as u16;
+            px[2] = (10000 * a / 32768) as u16;
+            px[3] = a as u16;
+        }
+    };
+    let pigment_eraser = |mut b: MyBrush| -> MyBrush {
+        b.set_color_mixing(mn_brush::BrushMix::Perceptual);
+        b.set_eraser(true);
+        b
+    };
+    let mut ref_doc = Document::default();
+    paint_base(&mut ref_doc);
+    run_stock(pigment_eraser(pen()), &mut ref_doc);
+    assert_inked(&ref_doc);
+
+    let mut gpu_doc = Document::default();
+    paint_base(&mut gpu_doc);
+    let mut gpu_brush = pigment_eraser(pen());
+    let (canary_ok, all_dabs) =
+        run_gpu_maybe_composited(&mut gpu_brush, &mut gpu_doc, &mut renderer, false, false, None);
+
+    let (max, over) = max_diff(&ref_doc, &gpu_doc);
+    println!("[test] paint-eraser parity: max channel diff {max}, over 1: {over}");
+    check(canary_ok, max);
+
+    let mut repair_doc = Document::default();
+    paint_base(&mut repair_doc);
+    repair_doc.begin_op();
+    mn_brush::rasterize_dabs(&mut repair_doc, 0, &all_dabs, false, None);
+    repair_doc.end_op();
+    let (max, over) = max_diff(&ref_doc, &repair_doc);
+    println!("[test] paint-eraser repair parity: max diff {max}, over 1: {over}");
+    assert!(max <= 1, "repair parity bar is <= 1, got {max}");
+}
+
 #[test]
 fn gpu_dab_parity_hard_stamp() {
     let _g = gpu_guard();
@@ -612,44 +763,45 @@ fn anchored_stamp_mask_is_the_coverage() {
     assert_eq!(alpha_at(117, 100), 0, "outside the stamp square is dry");
 }
 
-/// Rows 58 + 167 (`I-014`): the GPU dab shader has no pigment model, so a
-/// brush in Perceptual mixing must never reach this path at all.
-///
-/// Deliberately a ROUTING test rather than a parity one. Every other test in
-/// this file asserts that two rasterizers agree; this one asserts that they
-/// are never asked to, because they cannot: `dab.wgsl` implements the
-/// additive Normal / Normal-and-Eraser / LockAlpha blends and there is no
-/// spectral arm to compare against. If a later round ports one, this test is
-/// what should be deleted and replaced by a real parity run.
-///
-/// The recorded dabs are checked too: a `DabParams.paint` above zero handed
-/// to `rasterize_dabs` would be silently ignored by the shader, so the fact
-/// that the record carries zero for every GPU-eligible brush is the second
-/// half of the guarantee.
+/// Rows 58 + 167 (`I-014`), RETARGETED by the wave-4 spectral port: the
+/// predecessor of this test asserted Perceptual could never reach the GPU
+/// path because `dab.wgsl` had no pigment model — and told its replacer to
+/// swap it for a real parity run once one was ported. The parity runs are
+/// the `gpu_dab_parity_paint_*` tests above; what remains here is the
+/// ROUTING and the RECORD: Perceptual keeps `gpu_ready` and its dabs carry
+/// the spectral weight the shader's `*_Paint` arms consume, while Standard
+/// records zero (the additive path untouched to the byte).
 #[test]
-fn a_spectral_brush_never_reaches_the_gpu_dab_path() {
+fn spectral_routing_and_the_recorded_paint_weight() {
     let mut b = pen();
     assert!(b.gpu_ready(), "the stock pen is the GPU path's own brush");
     b.set_color_mixing(mn_brush::BrushMix::Perceptual);
     assert!(
-        !b.gpu_ready(),
-        "spectral mixing must route the stroke to the CPU rasterizer"
+        b.gpu_ready(),
+        "static spectral mixing rides the GPU arms since the wave-4 port"
     );
 
-    // And the dabs a GPU-eligible brush records carry no spectral weight,
-    // so nothing the shader consumes can be quietly wrong.
-    let mut doc = Document::default();
-    let mut rec = pen();
-    rec.set_dab_recording(RecordMode::Tap);
-    rec.begin(&mut doc);
-    for s in stroke_samples() {
-        rec.sample(&mut doc, s);
-    }
-    rec.end(&mut doc);
-    let dabs = rec.take_dab_record().dabs;
-    assert!(!dabs.is_empty(), "the reference stroke recorded no dabs");
+    let record = |mix: mn_brush::BrushMix| -> Vec<mn_core::dab::DabParams> {
+        let mut doc = Document::default();
+        let mut rec = pen();
+        rec.set_color_mixing(mix);
+        rec.set_dab_recording(RecordMode::Tap);
+        rec.begin(&mut doc);
+        for s in stroke_samples() {
+            rec.sample(&mut doc, s);
+        }
+        rec.end(&mut doc);
+        rec.take_dab_record().dabs
+    };
+    let standard = record(mn_brush::BrushMix::Standard);
+    assert!(!standard.is_empty(), "the reference stroke recorded no dabs");
     assert!(
-        dabs.iter().all(|d| d.paint == 0.0),
-        "a GPU-eligible brush recorded a dab with a spectral weight"
+        standard.iter().all(|d| d.paint == 0.0),
+        "a Standard brush recorded a dab with a spectral weight"
+    );
+    let pigment = record(mn_brush::BrushMix::Perceptual);
+    assert!(
+        pigment.iter().all(|d| d.paint == 1.0),
+        "a Perceptual brush's dabs must carry the weight the paint arms read"
     );
 }
