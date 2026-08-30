@@ -4374,9 +4374,15 @@ impl App {
                 if rows.is_empty() {
                     return;
                 }
+                // is_lit, not is_current: the current STOP is the row of the
+                // tool in hand. is_current is deliberately mode-blind for the
+                // Select shapes (the memory an `M` press honours), so with the
+                // selection pen held it would find `Select(select_mode)` at an
+                // earlier index than the SelectPen row and restart the cycle
+                // from the remembered shape.
                 let cur = rows
                     .iter()
-                    .position(|&s| crate::subtools::is_current(self, s))
+                    .position(|&s| crate::subtools::is_lit(self, s))
                     .unwrap_or(0);
                 let next = rows[((cur as i32 + dir).rem_euclid(rows.len() as i32)) as usize];
                 match next {
@@ -4429,6 +4435,7 @@ impl App {
                     // walk filters to the Direct draw group).
                     SubTool::Figure(m) => {
                         self.figure_mode = m;
+                        self.figure_drag = None;
                         self.figure_poly = None;
                         self.figure_stage2 = None;
                         self.smart_shape = None;

@@ -905,4 +905,43 @@ mod tests {
             ]
         );
     }
+
+    /// The stepper finds the current stop by the tool IN HAND (is_lit), not
+    /// by remembered mode alone: with the selection pen held, `.` steps to
+    /// the selection eraser — it must not restart the cycle from the shape
+    /// `select_mode` still remembers (is_current is deliberately blind to
+    /// the tool for exactly that memory).
+    #[test]
+    fn the_stepper_steps_from_the_selection_pen_not_the_remembered_shape() {
+        let Some(mut app) = headless() else { return };
+        app.tool = Tool::SelPen;
+        app.select_mode = SelectMode::Rect; // the remembered shape, index 0
+        app.step_subtool(true);
+        let queued: Vec<_> = app.cmds.drain(..).collect();
+        assert_eq!(queued.len(), 1);
+        assert!(
+            matches!(queued[0], AppCmd::SetTool(Tool::SelEraser)),
+            "SelPen is stop 4; forward lands on the eraser, not Lasso: {:?}",
+            queued[0]
+        );
+        // And off the end of the list, backwards reaches the pen again.
+        app.tool = Tool::SelEraser;
+        app.step_subtool(false);
+        let queued: Vec<_> = app.cmds.drain(..).collect();
+        assert_eq!(queued.len(), 1);
+        assert!(matches!(queued[0], AppCmd::SetTool(Tool::SelPen)), "{:?}", queued[0]);
+    }
+
+    /// A half-drawn figure drag belongs to the row that started it — the
+    /// mode cycle drops it like every other figure gesture.
+    #[test]
+    fn the_figure_step_drops_a_half_drawn_drag() {
+        let Some(mut app) = headless() else { return };
+        app.tool = Tool::Figure;
+        app.figure_mode = FigureMode::Rect;
+        app.figure_drag = Some(((10.0, 10.0), (60.0, 40.0)));
+        app.step_subtool(true);
+        assert!(app.figure_drag.is_none(), "the step drops the drag");
+        assert_eq!(app.figure_mode, FigureMode::Ellipse);
+    }
 }
