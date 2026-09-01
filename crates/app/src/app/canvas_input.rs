@@ -1684,6 +1684,23 @@ impl App {
             tilt_y: 0.0,
             t_ms: t0 + samples.len() as f64 * 4.0 + 16.0,
         });
+        // `push_batch` takes CLIENT-space samples — it runs every one of
+        // them through `viewport.to_canvas` itself, because that is the
+        // space a tablet reports in. Every path that reaches here is in
+        // CANVAS space (the drag corners, the polygon's vertices, the
+        // recognized Smart shape), so it has to be mapped back on the way
+        // in. Without this the figure is laid down at whatever canvas
+        // point its own canvas coordinates happen to name when read as
+        // screen ones: right only at the identity viewport, which is
+        // exactly what every figure test pinned, so the suite never saw
+        // it. At a fitted page the shape lands off the paper entirely.
+        let samples: Vec<PenSample> = samples
+            .into_iter()
+            .map(|s| {
+                let (x, y) = self.viewport.to_screen(s.x, s.y);
+                PenSample { x, y, ..s }
+            })
+            .collect();
         self.push_batch(&samples);
         self.end_stroke();
         self.set_status(match self.figure_mode {
@@ -3663,7 +3680,9 @@ impl App {
             self.needs_redraw = true;
         } else if let Some(pts) = &mut self.select_drag {
             match self.select_mode {
-                SelectMode::Rect => {
+                // Both corner-drag shapes keep exactly the press and the
+                // live corner; the ellipse is derived from the same pair.
+                SelectMode::Rect | SelectMode::Ellipse => {
                     pts.truncate(1);
                     pts.push((cx, cy));
                 }
@@ -4475,6 +4494,15 @@ impl App {
                         None // a click, not a drag: deselect (CSP-like)
                     } else {
                         Some(Selection::from_rect(&self.doc, a.0, a.1, cx, cy))
+                    }
+                }
+                SelectMode::Ellipse => {
+                    let a = pts[0];
+                    if (a.0 - cx).abs() < 2.0 && (a.1 - cy).abs() < 2.0 {
+                        None // a click, not a drag: deselect, like Rect
+                    } else {
+                        let poly = Selection::ellipse_polygon(a.0, a.1, cx, cy);
+                        Some(Selection::from_polygon(&self.doc, &poly))
                     }
                 }
                 SelectMode::Lasso => {

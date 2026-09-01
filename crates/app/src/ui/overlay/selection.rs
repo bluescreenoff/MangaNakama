@@ -56,6 +56,17 @@ pub(super) fn paint(
                     dim_readout(b.0 - a.0, b.1 - a.1, app.work_dpi()),
                 );
             }
+            SelectMode::Ellipse if pts.len() >= 2 => {
+                let (a, b) = (pts[0], pts[1]);
+                let poly = mn_core::Selection::ellipse_polygon(a.0, a.1, b.0, b.1);
+                ants(&poly, (0.0, 0.0), col);
+                draw_dim_readout(
+                    &painter,
+                    canvas_pts,
+                    cursor_pt(),
+                    dim_readout(b.0 - a.0, b.1 - a.1, app.work_dpi()),
+                );
+            }
             SelectMode::Lasso | SelectMode::Shrink => ants(pts, (0.0, 0.0), col),
             _ => {}
         }

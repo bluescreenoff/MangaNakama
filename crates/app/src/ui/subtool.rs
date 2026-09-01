@@ -306,6 +306,17 @@ fn mode_sub_tools(ui: &mut egui::Ui, app: &mut App) {
             {
                 app.push_cmd(AppCmd::SetSelectMode(SelectMode::Rect));
             }
+            if mode_row(
+                ui,
+                shape && m == SelectMode::Ellipse,
+                Icon::Select,
+                "Ellipse",
+            )
+            .on_hover_text("drag a diagonal — the selection is the ellipse inside it")
+            .clicked()
+            {
+                app.push_cmd(AppCmd::SetSelectMode(SelectMode::Ellipse));
+            }
             if mode_row(ui, shape && m == SelectMode::Lasso, Icon::Select, "Lasso").clicked() {
                 app.push_cmd(AppCmd::SetSelectMode(SelectMode::Lasso));
             }

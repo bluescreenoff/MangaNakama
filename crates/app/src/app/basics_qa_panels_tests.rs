@@ -520,6 +520,42 @@ fn qa_transform_scales_from_a_corner_and_rotates_the_lifted_pixels() {
     assert!(inked(&after, 112, 40), "a quarter turn makes it tall");
     assert!(!inked(&after, 60, 96), "and no longer wide");
 }
+
+/// S10. Ellipse selection (CSP 楕円選択, the sub tool beside Rectangle):
+/// the same diagonal drag, but what fills is the ellipse INSIDE the
+/// dragged box — the corners stay paper.
+#[test]
+fn qa_ellipse_selection_fills_the_oval_not_its_box() {
+    let Some(mut app) = headless() else { return };
+    page(&mut app);
+    dispatch(&mut app, AppCmd::SetTool(Tool::Select));
+    dispatch(&mut app, AppCmd::SetSelectMode(SelectMode::Ellipse));
+    drag(&mut app, (48.0, 64.0), (208.0, 192.0));
+
+    let b = sel_bounds(&app).expect("an ellipse drag makes a selection");
+    assert!(
+        (b[0] - 48).abs() <= 2 && (b[2] - 207).abs() <= 2,
+        "the oval spans the drag: {b:?}"
+    );
+    // pi/4 of the 160 x 128 box = 16085; a rectangle would be 20480.
+    let area = sel_area(&app);
+    assert!(
+        (15300..=16800).contains(&area),
+        "the area is the ellipse's, not the box's: {area}"
+    );
+
+    dispatch(&mut app, AppCmd::SetSlotColor([0.0, 0.0, 0.0]));
+    dispatch(&mut app, AppCmd::FillSelection);
+    let img = shot(&mut app, "S10-ellipse-fill");
+    assert!(inked(&img, 128, 128), "the middle of the oval is inked");
+    assert!(!inked(&img, 52, 68), "the box's top-left corner stays paper");
+    assert!(
+        !inked(&img, 204, 188),
+        "and so does its bottom-right corner"
+    );
+    assert!(inked(&img, 128, 68), "but the top of the oval is inked");
+    assert!(inked(&img, 52, 128), "and its left flank");
+}
 // =====================================================================
 // P — frame folders, the comic page a mangaka actually starts from
 // =====================================================================

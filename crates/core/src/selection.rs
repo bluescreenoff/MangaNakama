@@ -141,6 +141,23 @@ impl Selection {
         Self::from_polygon(doc, &poly)
     }
 
+    /// CSP's Ellipse selection sub tool: the ellipse inscribed in the
+    /// dragged rectangle, as a closed polygon. One point per ~3° at a
+    /// typical panel size — dense enough that the ants read as a curve and
+    /// the scanline fill has no visible facets, cheap enough to rebuild on
+    /// every pointer move for the live preview.
+    pub fn ellipse_polygon(ax: f32, ay: f32, bx: f32, by: f32) -> Vec<(f32, f32)> {
+        let (cx, cy) = ((ax + bx) * 0.5, (ay + by) * 0.5);
+        let (rx, ry) = ((bx - ax) * 0.5, (by - ay) * 0.5);
+        let steps = 128;
+        (0..steps)
+            .map(|i| {
+                let t = i as f32 / steps as f32 * std::f32::consts::TAU;
+                (cx + rx * t.cos(), cy + ry * t.sin())
+            })
+            .collect()
+    }
+
     /// Even-odd scanline fill of a closed polygon (the lasso), clipped to the
     /// document. Hard edges — CSP-style anti-aliased selection can come later.
     pub fn from_polygon(doc: &Document, pts: &[(f32, f32)]) -> Self {

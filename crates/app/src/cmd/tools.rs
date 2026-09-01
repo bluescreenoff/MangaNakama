@@ -568,6 +568,10 @@ pub enum RulerKind {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SelectMode {
     Rect,
+    /// CSP 楕円選択 Ellipse: the same diagonal drag as Rect, but the
+    /// selection is the ellipse inscribed in it — the sub tool CSP ships
+    /// beside Rectangle, and the shape a face, a moon or a spotlight is.
+    Ellipse,
     Lasso,
     /// L-001/L-002 magnetic lasso: the outline snaps to the nearest strong
     /// edge as you trace, so a character is selected by roughly following
@@ -945,6 +949,7 @@ impl SubTool {
             SubTool::Wand(Active),
             SubTool::Wand(Reference),
             SubTool::Select(SelectMode::Rect),
+            SubTool::Select(SelectMode::Ellipse),
             SubTool::Select(SelectMode::Lasso),
             SubTool::Select(SelectMode::Magnetic),
             SubTool::Select(SelectMode::Shrink),
@@ -1026,6 +1031,7 @@ impl SubTool {
             SubTool::Wand(Active) => "Refer editing layer only",
             SubTool::Wand(Reference) => "Refer reference layer",
             SubTool::Select(SelectMode::Rect) => "Rectangle",
+            SubTool::Select(SelectMode::Ellipse) => "Ellipse",
             SubTool::Select(SelectMode::Lasso) => "Lasso",
             SubTool::Select(SelectMode::Magnetic) => "Magnetic lasso",
             SubTool::Select(SelectMode::Shrink) => "Shrink selection",
