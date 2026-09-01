@@ -53,7 +53,7 @@ pub(crate) use layers::LAYER_TINTS;
 use color::picker_sync;
 use dialogs::{
     adjust_window, batch_import_window, canvas_size_window, detail_window, export_all_window,
-    feedback_window,
+    export_preflight_window, feedback_window,
     filter_window, gen_lines_window, goto_page_window, hud, new_doc_window, pen_wizard_window,
     promote_window, property_detail_window, resample_progress_window, resample_work_window,
     spread_window, story_window,
@@ -166,6 +166,7 @@ pub fn build(ui: &mut egui::Ui, app: &mut App) {
     goto_page_window(ui.ctx(), app);
     spread_window(ui.ctx(), app);
     export_all_window(ui.ctx(), app);
+    export_preflight_window(ui.ctx(), app);
     crate::app::print::print_window(ui.ctx(), app);
     story_window(ui.ctx(), app);
     gen_lines_window(ui.ctx(), app);

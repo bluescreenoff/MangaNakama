@@ -646,6 +646,32 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
         AppCmd::ExportAllPagesPath(dir) => match app.stash_current_page() {
             Err(e) => app.set_error(e),
             Ok(()) => {
+                // Friction 10: the preflight finally guards the door it
+                // was written for. Errors PARK the run — the artist sees
+                // them once and answers — and "Export anyway" comes back
+                // with the ack set, spent on arrival. A pixel canvas
+                // declines the whole check: it is not a print job, and
+                // `setup.absent` is the finding that says exactly that.
+                // Warnings never block; they ride the status line.
+                let acked = std::mem::take(&mut app.export_preflight_ack);
+                let findings = if app.page.is_some() && !acked {
+                    app.preflight_cached()
+                } else {
+                    Vec::new()
+                };
+                let errors = findings
+                    .iter()
+                    .filter(|f| f.level == mn_core::PreflightLevel::Error)
+                    .count();
+                if errors > 0 {
+                    app.set_error(format!(
+                        "export held: {errors} preflight error{} to answer first",
+                        if errors > 1 { "s" } else { "" }
+                    ));
+                    app.export_preflight = Some((dir, findings));
+                    return run_cmd_tail(app, cmd_tail);
+                }
+                let warns = findings.len();
                 // PM-051: an empty prefix falls back to the work name, so
                 // clearing the field cannot produce files called "-p001".
                 let prefix = {
@@ -871,6 +897,14 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                 }
                 if format == mn_core::export::ExportFormat::Jpeg {
                     extra.push_str(&format!(" jpeg q{quality}"));
+                }
+                // The preflight had something to say and nothing to stop:
+                // say it here, once, where the run is reported.
+                if warns > 0 {
+                    extra.push_str(&format!(
+                        " — {warns} preflight warning{}",
+                        if warns > 1 { "s" } else { "" }
+                    ));
                 }
                 if want_text {
                     let body = app.script_dump();

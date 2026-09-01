@@ -25,14 +25,7 @@ pub(super) fn pages_palette(ui: &mut egui::Ui, app: &mut App) {
 /// "Re-check" forces it. Non-active pages decode from their stashed ORA
 /// bytes — only the page being edited can change under the cache.
 pub(super) fn preflight_palette(ui: &mut egui::Ui, app: &mut App) {
-    let stale = app.preflight_findings.is_none()
-        || app.preflight_stale
-        || app.preflight_rev != app.doc.revision
-        || app.preflight_page != app.page_index;
-    if stale {
-        app.preflight_findings = Some(app.run_preflight());
-    }
-    let findings = app.preflight_findings.clone().unwrap_or_default();
+    let findings = app.preflight_cached();
     let errors = findings
         .iter()
         .filter(|f| f.level == mn_core::PreflightLevel::Error)

@@ -1961,6 +1961,59 @@ fn crop_label(c: mn_core::export::ExportCrop) -> &'static str {
 /// stores no index — the selection is DERIVED from those three fields
 /// (`matching_preset`), so any edit below reads as "Custom" for free and
 /// there is no stale index to invalidate.
+/// Friction 10: the preflight result an Export All parked on. The checks
+/// have existed since TRIAGE 132 and ran in a palette nobody had to open;
+/// this is the one place they are UNMISSABLE — between "Export…" and the
+/// first file. Errors only: warnings ride the run's status line, because a
+/// dialog you dismiss every time is a dialog you stop reading.
+pub(super) fn export_preflight_window(ctx: &egui::Context, app: &mut App) {
+    let Some((dir, findings)) = app.export_preflight.clone() else {
+        return;
+    };
+    let mut open = true;
+    let (mut go, mut cancel) = (false, false);
+    egui::Window::new("Preflight")
+        .open(&mut open)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, -30.0))
+        .show(ctx, |ui| {
+            ui.label(
+                egui::RichText::new(format!("Before writing into {}", dir.display()))
+                    .weak()
+                    .size(11.0),
+            );
+            ui.add_space(4.0);
+            for f in &findings {
+                let (word, color) = match f.level {
+                    mn_core::PreflightLevel::Error => ("error", egui::Color32::from_rgb(196, 74, 74)),
+                    mn_core::PreflightLevel::Warn => {
+                        ("warning", egui::Color32::from_rgb(196, 158, 46))
+                    }
+                };
+                ui.horizontal_wrapped(|ui| {
+                    ui.colored_label(color, word);
+                    ui.label(&f.message);
+                });
+            }
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui.button("Export anyway").clicked() {
+                    go = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+            });
+        });
+    if go {
+        app.export_preflight_ack = true;
+        app.push_cmd(crate::cmd::AppCmd::ExportAllPagesPath(dir));
+    }
+    if go || cancel || !open {
+        app.export_preflight = None;
+    }
+}
+
 pub(super) fn export_all_window(ctx: &egui::Context, app: &mut App) {
     if !app.export_all_open {
         return;

@@ -811,3 +811,92 @@ fn crop_marks_ride_the_export_when_the_work_asks_for_them() {
     assert!(changed > 0, "the marks reached the file");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+// --- the preflight gate on Export All (friction 10) ----------------------
+
+/// A print work with a preflight ERROR does not write files: the run parks
+/// with the findings, and only "Export anyway" (the ack) lets it through —
+/// once. Warnings alone never hold anything up; they land in the status.
+#[test]
+fn export_all_parks_on_a_preflight_error_until_it_is_answered() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = stamp_work(renderer, "GATE");
+    // `cover.out_of_range`: an Error the artist can actually cause, and one
+    // that leaves the rest of the checks running (unlike `setup.absent`).
+    app.cover = Some(9);
+    let dir = std::env::temp_dir().join(format!("mn-preflight-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    crate::cmd::dispatch(
+        &mut app,
+        crate::cmd::AppCmd::ExportAllPagesPath(dir.clone()),
+    );
+    let wrote = |dir: &std::path::Path| {
+        std::fs::read_dir(dir)
+            .map(|d| d.filter_map(|e| e.ok()).count())
+            .unwrap_or(0)
+    };
+    assert_eq!(wrote(&dir), 0, "nothing was written past the gate");
+    let (parked, findings) = app.export_preflight.clone().expect("the run parked");
+    assert_eq!(parked, dir, "it remembers where it was headed");
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.check == "cover.out_of_range"
+                && f.level == mn_core::PreflightLevel::Error),
+        "and what stopped it: {findings:?}"
+    );
+
+    // "Export anyway" — the ack is one-shot.
+    app.export_preflight = None;
+    app.export_preflight_ack = true;
+    crate::cmd::dispatch(
+        &mut app,
+        crate::cmd::AppCmd::ExportAllPagesPath(dir.clone()),
+    );
+    assert!(wrote(&dir) > 0, "the override exports");
+    assert!(app.export_preflight.is_none(), "and does not park again");
+    assert!(!app.export_preflight_ack, "the ack was spent");
+
+    // A second run faces the same checks with no ack left.
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    crate::cmd::dispatch(
+        &mut app,
+        crate::cmd::AppCmd::ExportAllPagesPath(dir.clone()),
+    );
+    assert_eq!(wrote(&dir), 0, "the gate is not a one-time toll");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Warnings are not a wall: a work whose only findings are warnings
+/// exports, and the status line is where the artist meets them.
+#[test]
+fn preflight_warnings_export_and_report_themselves() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = stamp_work(renderer, "WARNS");
+    let f = app.run_preflight();
+    assert!(
+        !f.is_empty() && f.iter().all(|f| f.level == mn_core::PreflightLevel::Warn),
+        "this fixture warns and only warns: {f:?}"
+    );
+    let dir = std::env::temp_dir().join(format!("mn-preflight-warn-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    crate::cmd::dispatch(
+        &mut app,
+        crate::cmd::AppCmd::ExportAllPagesPath(dir.clone()),
+    );
+    assert!(app.export_preflight.is_none(), "warnings do not park a run");
+    assert!(first_png(&dir).exists(), "the pages landed");
+    assert!(
+        app.status.contains("preflight warning"),
+        "the run says so: {:?}",
+        app.status
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

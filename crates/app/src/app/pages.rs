@@ -553,6 +553,21 @@ impl App {
     /// bytes (unchanged while another page is being edited, which is why
     /// the cache key is the active doc's revision + page). Findings carry
     /// page context in their messages already.
+    /// [`Self::run_preflight`] behind its cache key (palette opened, page
+    /// switched, active page edited, work metadata edited). The palette
+    /// and the export gate share this door: a run decodes every stashed
+    /// page, which is too much to pay twice for one Export All.
+    pub fn preflight_cached(&mut self) -> Vec<mn_core::PreflightFinding> {
+        let stale = self.preflight_findings.is_none()
+            || self.preflight_stale
+            || self.preflight_rev != self.doc.revision
+            || self.preflight_page != self.page_index;
+        if stale {
+            self.preflight_findings = Some(self.run_preflight());
+        }
+        self.preflight_findings.clone().unwrap_or_default()
+    }
+
     pub fn run_preflight(&mut self) -> Vec<mn_core::PreflightFinding> {
         let mut meta = mn_core::ProjectMeta::for_checks(
             self.story.clone(),
