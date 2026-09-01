@@ -118,13 +118,18 @@ neighbourhood moves), drag anywhere else on the line to slide the whole
 stroke, press <b>Del</b> to remove it. The line follows your cursor
 live; the ink re-renders the moment you let go — through the same brush,
 pressure and stabilizer it was drawn with.</div>
-<div class="quirk"><b>The eraser on a vector layer erases UP TO THE
-CROSSINGS.</b> Touch a line with the eraser and the touched span dies
-out to where that line crosses other lines — or to its ends, so a line
-that crosses nothing vanishes whole. This is the overshoot cleaner:
-hatch past the border, sweep the eraser along the spill, and every tail
-snaps back to the border line. An eraser pass that touches no line
-changes nothing and spends no undo step.</div>
+<div class="quirk"><b>The eraser on a vector layer has three settings —
+Tool property ▸ Vector eraser.</b> <b>Touched</b>, the default, takes
+only the part of the line you rubbed: a rub through the middle leaves
+two lines. <b>To intersection</b> widens the rub out to where that line
+crosses another line on the layer (a line crossing itself counts), or to
+the line's ends if it crosses nothing — the overshoot cleaner: hatch
+past the border, sweep the eraser along the spill, and every tail snaps
+back to the border line. <b>Whole line</b> takes any line you touch,
+entirely. Crossings are read on the layer you are on only. A raster
+layer always erases what you touched, whatever the setting says, and an
+eraser pass that touches no line changes nothing and spends no undo
+step.</div>
 <div class="quirk"><b>Two things do not record yet, and say so.</b>
 Strokes drawn with mirror or wrap-around active still ink normally but
 are not remembered as geometry (an edit re-render would drop their

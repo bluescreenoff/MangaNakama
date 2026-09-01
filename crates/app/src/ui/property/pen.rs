@@ -93,6 +93,48 @@ fn eraser_rows(ui: &mut egui::Ui, app: &mut App) {
              that keeps pixels — sketch, flats and ink together — as ONE undo \
              press. Folders, vector and live layers are never touched.",
         );
+    vector_eraser_row(ui, app);
+}
+
+/// CSP's Vector eraser modes, on the Eraser's own property page. A raster
+/// layer erases touched pixels whatever this says (CSP: "when used on a
+/// raster layer, vector erasers will only erase touched areas"), so the row
+/// stays visible and the hover says who it speaks to rather than blinking
+/// in and out as the artist walks the layer stack.
+fn vector_eraser_row(ui: &mut egui::Ui, app: &mut App) {
+    use mn_core::EraserMode as M;
+    const MODES: &[(M, &str, &str)] = &[
+        (
+            M::Touched,
+            "Touched",
+            "Erase touched areas — only the part of the line the eraser \
+             rubbed goes; rubbing through the middle leaves two lines.",
+        ),
+        (
+            M::ToIntersection,
+            "To intersection",
+            "Erase up to intersection — the rub widens out to where the \
+             line crosses another line on this layer (its own crossings \
+             count), or to the line's ends if it crosses nothing. The \
+             overshooting hatch mark, gone in one dab.\n\
+             Refer all layers is not built: crossings are this layer's.",
+        ),
+        (
+            M::WholeLine,
+            "Whole line",
+            "Whole line — every line the eraser touches goes entirely.",
+        ),
+    ];
+    ui.horizontal(|ui| {
+        ui.weak("Vector eraser").on_hover_text(
+            "What an eraser stroke takes off a VECTOR layer. Raster layers \
+             always erase what you touched.",
+        );
+        for (mode, label, hover) in MODES {
+            ui.selectable_value(&mut app.vector_eraser_mode, *mode, *label)
+                .on_hover_text(*hover);
+        }
+    });
 }
 
 /// BR-005: the gateable pen rows, in display order. The id is the

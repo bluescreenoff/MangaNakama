@@ -268,6 +268,106 @@ fn a_point_drag_deforms_locally() {
     );
 }
 
+/// The three-stroke fixture the eraser modes are judged on: a horizontal
+/// at y=200 crossed by verticals at x=100 and x=190, and the eraser rub
+/// that follows — one dab through the horizontal at x=150, between the
+/// crossings, touching nothing else. Returns the layer index.
+fn crossed_lines_then_rub(app: &mut App) -> usize {
+    let li = app.doc.active;
+    drag(app, 200.0); // horizontal: x 60..234 at y 200
+    for x in [100.0, 190.0] {
+        app.begin_stroke(PointerKind::Mouse);
+        let batch: Vec<PenSample> = (0..20)
+            .map(|i| PenSample {
+                x,
+                y: 160.0 + i as f32 * 4.0,
+                pressure: 0.9,
+                tilt_x: 0.0,
+                tilt_y: 0.0,
+                t_ms: i as f64 * 8.0,
+            })
+            .collect();
+        app.push_batch(&batch);
+        app.end_stroke();
+    }
+    assert_eq!(app.doc.layers[li].strokes.as_ref().unwrap().strokes.len(), 3);
+    app.tool = Tool::Eraser;
+    app.apply_draw_state();
+    app.begin_stroke(PointerKind::Mouse);
+    let batch: Vec<PenSample> = (0..10)
+        .map(|i| PenSample {
+            x: 150.0,
+            y: 190.0 + i as f32 * 2.0,
+            pressure: 0.9,
+            tilt_x: 0.0,
+            tilt_y: 0.0,
+            t_ms: i as f64 * 8.0,
+        })
+        .collect();
+    app.push_batch(&batch);
+    app.end_stroke();
+    li
+}
+
+fn alpha_at(app: &App, li: usize, x: i32, y: i32) -> u16 {
+    let idx = TileIdx::of_pixel(x, y);
+    app.doc.layers[li]
+        .tile(idx)
+        .map(|t| t.pixel((x - idx.origin().0) as usize, (y - idx.origin().1) as usize)[3])
+        .unwrap_or(0)
+}
+
+/// Mode 1, the default (CSP "Erase touched areas"): the rub takes what it
+/// covered and stops there — the ink either side of it, all the way up to
+/// the crossings, is still on the page.
+#[test]
+fn the_eraser_takes_only_what_it_touched_by_default() {
+    let Some(mut app) = vector_app() else { return };
+    assert_eq!(app.vector_eraser_mode, mn_core::EraserMode::Touched);
+    let li = crossed_lines_then_rub(&mut app);
+    assert_eq!(
+        app.doc.layers[li].strokes.as_ref().unwrap().strokes.len(),
+        4,
+        "the rub split the horizontal, the verticals stand"
+    );
+    assert_eq!(alpha_at(&app, li, 150, 200), 0, "the rub's own span is gone");
+    assert!(
+        alpha_at(&app, li, 130, 200) > 0 && alpha_at(&app, li, 170, 200) > 0,
+        "the ink beside the rub survives — it did not widen to the crossings"
+    );
+    assert!(alpha_at(&app, li, 100, 170) > 0, "the verticals survive");
+}
+
+/// Mode 3 (CSP "Whole line"): the touched stroke goes entire, in one undo
+/// step, and the strokes it crossed are untouched.
+#[test]
+fn whole_line_mode_takes_the_touched_stroke_entire() {
+    let Some(mut app) = vector_app() else { return };
+    app.vector_eraser_mode = mn_core::EraserMode::WholeLine;
+    let steps_before = app.doc.undo_len();
+    let li = crossed_lines_then_rub(&mut app);
+    let set = app.doc.layers[li].strokes.as_ref().unwrap();
+    assert_eq!(set.strokes.len(), 2, "only the two verticals are left");
+    assert_eq!(
+        alpha_at(&app, li, 70, 200),
+        0,
+        "the far end of the touched line went with it"
+    );
+    assert!(alpha_at(&app, li, 100, 170) > 0, "the verticals survive");
+    assert_eq!(
+        app.doc.undo_len(),
+        steps_before + 4,
+        "three strokes drawn, one erase step"
+    );
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::Undo);
+    assert_eq!(
+        app.doc.layers[li].strokes.as_ref().unwrap().strokes.len(),
+        3,
+        "one undo brings the whole line back"
+    );
+    assert!(alpha_at(&app, li, 70, 200) > 0, "…ink and all");
+}
+
 /// Phase 3, the headline: the eraser on a vector layer TRIMS — the touched
 /// span dies up to the neighbouring crossings, the rest survives as split
 /// strokes, and one undo restores geometry and ink exactly.
@@ -275,6 +375,8 @@ fn a_point_drag_deforms_locally() {
 fn the_eraser_trims_to_the_crossings_and_undoes_as_one() {
     let Some(mut app) = vector_app() else { return };
     let li = app.doc.active;
+    // Mode 2 (CSP "Erase up to intersection") — not the default.
+    app.vector_eraser_mode = mn_core::EraserMode::ToIntersection;
     // A horizontal crossed by two verticals.
     drag(&mut app, 200.0); // horizontal: x 60..234 at y 200
     let vert = |app: &mut App, x: f32| {
@@ -344,6 +446,16 @@ fn the_eraser_trims_to_the_crossings_and_undoes_as_one() {
         alpha_at(&app, 150, 200),
         0,
         "the trimmed span's ink is gone"
+    );
+    assert_eq!(
+        alpha_at(&app, 130, 200),
+        0,
+        "the span widened out to the crossing at x=100"
+    );
+    assert_eq!(
+        alpha_at(&app, 170, 200),
+        0,
+        "…and out to the crossing at x=190"
     );
     assert!(alpha_at(&app, 70, 200) > 0, "the left piece survives");
     assert!(alpha_at(&app, 220, 200) > 0, "the right piece survives");

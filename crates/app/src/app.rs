@@ -619,6 +619,13 @@ pub struct App {
     /// by default and armed per stroke in `begin_stroke`; see
     /// [`App::erase_on_other_layers`] for who is in the loop.
     pub erase_all_layers: bool,
+    /// CSP's Vector eraser modes (manual: "Eraser tools ▸ Vector eraser"):
+    /// what an eraser stroke takes off a stroke-recording layer — the
+    /// touched samples, the span out to the neighbouring crossings, or the
+    /// whole line. Raster layers ignore it, exactly as CSP says they do.
+    /// Tool state, not document state: it lives with the sub tool, not the
+    /// undo stack.
+    pub vector_eraser_mode: mn_core::EraserMode,
     /// While an erase-all stroke is live: the raw client-space samples it
     /// was fed, replayed onto the other layers at `end_stroke`. `None` for
     /// every ordinary stroke.
@@ -1781,6 +1788,7 @@ impl App {
             anti_overflow_margin: 0,
             anti_overflow_vector_centreline: false,
             erase_all_layers: false,
+            vector_eraser_mode: mn_core::EraserMode::default(),
             erase_all_capture: None,
             erase_all_replaying: false,
             quick_query: String::new(),
@@ -3716,26 +3724,38 @@ impl App {
         // Vector inking: close the op as ONE pixels-plus-record group when
         // this stroke captured (docs/VECTOR-INKING.md); otherwise stock.
         match self.vector_capture.take() {
-            // Phase 3: the ERASER on a vector layer TRIMS geometry (up to
-            // the neighbouring intersections) instead of recording an
-            // eraser stroke. The live raster erase already happened inside
-            // the op; the re-derive replaces it with the trimmed truth —
-            // and an eraser that touched no stroke reverts to the op's own
-            // pre-images and spends nothing.
+            // Phase 3: the ERASER on a vector layer EDITS geometry instead
+            // of recording an eraser stroke — how much is `vector_eraser_
+            // mode` (CSP's three). The live raster erase already happened
+            // inside the op; the re-derive replaces it with the edited
+            // truth — and an eraser that touched no stroke reverts to the
+            // op's own pre-images and spends nothing.
             Some(samples) if !samples.is_empty() && self.eraser_active() => {
                 let li = self.doc.active;
                 let before = self.doc.layers[li].strokes.clone().unwrap_or_default();
                 let path: Vec<(f32, f32)> = samples.iter().map(|s| (s.x, s.y)).collect();
                 let radius = (self.props_current.size_px / 2.0).max(1.0);
+                let mode = self.vector_eraser_mode;
                 let changed = self.doc.layers[li]
                     .strokes
                     .as_mut()
-                    .is_some_and(|set| set.trim(&path, radius));
+                    .is_some_and(|set| set.trim(&path, radius, mode));
                 if changed {
                     self.vector_sel = None; // indices just restructured
                     self.rederive_vector_layer(li);
-                    self.doc.end_op_vector_set(before, "Trim strokes");
-                    self.set_status("strokes trimmed to their crossings");
+                    let (label, said) = match mode {
+                        mn_core::EraserMode::Touched => {
+                            ("Erase strokes", "strokes erased where you touched them")
+                        }
+                        mn_core::EraserMode::ToIntersection => {
+                            ("Trim strokes", "strokes trimmed to their crossings")
+                        }
+                        mn_core::EraserMode::WholeLine => {
+                            ("Erase whole strokes", "whole strokes erased")
+                        }
+                    };
+                    self.doc.end_op_vector_set(before, label);
+                    self.set_status(said);
                 } else {
                     self.doc.abort_op_restore();
                 }

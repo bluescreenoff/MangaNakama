@@ -110,7 +110,7 @@ pub use ruler::{AnchorRole, CurveRuler, Ruler, RulerGrab, Rulers, SnapLock};
 pub use selection::{SEL_ON, Selection, SelectionOp, selected};
 pub use stabilize::Stabilizer;
 pub use stroke::{PenSample, StrokeSink};
-pub use stroke_set::{StrokeSet, StrokeSettings, VectorStroke};
+pub use stroke_set::{EraserMode, StrokeSet, StrokeSettings, VectorStroke};
 pub use taper::Taper;
 pub use text::{
     Align, FrameAlign, LineSpacing, RenderedText, StyleFlag, StyleRun, TextHandle, TextItem,
