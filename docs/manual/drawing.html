@@ -676,6 +676,20 @@ ignores both, the same rule fill and the magic wand follow. <span
 class="why">Snapping to the rough underdrawing instead of the finished
 line is the one wrong answer that would be worth reporting as a
 bug.</span></div>
+<div class="quirk"><b>A plain drag that starts INSIDE the ants moves
+them.</b> With the Rectangle or Ellipse sub tool and the mode on
+<i>New</i>, pressing inside a live selection picks the marching ants up
+and slides them — the ants only, never the art under them (that is
+Ctrl+T). To draw a fresh shape over the top of one, deselect first
+(<kbd>Ctrl+D</kbd>). Holding <kbd>Shift</kbd>/<kbd>Alt</kbd>, or setting
+Tool Property ▸ mode to Add/Subtract/Intersect, always draws the new
+shape instead — combining is what those say, so the move grab stands
+aside.</div>
+<div class="quirk"><b>Shift does not make the ellipse a circle.</b>
+<kbd>Shift</kbd> is the add-to-selection modifier on every selection sub
+tool here, and it cannot mean two things on one drag. Drag the diagonal
+of a square by eye, or take a rectangle and shrink/expand it — the
+constrained drag is on the list, not in the build.</div>
 <div class="quirk"><b>A blurred (feathered) selection moves softly.</b>
 Blur a selection in the selection launcher, then transform: each pixel
 travels by its coverage fraction, so the edge fades instead of cutting
