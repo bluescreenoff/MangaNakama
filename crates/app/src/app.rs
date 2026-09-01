@@ -5099,6 +5099,13 @@ mod basics_qa_fill_tests;
 #[cfg(test)]
 mod basics_qa_panels_tests;
 
+/// Mangaka-basics QA (2026-09-02 round), tool usage + switching family:
+/// the tool keys, the cycles they carry, `,`/`.` sub tool stepping, the
+/// spring-loaded borrow, and CSP's canvas modifier family — every one
+/// driven through `main::key_down` and the pointer arms.
+#[cfg(test)]
+mod basics_qa_tools_tests;
+
 /// Workflow audit #4: the batch import — N roughs become N page underlays.
 /// Pins the underlay's placement against a page's White base, the park
 /// staleness a direct byte write must cause, and the open page's single
