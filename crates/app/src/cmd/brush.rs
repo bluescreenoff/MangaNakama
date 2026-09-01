@@ -15,26 +15,19 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
 
         // --- brush --------------------------------------------------------
         AppCmd::SelectBrush(p) => {
-            // TODO #7, the `mn-engine` preset key: grid/hairy/curve/dyna
-            // build their own engine instead of the MyPaint one
-            // (per-sub-tool identities without new preset formats).
-            let engine_kind = std::fs::read_to_string(&p).ok().and_then(|text| {
-                serde_json::from_str::<serde_json::Value>(&text)
-                    .ok()
-                    .and_then(|j| {
-                        j.get("mn-engine")
-                            .and_then(|v| v.as_str())
-                            .map(str::to_owned)
-                    })
-            });
-            let special = match engine_kind.as_deref() {
-                Some("grid") => Some(EngineKind::Grid(GridDab::default())),
-                Some("hairy") => Some(EngineKind::Hairy(HairyDab::default())),
-                Some("curve") => Some(EngineKind::Curve(CurveDab::default())),
-                Some("dyna") => Some(EngineKind::Dyna(DynaDab::default())),
-                _ => None,
-            };
-            if let Some(kind) = special {
+            // TODO #7, the `mn-engine` preset key: a procedural preset
+            // builds its own engine instead of the MyPaint one (per-sub-tool
+            // identities without new preset formats).
+            //
+            // ONE reader, shared with the sub tool PREVIEW
+            // (`app::preset_engine`). This arm used to keep a second
+            // copy of the name list and "dot" was missing from it, so the Dot
+            // Pen previewed as the row-96 pixel pen and then inked as a plain
+            // MyPaint brush off a preset file that carries no libmypaint
+            // settings — a soft, pressure-tapered line, which is the one
+            // thing that sub tool exists not to draw.
+            let engine_kind = mn_brush::preset_engine_key(&p);
+            if let Some(kind) = crate::app::preset_engine(&p) {
                 app.store_current_props();
                 app.selected_preset = app.presets.iter().position(|(_, q)| *q == p);
                 *app.engine_mut() = Engine::new(kind);
@@ -50,6 +43,7 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                     Some("hairy") => "hairy engine: bristle fan",
                     Some("curve") => "curve engine: scallop arches",
                     Some("dyna") => "dyna engine: spring tip",
+                    Some("dot") => "dot pen: one whole pixel per dab",
                     _ => "grid engine: lattice dots",
                 });
                 app.mark_dirty();

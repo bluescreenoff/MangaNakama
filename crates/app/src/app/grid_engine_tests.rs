@@ -361,3 +361,50 @@ fn mn_engine_grid_key_selects_the_grid_engine() {
     assert!(alpha > 0, "the grid engine inked");
     let _ = (x1, y1);
 }
+
+/// Every shipped preset that declares an `mn-engine` must get that engine
+/// LIVE, not only in the sub tool preview.
+///
+/// The Dot Pen (row 96) was the one the two halves disagreed about:
+/// `SelectBrush` carried its own copy of the name list and "dot" was not on
+/// it, so the pixel pen previewed as a hard one-pixel line and then inked as
+/// a plain MyPaint brush loaded from a preset file that holds no libmypaint
+/// settings — a soft, size-following, pressure-tapered ribbon. Comparing
+/// against `preset_engine` rather than a hand-written expectation is the
+/// point: a future procedural preset cannot be added to one list only.
+#[test]
+fn a_procedural_preset_selects_its_engine_live_not_only_in_the_preview() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    let mut checked = 0;
+    for (_, path) in app.presets.clone() {
+        let Some(want) = crate::app::preset_engine(&path) else {
+            continue;
+        };
+        crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::SelectBrush(path.clone()));
+        assert_eq!(
+            std::mem::discriminant(app.engine().kind()),
+            std::mem::discriminant(&want),
+            "{} previews as one engine and inks as another",
+            path.display()
+        );
+        // The dot pen and the fallback dab share `EngineKind::Dab`, so the
+        // discriminant alone would let a soft round dab pass for the pixel
+        // pen: its whole definition is the aliased mode.
+        if let (EngineKind::Dab(live), EngineKind::Dab(want)) = (app.engine().kind(), &want) {
+            assert_eq!(
+                live.aliased,
+                want.aliased,
+                "{} lost its aliased mode",
+                path.display()
+            );
+        }
+        checked += 1;
+    }
+    assert!(
+        checked >= 5,
+        "the shipped procedural presets must be in the list, found {checked}"
+    );
+}

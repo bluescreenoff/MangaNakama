@@ -21,7 +21,6 @@ use mn_brush::{AntiAlias, Interval, MyBrush};
 use mn_core::{Balloon, BalloonSet, Blend, FrameSet, ResizeAnchor, Tail};
 
 use crate::app::{App, Engine, EngineKind, PageEntry};
-use mn_brush::{CurveDab, DynaDab, GridDab, HairyDab};
 
 mod brush;
 mod edit;
