@@ -11213,3 +11213,80 @@ fn pinned_modifiers_override_the_physical_keyboard() {
     app.shell.test_modifiers = Some(egui::Modifiers::SHIFT);
     assert!(app.shell.sync_modifiers().shift);
 }
+
+/// The manual's claim, on the group that has to keep it: "Size is an
+/// absolute dab diameter in canvas pixels." Every shipped `csp/` inking sub
+/// tool must ink a line whose width at FULL pressure is the number in the
+/// Size box — that is CSP's own contract, and it is what makes a nib size
+/// mean the same thing here as it does in a tutorial.
+///
+/// Full pressure matters: the same Real G-Pen at 9 px inks 8 px at pressure
+/// 1.0 and 2 px at 0.3, which is its documented 3 % minimum size doing
+/// exactly its job. A width measured mid-taper is not a size reading.
+#[test]
+fn the_size_box_is_the_inked_diameter_for_every_csp_ink_preset() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (900, 700), 1.0);
+    app.props_current.stabilizer = 0.0;
+    app.prefs.mouse_smooth_px = 0.0;
+    app.viewport.zoom = 1.0;
+    app.viewport.pan = [0.0, 0.0];
+    let inks: Vec<_> = app
+        .presets
+        .iter()
+        .map(|(_, p)| p.clone())
+        .filter(|p| {
+            // By components, so the separator never enters the test.
+            let group = p.parent().and_then(|d| d.file_name());
+            let name = p.file_name().unwrap_or_default();
+            group.is_some_and(|g| g == "csp")
+                && ["real-g-pen.myb", "milli-pen.myb", "ink-gire-fude-pen.myb"]
+                    .iter()
+                    .any(|n| name == std::ffi::OsStr::new(n))
+        })
+        .collect();
+    assert_eq!(inks.len(), 3, "the shipped csp ink presets: {inks:?}");
+
+    for path in inks {
+        crate::cmd::dispatch(&mut app, AppCmd::SelectBrush(path.clone()));
+        crate::cmd::dispatch(&mut app, AppCmd::SetBrushSizePx(20.0));
+        crate::cmd::dispatch(&mut app, AppCmd::AddLayer);
+        let li = app.doc.active;
+        app.begin_stroke(PointerKind::Mouse);
+        let batch: Vec<PenSample> = (0..200)
+            .map(|i| {
+                let (x, y) = app.viewport.to_screen(300.0 + i as f32 * 7.0, 500.0);
+                PenSample {
+                    x,
+                    y,
+                    pressure: 1.0,
+                    tilt_x: 0.0,
+                    tilt_y: 0.0,
+                    t_ms: i as f64 * 8.0,
+                }
+            })
+            .collect();
+        app.push_batch(&batch);
+        app.end_stroke();
+        // Mid-stroke column, well past any entry taper.
+        let x = 1000;
+        let inked = (440..560)
+            .filter(|&y| {
+                let idx = mn_core::TileIdx::of_pixel(x, y);
+                app.doc.layers[li].tile(idx).is_some_and(|t| {
+                    let (ox, oy) = idx.origin();
+                    t.pixel((x - ox) as usize, (y - oy) as usize)[3] > 0
+                })
+            })
+            .count();
+        // ±20 %: the dab is a disc sampled onto a pixel grid, and a preset
+        // may carry a hardness that shaves a fringe row off each edge.
+        assert!(
+            (16..=24).contains(&inked),
+            "{}: Size 20 px inked a {inked} px line",
+            path.display()
+        );
+    }
+}
