@@ -37,8 +37,11 @@ pub(super) fn paint(
                 egui::Stroke::new(1.5, col),
             );
         };
+        // The continuum rulers draw SAMPLES of their family, not the
+        // family: every angle (every radius) is reachable, so the marks
+        // are faint to say "these are not the only ones".
+        let faint = egui::Color32::from_rgba_unmultiplied(0, 200, 220, 60);
         let vp_mark = |vp: [f32; 2]| {
-            let faint = egui::Color32::from_rgba_unmultiplied(0, 200, 220, 60);
             for k in 0..24 {
                 let ang = k as f32 * std::f32::consts::TAU / 24.0;
                 let dd = [ang.cos(), ang.sin()];
@@ -128,14 +131,24 @@ pub(super) fn paint(
                         egui::Stroke::new(2.0, col),
                     );
                 }
+                // The radial line ruler: a continuum, so it draws exactly
+                // the faint sample fan a vanishing point draws, plus the
+                // cross on the centre that IS the ruler's handle.
+                mn_core::Ruler::Radial { c } => vp_mark(c),
                 mn_core::Ruler::Concentric { c, dr } => {
-                    let reach = ((c[0]).abs().max(c[0]) + (c[1]).abs().max(c[1]) + 2048.0).max(dr);
-                    for k in 1..=(reach / dr.max(1.0)) as usize {
-                        let r = k as f32 * dr;
+                    // A FREE ring ruler (dr <= 0) has no spacing to draw:
+                    // the rings shown are a fixed-pitch sample, drawn
+                    // faint so they do not read as the only radii.
+                    let free = dr <= 0.0;
+                    let step = if free { 64.0 } else { dr };
+                    let stroke = egui::Stroke::new(1.0, if free { faint } else { col });
+                    let reach = ((c[0]).abs().max(c[0]) + (c[1]).abs().max(c[1]) + 2048.0).max(step);
+                    for k in 1..=(reach / step.max(1.0)) as usize {
+                        let r = k as f32 * step;
                         painter.circle_stroke(
                             to_pt(c[0], c[1]),
                             (r * app.viewport.zoom).max(1.0),
-                            egui::Stroke::new(1.0, col),
+                            stroke,
                         );
                     }
                     // The centre mark.

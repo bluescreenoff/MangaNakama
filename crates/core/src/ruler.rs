@@ -1,9 +1,9 @@
 //! Rulers (TODO #3): snapping geometry drawn on the canvas. Part 1 shipped
 //! the LINE ruler (straight edge) and the VANISHING POINT (radial fan);
 //! part 2 the CURVE ruler + sticky snapping; part 3 the SPECIAL family —
-//! PARALLEL line, CONCENTRIC circles, GUIDES and the SYMMETRICAL ruler
-//! (which mirrors strokes instead of snapping them — the app reads it to
-//! build reflection twins).
+//! RADIAL line (集中線 focus lines), PARALLEL line, CONCENTRIC circles,
+//! GUIDES and the SYMMETRICAL ruler (which mirrors strokes instead of
+//! snapping them — the app reads it to build reflection twins).
 //!
 //! Snapping is a pure projection: the sample lands on the NEAREST ruler
 //! geometry, perpendicularly. The stroke pipeline applies it after the
@@ -20,14 +20,27 @@ pub enum Ruler {
     /// starting at `angle0` radians (the creation drag's direction — so
     /// the fan aligns with how it was drawn).
     VanishingPoint { c: [f32; 2], rays: u16, angle0: f32 },
+    /// CSP "Special ruler ▸ Radial line" (集中線 — the focus-line ruler):
+    /// every stroke runs along the line through `c` and the point the pen
+    /// started at. A CONTINUUM, which is the whole difference from
+    /// [`Ruler::VanishingPoint`]: there is no ray count, so no angle is
+    /// unreachable and speed lines never comb into N directions. Like the
+    /// perspective sets it declines `snap_pt` and is served by
+    /// [`Rulers::snap_sticky`], which binds the member at the first sample.
+    Radial { c: [f32; 2] },
     /// RL-014 special ruler: every stroke comes out PARALLEL to `a`→`b`.
     /// Not a discrete line set — the snap keeps the component along the
     /// direction and drops the perpendicular offset, i.e. it projects onto
     /// the member of the parallel family nearest to the pen.
     Parallel { a: [f32; 2], b: [f32; 2] },
-    /// RL-019 special ruler: concentric rings around `c` at `k · dr`,
-    /// k = 0, 1, … The snap quantizes the pen's radius to the nearest
-    /// ring. (Ellipse W/H ratio is `C-055`, deferred.)
+    /// RL-019 special ruler: concentric rings around `c`. `dr` is the ring
+    /// spacing and it is OPTIONAL — `dr <= 0` means FREE radius, CSP's own
+    /// concentric circle ruler: the stroke keeps whatever radius it started
+    /// at instead of being quantized onto `k · dr`. A positive `dr` keeps
+    /// the ring ladder (evenly spaced rings are ours, not CSP's, and are
+    /// worth keeping for panel furniture). The free form is a continuum, so
+    /// it too is served by [`Rulers::snap_sticky`] alone.
+    /// (Ellipse W/H ratio is `C-055`, deferred.)
     Concentric { c: [f32; 2], dr: f32 },
     /// RL-020: an axis-aligned guide line. Snaps the one coordinate; kept
     /// as its own kind (not a degenerate `Line`) for rendering.
@@ -104,19 +117,15 @@ impl Ruler {
                 let q = project(p, a, [b[0] - a[0], b[1] - a[1]]);
                 (q, d2(q, p))
             }
+            // Free radius (`dr <= 0`) is a continuum — every point is on
+            // some ring, so distance cannot arbitrate and `snap_sticky`
+            // takes it instead (as with the perspective sets).
             Ruler::Concentric { c, dr } => {
                 if dr <= f32::EPSILON {
                     return (p, f32::INFINITY);
                 }
-                let v = [p[0] - c[0], p[1] - c[1]];
-                let r = (v[0] * v[0] + v[1] * v[1]).sqrt();
-                let k = ((r / dr).round() as u32).max(0) as f32;
-                let rt = k * dr;
-                if r <= f32::EPSILON {
-                    return (c, rt * rt);
-                }
-                let s = rt / r;
-                let q = [c[0] + v[0] * s, c[1] + v[1] * s];
+                let r = d2(p, c).sqrt();
+                let q = on_ring(p, c, (r / dr).round() * dr);
                 (q, d2(q, p))
             }
             Ruler::Guide { horizontal, pos } => {
@@ -124,9 +133,10 @@ impl Ruler {
                 (q, d2(q, p))
             }
             Ruler::Symmetric { .. } => (p, f32::INFINITY),
-            Ruler::Perspective { .. } | Ruler::Perspective1 { .. } | Ruler::Perspective3 { .. } => {
-                (p, f32::INFINITY)
-            }
+            Ruler::Radial { .. }
+            | Ruler::Perspective { .. }
+            | Ruler::Perspective1 { .. }
+            | Ruler::Perspective3 { .. } => (p, f32::INFINITY),
         }
     }
 }
@@ -252,6 +262,7 @@ impl Ruler {
                 (z, AnchorRole::VerticalVp),
             ],
             Ruler::VanishingPoint { c, .. }
+            | Ruler::Radial { c }
             | Ruler::Concentric { c, .. }
             | Ruler::Symmetric { c, .. } => vec![(c, AnchorRole::Center)],
             Ruler::Guide { .. } => Vec::new(),
@@ -299,6 +310,7 @@ impl Ruler {
                 _ => {}
             },
             Ruler::VanishingPoint { c, .. }
+            | Ruler::Radial { c }
             | Ruler::Concentric { c, .. }
             | Ruler::Symmetric { c, .. } => {
                 if i == 0 {
@@ -338,7 +350,9 @@ impl Ruler {
                 p(a);
                 p(b);
             }
-            Ruler::VanishingPoint { c, .. } | Ruler::Symmetric { c, .. } => p(c),
+            Ruler::VanishingPoint { c, .. } | Ruler::Radial { c } | Ruler::Symmetric { c, .. } => {
+                p(c)
+            }
             Ruler::Concentric { c, dr } => {
                 p(c);
                 *dr *= s;
@@ -385,6 +399,12 @@ impl Ruler {
                 let q = project(p, vp, [h[0] - vp[0], h[1] - vp[1]]);
                 d2(q, p)
             }
+            // The two CENTRE continuums are grabbed by their centre. Their
+            // drawn geometry — a full ray fan, every ring — covers the
+            // page, so a body grab on it would swallow every press, the
+            // same reason a perspective set is grabbed by its eye level.
+            Ruler::Radial { c } => d2(c, p),
+            Ruler::Concentric { c, dr } if dr <= f32::EPSILON => d2(c, p),
             _ => self.snap_pt(p).1,
         }
     }
@@ -415,6 +435,16 @@ impl Ruler {
             self,
             Ruler::Perspective { .. } | Ruler::Perspective1 { .. } | Ruler::Perspective3 { .. }
         )
+    }
+
+    /// Is this a LINE continuum — a ruler whose members are lines and
+    /// cover the plane, so distance cannot arbitrate and the stroke's
+    /// first samples must bind one member? The perspective sets plus the
+    /// radial line ruler (a one-family set: the ray through the centre).
+    /// The free-radius [`Ruler::Concentric`] is a continuum too, but its
+    /// members are circles, so it binds a radius instead of a line.
+    fn is_line_continuum(&self) -> bool {
+        self.is_perspective() || matches!(self, Ruler::Radial { .. })
     }
 
     /// The candidate families at anchor `p0`, each a member line
@@ -461,6 +491,10 @@ impl Ruler {
                 .flatten()
                 .chain([(p0, perp(eye(a, b)))])
                 .collect(),
+            // The radial line ruler: ONE family, the ray through the
+            // centre and the anchor. No fan count, no quantization — the
+            // angle the pen started at is the angle it draws.
+            Ruler::Radial { c } => ray(c, p0).into_iter().collect(),
             // 3-pt: three fans and nothing else.
             Ruler::Perspective3 { a, b, z } => {
                 let fams: Vec<_> = [ray(a, p0), ray(b, p0), ray(z, p0)]
@@ -490,7 +524,12 @@ impl Ruler {
                 line = Some((o, d));
             }
         }
-        line
+        // A continuum with no family at the anchor — the radial ruler's
+        // own centre, where every ray passes through and none has a
+        // direction — takes the stroke's own heading: the ray it is
+        // already travelling down IS the member it wants. (A perspective
+        // set always has families, so only the radial ruler lands here.)
+        line.or(Some((p0, nd)))
     }
 }
 
@@ -503,6 +542,17 @@ fn project(p: [f32; 2], o: [f32; 2], d: [f32; 2]) -> [f32; 2] {
     }
     let t = ((p[0] - o[0]) * d[0] + (p[1] - o[1]) * d[1]) / dd;
     [o[0] + t * d[0], o[1] + t * d[1]]
+}
+
+/// Push `p` onto the circle (centre `c`, radius `r`). A point sitting ON
+/// the centre has no direction to push along, so it stays there.
+fn on_ring(p: [f32; 2], c: [f32; 2], r: f32) -> [f32; 2] {
+    let v = [p[0] - c[0], p[1] - c[1]];
+    let n = (v[0] * v[0] + v[1] * v[1]).sqrt();
+    if n <= f32::EPSILON {
+        return c;
+    }
+    [c[0] + v[0] / n * r, c[1] + v[1] / n * r]
 }
 
 fn d2(a: [f32; 2], b: [f32; 2]) -> f32 {
@@ -1246,6 +1296,10 @@ pub struct SnapLock {
     pub anchor: Option<[f32; 2]>,
     /// The bound perspective member: `(point on line, direction)`.
     pub line: Option<([f32; 2], [f32; 2])>,
+    /// The bound FREE-radius concentric ring: `(centre, radius)`. Fixed at
+    /// the stroke's first sample — one stroke draws one circle, which is
+    /// what a ring ruler is for.
+    pub circle: Option<([f32; 2], f32)>,
 }
 
 /// A perspective set only claims a stroke when the pen is NOT on a
@@ -1274,6 +1328,10 @@ impl Rulers {
         // A bound perspective line holds for the whole stroke.
         if let Some((o, d)) = lock.line {
             return project(p, o, d);
+        }
+        // As does a bound free ring.
+        if let Some((c, r)) = lock.circle {
+            return on_ring(p, c, r);
         }
         // Already locked to a discrete ruler: snap only against it, with
         // a generous re-across threshold (the pen may wander far; the
@@ -1304,11 +1362,11 @@ impl Rulers {
                 best_k = Some(self.items.len() + j);
             }
         }
-        // The perspective claim.
+        // The line-continuum claim (perspective sets and the radial ruler).
         let persp = self
             .items
             .iter()
-            .position(|r| r.is_perspective() && self.governed(r));
+            .position(|r| r.is_line_continuum() && self.governed(r));
         if let Some(pi) = persp {
             if best_d2 > PERSP_CAPTURE_D2 {
                 let Some(p0) = lock.anchor else {
@@ -1326,11 +1384,30 @@ impl Rulers {
                 // is the set's own business (1-pt adds the eye-level
                 // parallels, 3-pt drops the verticals for a third fan).
                 let Some(line) = self.items[pi].persp_bind(p0, nd) else {
-                    return p; // unreachable: a perspective set always has families
+                    return p; // unreachable: `persp_bind` falls back to `nd`
                 };
                 lock.ruler = Some(pi);
                 lock.line = Some(line);
                 return project(p, line.0, line.1);
+            }
+        }
+        // The free-radius ring claim: same continuum rule, but the member
+        // is fixed by the first sample's RADIUS, so no travel direction is
+        // needed. A pen starting exactly on the centre has no radius yet —
+        // wait rather than lock the stroke to a point.
+        let free_ring = self.items.iter().enumerate().find_map(|(i, r)| match *r {
+            Ruler::Concentric { c, dr } if dr <= f32::EPSILON && self.governed(r) => Some((i, c)),
+            _ => None,
+        });
+        if let Some((ci, c)) = free_ring {
+            if best_d2 > PERSP_CAPTURE_D2 {
+                let radius = d2(p, c).sqrt();
+                if radius <= PERSP_MIN_TRAVEL {
+                    return p;
+                }
+                lock.ruler = Some(ci);
+                lock.circle = Some((c, radius));
+                return p;
             }
         }
         lock.ruler = best_k;
@@ -2172,5 +2249,182 @@ mod part3_tests {
         assert_eq!(AnchorRole::Vp(2).tag(), "VP2");
         assert_eq!(AnchorRole::VerticalVp.tag(), "VP3");
         assert_eq!(AnchorRole::Horizon.tag(), "eye level");
+    }
+}
+
+/// The CONTINUUM special rulers: the radial line ruler (CSP "Special
+/// ruler ▸ Radial line", 集中線) and the free-radius concentric ruler.
+/// Both cover the plane with members, so both are served by
+/// [`Rulers::snap_sticky`] binding one member per stroke — the tests
+/// below are about that binding holding, and about the quantized
+/// siblings still quantizing.
+#[cfg(test)]
+mod continuum_ruler_tests {
+    use super::*;
+
+    fn rulers(items: Vec<Ruler>) -> Rulers {
+        let mut r = Rulers {
+            items,
+            attach: Vec::new(),
+            curves: Vec::new(),
+            on: true,
+            special_on: true,
+        };
+        r.fix_len();
+        r
+    }
+
+    /// One stroke through the sticky pipeline (a fresh lock per stroke, as
+    /// `begin_stroke` gives it).
+    fn stroke(rs: &Rulers, pts: &[[f32; 2]]) -> Vec<[f32; 2]> {
+        let mut lock = SnapLock::default();
+        pts.iter().map(|p| rs.snap_sticky(*p, &mut lock)).collect()
+    }
+
+    /// The radial ruler is CONTINUOUS: a stroke started at an angle no fan
+    /// could reach keeps that exact angle, and every later sample lands
+    /// back on the same ray however far the pen wanders across it.
+    #[test]
+    fn radial_holds_the_exact_ray_the_stroke_started_on() {
+        let c = [300.0, 200.0];
+        let rs = rulers(vec![Ruler::Radial { c }]);
+        // 7° off the x axis — between the rays of any 12- or 24-ray fan.
+        let ang = 7.0f32.to_radians();
+        let at = |r: f32| [c[0] + ang.cos() * r, c[1] + ang.sin() * r];
+        let mut pts = vec![at(60.0)];
+        for i in 1..20 {
+            let base = at(60.0 + i as f32 * 15.0);
+            let wob = if i % 2 == 0 { 20.0 } else { -20.0 };
+            pts.push([base[0] - ang.sin() * wob, base[1] + ang.cos() * wob]);
+        }
+        let out = stroke(&rs, &pts);
+        for (i, q) in out.iter().enumerate() {
+            // Cross product with the ray's direction: zero ON the ray.
+            let cross = (q[0] - c[0]) * ang.sin() - (q[1] - c[1]) * ang.cos();
+            assert!(cross.abs() < 0.01, "sample {i} at {q:?} is off the ray");
+        }
+        assert!(
+            out.last().unwrap()[0] > out[0][0] + 200.0,
+            "the stroke still travelled outward along the ray"
+        );
+    }
+
+    /// The discrete fan, by contrast, combs a 7° line onto its 0° ray —
+    /// which is the friction: focus lines that cannot point where the pen
+    /// pointed. The radial ruler leaves the angle alone.
+    #[test]
+    fn vanishing_point_quantizes_where_radial_does_not() {
+        let c = [300.0, 200.0];
+        let ang = 7.0f32.to_radians();
+        let p = [c[0] + ang.cos() * 200.0, c[1] + ang.sin() * 200.0];
+        let fan = Ruler::VanishingPoint {
+            c,
+            rays: 12,
+            angle0: 0.0,
+        };
+        let q = fan.snap_pt(p).0;
+        let combed = (q[1] - c[1]).atan2(q[0] - c[0]).to_degrees();
+        assert!(combed.abs() < 0.01, "the fan pulled 7° onto 0°, got {combed}");
+
+        let rs = rulers(vec![Ruler::Radial { c }]);
+        // Second sample: further out AND pushed 50 px off the ray.
+        let far = [c[0] + ang.cos() * 400.0 + 50.0, c[1] + ang.sin() * 400.0 - 50.0];
+        let out = stroke(&rs, &[p, far]);
+        let kept = (out[1][1] - c[1]).atan2(out[1][0] - c[0]).to_degrees();
+        assert!((kept - 7.0).abs() < 0.01, "radial kept {kept}°, not 7°");
+    }
+
+    /// A radial ruler is grabbed by its CENTRE: its rays cover the page,
+    /// so a body grab on them would make every press a ruler grab.
+    #[test]
+    fn radial_grabs_and_moves_by_its_centre() {
+        let r = Ruler::Radial { c: [300.0, 200.0] };
+        assert_eq!(
+            r.grab_near([304.0, 197.0], 10.0),
+            Some(RulerGrab::Anchor(0))
+        );
+        assert_eq!(
+            r.grab_near([600.0, 200.0], 10.0),
+            None,
+            "squarely on a ray, far from the centre: nothing"
+        );
+        assert_eq!(r.anchor_roles(), vec![AnchorRole::Center]);
+        let mut m = r;
+        m.translate([10.0, -5.0]);
+        assert_eq!(m, Ruler::Radial { c: [310.0, 195.0] });
+    }
+
+    /// A stroke that STARTS on the centre has no ray yet — it takes the
+    /// one it is heading down rather than going unsnapped.
+    #[test]
+    fn radial_from_the_centre_takes_the_strokes_own_heading() {
+        let c = [300.0, 200.0];
+        let rs = rulers(vec![Ruler::Radial { c }]);
+        let out = stroke(&rs, &[c, [340.0, 230.0], [400.0, 240.0]]);
+        // Heading 3:4 from the centre; the third sample must land on it.
+        let cross = (out[2][0] - c[0]) * 0.6 - (out[2][1] - c[1]) * 0.8;
+        assert!(cross.abs() < 0.01, "sample 2 at {:?} is off the ray", out[2]);
+    }
+
+    /// `dr <= 0` = FREE radius (CSP's own concentric circle ruler): the
+    /// stroke keeps the radius it started at — 137.5 px is on no ring
+    /// ladder — instead of being quantized onto `k · dr`.
+    #[test]
+    fn free_radius_concentric_keeps_the_radius_the_stroke_started_on() {
+        let c = [200.0, 200.0];
+        let rs = rulers(vec![Ruler::Concentric { c, dr: 0.0 }]);
+        let at = |a: f32, r: f32| [c[0] + a.cos() * r, c[1] + a.sin() * r];
+        let r0 = 137.5;
+        // Start on r0, then sweep an arc while drifting the radius out.
+        let pts: Vec<[f32; 2]> = (0..24)
+            .map(|i| at(i as f32 * 0.1, r0 + i as f32 * 2.0))
+            .collect();
+        for (i, q) in stroke(&rs, &pts).iter().enumerate() {
+            let r = d2(*q, c).sqrt();
+            assert!((r - r0).abs() < 0.02, "sample {i} came back at r = {r}");
+        }
+        // The lock is per STROKE: the next one picks its own radius.
+        let out = stroke(&rs, &[at(0.0, 60.0), at(0.5, 300.0)]);
+        assert!((d2(out[1], c).sqrt() - 60.0).abs() < 0.02);
+    }
+
+    /// A positive `dr` still quantizes: the free radius is an option, not
+    /// a replacement — part 3's ring ladder is untouched.
+    #[test]
+    fn positive_dr_still_quantizes_the_radius() {
+        let c = [200.0, 200.0];
+        let rs = rulers(vec![Ruler::Concentric { c, dr: 100.0 }]);
+        assert_eq!(rs.snap([c[0] + 137.5, c[1]]), [300.0, 200.0]);
+        assert_eq!(rs.snap([c[0] + 162.5, c[1]]), [400.0, 200.0]);
+    }
+
+    /// Both new continuums answer to the RL-031 special switch, like the
+    /// rest of the special family.
+    #[test]
+    fn the_special_veto_covers_radial_and_free_rings() {
+        let c = [200.0, 200.0];
+        let mut rs = rulers(vec![Ruler::Radial { c }, Ruler::Concentric { c, dr: 0.0 }]);
+        rs.special_on = false;
+        let off = [400.0, 260.0];
+        assert_eq!(
+            stroke(&rs, &[[300.0, 200.0], off])[1],
+            off,
+            "special rulers vetoed: the pen goes where it was driven"
+        );
+    }
+
+    /// Round-trip: a new kind survives `mnc/rulers.json` (and an old file
+    /// that never heard of it still loads).
+    #[test]
+    fn radial_and_free_rings_round_trip_through_json() {
+        let rs = rulers(vec![
+            Ruler::Radial { c: [12.0, 34.0] },
+            Ruler::Concentric {
+                c: [5.0, 6.0],
+                dr: 0.0,
+            },
+        ]);
+        let back = Rulers::from_json(&rs.to_json());
+        assert_eq!(back.items, rs.items);
     }
 }
