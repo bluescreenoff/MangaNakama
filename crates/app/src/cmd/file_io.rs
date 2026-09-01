@@ -411,11 +411,16 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                 visible: true,
                 ..app.doc.paper
             }));
-            let img = app.renderer.render_offscreen(&app.doc, w, h);
+            // Export rules, not screen rules: the 下書き stays behind. Same
+            // renderer the folder export, the previews, the reader and
+            // print all use — without it the artist's rough shipped inside
+            // the PNG, with the margin stamp printed on top of it.
+            let img =
+                crate::app::pages::render_offscreen_drafts_off(&mut app.renderer, &mut app.doc, w, h);
             app.renderer.set_paper_override(None);
             // The margin stamp rides this door too: the active page, full
-            // paper, work pixels, no colour reduction — this door has
-            // never had a finish.
+            // paper, work pixels, no colour reduction — this door still has
+            // no dpi, no colour reduction and no crop.
             let mut img = img;
             if app.print_margin_info {
                 crate::app::export_stamp::stamp_margin_info(

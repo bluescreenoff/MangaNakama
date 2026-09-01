@@ -49,7 +49,9 @@ pub mod materials;
 mod page_files;
 mod page_import;
 mod page_resize;
-mod pages;
+// `pub(crate)` for `render_offscreen_drafts_off`: the export commands live
+// in `crate::cmd` and must render by export rules, not screen rules.
+pub(crate) mod pages;
 pub mod pattern;
 /// Workflow audit §11: the ネーム promotion path — "New work from this
 /// work at a different dpi" and the stamp back onto the manuscript.

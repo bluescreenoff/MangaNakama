@@ -897,7 +897,7 @@ impl App {
 /// the rebuilds, and it is presentation-only (no revision bump, no undo
 /// traffic). Free function so callers can split-borrow renderer/doc out
 /// of `App`.
-pub(super) fn render_offscreen_drafts_off(
+pub(crate) fn render_offscreen_drafts_off(
     renderer: &mut mn_gpu::Renderer,
     doc: &mut Document,
     w: u32,

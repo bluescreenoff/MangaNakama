@@ -730,3 +730,42 @@ fn a_mono_export_thresholds_the_stamp_like_ink() {
     assert!(blacks > 0, "ink and stamp both survived the threshold");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+// --- Export PNG (this page) exports a FINISHED page (friction 3) --------
+
+/// The single-page PNG door is an export door, not a screenshot door: a
+/// 下書き layer is excluded from it exactly as the folder export excludes
+/// it. Before this, the handler rendered the on-screen composite and the
+/// artist's blue rough shipped inside the PNG (and under the margin
+/// stamp).
+#[test]
+fn single_page_export_png_leaves_the_drafts_out() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (64, 64), 1.0);
+    let li = app.doc.add_layer("rough");
+    assert!(app.doc.set_layer_draft(li, true), "the layer is a draft");
+    let tile = app.doc.layers[li].tile_mut(mn_core::TileIdx::new(0, 0));
+    for y in 0..64 {
+        for x in 0..64 {
+            tile.set_pixel(x, y, [mn_core::FIX15_ONE as u16, 0, 0, mn_core::FIX15_ONE as u16]);
+        }
+    }
+    let dir = std::env::temp_dir().join(format!("mn-draft-png-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let one = dir.join("one.png");
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::ExportPngPath(one.clone()));
+    let img = decoded_png(&one);
+    let rough = img
+        .enumerate_pixels()
+        .filter(|(_, _, p)| p.0[0] > 128 && p.0[1] < 128)
+        .count();
+    assert_eq!(rough, 0, "no draft red anywhere in the exported page");
+    assert!(
+        app.doc.layers[li].visible,
+        "and the document still shows the draft on screen"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

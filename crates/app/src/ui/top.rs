@@ -150,7 +150,18 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 app.push_cmd(AppCmd::ImportAbr);
                 ui.close();
             }
-            if item(ui, "Export PNG (this page)…", "") {
+            // The quick-look door. It follows export rules for drafts (the
+            // 下書き stays behind) but has no crop, no dpi and no colour
+            // reduction — say so rather than let the name imply a finish.
+            if ui
+                .add(egui::Button::new("Export PNG (this page)…"))
+                .on_hover_text(
+                    "Whole paper at work pixels, drafts excluded. No crop, no\n\
+                     dpi and no colour reduction — Export All Pages… is the\n\
+                     door with the finish settings.",
+                )
+                .clicked()
+            {
                 app.push_cmd(AppCmd::ExportPng);
                 ui.close();
             }
