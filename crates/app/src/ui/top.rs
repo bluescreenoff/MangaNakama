@@ -1197,11 +1197,12 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
             // the Tab hides below it.
             let mut guides = !app.layout.guides_hidden;
             if ui
-                .checkbox(&mut guides, "Crop marks and margins")
+                .checkbox(&mut guides, "Trim, bleed and margin guides")
                 .on_hover_text(
                     "Bleed, trim, inner border and safety margins. Hiding them\n\
                      changes nothing on the page — panels still snap to them,\n\
-                     and they were never exported.",
+                     and they never export. Printed トンボ are a different\n\
+                     thing and live in File ▸ Work settings ▸ Crop marks.",
                 )
                 .changed()
             {

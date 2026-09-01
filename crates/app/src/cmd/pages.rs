@@ -473,6 +473,7 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                 binding_right: app.binding_right,
                 story: app.story.clone(),
                 print_margin_info: app.print_margin_info,
+                print_crop_marks: app.print_crop_marks,
                 expression: app.expression,
                 spine_mm: app.spine_mm,
                 cover: app.cover,
@@ -486,6 +487,7 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
             app.story = d.story;
             app.binding_right = d.binding_right;
             app.print_margin_info = d.print_margin_info;
+            app.print_crop_marks = d.print_crop_marks;
             app.expression = d.expression;
             app.spine_mm = d.spine_mm;
             app.cover = d.cover;
@@ -721,10 +723,12 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                 // the closure so the loop below can keep `&mut app.renderer`
                 // — the closure captures these, not `&app`.
                 let stamp_on = app.print_margin_info;
+                let marks_on = app.print_crop_marks;
                 let stamp_engine = app.text_engine.as_ref();
                 let stamp_font = app.text_font.clone();
                 let stamp_story = app.story.clone();
                 let finish = |img: image::RgbaImage, number: &str| -> image::RgbaImage {
+                    let in_px = (img.width(), img.height());
                     let full = [0, 0, img.width(), img.height()];
                     let r = match &setup {
                         Some(s) => {
@@ -755,6 +759,16 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                             colour,
                             number,
                         );
+                    }
+                    // トンボ, placed through the SAME geometry the finish
+                    // applied — a crop that ate the margin leaves the
+                    // marks with nowhere to go and draws none.
+                    if marks_on {
+                        let (out_px, eff, applied) =
+                            mn_core::export::finish_geometry(in_px, r, scale, px_h);
+                        let marks =
+                            mn_core::export::crop_marks(setup.as_ref(), applied, eff, out_px);
+                        mn_core::export::apply_crop_marks(&mut out, &marks);
                     }
                     out
                 };

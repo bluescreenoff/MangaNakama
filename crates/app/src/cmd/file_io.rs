@@ -87,6 +87,7 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                                     cover,
                                     template_page,
                                     print_margin_info,
+                                    print_crop_marks,
                                     profile,
                                     next_id,
                                     pages,
@@ -106,6 +107,7 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                                 app.cover = cover;
                                 app.template_page = template_page;
                                 app.print_margin_info = print_margin_info;
+                                app.print_crop_marks = print_crop_marks;
                                 app.profile = profile;
                                 app.pages = pages
                                     .into_iter()
@@ -179,6 +181,7 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                                 app.cover = proj.meta.cover;
                                 app.template_page = proj.meta.template_page;
                                 app.print_margin_info = proj.meta.print_margin_info;
+                                app.print_crop_marks = proj.meta.print_crop_marks;
                                 app.profile = proj.meta.profile.clone();
                                 app.pages = proj
                                     .pages
@@ -272,6 +275,7 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                             proj.meta.cover = app.cover;
                             proj.meta.template_page = app.template_page;
                             proj.meta.print_margin_info = app.print_margin_info;
+                            proj.meta.print_crop_marks = app.print_crop_marks;
                             proj.meta.profile = app.profile.clone();
                             // Workflow audit §11: the pages' stable
                             // identities ride the file, so a work promoted
@@ -348,6 +352,7 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                     proj.meta.cover = app.cover;
                     proj.meta.template_page = app.template_page;
                     proj.meta.print_margin_info = app.print_margin_info;
+                    proj.meta.print_crop_marks = app.print_crop_marks;
                     proj.meta.profile = app.profile.clone();
                     proj.meta.page_uids = app.page_uids();
                     proj.pages = app
@@ -436,6 +441,13 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                     &(app.page_index + 1).to_string(),
                 );
             }
+            // トンボ ride this door too — full paper at scale 1 is exactly
+            // the geometry the marks want.
+            if app.print_crop_marks {
+                let marks =
+                    mn_core::export::crop_marks(app.page.as_ref(), [0, 0, w, h], 1.0, (w, h));
+                mn_core::export::apply_crop_marks(&mut img, &marks);
+            }
             match img.save(&p) {
                 Ok(()) => {
                     app.set_status(format!("exported {w}x{h} PNG -> {}", p.display()));
@@ -496,6 +508,7 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                         proj.meta.cover = app.cover;
                         proj.meta.template_page = app.template_page;
                         proj.meta.print_margin_info = app.print_margin_info;
+                        proj.meta.print_crop_marks = app.print_crop_marks;
                         proj.meta.profile = app.profile.clone();
                         proj.meta.page_uids = app.page_uids();
                         proj.pages = app

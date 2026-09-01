@@ -50,6 +50,7 @@ impl App {
             cover: self.cover,
             template_page: self.template_page,
             print_margin_info: self.print_margin_info,
+            print_crop_marks: self.print_crop_marks,
             profile: self.profile.clone(),
             next_id: self.folder_next_id,
             pages: self
@@ -125,6 +126,7 @@ impl App {
             cover: self.cover,
             template_page: self.template_page,
             print_margin_info: self.print_margin_info,
+            print_crop_marks: self.print_crop_marks,
             profile: self.profile.clone(),
             next_id: self.folder_next_id,
             pages: self

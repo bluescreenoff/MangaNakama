@@ -1373,6 +1373,140 @@ pub fn margin_stamp_layout(
 /// reduction over the stamped pixels so a mono finish thresholds the stamp
 /// exactly like page ink (the reduction is per-pixel, so doing it here is
 /// the same math as stamping before the finish's reduce pass).
+/// Length of one トンボ arm, mm at the OUTPUT dpi. 10 mm is the length a
+/// JP printer's own template draws; shorter reads as a scratch.
+pub const CROP_MARK_LEN_MM: f32 = 10.0;
+/// Line weight of a mark, mm. Hairline, never thinner than a pixel.
+pub const CROP_MARK_WEIGHT_MM: f32 = 0.2;
+/// Below this much margin outside the bleed, no marks at all.
+pub const CROP_MARK_MIN_LEN_MM: f32 = 2.0;
+/// The bleed a work with none set still gets marked at — the marks are
+/// what tells the printer where the bleed is, so they cannot say "zero".
+pub const CROP_MARK_FALLBACK_BLEED_MM: f32 = 3.0;
+
+/// The トンボ (register marks) for a finished export: black rectangles in
+/// OUTPUT pixels, `[x0, y0, x1, y1]`, clipped to the image.
+///
+/// Standard JP layout — 角トンボ at the four corners (a double L: the
+/// inner line is the TRIM, the outer line the BLEED, `bleed_mm` apart)
+/// and センタートンボ, a cross, at the middle of each side. Every mark
+/// lies OUTSIDE the bleed rect, which is where a printer expects them and
+/// the only place they cannot eat artwork.
+///
+/// Returns EMPTY when there is no room for them: no page setup, a pixel
+/// canvas (`dpi == 0`), a degenerate trim, or a crop tighter than the
+/// paper (`ExportCrop::TrimBleed`/`Trim` cut the margin the marks live
+/// in). An empty result is the honest answer, not a failure — a file
+/// already cropped to the bleed has nothing left to mark.
+pub fn crop_marks(
+    setup: Option<&crate::page::PageSetup>,
+    crop: [u32; 4],
+    eff_scale: f32,
+    out_px: (u32, u32),
+) -> Vec<[u32; 4]> {
+    let mut out: Vec<[u32; 4]> = Vec::new();
+    let Some(s) = setup.filter(|s| s.dpi > 0) else {
+        return out;
+    };
+    let trim = s.trim_rect_px();
+    if !(trim[2] > trim[0] && trim[3] > trim[1]) {
+        return out;
+    }
+    let out_dpi = s.dpi as f32 * eff_scale;
+    let mm = |v: f32| (v / 25.4 * out_dpi).max(1.0);
+    let bleed = mm(if s.bleed_mm > 0.0 {
+        s.bleed_mm
+    } else {
+        CROP_MARK_FALLBACK_BLEED_MM
+    })
+    .round() as i64;
+    let wt = (mm(CROP_MARK_WEIGHT_MM).round() as i64).max(1);
+    // Work px → output px: the same mapping the margin stamp uses.
+    let px = |v: f32, origin: u32| ((v - origin as f32) * eff_scale).round() as i64;
+    let (x0, y0) = (px(trim[0], crop[0]), px(trim[1], crop[1]));
+    let (x1, y1) = (px(trim[2], crop[0]), px(trim[3], crop[1]));
+    let (ow, oh) = (out_px.0 as i64, out_px.1 as i64);
+    // The arm is 10 mm where the margin allows it and the margin where it
+    // does not — a paper only a little bigger than the bleed still gets
+    // marks, just shorter ones. Under 2 mm of room there is no mark worth
+    // drawing, and a stub in the corner reads as dirt on the plate.
+    let room = [x0 - bleed, y0 - bleed, ow - x1 - bleed, oh - y1 - bleed]
+        .into_iter()
+        .min()
+        .unwrap_or(0);
+    if room < mm(CROP_MARK_MIN_LEN_MM).round() as i64 {
+        return out;
+    }
+    let len = (mm(CROP_MARK_LEN_MM).round() as i64).max(2).min(room);
+    // One line, thickness centred on the coordinate, clipped away rather
+    // than clamped: a mark half off the edge is a smear, not a mark.
+    let mut line = |a: i64, b: i64, c: i64, d: i64| {
+        let (a, b) = (a.min(b), a.max(b));
+        let (c, d) = (c.min(d), c.max(d));
+        if a >= 0 && c >= 0 && b <= ow && d <= oh && b > a && d > c {
+            out.push([a as u32, c as u32, b as u32, d as u32]);
+        }
+    };
+    // 角トンボ. `sx`/`sy` point AWAY from the page, so one arm block
+    // serves all four corners.
+    for (cx, cy, sx, sy) in [
+        (x0, y0, -1i64, -1i64),
+        (x1, y0, 1, -1),
+        (x0, y1, -1, 1),
+        (x1, y1, 1, 1),
+    ] {
+        // Horizontal pair, lying beyond the vertical bleed edge.
+        let (ha, hb) = (cx + sx * bleed, cx + sx * (bleed + len));
+        for y in [cy, cy + sy * bleed] {
+            line(ha, hb, y - wt / 2, y - wt / 2 + wt);
+        }
+        // Vertical pair, standing beyond the horizontal bleed edge.
+        let (va, vb) = (cy + sy * bleed, cy + sy * (bleed + len));
+        for x in [cx, cx + sx * bleed] {
+            line(x - wt / 2, x - wt / 2 + wt, va, vb);
+        }
+    }
+    // センタートンボ: a cross on each side, its long arm on the page's
+    // centre line, its short arm crossing at the arm's middle.
+    let (mx, my) = ((x0 + x1) / 2, (y0 + y1) / 2);
+    for (cx, cy, dx, dy) in [
+        (mx, y0, 0i64, -1i64),
+        (mx, y1, 0, 1),
+        (x0, my, -1, 0),
+        (x1, my, 1, 0),
+    ] {
+        let (a0, a1) = (bleed, bleed + len);
+        let mid = (a0 + a1) / 2;
+        // Long arm, out along the normal; short arm across it.
+        line(
+            cx + dx * a0 - if dx == 0 { wt / 2 } else { 0 },
+            cx + dx * a1 + if dx == 0 { wt - wt / 2 } else { 0 },
+            cy + dy * a0 - if dy == 0 { wt / 2 } else { 0 },
+            cy + dy * a1 + if dy == 0 { wt - wt / 2 } else { 0 },
+        );
+        line(
+            cx + dx * mid - if dx == 0 { len / 2 } else { wt / 2 },
+            cx + dx * mid + if dx == 0 { len / 2 } else { wt - wt / 2 },
+            cy + dy * mid - if dy == 0 { len / 2 } else { wt / 2 },
+            cy + dy * mid + if dy == 0 { len / 2 } else { wt - wt / 2 },
+        );
+    }
+    out
+}
+
+/// Paint [`crop_marks`] into a finished export image: flat black, opaque,
+/// no anti-aliasing — a register mark is a cut instruction, and a grey
+/// edge on it is a mono export's problem waiting to happen.
+pub fn apply_crop_marks(img: &mut image::RgbaImage, marks: &[[u32; 4]]) {
+    for &[x0, y0, x1, y1] in marks {
+        for y in y0..y1.min(img.height()) {
+            for x in x0..x1.min(img.width()) {
+                img.get_pixel_mut(x, y).0 = [0, 0, 0, 255];
+            }
+        }
+    }
+}
+
 pub fn apply_margin_stamp(
     img: &mut image::RgbaImage,
     layout: &MarginStampLayout,
@@ -2763,5 +2897,67 @@ mod crop_tests {
             crate::doc::LayerExpression::Colour,
         );
         assert_eq!(img.get_pixel(1, 1).0, [127, 127, 127, 255]);
+    }
+
+    // --- トンボ (register marks) ---
+
+    /// The marks land in the PAPER margin: outside the bleed rect, inside
+    /// the image, never over the artwork. And they say where both edges
+    /// are — the corner arms come in pairs one `bleed_mm` apart.
+    #[test]
+    fn crop_marks_sit_outside_the_bleed_and_mark_both_edges() {
+        let s = b4_setup();
+        let (w, h) = s.paper_px();
+        let marks = crop_marks(Some(&s), [0, 0, w, h], 1.0, (w, h));
+        assert!(!marks.is_empty(), "a paper with a margin gets marks");
+        let bleed = s.bleed_rect_px();
+        for m in &marks {
+            assert!(m[2] <= w && m[3] <= h, "inside the image: {m:?}");
+            let outside = (m[2] as f32) <= bleed[0]
+                || (m[0] as f32) >= bleed[2]
+                || (m[3] as f32) <= bleed[1]
+                || (m[1] as f32) >= bleed[3];
+            assert!(outside, "no mark touches the bleed rect: {m:?}");
+        }
+        // The top-left corner's two horizontal arms: one on the trim line,
+        // one `bleed_mm` above it.
+        let trim = s.trim_rect_px();
+        let gap = (s.bleed_mm / 25.4 * s.dpi as f32).round() as i64;
+        let mut tops: Vec<i64> = marks
+            .iter()
+            .filter(|m| (m[0] as f32) < trim[0] && (m[1] as f32) < trim[1] + 1.0)
+            .map(|m| m[1] as i64)
+            .collect();
+        tops.sort_unstable();
+        tops.dedup();
+        assert!(
+            tops.windows(2).any(|p| (p[1] - p[0] - gap).abs() <= 2),
+            "trim line and bleed line one bleed apart, got {tops:?}"
+        );
+    }
+
+    /// No room, no marks — and that is the answer, not a panic or a smear
+    /// over the art. A trim+bleed crop has cut the margin away already.
+    #[test]
+    fn a_crop_with_no_margin_gets_no_crop_marks() {
+        let s = b4_setup();
+        let (w, h) = s.paper_px();
+        let r = crop_rect_px(&s, (w, h), ExportCrop::TrimBleed);
+        let out = (r[2] - r[0], r[3] - r[1]);
+        assert!(crop_marks(Some(&s), r, 1.0, out).is_empty());
+        // Ditto a pixel canvas: no setup, nothing to mark.
+        assert!(crop_marks(None, [0, 0, w, h], 1.0, (w, h)).is_empty());
+    }
+
+    /// The marks are flat black and opaque, so a mono finish cannot turn
+    /// them grey and a printer cannot miss them.
+    #[test]
+    fn apply_crop_marks_paints_flat_black() {
+        let mut img = image::RgbaImage::from_pixel(20, 20, image::Rgba([255, 255, 255, 255]));
+        apply_crop_marks(&mut img, &[[2, 3, 5, 4]]);
+        assert_eq!(img.get_pixel(2, 3).0, [0, 0, 0, 255]);
+        assert_eq!(img.get_pixel(4, 3).0, [0, 0, 0, 255]);
+        assert_eq!(img.get_pixel(5, 3).0, [255, 255, 255, 255], "x1 exclusive");
+        assert_eq!(img.get_pixel(2, 4).0, [255, 255, 255, 255], "y1 exclusive");
     }
 }

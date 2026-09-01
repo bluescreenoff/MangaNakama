@@ -462,6 +462,16 @@ pub(super) fn work_settings_window(ctx: &egui::Context, app: &mut App) {
                     );
                     ui.end_row();
 
+                    ui.label("Crop marks");
+                    ui.checkbox(&mut d.print_crop_marks, "Print トンボ (register marks)")
+                        .on_hover_text(
+                            "Corner marks at the trim and the bleed, plus centre marks —\n\
+                             drawn in the paper margin on export and on print. Needs the\n\
+                             margin: an export cropped to trim (or trim+bleed) has cut the\n\
+                             room away, and gets no marks.",
+                        );
+                    ui.end_row();
+
                     // Print metadata (preflight inputs, TRIAGE 132).
                     ui.label("Expression");
                     ui.horizontal(|ui| {

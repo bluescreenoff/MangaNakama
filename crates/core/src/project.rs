@@ -79,6 +79,11 @@ pub struct ProjectMeta {
     /// before the flag was wired to anything.
     #[serde(default)]
     pub print_margin_info: bool,
+    /// Draw トンボ (register marks) in the paper margin on export
+    /// (Work Settings ▸ crop marks). `false` for every work saved before
+    /// the marks existed.
+    #[serde(default)]
+    pub print_crop_marks: bool,
     /// Page file names inside the zip, reading order.
     pages: Vec<String>,
     /// Stable page identities, reading order, parallel to `pages`
@@ -127,6 +132,7 @@ impl ProjectMeta {
             template_page: None,
             profile: None,
             print_margin_info: false,
+            print_crop_marks: false,
             pages: Vec::new(),
             page_uids: Vec::new(),
         }
@@ -154,6 +160,7 @@ impl Project {
                 template_page: None,
                 profile: None,
                 print_margin_info: false,
+                print_crop_marks: false,
                 pages: Vec::new(),
                 page_uids: Vec::new(),
             },
@@ -349,6 +356,9 @@ pub struct FolderMeta {
     /// Next free page identity; ids are never reused inside a work.
     #[serde(default)]
     pub print_margin_info: bool,
+    /// トンボ on export — see `ProjectMeta::print_crop_marks`.
+    #[serde(default)]
+    pub print_crop_marks: bool,
     pub next_id: u32,
     /// Pages in READING order — the list order is the page order, the file
     /// names are stable identities.
@@ -390,6 +400,8 @@ pub struct WorkFolder {
     /// Print story + page number in the margins — see
     /// `ProjectMeta::print_margin_info`.
     pub print_margin_info: bool,
+    /// トンボ on export — see `ProjectMeta::print_crop_marks`.
+    pub print_crop_marks: bool,
     pub next_id: u32,
     pub pages: Vec<FolderPage>,
 }
@@ -481,6 +493,7 @@ pub fn save_folder(
         cover: wf.cover,
         template_page: wf.template_page,
         print_margin_info: wf.print_margin_info,
+        print_crop_marks: wf.print_crop_marks,
         profile: wf.profile.clone(),
         next_id,
         pages: wf
@@ -595,6 +608,7 @@ pub fn load_folder(path: &Path) -> Result<WorkFolder, OraError> {
         cover: meta.cover,
         template_page: meta.template_page,
         print_margin_info: meta.print_margin_info,
+        print_crop_marks: meta.print_crop_marks,
         profile: meta.profile,
         next_id,
         pages,

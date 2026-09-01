@@ -769,3 +769,45 @@ fn single_page_export_png_leaves_the_drafts_out() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+// --- トンボ on export (friction 12) --------------------------------------
+
+/// With Work Settings ▸ Crop marks on, the export carries register marks
+/// in the paper margin: flat black, and never one pixel inside the trim.
+#[test]
+fn crop_marks_ride_the_export_when_the_work_asks_for_them() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = stamp_work(renderer, "");
+    app.print_margin_info = false;
+    let dir = std::env::temp_dir().join(format!("mn-tombo-{}", std::process::id()));
+    let export = |app: &mut App, dir: &std::path::Path| {
+        let _ = std::fs::remove_dir_all(dir);
+        std::fs::create_dir_all(dir).unwrap();
+        crate::cmd::dispatch(
+            app,
+            crate::cmd::AppCmd::ExportAllPagesPath(dir.to_path_buf()),
+        );
+        decoded_png(&first_png(dir))
+    };
+    let plain = export(&mut app, &dir);
+    app.print_crop_marks = true;
+    let marked = export(&mut app, &dir);
+    let trim = stamp_setup().trim_rect_px();
+    let mut changed = 0;
+    for (x, y, p) in marked.enumerate_pixels() {
+        if p.0 == plain.get_pixel(x, y).0 {
+            continue;
+        }
+        changed += 1;
+        let inside = (x as f32) >= trim[0]
+            && (x as f32) < trim[2]
+            && (y as f32) >= trim[1]
+            && (y as f32) < trim[3];
+        assert!(!inside, "a mark landed on the artwork at {x},{y}");
+        assert_eq!(p.0, [0, 0, 0, 255], "marks are flat black at {x},{y}");
+    }
+    assert!(changed > 0, "the marks reached the file");
+    std::fs::remove_dir_all(&dir).ok();
+}

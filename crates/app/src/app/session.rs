@@ -58,6 +58,7 @@ pub struct DocSession {
     pub expression: mn_core::Expression,
     pub spine_mm: f32,
     pub print_margin_info: bool,
+    pub print_crop_marks: bool,
     pub cover: Option<usize>,
     pub saved_revision: u64,
     pub pages_dirty: bool,
@@ -104,6 +105,7 @@ impl DocSession {
         proj.meta.expression = self.expression;
         proj.meta.spine_mm = self.spine_mm;
         proj.meta.print_margin_info = self.print_margin_info;
+        proj.meta.print_crop_marks = self.print_crop_marks;
         proj.meta.cover = self.cover;
         // Workflow audit §11: a recovered tab must come back with the page
         // identities it had, or a ネーム promoted from it would no longer
@@ -204,6 +206,7 @@ impl App {
             expression: self.expression,
             spine_mm: self.spine_mm,
             print_margin_info: self.print_margin_info,
+            print_crop_marks: self.print_crop_marks,
             cover: self.cover,
             saved_revision: self.saved_revision,
             pages_dirty: self.pages_dirty,
@@ -226,6 +229,7 @@ impl App {
         self.expression = s.expression;
         self.spine_mm = s.spine_mm;
         self.print_margin_info = s.print_margin_info;
+        self.print_crop_marks = s.print_crop_marks;
         self.cover = s.cover;
         self.saved_revision = s.saved_revision;
         self.pages_dirty = s.pages_dirty;

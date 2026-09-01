@@ -716,6 +716,9 @@ pub struct App {
     pub batch_import: BatchImportDraft,
     /// Print story info in page margins (round 14 feature).
     pub print_margin_info: bool,
+    /// Draw トンボ (register marks) in the paper margin on export
+    /// (Work Settings; friction 12).
+    pub print_crop_marks: bool,
     /// The work's expression colour (TRIAGE 132 preflight): Mono = B&W
     /// print; the colour-on-mono predicate keys off it.
     pub expression: mn_core::Expression,
@@ -1799,6 +1802,7 @@ impl App {
             },
             batch_import: BatchImportDraft::default(),
             print_margin_info: false,
+            print_crop_marks: false,
             expression: mn_core::Expression::Mono,
             spine_mm: 0.0,
             cover: None,

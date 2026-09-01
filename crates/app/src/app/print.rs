@@ -17,8 +17,9 @@
 //!
 //! **Deferred, deliberately.** One page per job (the ACTIVE page) — spread
 //! splitting, page ranges and N-up all belong to a print run and are a
-//! separate round; crop marks on the printed sheet likewise (the export
-//! crop knobs exist, the printer does not read them yet). Printing goes
+//! separate round. トンボ DO ride the sheet when Work Settings asks for
+//! them (friction 12) — at scale 1 on the full page, the same marks the
+//! export door draws; the export CROP knobs are still print-blind. Printing goes
 //! through GDI's `StretchDIBits`, so a 600 dpi B4 page is handed to the
 //! driver as one bitmap rather than banded — fine on the desktop drivers
 //! this is for, and the honest fix if it ever OOMs is banding.
@@ -274,12 +275,19 @@ impl App {
         // Scale 1.0: the printer's own scaling happens in `place`, in
         // printer pixels, where it belongs. Comic is the export default and
         // only bites on a mono finish.
-        let img = mn_core::export::finish_image(
+        let mut img = mn_core::export::finish_image(
             img,
             1.0,
             colour,
             mn_core::export::Resample::Comic,
         );
+        // トンボ: the whole page at scale 1, so the marks land in the paper
+        // margin where the printer's blade looks for them.
+        if self.print_crop_marks {
+            let (iw, ih) = (img.width(), img.height());
+            let marks = mn_core::export::crop_marks(self.page.as_ref(), [0, 0, iw, ih], 1.0, (iw, ih));
+            mn_core::export::apply_crop_marks(&mut img, &marks);
+        }
         let stem = if self.story.trim().is_empty() {
             "MangaNakama".to_owned()
         } else {

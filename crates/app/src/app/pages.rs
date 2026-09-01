@@ -211,6 +211,8 @@ pub struct WorkSettingsDraft {
     pub story: String,
     /// Print story title + page number in the margins (outside the trim).
     pub print_margin_info: bool,
+    /// Draw トンボ (register marks) in the paper margin on export.
+    pub print_crop_marks: bool,
     /// Expression colour (preflight), spine width mm, cover page index.
     pub expression: mn_core::Expression,
     pub spine_mm: f32,
@@ -228,6 +230,7 @@ impl Default for WorkSettingsDraft {
             binding_right: true,
             story: String::new(),
             print_margin_info: false,
+            print_crop_marks: false,
             expression: mn_core::Expression::Mono,
             spine_mm: 0.0,
             cover: None,
