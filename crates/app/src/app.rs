@@ -5093,6 +5093,12 @@ mod fill_repair_tests;
 #[cfg(test)]
 mod basics_qa_fill_tests;
 
+/// Mangaka-basics QA (2026-09-02 round), selection + paneling family: the
+/// selection tools, the launcher's own commands, transform, and the frame
+/// folders a comic page is made of — every one judged on an EXPORT render.
+#[cfg(test)]
+mod basics_qa_panels_tests;
+
 /// Workflow audit #4: the batch import — N roughs become N page underlays.
 /// Pins the underlay's placement against a page's White base, the park
 /// staleness a direct byte write must cause, and the open page's single

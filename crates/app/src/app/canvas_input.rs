@@ -789,11 +789,21 @@ impl App {
             }
             Tool::Select => {
                 let (cx, cy) = self.viewport.to_canvas(x, y);
-                let inside = self
-                    .doc
-                    .selection
-                    .as_ref()
-                    .is_some_and(|s| selected(s.coverage(cx as i32, cy as i32)))
+                // A press that is COMBINING (Shift/Alt held, or the Tool
+                // Property's own Add/Subtract/Intersect mode) always draws
+                // a new shape, even from inside the existing ants: adding a
+                // second chunk to a selection is the everyday gesture, and
+                // SE-039's move-the-ants grab used to swallow it whole —
+                // Shift+drag inside a selection MOVED it instead of adding.
+                let m = self.shell.sync_modifiers();
+                let combining = crate::cmd::effective_sel_op(m.shift, m.alt, self.sel_op)
+                    != mn_core::SelectionOp::Replace;
+                let inside = !combining
+                    && self
+                        .doc
+                        .selection
+                        .as_ref()
+                        .is_some_and(|s| selected(s.coverage(cx as i32, cy as i32)))
                     && !self.doc.active_layer().is_vector();
                 if inside {
                     // Dragging from inside the selection moves the ANTS
