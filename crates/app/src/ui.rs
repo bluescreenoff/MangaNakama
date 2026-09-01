@@ -26,7 +26,7 @@ mod color;
 mod dialogs;
 pub mod dock;
 pub(crate) mod launcher;
-mod layers;
+pub(crate) mod layers;
 mod materials;
 mod navigator;
 mod overlay;

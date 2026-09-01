@@ -2458,8 +2458,17 @@ impl App {
                 mid: self.grad_mid,
                 opts: self.grad_opts,
             };
+            // …but only onto a layer that is ALREADY a ramp. CSP's gradient
+            // tool in layer mode makes a NEW gradient layer; it never turns
+            // the layer you are standing on into one, and a tone layer you
+            // tuned an hour ago is exactly the thing you do not want a drag
+            // to overwrite. The stack (a gradient above the tone) is also
+            // the honest picture: two objects, both still editable.
             let li = self.doc.active;
-            if matches!(self.doc.layers[li].kind, mn_core::LayerKind::Fill(_)) {
+            if matches!(
+                self.doc.layers[li].kind,
+                mn_core::LayerKind::Fill(mn_core::FillKind::Gradient { .. })
+            ) {
                 self.push_cmd(crate::cmd::AppCmd::SetFillParams(li, kind));
             } else {
                 self.push_cmd(crate::cmd::AppCmd::NewLiveFill(kind));

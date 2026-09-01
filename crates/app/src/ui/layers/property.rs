@@ -61,6 +61,12 @@ pub(crate) fn layer_property(ui: &mut egui::Ui, app: &mut App) {
     let frames = l.frames().cloned();
     let balloons = l.balloons().cloned();
     let tone = l.tone;
+    // LIVE layers (fill / gradient / tone) carry their picture as
+    // parameters, not pixels — a different block below.
+    let live = match l.kind {
+        mn_core::LayerKind::Fill(k) => Some(k),
+        _ => None,
+    };
 
     ui.label(
         egui::RichText::new(name)
@@ -157,150 +163,174 @@ pub(crate) fn layer_property(ui: &mut egui::Ui, app: &mut App) {
                 }
             });
 
-            // CSP Layer Property ▸ Effect ▸ Tone: the non-destructive
-            // conversion. Painting keeps working on the ink source; the
-            // screen follows.
-            group_caption(ui, "Effect");
-            let mut effect_pick = None;
-            egui::ComboBox::from_id_salt("mn.effect")
-                .width(120.0)
-                .selected_text(match tone {
-                    Some(_) => "Tone",
-                    None => "None",
-                })
-                .show_ui(ui, |ui| {
-                    if ui.selectable_label(tone.is_none(), "None").clicked() {
-                        effect_pick = Some(false);
-                    }
-                    if ui.selectable_label(tone.is_some(), "Tone").clicked() {
-                        effect_pick = Some(true);
-                    }
-                });
-            if let Some(want_tone) = effect_pick {
-                app.push_cmd(AppCmd::SetTone(if want_tone {
-                    Some(mn_core::ToneParams::default())
-                } else {
-                    None
-                }));
-            }
-            if let Some(cur) = tone {
-                let mut p = app.tone_edit.unwrap_or(cur);
-                // Combos and the posterize switch are DISCRETE: one click is
-                // the whole edit, so they commit at once. The bars drag, so
-                // they coalesce through `app.tone_edit` and commit on release
-                // (one undo step per drag, not one per frame).
-                let mut discrete = false;
-                ui.horizontal(|ui| {
-                    egui::ComboBox::from_id_salt("mn.tone.pattern")
-                        .width(88.0)
-                        .selected_text(p.pattern.label())
+            // A LIVE layer's screen IS its parameters, so this palette shows
+            // those parameters — the same rows the Tool Property draws, from
+            // the same function, so the two doors cannot drift and a drag
+            // through either is one undo press. CSP's Tone layers page sends
+            // you exactly here: "You can change the detailed settings of the
+            // tone layer in the Layer Properties palette."
+            //
+            // The raster Effect ▸ Tone combo is deliberately NOT offered here:
+            // it screens the layer's PAINTED pixels, and `Document::set_tone`
+            // refuses every non-raster kind, so on a live layer the combo was
+            // a dead control that reported "None" about a layer made of dots.
+            if let Some(k) = live {
+                group_caption(
+                    ui,
+                    match k {
+                        mn_core::FillKind::Tone { .. } => "Tone",
+                        mn_core::FillKind::Gradient { .. } => "Gradient",
+                        mn_core::FillKind::Flat { .. } => "Fill",
+                    },
+                );
+                super::super::property::sec_live_fill(ui, app);
+            } else {
+                // CSP Layer Property ▸ Effect ▸ Tone: the non-destructive
+                // conversion. Painting keeps working on the ink source; the
+                // screen follows.
+                group_caption(ui, "Effect");
+                let mut effect_pick = None;
+                egui::ComboBox::from_id_salt("mn.effect")
+                    .width(120.0)
+                    .selected_text(match tone {
+                        Some(_) => "Tone",
+                        None => "None",
+                    })
+                    .show_ui(ui, |ui| {
+                        if ui.selectable_label(tone.is_none(), "None").clicked() {
+                            effect_pick = Some(false);
+                        }
+                        if ui.selectable_label(tone.is_some(), "Tone").clicked() {
+                            effect_pick = Some(true);
+                        }
+                    });
+                if let Some(want_tone) = effect_pick {
+                    app.push_cmd(AppCmd::SetTone(if want_tone {
+                        Some(mn_core::ToneParams::default())
+                    } else {
+                        None
+                    }));
+                }
+                if let Some(cur) = tone {
+                    let mut p = app.tone_edit.unwrap_or(cur);
+                    // Combos and the posterize switch are DISCRETE: one click is
+                    // the whole edit, so they commit at once. The bars drag, so
+                    // they coalesce through `app.tone_edit` and commit on release
+                    // (one undo step per drag, not one per frame).
+                    let mut discrete = false;
+                    ui.horizontal(|ui| {
+                        egui::ComboBox::from_id_salt("mn.tone.pattern")
+                            .width(88.0)
+                            .selected_text(p.pattern.label())
+                            .show_ui(ui, |ui| {
+                                for pat in mn_core::TonePattern::ALL {
+                                    if ui.selectable_label(p.pattern == pat, pat.label()).clicked()
+                                    {
+                                        p.pattern = pat;
+                                        discrete = true;
+                                    }
+                                }
+                            });
+                        ui.weak(format!("{} LPI at {}°", p.lpi, p.angle_deg));
+                    });
+                    let mut bars: Vec<egui::Response> = Vec::new();
+                    bars.push(
+                        ValueBar::new("Frequency", 5.0, 80.0)
+                            .decimals(1)
+                            .suffix(" LPI")
+                            .show(ui, &mut p.lpi),
+                    );
+                    bars.push(
+                        ValueBar::new("Angle", 0.0, 90.0)
+                            .decimals(0)
+                            .suffix("°")
+                            .show(ui, &mut p.angle_deg),
+                    );
+
+                    // LP-008 density source. "Specified" is CSP's Fill-layer-only
+                    // option; we allow it on any tone layer too, because "screen
+                    // the region I painted at a flat 40 %" is the same engine and
+                    // the same want.
+                    const DENSITIES: [mn_core::ToneDensity; 3] = [
+                        mn_core::ToneDensity::ImageColour,
+                        mn_core::ToneDensity::ImageBrightness,
+                        mn_core::ToneDensity::Specified(0.4),
+                    ];
+                    egui::ComboBox::from_id_salt("mn.tone.density")
+                        .width(160.0)
+                        .selected_text(p.density.label())
                         .show_ui(ui, |ui| {
-                            for pat in mn_core::TonePattern::ALL {
-                                if ui.selectable_label(p.pattern == pat, pat.label()).clicked() {
-                                    p.pattern = pat;
+                            for d in DENSITIES {
+                                let picked = std::mem::discriminant(&p.density)
+                                    == std::mem::discriminant(&d);
+                                if ui.selectable_label(picked, d.label()).clicked() && !picked {
+                                    p.density = d;
                                     discrete = true;
                                 }
                             }
                         });
-                    ui.weak(format!("{} LPI at {}°", p.lpi, p.angle_deg));
-                });
-                let mut bars: Vec<egui::Response> = Vec::new();
-                bars.push(
-                    ValueBar::new("Frequency", 5.0, 80.0)
-                        .decimals(1)
-                        .suffix(" LPI")
-                        .show(ui, &mut p.lpi),
-                );
-                bars.push(
-                    ValueBar::new("Angle", 0.0, 90.0)
-                        .decimals(0)
-                        .suffix("°")
-                        .show(ui, &mut p.angle_deg),
-                );
+                    if let mn_core::ToneDensity::Specified(d) = p.density {
+                        let mut pct = d * 100.0;
+                        let r = ValueBar::new("Density", 0.0, 100.0)
+                            .decimals(0)
+                            .suffix("%")
+                            .show(ui, &mut pct);
+                        p.density = mn_core::ToneDensity::Specified(pct / 100.0);
+                        bars.push(r);
+                    }
 
-                // LP-008 density source. "Specified" is CSP's Fill-layer-only
-                // option; we allow it on any tone layer too, because "screen
-                // the region I painted at a flat 40 %" is the same engine and
-                // the same want.
-                const DENSITIES: [mn_core::ToneDensity; 3] = [
-                    mn_core::ToneDensity::ImageColour,
-                    mn_core::ToneDensity::ImageBrightness,
-                    mn_core::ToneDensity::Specified(0.4),
-                ];
-                egui::ComboBox::from_id_salt("mn.tone.density")
-                    .width(160.0)
-                    .selected_text(p.density.label())
-                    .show_ui(ui, |ui| {
-                        for d in DENSITIES {
-                            let picked =
-                                std::mem::discriminant(&p.density) == std::mem::discriminant(&d);
-                            if ui.selectable_label(picked, d.label()).clicked() && !picked {
-                                p.density = d;
-                                discrete = true;
-                            }
-                        }
-                    });
-                if let mn_core::ToneDensity::Specified(d) = p.density {
-                    let mut pct = d * 100.0;
-                    let r = ValueBar::new("Density", 0.0, 100.0)
-                        .decimals(0)
-                        .suffix("%")
-                        .show(ui, &mut pct);
-                    p.density = mn_core::ToneDensity::Specified(pct / 100.0);
-                    bars.push(r);
-                }
+                    // LP-014 / TN-009: the lattice origin. ±32 px covers several
+                    // cells at every frequency the Frequency bar offers, and the
+                    // whole point is a nudge of a few px.
+                    bars.push(
+                        ValueBar::new("Dot position X", -32.0, 32.0)
+                            .decimals(1)
+                            .suffix(" px")
+                            .show(ui, &mut p.offset[0]),
+                    );
+                    bars.push(
+                        ValueBar::new("Dot position Y", -32.0, 32.0)
+                            .decimals(1)
+                            .suffix(" px")
+                            .show(ui, &mut p.offset[1]),
+                    );
 
-                // LP-014 / TN-009: the lattice origin. ±32 px covers several
-                // cells at every frequency the Frequency bar offers, and the
-                // whole point is a nudge of a few px.
-                bars.push(
-                    ValueBar::new("Dot position X", -32.0, 32.0)
-                        .decimals(1)
-                        .suffix(" px")
-                        .show(ui, &mut p.offset[0]),
-                );
-                bars.push(
-                    ValueBar::new("Dot position Y", -32.0, 32.0)
-                        .decimals(1)
-                        .suffix(" px")
-                        .show(ui, &mut p.offset[1]),
-                );
+                    // LP-010 posterization.
+                    let mut post_on = p.posterize.is_some();
+                    if ui
+                        .checkbox(
+                            &mut post_on,
+                            egui::RichText::new("Posterize the density").size(12.0),
+                        )
+                        .on_hover_text("flatten the density ramp into a few steps")
+                        .changed()
+                    {
+                        p.posterize = post_on.then_some(4);
+                        discrete = true;
+                    }
+                    if let Some(n) = p.posterize {
+                        let mut steps = n as f32;
+                        let r = ValueBar::new("Steps", 2.0, 20.0)
+                            .decimals(0)
+                            .step(1.0)
+                            .show(ui, &mut steps);
+                        p.posterize = Some(steps.round().clamp(2.0, 20.0) as u8);
+                        bars.push(r);
+                    }
 
-                // LP-010 posterization.
-                let mut post_on = p.posterize.is_some();
-                if ui
-                    .checkbox(
-                        &mut post_on,
-                        egui::RichText::new("Posterize the density").size(12.0),
-                    )
-                    .on_hover_text("flatten the density ramp into a few steps")
-                    .changed()
-                {
-                    p.posterize = post_on.then_some(4);
-                    discrete = true;
-                }
-                if let Some(n) = p.posterize {
-                    let mut steps = n as f32;
-                    let r = ValueBar::new("Steps", 2.0, 20.0)
-                        .decimals(0)
-                        .step(1.0)
-                        .show(ui, &mut steps);
-                    p.posterize = Some(steps.round().clamp(2.0, 20.0) as u8);
-                    bars.push(r);
-                }
-
-                let dragging = bars.iter().any(|r| r.dragged());
-                let changed = bars.iter().any(|r| r.changed());
-                let released = bars.iter().any(|r| r.drag_stopped());
-                if changed {
-                    app.tone_edit = Some(p);
-                }
-                if discrete {
-                    app.tone_edit = None;
-                    app.push_cmd(AppCmd::SetTone(Some(p)));
-                } else if released || (changed && !dragging) {
-                    if let Some(p) = app.tone_edit.take() {
+                    let dragging = bars.iter().any(|r| r.dragged());
+                    let changed = bars.iter().any(|r| r.changed());
+                    let released = bars.iter().any(|r| r.drag_stopped());
+                    if changed {
+                        app.tone_edit = Some(p);
+                    }
+                    if discrete {
+                        app.tone_edit = None;
                         app.push_cmd(AppCmd::SetTone(Some(p)));
+                    } else if released || (changed && !dragging) {
+                        if let Some(p) = app.tone_edit.take() {
+                            app.push_cmd(AppCmd::SetTone(Some(p)));
+                        }
                     }
                 }
             }

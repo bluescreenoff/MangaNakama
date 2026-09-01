@@ -560,11 +560,15 @@ It is an ordered pattern worth about one 8-bit level, there to stop a
 long smooth ramp printing as visible bands. Where the ramp has run out
 and the end colour is being held flat, no noise is added — a fade to
 transparent leaves genuinely clean paper.</div>
-<div class="quirk"><b>&ldquo;Create live layer&rdquo; retargets the
-gradient layer you are standing on.</b> With the switch on, dragging the
-Gradient tool while a live fill/gradient/tone layer is active REPLACES
-that layer's parameters instead of stacking a new layer. Stand on a
-raster layer to get a new gradient layer.</div>
+<div class="quirk"><b>&ldquo;Create live layer&rdquo; retargets a live
+GRADIENT layer, and nothing else.</b> With the switch on, dragging the
+Gradient tool while a live gradient layer is active re-aims that ramp
+instead of stacking a new layer &mdash; that is how you fix the angle a
+day later. Stand on anything else, including a tone or fill layer, and
+you get a new gradient layer above it and a status line saying so.
+<span class="why">A tone you spent time tuning is not something a drag
+should overwrite; CSP never converts the layer you are standing on
+either.</span></div>
 <div class="quirk"><b>Brightness only exists in Perceptual mixing.</b> The
 slider disappears in the other modes rather than sitting there dead. It
 lifts the middle of a ramp between two saturated colours back toward the

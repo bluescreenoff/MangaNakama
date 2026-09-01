@@ -15,7 +15,7 @@ mod breakout;
 mod property;
 mod rows;
 
-pub(super) use property::layer_property;
+pub(crate) use property::layer_property;
 pub(super) use rows::layer_section;
 
 // The picker order is OURS, not CSP's: parts 1, 2 and 3 in the order they

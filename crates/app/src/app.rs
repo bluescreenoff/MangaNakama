@@ -5129,3 +5129,9 @@ mod grad_free_tests;
 /// inside the ants, as dots rather than a slab.
 #[cfg(test)]
 mod launcher_tone_tests;
+
+/// Friction 6: the live tone layer and the palettes around it — Layer
+/// Property shows its own rows, the raster tone effect refuses a live
+/// layer instead of blanking it, and a gradient never eats a tone.
+#[cfg(test)]
+mod live_tone_tests;

@@ -709,13 +709,21 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                     app.mark_dirty();
                 }
                 false => {
-                    if app
-                        .doc
-                        .layers
-                        .get(i)
-                        .is_some_and(|l| l.folder || l.is_vector())
-                    {
-                        app.set_status("folders and vector layers cannot be tones");
+                    // A LIVE layer is refused too (`is_vector` means "not a
+                    // plain raster"), and telling a tone layer that it is a
+                    // folder helped nobody: its screen is its own parameters,
+                    // and Layer Property now shows them.
+                    let why = match app.doc.layers.get(i) {
+                        Some(l) if matches!(l.kind, mn_core::LayerKind::Fill(_)) => Some(
+                            "a live layer's screen IS its parameters — tune it in Layer Property; the tone effect screens painted ink",
+                        ),
+                        Some(l) if l.folder || l.is_vector() => {
+                            Some("folders and vector layers cannot be tones")
+                        }
+                        _ => None,
+                    };
+                    if let Some(why) = why {
+                        app.set_status(why);
                     }
                 }
             }

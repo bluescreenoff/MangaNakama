@@ -685,10 +685,22 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
             // inside `add_fill_layer`, so changing the parameters after it
             // would leave the stamp describing a picture nobody asked for.
             let kind = app.layer_defaults.fill_kind(kind);
+            // Say WHY the new layer is new when it landed on top of another
+            // live layer: the Gradient tool used to overwrite the one you
+            // were standing on, so a stack where a replacement used to
+            // happen needs a word (friction 6).
+            let over = matches!(
+                app.doc.active_layer().kind,
+                mn_core::LayerKind::Fill(mn_core::FillKind::Tone { .. })
+            );
             let li = app.doc.add_fill_layer(kind, from_sel);
             app.apply_layer_defaults(li);
             app.refresh_tones();
-            app.set_status("live layer — any brush edits its window; parameters in Tool Property");
+            app.set_status(if over {
+                "live layer ABOVE the tone — a tone layer is never overwritten; parameters in Tool Property"
+            } else {
+                "live layer — any brush edits its window; parameters in Tool Property"
+            });
             app.mark_dirty();
         }
         AppCmd::SetFillParams(li, kind) => {
