@@ -798,3 +798,51 @@ fn qa_auto_gap_and_fringe_narrates_what_it_measured() {
         app2.status
     );
 }
+
+// ---------------------------------------------------------------------
+// Flow L — toning a PANEL on a real comic page
+// ---------------------------------------------------------------------
+
+/// The commonest tone gesture in manga: one click screens the inside of a
+/// panel. On a real `File ▸ New comic` page that means the flood has to
+/// read the frame border as a wall, and the tone must not spill into the
+/// gutter or the margin.
+#[test]
+fn qa_the_tone_tool_screens_a_panel_and_stays_inside_it() {
+    let Some(mut app) = headless() else { return };
+    super::new_document_tests::small_draft(&mut app, 1, "");
+    dispatch(&mut app, AppCmd::NewComicCreate);
+    // Stand on a raster layer — the frame folder itself takes no paint.
+    let li = app.doc.add_layer("tone target");
+    app.doc.set_active(li);
+    let before = app.doc.layers.len();
+
+    dispatch(&mut app, AppCmd::SetTool(Tool::Tone));
+    let (w, h) = (app.doc.size.0, app.doc.size.1);
+    click(&mut app, w as f32 / 2.0, h as f32 / 2.0);
+    app.refresh_tones();
+    println!("[panel-tone] status: {:?}", app.status);
+    assert_eq!(app.doc.layers.len(), before + 1, "one click, one tone layer");
+
+    let (rw, rh) = (w.min(512), (h as u64 * w.min(512) as u64 / w as u64) as u32);
+    let dir = std::env::temp_dir().join(format!("mn-qa2-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let App { renderer, doc, .. } = &mut app;
+    let img = super::pages::render_offscreen_drafts_off(renderer, doc, rw, rh);
+    let path = dir.join("L-panel-tone.png");
+    img.save(&path).expect("write the shot");
+    println!("[shot] {}", path.display());
+
+    // The margin: a few pixels in from the page corner is outside every
+    // panel, and must be untouched paper.
+    for (x, y) in [(3, 3), (rw - 4, 3), (3, rh - 4), (rw - 4, rh - 4)] {
+        assert!(
+            luma(&img, x, y) > 200,
+            "the tone spilled into the page corner at ({x}, {y})"
+        );
+    }
+    // Inside the panel: a screen, not a slab.
+    let (inked, clear) = dot_census(&img, rw / 3, rh / 3, rw * 2 / 3, rh * 2 / 3);
+    println!("[panel-tone] inside the panel: {inked} inked, {clear} clear");
+    assert!(inked > 0 && clear > 0, "the panel came back as dots ({inked}/{clear})");
+}
