@@ -1,13 +1,31 @@
 //! CSP Selection Launcher: the floating action bar that appears under a live
 //! selection. Default CSP button order, minus the ones our infrastructure
-//! cannot honor yet (Cut/Copy&paste → undoable structural ops; New tone →
-//! tones; Settings) — those live on the backlog.
+//! cannot honor yet (Settings) — those live on the backlog.
 
 use super::icons::Icon;
 use super::theme;
 use super::widgets::icon_btn;
 use crate::app::App;
 use crate::cmd::AppCmd;
+
+/// What the launcher's "New tone" button pushes (CSP 選択範囲ランチャー ▸
+/// 新規トーン): the same live-tone door the Layer menu uses, so either
+/// route makes the identical screen. `NewLiveFill` cuts the layer's window
+/// mask from the live selection, which is the whole point of reaching it
+/// from here — the tone lands INSIDE the marching ants.
+///
+/// Factored out of the button so a headless test can press the same door
+/// the bar does.
+pub(crate) fn new_tone_cmd() -> AppCmd {
+    AppCmd::NewLiveFill(mn_core::FillKind::Tone {
+        tone: mn_core::tone::ToneParams::default(),
+        // NOT 1.0 — `ToneDensity::Specified(1.0)` short-circuits
+        // `TonePattern::on` to always-true and the "tone" comes out a solid
+        // black slab. 0.4 is the Tone tool's own default; the Layer menu's
+        // door carries the same number.
+        density: 0.4,
+    })
+}
 
 /// Draw the launcher under the selection's screen bbox, clamped into the
 /// canvas area. Called from `build` after the canvas overlay — real egui
@@ -41,7 +59,7 @@ pub(super) fn selection_launcher(ui: &mut egui::Ui, app: &mut App, canvas: egui:
     }
     // Anchor just under the selection, CENTERED on it (owner report
     // 2026-08-21: left-anchored read as misaligned), clamped into the canvas.
-    let bar_w = 14.0 * 24.0 + 34.0 + 12.0;
+    let bar_w = 15.0 * 24.0 + 34.0 + 12.0;
     let mut pos = egui::pos2(
         (x0 + x1) * 0.5 - bar_w * 0.5,
         (y1 + 6.0).min(canvas.bottom() - 30.0),
@@ -187,6 +205,15 @@ pub(super) fn selection_launcher(ui: &mut egui::Ui, app: &mut App, canvas: egui:
                         if icon_btn(ui, Icon::Fill, b, false, true, "Fill  (Alt+Delete)").clicked()
                         {
                             app.push_cmd(AppCmd::FillSelection);
+                        }
+                        // CSP puts New tone right after Fill: the same
+                        // "make this area solid" reflex, screened instead
+                        // of flat. Live layer, so the ants become an
+                        // editable window rather than baked dots.
+                        if icon_btn(ui, Icon::Tone, b, false, true, "New tone (live layer)")
+                            .clicked()
+                        {
+                            app.push_cmd(new_tone_cmd());
                         }
                     });
                 });

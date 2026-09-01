@@ -25,7 +25,7 @@ mod batch;
 mod color;
 mod dialogs;
 pub mod dock;
-mod launcher;
+pub(crate) mod launcher;
 mod layers;
 mod materials;
 mod navigator;

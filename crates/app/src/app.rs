@@ -5115,3 +5115,8 @@ mod smart_shape_tests;
 /// guide lines, the cancel between strokes, and the one undo press.
 #[cfg(test)]
 mod grad_free_tests;
+
+/// Friction 8: the Selection Launcher's "New tone" button — the tone lands
+/// inside the ants, as dots rather than a slab.
+#[cfg(test)]
+mod launcher_tone_tests;
