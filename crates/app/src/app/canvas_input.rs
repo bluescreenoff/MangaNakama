@@ -3697,7 +3697,23 @@ impl App {
         // TODO #3: complete an armed ruler creation.
         if let (Some(kind), Some(a)) = (self.ruler_pending.take(), self.ruler_drag.take()) {
             let (cx, cy) = self.viewport.to_canvas(x, y);
-            let b = [cx, cy];
+            let mut b = [cx, cy];
+            // CSP: "Hold Shift while dragging to draw a straight line ruler
+            // in 45 degree increments." The same octant snap the Figure
+            // tool's drag uses, applied where every creation drag reads its
+            // end point — a 流線 block wants its parallel ruler dead
+            // horizontal (or on the 45) far more often than eyeballed.
+            // Length is preserved, so a concentric drag's ring spacing is
+            // untouched and the guides, which ignore `b`, are unaffected.
+            if self.shell.sync_modifiers().shift {
+                let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+                let len = dx.hypot(dy);
+                if len > 0.0 {
+                    let oct = (dy.atan2(dx) / std::f32::consts::FRAC_PI_4).round()
+                        * std::f32::consts::FRAC_PI_4;
+                    b = [a[0] + oct.cos() * len, a[1] + oct.sin() * len];
+                }
+            }
             let ruler = match kind {
                 RulerKind::Line => {
                     if (b[0] - a[0]).abs() + (b[1] - a[1]).abs() < 2.0 {

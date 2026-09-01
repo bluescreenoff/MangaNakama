@@ -262,3 +262,43 @@ fn rulers_survive_a_page_switch() {
     app.switch_page(0);
     assert_eq!(app.doc.rulers.items, vec![made], "and back again");
 }
+
+/// CSP: "Hold Shift while dragging to draw a straight line ruler in 45
+/// degree increments." Every ruler the drag AIMS obeys it — a parallel
+/// ruler for a 流線 block wants to be dead horizontal, and eyeballing a
+/// 1600 px drag to within a tenth of a degree is not a thing hands do.
+#[test]
+fn shift_snaps_a_ruler_creation_drag_to_45_degrees() {
+    let Some(mut app) = super::new_document_tests::headless() else {
+        return;
+    };
+    let empty: [PenSample; 0] = [];
+    app.shell.test_modifiers = Some(egui::Modifiers::SHIFT);
+    dispatch(&mut app, AppCmd::RulerArm(RulerKind::Parallel));
+    // 5° off horizontal over 400 px: 35 px of rise, well past any epsilon.
+    let (x0, y0) = app.viewport.to_screen(100.0, 300.0);
+    let (x1, y1) = app.viewport.to_screen(500.0, 335.0);
+    app.canvas_down(x0, y0, PointerKind::Mouse, &empty);
+    app.canvas_up(x1, y1, &empty);
+    let Some(mn_core::Ruler::Parallel { a, b }) = app.doc.rulers.items.last().copied() else {
+        panic!("the drag made a parallel ruler: {:?}", app.doc.rulers.items);
+    };
+    assert!(
+        (b[1] - a[1]).abs() < 0.5,
+        "shift did not flatten the drag: {a:?} -> {b:?}"
+    );
+    assert!(
+        (b[0] - a[0] - 400.0).abs() < 2.0,
+        "the drag's LENGTH is kept, only its angle snaps: {a:?} -> {b:?}"
+    );
+
+    // …and without shift the same drag keeps its 5°.
+    app.shell.test_modifiers = Some(egui::Modifiers::default());
+    dispatch(&mut app, AppCmd::RulerArm(RulerKind::Parallel));
+    app.canvas_down(x0, y0, PointerKind::Mouse, &empty);
+    app.canvas_up(x1, y1, &empty);
+    let Some(mn_core::Ruler::Parallel { a, b }) = app.doc.rulers.items.last().copied() else {
+        panic!("the second drag made a parallel ruler");
+    };
+    assert!((b[1] - a[1] - 35.0).abs() < 2.0, "{a:?} -> {b:?}");
+}
