@@ -874,12 +874,13 @@ mod tests {
                 SubTool::Fill(FillMode::Dust),
             ]
         );
-        // Select: the four shapes, then the two paint rows.
+        // Select: the five shapes, then the two paint rows.
         app.tool = Tool::Select;
-        assert_eq!(step_rows(&app).len(), 6);
+        assert_eq!(step_rows(&app).len(), 7);
         assert_eq!(step_rows(&app)[0], SubTool::Select(SelectMode::Rect));
-        assert_eq!(step_rows(&app)[4], SubTool::SelectPen);
-        assert_eq!(step_rows(&app)[5], SubTool::SelectEraser);
+        assert_eq!(step_rows(&app)[1], SubTool::Select(SelectMode::Ellipse));
+        assert_eq!(step_rows(&app)[5], SubTool::SelectPen);
+        assert_eq!(step_rows(&app)[6], SubTool::SelectEraser);
         // Frame border crosses BOTH tabs in list order.
         app.tool = Tool::Frame;
         assert_eq!(
@@ -926,7 +927,7 @@ mod tests {
         assert_eq!(queued.len(), 1);
         assert!(
             matches!(queued[0], AppCmd::SetTool(Tool::SelEraser)),
-            "SelPen is stop 4; forward lands on the eraser, not Lasso: {:?}",
+            "SelPen is stop 5; forward lands on the eraser, not Lasso: {:?}",
             queued[0]
         );
         // And off the end of the list, backwards reaches the pen again.
