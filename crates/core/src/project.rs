@@ -668,6 +668,7 @@ mod tests {
             cover: Some(1),
             template_page: Some(0),
             print_margin_info: true,
+            print_crop_marks: true,
             profile: crate::profile::PublisherProfile::builtins().pop(),
             next_id: 0,
             pages: vec![
@@ -705,6 +706,7 @@ mod tests {
         assert_eq!(back.cover, Some(1));
         assert_eq!(back.template_page, Some(0), "tekno B2 rides the index");
         assert!(back.print_margin_info, "margin stamp flag rides the index");
+        assert!(back.print_crop_marks, "the トンボ flag rides it too");
         assert_eq!(
             back.profile.as_ref().map(|p| p.name.clone()),
             crate::profile::PublisherProfile::builtins()
