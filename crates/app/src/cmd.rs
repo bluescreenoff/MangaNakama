@@ -574,6 +574,12 @@ pub enum AppCmd {
     /// CSP ladder — applies to existing symmetric rulers AND the default
     /// for the next one created.
     RulerSymmetricCount,
+    /// The same ladder for the OTHER special ruler with a number in it:
+    /// cycle every concentric ruler's ring spacing, FREE included (CSP's
+    /// own concentric circle ruler is free-radius). Without this the
+    /// spacing could only be chosen by the creation drag, so changing it
+    /// meant deleting the ruler and drawing it again.
+    RulerRingSpacing,
     /// Row 149: bind every ruler to the active layer (Some) or make
     /// them all page-wide again (None). One undo step.
     RulerAttachAll(Option<usize>),

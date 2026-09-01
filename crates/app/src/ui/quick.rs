@@ -167,9 +167,19 @@ pub fn command_index() -> Vec<(&'static str, &'static str, AppCmd)> {
             RulerArm(crate::cmd::RulerKind::Parallel),
         ),
         (
+            "Radial line ruler (focus lines)",
+            "Layer ▸ Ruler",
+            RulerArm(crate::cmd::RulerKind::Radial),
+        ),
+        (
             "Concentric circle ruler",
             "Layer ▸ Ruler",
             RulerArm(crate::cmd::RulerKind::Concentric),
+        ),
+        (
+            "Concentric ring spacing (cycle, free included)",
+            "Layer ▸ Ruler",
+            RulerRingSpacing,
         ),
         (
             "Symmetrical ruler",
@@ -180,6 +190,10 @@ pub fn command_index() -> Vec<(&'static str, &'static str, AppCmd)> {
         // them (the owner's CSP Ctrl+1 / Ctrl+2 are exactly these).
         ("Snap to rulers", "Layer ▸ Ruler", RulerSnapToggle),
         (
+            // The parenthetical is a sample, not the list (concentric and
+            // radial are special too). It is also the keys.json BINDING
+            // NAME — renaming it silently unbinds whatever key the user
+            // put on it, so it stays as it is.
             "Snap to special rulers (parallel, guide, symmetry)",
             "Layer ▸ Ruler",
             RulerSpecialSnapToggle,

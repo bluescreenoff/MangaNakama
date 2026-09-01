@@ -468,9 +468,34 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                     app.push_cmd(AppCmd::RulerArm(crate::cmd::RulerKind::Parallel));
                     ui.close();
                 }
+                // CSP's Special ruler order: parallel line, radial line,
+                // concentric circle. Radial is a CLICK (the centre is the
+                // whole ruler); concentric is a click for free rings, a
+                // drag to set a spacing.
+                if item(ui, "Radial line…", "") {
+                    app.push_cmd(AppCmd::RulerArm(crate::cmd::RulerKind::Radial));
+                    ui.close();
+                }
                 if item(ui, "Concentric circles…", "") {
                     app.push_cmd(AppCmd::RulerArm(crate::cmd::RulerKind::Concentric));
                     ui.close();
+                }
+                // The ring spacing, cyclable after the fact — shown only
+                // once a concentric ruler exists, since unlike the
+                // symmetry count it is not also a creation default.
+                if let Some(dr) = app.doc.rulers.items.iter().rev().find_map(|r| match r {
+                    mn_core::Ruler::Concentric { dr, .. } => Some(*dr),
+                    _ => None,
+                }) {
+                    let spacing = if dr <= 0.0 {
+                        "free".to_string()
+                    } else {
+                        format!("{dr:.0} px")
+                    };
+                    if item(ui, &format!("Ring spacing: {spacing} (cycle)"), "") {
+                        app.push_cmd(AppCmd::RulerRingSpacing);
+                        ui.close();
+                    }
                 }
                 if item(ui, "Symmetrical…", "") {
                     app.push_cmd(AppCmd::RulerArm(crate::cmd::RulerKind::Symmetric));

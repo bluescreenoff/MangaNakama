@@ -533,8 +533,14 @@ pub enum RulerKind {
     /// Part 3 (RL-014): drag the direction — every stroke comes out
     /// parallel to it.
     Parallel,
-    /// Part 3 (RL-019): drag from the centre — the drag length is the ring
-    /// spacing.
+    /// CSP "Special ruler ▸ Radial line" (集中線): CLICK places the
+    /// centre, and every stroke afterwards runs along the line through it
+    /// — a continuum, unlike the vanishing point's ray fan.
+    Radial,
+    /// Part 3 (RL-019): CLICK places a free-radius ring ruler (CSP's own
+    /// concentric circle ruler: the stroke keeps the radius it started
+    /// at); DRAG instead and the drag length becomes a ring spacing to
+    /// quantize onto.
     Concentric,
     /// Part 3 (RL-021): drag from the centre outward — centre at the
     /// press, first axis along the drag. Line count via the menu ladder.

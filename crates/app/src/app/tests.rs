@@ -3745,6 +3745,87 @@ fn special_rulers_parallel_concentric_and_the_veto() {
     );
 }
 
+/// The continuum special rulers' DOORS: CSP places a radial line ruler
+/// with a tap, and its concentric circle ruler has no ring spacing at
+/// all. A click now makes both of ours (the concentric drag still sets a
+/// spacing, which is our own addition), and the ring spacing is cyclable
+/// after the fact — free included — instead of being frozen at creation.
+#[test]
+fn radial_and_free_ring_creation_doors() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    let empty: [PenSample; 0] = [];
+    let spacings = |app: &App| {
+        app.doc
+            .rulers
+            .items
+            .iter()
+            .filter_map(|r| match r {
+                mn_core::Ruler::Concentric { dr, .. } => Some(*dr),
+                _ => None,
+            })
+            .collect::<Vec<f32>>()
+    };
+
+    // RADIAL: one click, centre at the press.
+    crate::cmd::dispatch(
+        &mut app,
+        crate::cmd::AppCmd::RulerArm(crate::cmd::RulerKind::Radial),
+    );
+    let (x, y) = app.viewport.to_screen(300.0, 200.0);
+    app.canvas_down(x, y, PointerKind::Mouse, &empty);
+    app.canvas_up(x, y, &empty);
+    let Some(mn_core::Ruler::Radial { c }) = app.doc.rulers.items.last().copied() else {
+        panic!(
+            "a click on the armed radial ruler must create it: {:?}",
+            app.doc.rulers.items
+        );
+    };
+    assert!(
+        (c[0] - 300.0).abs() < 0.5 && (c[1] - 200.0).abs() < 0.5,
+        "the centre is the press, got {c:?}"
+    );
+    assert!(app.doc.rulers.on, "creating a ruler turns snapping on");
+
+    // CONCENTRIC by click: free radius.
+    crate::cmd::dispatch(
+        &mut app,
+        crate::cmd::AppCmd::RulerArm(crate::cmd::RulerKind::Concentric),
+    );
+    app.canvas_down(x, y, PointerKind::Mouse, &empty);
+    app.canvas_up(x, y, &empty);
+    assert_eq!(spacings(&app), vec![0.0], "a click leaves the radius free");
+
+    // CONCENTRIC by drag: the drag length is still a ring spacing.
+    crate::cmd::dispatch(
+        &mut app,
+        crate::cmd::AppCmd::RulerArm(crate::cmd::RulerKind::Concentric),
+    );
+    let (x1, y1) = app.viewport.to_screen(400.0, 200.0);
+    app.canvas_down(x, y, PointerKind::Mouse, &empty);
+    app.canvas_up(x1, y1, &empty);
+    let drs = spacings(&app);
+    assert!(
+        (drs[1] - 100.0).abs() < 1.0,
+        "the 100 px drag sets the spacing, got {drs:?}"
+    );
+
+    // The ladder: up from the drag's 100 px, then round to FREE.
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::RulerRingSpacing);
+    assert_eq!(spacings(&app), vec![200.0, 200.0]);
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::RulerRingSpacing);
+    assert_eq!(
+        spacings(&app),
+        vec![0.0, 0.0],
+        "the ladder wraps to free, which is CSP's own concentric ruler"
+    );
+    // And it is ONE undo step, like every other ruler edit.
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::Undo);
+    assert_eq!(spacings(&app), vec![200.0, 200.0]);
+}
+
 /// Rulers part 3 (RL-021): the symmetrical ruler mirrors a stroke into
 /// its whole dihedral orbit — placement, angle and line count are the
 /// ruler's, not the fixed canvas-centre checkbox symmetry.

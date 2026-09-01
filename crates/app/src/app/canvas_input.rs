@@ -3756,10 +3756,17 @@ impl App {
                     }
                     mn_core::Ruler::Parallel { a, b }
                 }
+                // CSP: "Tap on the canvas to create a Radial line ruler."
+                // The press IS the centre; the drag (if any) is free,
+                // because a continuum fan has no angle to aim.
+                RulerKind::Radial => mn_core::Ruler::Radial { c: a },
+                // A CLICK leaves the ring spacing free (CSP's concentric
+                // circle ruler: the stroke keeps its own radius). Drag and
+                // the drag length becomes the ladder's spacing — ours, and
+                // worth keeping for evenly spaced panel furniture.
                 RulerKind::Concentric => {
-                    let dr = ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2))
-                        .sqrt()
-                        .max(8.0);
+                    let d = ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt();
+                    let dr = if d < 8.0 { 0.0 } else { d };
                     mn_core::Ruler::Concentric { c: a, dr }
                 }
                 RulerKind::Symmetric => {
@@ -3802,7 +3809,22 @@ impl App {
                     self.symmetric_lines
                 ));
             } else {
-                self.set_status("ruler created — snapping on");
+                // The two continuum rulers say WHAT they will do, because
+                // nothing on the canvas distinguishes a free ring ruler
+                // from a laddered one until a stroke lands.
+                self.set_status(match ruler {
+                    mn_core::Ruler::Radial { .. } => {
+                        "radial line ruler — every stroke runs through the centre".to_string()
+                    }
+                    mn_core::Ruler::Concentric { dr, .. } if dr <= 0.0 => {
+                        "concentric ruler — free radius: each stroke keeps the one it starts on"
+                            .to_string()
+                    }
+                    mn_core::Ruler::Concentric { dr, .. } => {
+                        format!("concentric ruler — rings every {dr:.0} px")
+                    }
+                    _ => "ruler created — snapping on".to_string(),
+                });
             }
             self.needs_redraw = true;
             return;

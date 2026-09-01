@@ -849,7 +849,12 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                 }
                 RulerKind::Curve => "click the curve's corners — double-click (or Enter) to finish",
                 RulerKind::Parallel => "drag the direction — every stroke comes out parallel to it",
-                RulerKind::Concentric => "drag from the centre — the length sets the ring spacing",
+                RulerKind::Radial => {
+                    "click where the focus lines converge — every stroke then runs through it"
+                }
+                RulerKind::Concentric => {
+                    "click for free rings, or drag from the centre to set a ring spacing"
+                }
                 RulerKind::Symmetric => {
                     "drag from the symmetry centre outward — the drag sets the first axis"
                 }
@@ -871,7 +876,7 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
             app.doc.rulers.special_on = !app.doc.rulers.special_on;
             app.rebuild_twins();
             app.set_status(if app.doc.rulers.special_on {
-                "special rulers ON (parallel/concentric/guide/symmetry)"
+                "special rulers ON (radial/parallel/concentric/guide/symmetry)"
             } else {
                 "special rulers OFF (line/curve/vanishing-point rulers unaffected)"
             });
@@ -912,6 +917,48 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                 format!("symmetry line count: {next} (creates at this count)")
             });
             app.mark_dirty();
+        }
+        AppCmd::RulerRingSpacing => {
+            // FREE first: CSP's concentric circle ruler has no spacing at
+            // all, so that is the head of the ladder and the value a
+            // drag-made spacing normalizes to on the first press.
+            const LADDER: [f32; 5] = [0.0, 25.0, 50.0, 100.0, 200.0];
+            let cur = app
+                .doc
+                .rulers
+                .items
+                .iter()
+                .rev()
+                .find_map(|r| match r {
+                    mn_core::Ruler::Concentric { dr, .. } => Some(*dr),
+                    _ => None,
+                })
+                .unwrap_or(0.0);
+            let next = LADDER
+                .iter()
+                .position(|&n| (n - cur.max(0.0)).abs() < 0.5)
+                .map(|i| LADDER[(i + 1) % LADDER.len()])
+                .unwrap_or(0.0);
+            let before = app.doc.rulers.clone();
+            let mut changed = 0;
+            for r in &mut app.doc.rulers.items {
+                if let mn_core::Ruler::Concentric { dr, .. } = r {
+                    *dr = next;
+                    changed += 1;
+                }
+            }
+            if changed == 0 {
+                app.set_status("no concentric ruler yet — Layer ▸ Ruler ▸ Concentric circles…");
+            } else {
+                app.doc.record_rulers(before, "Ring spacing");
+                app.set_status(if next <= 0.0 {
+                    "concentric rulers: free radius — each stroke keeps the one it starts on"
+                        .to_string()
+                } else {
+                    format!("concentric rulers: rings every {next:.0} px")
+                });
+                app.mark_dirty();
+            }
         }
         AppCmd::RulerAttachAll(layer) => {
             let before = app.doc.rulers.clone();
