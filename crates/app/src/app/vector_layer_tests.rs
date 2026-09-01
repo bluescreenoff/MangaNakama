@@ -773,3 +773,49 @@ fn the_replay_reproduces_the_watercolour_rim() {
         layer_alpha(&app, li)
     );
 }
+
+/// A layer inked with a PROCEDURAL sub tool keeps its ink through a
+/// re-derive.
+///
+/// The dot pen and the Krita engines are asked for by name (`mn-engine`) and
+/// their preset files carry no libmypaint settings on purpose, so
+/// `MyBrush::load` — which used to be the replay's only door — refused them.
+/// A vector layer inked with the dot pen therefore lost its art the first
+/// time anything re-derived it (one control point moved, one line-correction
+/// pass), and the status line still reported the edit as done. The replay
+/// now asks `preset_engine` first, exactly as `SelectBrush` does.
+#[test]
+fn a_layer_inked_with_a_procedural_sub_tool_survives_a_re_derive() {
+    let Some(mut app) = vector_app() else { return };
+    let dot = app
+        .presets
+        .iter()
+        .map(|(_, p)| p.clone())
+        .find(|p| p.ends_with("dot-pen.myb"))
+        .expect("the shipped dot pen preset");
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::SelectBrush(dot));
+    let li = app.doc.active;
+    drag(&mut app, 200.0);
+    let inked = layer_alpha(&app, li);
+    assert!(inked > 0, "the dot pen inked something to re-derive");
+
+    crate::cmd::dispatch(
+        &mut app,
+        crate::cmd::AppCmd::LineCorrect(crate::app::vector_edit::LineCorrect::Width {
+            scale: 2.0,
+        }),
+    );
+    // The dot pen is one pixel by definition, so a width pass changes the
+    // record and not one pixel — which makes EQUALITY the assertion: the
+    // replay must put back exactly what it cleared.
+    assert_eq!(
+        layer_alpha(&app, li),
+        inked,
+        "the re-derive dropped the layer's ink"
+    );
+    assert!(
+        !app.status.contains("missing"),
+        "and said nothing about missing presets: {}",
+        app.status
+    );
+}

@@ -196,9 +196,14 @@ impl App {
     /// caller's open op (the pre-images ride that op). CODE-MAP's replay
     /// rules: engine entry, fresh wrapper per stroke from the stroke's own
     /// preset and stabilizer.
-    pub fn rederive_vector_layer(&mut self, li: usize) {
+    ///
+    /// `false` = at least one stroke could NOT be replayed and its ink is
+    /// gone from the layer. The caller owns the status line, so it has to
+    /// carry that word out — a re-derive that quietly drops art and then
+    /// reports the edit as done is the worst shape this can take.
+    pub fn rederive_vector_layer(&mut self, li: usize) -> bool {
         let Some(set) = self.doc.layers.get(li).and_then(|l| l.strokes.clone()) else {
-            return;
+            return true;
         };
         // Clear through the tile APIs so every pre-image is captured.
         let idxs: Vec<_> = self.doc.layers[li].tiles().map(|(i, _)| i).collect();
@@ -214,14 +219,25 @@ impl App {
                 missing = true;
                 continue;
             };
-            let Ok(b) = mn_brush::MyBrush::load(&path) else {
-                missing = true;
-                continue;
+            // The PROCEDURAL sub tools (`mn-engine`: the dot pen, the Krita
+            // engines) are asked for by name, exactly as `SelectBrush` asks —
+            // their preset files carry no libmypaint settings on purpose, so
+            // `MyBrush::load` refuses them. It used to be the only door here,
+            // which meant a vector layer inked with the dot pen lost its ink
+            // the first time anything re-derived it (one control point moved,
+            // one line-correction pass) while the status said the pass had
+            // worked.
+            let kind = match crate::app::preset_engine(&path) {
+                Some(k) => k,
+                None => match mn_brush::MyBrush::load(&path) {
+                    Ok(b) => EngineKind::My(Box::new(b)),
+                    Err(_) => {
+                        missing = true;
+                        continue;
+                    }
+                },
             };
-            let mut fresh = Stabilizer::new(
-                Taper::new(Engine::new(EngineKind::My(Box::new(b)))),
-                s.stabilizer,
-            );
+            let mut fresh = Stabilizer::new(Taper::new(Engine::new(kind)), s.stabilizer);
             // The stroke's own Tool Property snapshot, where it has one.
             // Without this the wrapper stack keeps its constructor defaults
             // and the engine keeps the preset's, so a layer inked at 40 %
@@ -261,6 +277,7 @@ impl App {
         if missing {
             self.set_status("some strokes' presets are missing — their ink was not re-derived");
         }
+        !missing
     }
 
     /// Row 169 (`E-001`…`E-007`, `VL-021`…`VL-027`): one line-correction
@@ -294,10 +311,15 @@ impl App {
         self.doc.layers[li].strokes = Some(after);
         // Indices just restructured under the Object tool's selection.
         self.vector_sel = None;
-        self.rederive_vector_layer(li);
+        let replayed = self.rederive_vector_layer(li);
         self.doc.end_op_vector_set(before, op.label());
         self.renderer.invalidate();
-        self.set_status(op.status(was, now));
+        // The pass's own line, unless the replay had to drop a stroke — then
+        // its warning stands, because "4 line(s) simplified" over a layer
+        // that just lost art is the one thing the artist must not be told.
+        if replayed {
+            self.set_status(op.status(was, now));
+        }
         self.needs_redraw = true;
         self.mark_dirty();
     }
