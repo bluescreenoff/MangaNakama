@@ -958,6 +958,21 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                     undo_len: app.doc.undo_len(),
                 });
                 app.set_status(format!("filled {n} px{}", auto_note(&opts, auto)));
+            } else {
+                // Every other fill door says so when it writes nothing —
+                // enclose, leftover, lasso and the Tone tool all do. The
+                // plain click used to go silent, and a bucket that does
+                // nothing without a word reads as a broken tool. The two
+                // ways to get here on a real page are clicking ON the line
+                // instead of beside it, and re-clicking an area that is
+                // already this colour.
+                app.set_status(if !app.doc.active_layer().paintable() {
+                    "this layer takes no paint — pick a raster layer to fill"
+                } else if app.doc.selection.is_some() {
+                    "nothing filled — the selection clipped the whole area away"
+                } else {
+                    "nothing filled — click inside the page"
+                });
             }
             app.mark_dirty();
         }

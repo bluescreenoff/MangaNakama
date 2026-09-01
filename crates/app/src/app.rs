@@ -5087,6 +5087,12 @@ mod file_object_tests;
 #[cfg(test)]
 mod fill_repair_tests;
 
+/// Mangaka-basics QA (2026-09-02 round), toning + fill family: the real
+/// bucket / tone / gradient doors driven through the pointer arms and
+/// judged on an EXPORT render.
+#[cfg(test)]
+mod basics_qa_fill_tests;
+
 /// Workflow audit #4: the batch import — N roughs become N page underlays.
 /// Pins the underlay's placement against a page's White base, the park
 /// staleness a direct byte write must cause, and the open page's single

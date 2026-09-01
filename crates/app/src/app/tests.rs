@@ -3607,7 +3607,11 @@ fn special_rulers_parallel_concentric_and_the_veto() {
     let empty: [PenSample; 0] = [];
 
     // PARALLEL: drag the direction, then a wiggly stroke comes out
-    // exactly on-direction.
+    // exactly on-direction — on the member of the family through its OWN
+    // start, so a SECOND hatch 120 px away stays 120 px away. (This used to
+    // project every stroke onto the line through the ruler's handles, which
+    // stacked the whole page onto one line: the hatching ruler could draw
+    // one hatch.)
     crate::cmd::dispatch(
         &mut app,
         crate::cmd::AppCmd::RulerArm(crate::cmd::RulerKind::Parallel),
@@ -3620,35 +3624,43 @@ fn special_rulers_parallel_concentric_and_the_veto() {
         app.doc.rulers.items.last(),
         Some(mn_core::Ruler::Parallel { .. })
     ));
-    app.begin_stroke(PointerKind::Mouse);
-    app.engine_mut()
-        .set_dab_recording_all(mn_brush::RecordMode::Tap);
-    let batch: Vec<PenSample> = (0..30)
-        .map(|i| {
-            let cy = 200.0 + if i % 2 == 0 { 25.0 } else { -25.0 };
-            let (sx, sy) = app.viewport.to_screen(100.0 + i as f32 * 10.0, cy);
-            PenSample {
-                x: sx,
-                y: sy,
-                pressure: 0.8,
-                tilt_x: 0.0,
-                tilt_y: 0.0,
-                t_ms: i as f64 * 8.0,
-            }
+    // One wobbly hatch centred on `cy`; returns the dabs' y span.
+    let hatch = |app: &mut App, cy0: f32| -> (f32, f32) {
+        app.begin_stroke(PointerKind::Mouse);
+        app.engine_mut()
+            .set_dab_recording_all(mn_brush::RecordMode::Tap);
+        let batch: Vec<PenSample> = (0..30)
+            .map(|i| {
+                let cy = cy0 + if i % 2 == 0 { 25.0 } else { -25.0 };
+                let (sx, sy) = app.viewport.to_screen(100.0 + i as f32 * 10.0, cy);
+                PenSample {
+                    x: sx,
+                    y: sy,
+                    pressure: 0.8,
+                    tilt_x: 0.0,
+                    tilt_y: 0.0,
+                    t_ms: i as f64 * 8.0,
+                }
+            })
+            .collect();
+        app.push_batch(&batch);
+        app.end_stroke();
+        let dabs = app.engine_mut().drain_dab_records();
+        assert!(!dabs.is_empty());
+        dabs.iter().fold((f32::MAX, f32::MIN), |(lo, hi), d| {
+            (lo.min(d.y), hi.max(d.y))
         })
-        .collect();
-    app.push_batch(&batch);
-    app.end_stroke();
-    let dabs = app.engine_mut().drain_dab_records();
-    assert!(!dabs.is_empty());
-    for d in &dabs {
-        assert!(
-            (d.y - 200.0).abs() < 0.5,
-            "parallel: dab ({}, {}) flattened onto the family",
-            d.x,
-            d.y
-        );
-    }
+    };
+    let (lo1, hi1) = hatch(&mut app, 200.0);
+    let (lo2, hi2) = hatch(&mut app, 320.0);
+    // Each hatch is FLAT: a ±25 px wobble comes out inside one pixel.
+    assert!(hi1 - lo1 < 1.0, "parallel: hatch 1 not flat ({lo1}..{hi1})");
+    assert!(hi2 - lo2 < 1.0, "parallel: hatch 2 not flat ({lo2}..{hi2})");
+    // …and they are still 120 px apart, not stacked on the ruler's line.
+    assert!(
+        (lo2 - lo1).abs() > 100.0,
+        "parallel: the two hatches collapsed onto one line ({lo1} vs {lo2})"
+    );
 
     // CONCENTRIC: rings at k·dr. The engine renders a circular TARGET
     // with a slow inward drift of its own (measured: a NO-RULER stroke

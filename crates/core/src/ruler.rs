@@ -28,10 +28,13 @@ pub enum Ruler {
     /// perspective sets it declines `snap_pt` and is served by
     /// [`Rulers::snap_sticky`], which binds the member at the first sample.
     Radial { c: [f32; 2] },
-    /// RL-014 special ruler: every stroke comes out PARALLEL to `a`→`b`.
-    /// Not a discrete line set — the snap keeps the component along the
-    /// direction and drops the perpendicular offset, i.e. it projects onto
-    /// the member of the parallel family nearest to the pen.
+    /// RL-014 special ruler: every stroke comes out PARALLEL to `a`→`b`,
+    /// WHERE IT WAS DRAWN. `a`/`b` aim the family; they are not one of its
+    /// lines. A continuum like the perspective sets — every point of the
+    /// page lies on some member, so a nearest-snap cannot arbitrate — and
+    /// [`Rulers::snap_sticky`] binds the member through the stroke's first
+    /// sample. That is what makes it the hatching ruler CSP draws 流線
+    /// with: a fan of parallel lines spread across the panel.
     Parallel { a: [f32; 2], b: [f32; 2] },
     /// RL-019 special ruler: concentric rings around `c`. `dr` is the ring
     /// spacing and it is OPTIONAL — `dr <= 0` means FREE radius, CSP's own
@@ -109,14 +112,6 @@ impl Ruler {
                 }
                 (best, best_d2)
             }
-            Ruler::Parallel { a, b } => {
-                // The nearest member of the family IS the projection onto
-                // the line through `a` — every point has one, so this
-                // always snaps (like CSP: nothing you draw is ever
-                // off-direction).
-                let q = project(p, a, [b[0] - a[0], b[1] - a[1]]);
-                (q, d2(q, p))
-            }
             // Free radius (`dr <= 0`) is a continuum — every point is on
             // some ring, so distance cannot arbitrate and `snap_sticky`
             // takes it instead (as with the perspective sets).
@@ -133,7 +128,12 @@ impl Ruler {
                 (q, d2(q, p))
             }
             Ruler::Symmetric { .. } => (p, f32::INFINITY),
-            Ruler::Radial { .. }
+            // The parallel family covers the page — the member nearest any
+            // point is the one THROUGH it — so distance cannot arbitrate
+            // here either; `snap_sticky` binds it at the stroke's first
+            // sample.
+            Ruler::Parallel { .. }
+            | Ruler::Radial { .. }
             | Ruler::Perspective { .. }
             | Ruler::Perspective1 { .. }
             | Ruler::Perspective3 { .. } => (p, f32::INFINITY),
@@ -1391,6 +1391,29 @@ impl Rulers {
                 return project(p, line.0, line.1);
             }
         }
+        // The PARALLEL claim: same continuum rule, and the member is the
+        // line through the first sample. No travel is needed to find it —
+        // the direction is the RULER's, not the stroke's — so the head of
+        // every hatch is on-direction from its first dab.
+        //
+        // This used to project onto the line through `a`/`b` instead, which
+        // collapsed every stroke on the page onto that one line: the ruler
+        // whose whole job is a fan of parallels could draw exactly one.
+        let par = self.items.iter().enumerate().find_map(|(i, r)| match *r {
+            Ruler::Parallel { a, b } if self.governed(r) => {
+                let d = [b[0] - a[0], b[1] - a[1]];
+                let n = (d[0] * d[0] + d[1] * d[1]).sqrt();
+                (n > 1e-3).then(|| (i, [d[0] / n, d[1] / n]))
+            }
+            _ => None,
+        });
+        if let Some((pi, dir)) = par
+            && best_d2 > PERSP_CAPTURE_D2
+        {
+            lock.ruler = Some(pi);
+            lock.line = Some((p, dir));
+            return p;
+        }
         // The free-radius ring claim: same continuum rule, but the member
         // is fixed by the first sample's RADIUS, so no travel direction is
         // needed. A pen starting exactly on the centre has no radius yet —
@@ -1514,11 +1537,13 @@ mod part2_tests {
 mod part3_tests {
     use super::*;
 
-    /// RL-014: a parallel ruler flattens any point onto the family — the
-    /// direction component is preserved, the perpendicular offset dropped.
+    /// RL-014: a parallel ruler flattens a stroke onto the member of the
+    /// family through the stroke's OWN first sample — the direction is the
+    /// ruler's, the position is yours. Two strokes at different offsets
+    /// stay apart, which is the whole of "a fan of parallels".
     #[test]
-    fn parallel_ruler_keeps_direction_drops_offset() {
-        let rs = Rulers {
+    fn parallel_ruler_keeps_direction_and_the_strokes_own_offset() {
+        let mut rs = Rulers {
             attach: Vec::new(),
             items: vec![Ruler::Parallel {
                 a: [0.0, 0.0],
@@ -1526,12 +1551,23 @@ mod part3_tests {
             }],
             ..Default::default()
         };
-        let mut rs = rs;
         rs.on = true;
-        let p = rs.snap([50.0, 73.0]);
-        assert!((p[0] - 50.0).abs() < 1e-3, "x preserved: {p:?}");
-        assert!(p[1].abs() < 1e-3, "perpendicular offset dropped: {p:?}");
-        // Diagonal family: y = x direction.
+        // A wobbly stroke started at y = 73 comes out flat AT y = 73.
+        let out = stroke(&rs, &[[50.0, 73.0], [80.0, 60.0], [110.0, 90.0]]);
+        for q in &out {
+            assert!((q[1] - 73.0).abs() < 1e-3, "off its own member: {q:?}");
+        }
+        assert!(
+            (out[2][0] - 110.0).abs() < 1e-3,
+            "the along-direction travel is kept: {out:?}"
+        );
+        // A second stroke 40 px away keeps ITS offset. The two must not
+        // collapse onto one line — they used to, because the snap projected
+        // onto the line through the handles, so the hatching ruler could
+        // draw exactly one hatch.
+        let other = stroke(&rs, &[[50.0, 113.0], [90.0, 100.0]]);
+        assert!((other[1][1] - 113.0).abs() < 1e-3, "{other:?}");
+        // Diagonal family: the direction is a→b, the offset the pen's.
         let rs = Rulers {
             attach: Vec::new(),
             items: vec![Ruler::Parallel {
@@ -1541,8 +1577,9 @@ mod part3_tests {
             on: true,
             ..Default::default()
         };
-        let p = rs.snap([10.0, 0.0]);
-        assert!((p[0] - 5.0).abs() < 1e-3 && (p[1] - 5.0).abs() < 1e-3);
+        let out = stroke(&rs, &[[10.0, 0.0], [30.0, 40.0]]);
+        assert_eq!(out[0], [10.0, 0.0], "the first sample IS the member");
+        assert!(on_line(out[1], [10.0, 0.0], [1.0, 1.0]), "{out:?}");
     }
 
     /// RL-019: concentric rings quantize the radius, keeping the angle.
@@ -1613,9 +1650,12 @@ mod part3_tests {
             special_on: true,
             curves: Vec::new(),
         };
-        // Both live: nearer the parallel (dy=3 vs dy=7).
-        let p = rs.snap([50.0, 203.0]);
-        assert!((p[1] - 200.0).abs() < 1e-3, "{p:?}");
+        // Both live: the pen is nowhere near the line ruler, so the parallel
+        // family claims the stroke and keeps it on its own member.
+        let mut lock = SnapLock::default();
+        let p = rs.snap_sticky([50.0, 203.0], &mut lock);
+        assert!((p[1] - 203.0).abs() < 1e-3, "{p:?}");
+        assert_eq!(lock.ruler, Some(1), "the parallel family took the stroke");
         // Special off: only the line ruler remains.
         rs.special_on = false;
         let p = rs.snap([50.0, 203.0]);
