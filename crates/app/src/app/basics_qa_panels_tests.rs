@@ -463,3 +463,478 @@ fn qa_transform_moves_the_selected_ink_where_it_was_dragged() {
     assert!(inked(&undone, 64, 64), "one undo put the block back");
     assert!(!inked(&undone, 200, 200), "and cleared where it had gone");
 }
+
+
+/// S9. The other two thirds of Transform on a selection: a CORNER drag
+/// scales about the opposite corner (CSP's anchor, not the centre), and a
+/// rotate turns the lifted pixels — both judged on the printed page.
+#[test]
+fn qa_transform_scales_from_a_corner_and_rotates_the_lifted_pixels() {
+    let Some(mut app) = headless() else { return };
+    page(&mut app);
+    dispatch(&mut app, AppCmd::SetTool(Tool::Select));
+    dispatch(&mut app, AppCmd::SetSelectMode(SelectMode::Rect));
+    drag(&mut app, (64.0, 64.0), (128.0, 128.0));
+    dispatch(&mut app, AppCmd::SetSlotColor([0.0, 0.0, 0.0]));
+    dispatch(&mut app, AppCmd::FillSelection);
+
+    // Corner (128,128) pulled to (192,192): x2 about the pinned (64,64).
+    dispatch(&mut app, AppCmd::TransformStart);
+    let (x0, y0) = s(&app, 128.0, 128.0);
+    let (x1, y1) = s(&app, 192.0, 192.0);
+    app.canvas_down(x0, y0, PointerKind::Mouse, &NO_PEN);
+    app.canvas_move(x1, y1, &NO_PEN);
+    app.canvas_up(x1, y1, &NO_PEN);
+    pump(&mut app);
+    dispatch(&mut app, AppCmd::TransformCommit);
+    let img = shot(&mut app, "S9a-corner-scale");
+    assert!(inked(&img, 70, 70), "the pinned corner stayed put");
+    assert!(inked(&img, 185, 185), "and the block grew to the pointer");
+    assert!(!inked(&img, 200, 200), "not past it");
+
+    // A rotation: a wide bar becomes a tall one about its own centre.
+    let Some(mut app) = headless() else { return };
+    page(&mut app);
+    dispatch(&mut app, AppCmd::SetTool(Tool::Select));
+    dispatch(&mut app, AppCmd::SetSelectMode(SelectMode::Rect));
+    drag(&mut app, (48.0, 80.0), (176.0, 112.0));
+    dispatch(&mut app, AppCmd::SetSlotColor([0.0, 0.0, 0.0]));
+    dispatch(&mut app, AppCmd::FillSelection);
+    let before = shot(&mut app, "S9b-bar-before");
+    assert!(inked(&before, 60, 96), "the bar starts wide");
+    assert!(!inked(&before, 112, 40), "and short");
+
+    dispatch(&mut app, AppCmd::TransformStart);
+    dispatch(
+        &mut app,
+        AppCmd::TransformUpdate {
+            sx: 1.0,
+            sy: 1.0,
+            rad: std::f32::consts::FRAC_PI_2,
+            tx: 0.0,
+            ty: 0.0,
+        },
+    );
+    dispatch(&mut app, AppCmd::TransformCommit);
+    let after = shot(&mut app, "S9c-bar-rotated");
+    assert!(inked(&after, 112, 40), "a quarter turn makes it tall");
+    assert!(!inked(&after, 60, 96), "and no longer wide");
+}
+// =====================================================================
+// P — frame folders, the comic page a mangaka actually starts from
+// =====================================================================
+
+/// Every frame folder header on the page, bottom of the stack first.
+fn frame_headers(app: &App) -> Vec<usize> {
+    app.doc
+        .layers
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.folder && l.is_frame())
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// The panel rectangle `fi` of the frame folder at `li`.
+fn panel_bbox(app: &App, li: usize, fi: usize) -> [f32; 4] {
+    app.doc.layers[li].frames().unwrap().frames[fi].bbox()
+}
+
+/// Along scanline `y`, the runs of INK between `x0` and `x1` — how the
+/// border's thickness and the panel walls are counted.
+fn ink_runs(img: &image::RgbaImage, y: u32, x0: u32, x1: u32) -> Vec<(u32, u32)> {
+    let mut out = Vec::new();
+    let mut run: Option<u32> = None;
+    for x in x0..=x1 {
+        if inked(img, x, y) {
+            run.get_or_insert(x);
+        } else if let Some(s) = run.take() {
+            out.push((s, x - s));
+        }
+    }
+    if let Some(s) = run {
+        out.push((s, x1 + 1 - s));
+    }
+    out
+}
+
+/// Ink inside a horizontal band `x0..=x1`, five scanlines tall around
+/// `y` — a stroke's tapered end is thin and wanders a pixel, so "did any
+/// of this stroke print here" is a band question, not a pixel one.
+fn band_ink(img: &image::RgbaImage, x0: u32, x1: u32, y: u32) -> u32 {
+    let (w, h) = img.dimensions();
+    let mut n = 0;
+    for yy in y.saturating_sub(3)..(y + 4).min(h) {
+        for xx in x0..=x1.min(w - 1) {
+            if inked(img, xx, yy) {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+/// A small real comic page: `File ▸ New comic` at 72 dpi so the render is
+/// a few hundred pixels, not a few thousand.
+fn comic_page(app: &mut App) {
+    super::new_document_tests::small_draft(app, 1, "");
+    dispatch(app, AppCmd::NewComicCreate);
+    app.viewport.zoom = 1.0;
+    app.viewport.pan = [0.0, 0.0];
+}
+
+/// P1. A new comic page arrives with one frame folder whose border sits
+/// on the inner border, inside the paper with margin all round — the page
+/// a mangaka starts every chapter from.
+#[test]
+fn qa_a_new_comic_page_comes_with_a_panel_on_the_inner_border() {
+    let Some(mut app) = headless() else { return };
+    comic_page(&mut app);
+    let heads = frame_headers(&app);
+    assert_eq!(heads.len(), 1, "one frame folder seeds the page");
+    let b = panel_bbox(&app, heads[0], 0);
+    let (pw, ph) = app.doc.size;
+    assert!(
+        b[0] > 2.0 && b[1] > 2.0 && b[2] < pw as f32 - 2.0 && b[3] < ph as f32 - 2.0,
+        "the panel sits inside the paper, not on it: {b:?} in {pw}x{ph}"
+    );
+
+    let img = shot(&mut app, "P1-new-comic-page");
+    let (iw, ih) = img.dimensions();
+    let my = ((b[1] + b[3]) * 0.5) as u32;
+    let runs = ink_runs(&img, my, 0, iw - 1);
+    assert_eq!(
+        runs.len(),
+        2,
+        "across the panel's waist: left wall, right wall, nothing else: {runs:?}"
+    );
+    assert!(!inked(&img, 1, 1), "the paper corner is clean");
+    assert!(!inked(&img, iw - 2, ih - 2), "and so is the far one");
+}
+
+/// P2. Divide frame border, level cut: two panels with the gutter the
+/// Tool Property asks for — measured on the printed page, not just in the
+/// geometry.
+#[test]
+fn qa_dividing_a_panel_leaves_the_gutter_the_tool_property_asks_for() {
+    let Some(mut app) = headless() else { return };
+    comic_page(&mut app);
+    let head = frame_headers(&app)[0];
+    app.doc.set_active(head);
+    app.frame_mode = crate::cmd::FrameMode::DivideBorder;
+    app.gutter_border_mm = (4.0, 4.0);
+    let want = app.mm_to_px(4.0);
+
+    let b = panel_bbox(&app, head, 0);
+    let mid_y = (b[1] + b[3]) * 0.5;
+    dispatch(
+        &mut app,
+        AppCmd::FrameDivide {
+            a: (b[0] - 20.0, mid_y),
+            b: (b[2] + 20.0, mid_y),
+        },
+    );
+    let fs = app.doc.layers[head].frames().unwrap();
+    assert_eq!(fs.frames.len(), 2, "the level drag cut the panel in two");
+    let (f0, f1) = (fs.frames[0].bbox(), fs.frames[1].bbox());
+    let (upper, lower) = if f0[1] < f1[1] { (f0, f1) } else { (f1, f0) };
+    let gap = lower[1] - upper[3];
+    assert!(
+        (gap - want).abs() <= 1.0,
+        "the gutter is the 4 mm asked for ({want:.1} px), measured {gap:.1} px"
+    );
+
+    let img = shot(&mut app, "P2-divide-horizontal");
+    // Straight down the panel's middle: the widest white run between the
+    // two panels IS the gutter as printed.
+    let cx = ((upper[0] + upper[2]) * 0.5) as u32;
+    let (mut paper, mut worst) = (0u32, 0u32);
+    for y in (upper[3] as u32).saturating_sub(4)..(lower[1] as u32 + 4) {
+        if inked(&img, cx, y) {
+            worst = worst.max(paper);
+            paper = 0;
+        } else {
+            paper += 1;
+        }
+    }
+    worst = worst.max(paper);
+    assert!(
+        (worst as f32 - want).abs() <= 3.0,
+        "the white gutter on the printed page is the asked-for {want:.1} px, not {worst}"
+    );
+
+    dispatch(&mut app, AppCmd::Undo);
+    assert_eq!(
+        app.doc.layers[head].frames().unwrap().frames.len(),
+        1,
+        "one undo takes the cut back"
+    );
+}
+
+/// P3. An upright cut across the level one: the four-panel page every
+/// chapter opener is.
+#[test]
+fn qa_a_second_cut_crosses_the_first_into_four_panels() {
+    let Some(mut app) = headless() else { return };
+    comic_page(&mut app);
+    let head = frame_headers(&app)[0];
+    app.doc.set_active(head);
+    app.frame_mode = crate::cmd::FrameMode::DivideBorder;
+    app.gutter_border_mm = (4.0, 4.0);
+    let b = panel_bbox(&app, head, 0);
+    let (mx, my) = ((b[0] + b[2]) * 0.5, (b[1] + b[3]) * 0.5);
+    dispatch(
+        &mut app,
+        AppCmd::FrameDivide {
+            a: (b[0] - 20.0, my),
+            b: (b[2] + 20.0, my),
+        },
+    );
+    dispatch(
+        &mut app,
+        AppCmd::FrameDivide {
+            a: (mx, b[1] - 20.0),
+            b: (mx, b[3] + 20.0),
+        },
+    );
+    assert_eq!(
+        app.doc.layers[head].frames().unwrap().frames.len(),
+        4,
+        "a level cut and an upright cut = four panels"
+    );
+    let img = shot(&mut app, "P3-four-panels");
+    let top = app.doc.layers[head]
+        .frames()
+        .unwrap()
+        .frames
+        .iter()
+        .map(|f| f.bbox())
+        .min_by(|a, c| a[1].total_cmp(&c[1]))
+        .unwrap();
+    let waist = ((top[1] + top[3]) * 0.5) as u32;
+    let runs = ink_runs(&img, waist, 0, img.dimensions().0 - 1);
+    assert_eq!(
+        runs.len(),
+        4,
+        "two panels side by side = four walls on that scanline: {runs:?}"
+    );
+}
+
+/// P4. The Border row is the ink's width on the page: the same panel at
+/// 0.4 mm and at 1.6 mm inks visibly different walls.
+#[test]
+fn qa_the_border_width_row_is_the_ink_on_the_page() {
+    let width_of = |mm: f32| -> u32 {
+        let Some(mut app) = headless() else { return 0 };
+        comic_page(&mut app);
+        let head = frame_headers(&app)[0];
+        let b = panel_bbox(&app, head, 0);
+        // Through the door the Border row uses.
+        let mut fs = app.doc.layers[head].frames().unwrap().clone();
+        fs.border_px = app.mm_to_px(mm);
+        dispatch(
+            &mut app,
+            AppCmd::FrameCommit {
+                layer: head,
+                frames: fs,
+            },
+        );
+        let img = shot(&mut app, &format!("P4-border-{mm}mm"));
+        let waist = ((b[1] + b[3]) * 0.5) as u32;
+        let runs = ink_runs(&img, waist, 0, img.dimensions().0 - 1);
+        assert_eq!(runs.len(), 2, "left wall and right wall: {runs:?}");
+        runs[0].1
+    };
+    let thin = width_of(0.4);
+    if thin == 0 {
+        return; // no renderer
+    }
+    let fat = width_of(1.6);
+    assert!(
+        fat > thin * 2,
+        "1.6 mm inks a visibly fatter wall than 0.4 mm: {thin} px vs {fat} px"
+    );
+}
+
+/// P5. THE frame-folder promise: ink on a layer inside the folder is
+/// clipped to the panel. A stroke that runs the width of the page stops
+/// at the border and the paper outside stays paper.
+#[test]
+fn qa_ink_inside_a_frame_folder_is_clipped_to_the_panel() {
+    let Some(mut app) = headless() else { return };
+    comic_page(&mut app);
+    let head = frame_headers(&app)[0];
+    let b = panel_bbox(&app, head, 0);
+    assert_eq!(
+        app.doc.enclosing_frame_folder(app.doc.active),
+        Some(head),
+        "a new comic page leaves you on a layer INSIDE the panel"
+    );
+    dispatch(&mut app, AppCmd::SetTool(Tool::Pen));
+    dispatch(&mut app, AppCmd::SetBrushSizePx(9.0));
+    dispatch(&mut app, AppCmd::SetSlotColor([0.0, 0.0, 0.0]));
+    let y = (b[1] + b[3]) * 0.5;
+    let right = app.doc.size.0 as f32 - 2.0;
+    brush_stroke_at(&mut app, (2.0, y), (right, y), 1.0);
+
+    let img = shot(&mut app, "P5-clipped-inside");
+    let yy = y as u32;
+    assert_eq!(
+        band_ink(&img, 2, b[0] as u32 - 4, yy),
+        0,
+        "the half of the stroke left of the panel never printed"
+    );
+    assert_eq!(
+        band_ink(&img, b[2] as u32 + 4, img.dimensions().0 - 3, yy),
+        0,
+        "nor the half right of it"
+    );
+    assert!(
+        inked(&img, ((b[0] + b[2]) * 0.5) as u32, yy),
+        "and the half inside the panel did"
+    );
+}
+
+/// P6. The breakout (CSP's hand-made overflow, one tick here): the same
+/// stroke on the same layer draws past the border, and unticking puts it
+/// back inside.
+#[test]
+fn qa_burst_out_of_the_panel_lets_the_art_escape() {
+    let Some(mut app) = headless() else { return };
+    comic_page(&mut app);
+    let head = frame_headers(&app)[0];
+    let b = panel_bbox(&app, head, 0);
+    let li = app.doc.active;
+    dispatch(&mut app, AppCmd::SetTool(Tool::Pen));
+    dispatch(&mut app, AppCmd::SetBrushSizePx(9.0));
+    dispatch(&mut app, AppCmd::SetSlotColor([0.0, 0.0, 0.0]));
+    let y = (b[1] + b[3]) * 0.5;
+    let right = app.doc.size.0 as f32 - 2.0;
+    brush_stroke_at(&mut app, (2.0, y), (right, y), 1.0);
+
+    dispatch(&mut app, AppCmd::SetLayerEscape(li, true));
+    assert!(
+        app.doc.layers[li].escape_frame,
+        "the Layer Property tick took"
+    );
+    let img = shot(&mut app, "P6-burst-out");
+    let yy = y as u32;
+    assert!(
+        band_ink(&img, 2, b[0] as u32 - 4, yy) > 0,
+        "the art now prints left of the panel"
+    );
+    assert!(
+        band_ink(&img, b[2] as u32 + 4, img.dimensions().0 - 3, yy) > 0,
+        "and right of it"
+    );
+
+    dispatch(&mut app, AppCmd::SetLayerEscape(li, false));
+    let back = shot(&mut app, "P6b-burst-unticked");
+    assert_eq!(
+        band_ink(&back, 2, b[0] as u32 - 4, yy),
+        0,
+        "unticking puts the art back inside the panel"
+    );
+}
+
+/// P7. CSP's own advice for art that spans panels — "draw on a layer
+/// ABOVE the frame folder" — must work here too: no clipping at all.
+///
+/// Getting such a layer is the awkward part, and this test pins the
+/// route: New layer with the seeded draw layer active lands as its
+/// SIBLING, still inside the panel (CSP-correct), and so does New layer
+/// on an OPEN folder. The layer that is not clipped is the one added
+/// with the folder COLLAPSED — which is the only door on a fresh comic
+/// page, and is in the ledger as a discoverability item.
+#[test]
+fn qa_a_layer_above_the_frame_folder_is_not_clipped() {
+    let Some(mut app) = headless() else { return };
+    comic_page(&mut app);
+    let head = frame_headers(&app)[0];
+    let b = panel_bbox(&app, head, 0);
+
+    // The two doors that keep you inside. (`head` moves as layers are
+    // inserted below it — read it back each time.)
+    dispatch(&mut app, AppCmd::AddLayer);
+    assert_eq!(
+        app.doc.enclosing_frame_folder(app.doc.active),
+        Some(frame_headers(&app)[0]),
+        "New layer beside the draw layer stays in the panel"
+    );
+    dispatch(&mut app, AppCmd::Undo);
+    let head = frame_headers(&app)[0];
+    app.doc.set_active(head);
+    app.doc.layers[head].open = true;
+    dispatch(&mut app, AppCmd::AddLayer);
+    assert_eq!(
+        app.doc.enclosing_frame_folder(app.doc.active),
+        Some(frame_headers(&app)[0]),
+        "New layer on an open frame folder goes inside it"
+    );
+    dispatch(&mut app, AppCmd::Undo);
+
+    // The door that gets out: collapse the folder first.
+    let head = frame_headers(&app)[0];
+    app.doc.set_active(head);
+    app.doc.layers[head].open = false;
+    dispatch(&mut app, AppCmd::AddLayer);
+    let li = app.doc.active;
+    assert!(
+        app.doc.enclosing_frame_folder(li).is_none(),
+        "with the folder collapsed the new layer lands above it"
+    );
+
+    dispatch(&mut app, AppCmd::SetTool(Tool::Pen));
+    dispatch(&mut app, AppCmd::SetBrushSizePx(9.0));
+    dispatch(&mut app, AppCmd::SetSlotColor([0.0, 0.0, 0.0]));
+    let y = (b[1] + b[3]) * 0.5;
+    let right = app.doc.size.0 as f32 - 2.0;
+    brush_stroke_at(&mut app, (2.0, y), (right, y), 1.0);
+    let img = shot(&mut app, "P7-above-the-folder");
+    let yy = y as u32;
+    assert!(
+        band_ink(&img, 2, b[0] as u32 - 4, yy) > 0,
+        "it prints outside the panel"
+    );
+    assert!(
+        inked(&img, ((b[0] + b[2]) * 0.5) as u32, yy),
+        "and inside it"
+    );
+}
+
+/// P8. The yellow expand arrows (CSP's triangle icons): with a panel
+/// picked in the Object tool every side that can still bleed offers one,
+/// and taking one runs the edge off the paper.
+#[test]
+fn qa_the_expand_arrows_run_a_panel_edge_out_to_the_paper() {
+    let Some(mut app) = headless() else { return };
+    comic_page(&mut app);
+    let head = frame_headers(&app)[0];
+    dispatch(&mut app, AppCmd::SetTool(Tool::Object));
+    app.object_sel = Some((head, 0));
+    let arrows = app.frame_expand_arrow_pts();
+    assert_eq!(
+        arrows.len(),
+        4,
+        "a lone panel can bleed off all four sides: {arrows:?}"
+    );
+
+    let b = panel_bbox(&app, head, 0);
+    dispatch(
+        &mut app,
+        AppCmd::FrameExtendEdge {
+            at: ((b[0] + b[2]) * 0.5, b[1]),
+        },
+    );
+    let after = panel_bbox(&app, head, 0);
+    assert!(
+        after[1] < 0.0,
+        "the top edge ran off the paper: {b:?} -> {after:?}"
+    );
+    let img = shot(&mut app, "P8-bleed-panel");
+    let cx = ((b[0] + b[2]) * 0.5) as u32;
+    assert!(
+        !inked(&img, cx, 1),
+        "no border ink is left along the top of the page"
+    );
+}
