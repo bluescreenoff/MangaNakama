@@ -317,13 +317,16 @@ fn alpha_at(app: &App, li: usize, x: i32, y: i32) -> u16 {
         .unwrap_or(0)
 }
 
-/// Mode 1, the default (CSP "Erase touched areas"): the rub takes what it
-/// covered and stops there — the ink either side of it, all the way up to
-/// the crossings, is still on the page.
+/// Mode 1 (CSP "Erase touched areas"): the rub takes what it covered and
+/// stops there — the ink either side of it, all the way up to the
+/// crossings, is still on the page. The DEFAULT stays "up to
+/// intersection" (what this build always did, and CSP's Vector eraser
+/// sub-tool default); the pin below guards that.
 #[test]
-fn the_eraser_takes_only_what_it_touched_by_default() {
+fn the_eraser_takes_only_what_it_touched_in_touched_mode() {
     let Some(mut app) = vector_app() else { return };
-    assert_eq!(app.vector_eraser_mode, mn_core::EraserMode::Touched);
+    assert_eq!(app.vector_eraser_mode, mn_core::EraserMode::ToIntersection, "default = up to intersection");
+    app.vector_eraser_mode = mn_core::EraserMode::Touched;
     let li = crossed_lines_then_rub(&mut app);
     assert_eq!(
         app.doc.layers[li].strokes.as_ref().unwrap().strokes.len(),

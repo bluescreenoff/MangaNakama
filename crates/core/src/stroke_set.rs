@@ -135,13 +135,15 @@ pub struct StrokeSet {
 pub enum EraserMode {
     /// "Erase touched areas": only the samples under the eraser die, so a
     /// rub through the middle splits the stroke in two.
-    #[default]
     Touched,
-    /// "Erase up to intersection": the touched span widens to the nearest
+    /// "Erase up to intersection" — the DEFAULT, as it has been since the
+    /// vector eraser shipped and as CSP's Vector eraser sub tool defaults:
+    /// the touched span widens to the nearest
     /// crossings with the layer's other strokes (a stroke crossing ITSELF
     /// counts), or to the stroke's own ends when there is no crossing on
     /// that side. CSP's extra "Refer all layers" option under this mode is
     /// not built — crossings are this layer's only.
+    #[default]
     ToIntersection,
     /// "Whole line": every stroke the eraser touched dies entire.
     WholeLine,
