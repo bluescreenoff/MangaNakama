@@ -73,6 +73,11 @@ pub enum ActiveLayerCmd {
     ToggleColour,
     /// CSP `layerchangebelowclip` (the owner's Ctrl+Alt+G).
     ToggleClip,
+    /// CSP Layer ▸ Layer order ▸ Move up / Move down: the active row (a
+    /// folder with its children) hops over the row beside it. The palette
+    /// drag did this; now a key can (surface pass 2026-09-02).
+    MoveUp,
+    MoveDown,
 }
 
 #[derive(Clone, Debug)]
@@ -829,6 +834,9 @@ pub enum AppCmd {
     /// the header goes (CSP Release folder, Ctrl+Shift+G). Index-free for
     /// the same reason.
     ReleaseFolder,
+    /// CSP Layer ▸ Flatten image: every visible layer into one raster,
+    /// hidden layers discarded, one undo. Index-free.
+    FlattenImage,
     /// Move the active-layer cursor up/down the stack (Alt+] / Alt+[).
     LayerAbove,
     LayerBelow,

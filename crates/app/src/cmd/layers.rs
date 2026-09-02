@@ -287,8 +287,8 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
 
         // --- layers -------------------------------------------------------
         // Structural ops (add/remove/reorder) shift layer indices, which the
-        // tile cache keys on and `UndoGroup` records — hence invalidate() here,
-        // and hence `Document` clearing the history itself.
+        // tile cache keys on — hence invalidate() here. `Document` records
+        // each as one structural undo step (`record_structure`).
         AppCmd::AddLayer => {
             app.commit_text_edit();
             let n = app.doc.layers.len() + 1;
@@ -420,6 +420,9 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                 app.renderer.invalidate();
                 app.renumber_frames();
                 app.mark_dirty();
+            } else {
+                // The only refusal: the stack must keep one layer.
+                app.set_status("a page keeps at least one layer — clear it instead (Del)");
             }
         }
         AppCmd::DuplicateLayer => {
@@ -442,26 +445,50 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
         AppCmd::MergeDown => {
             app.commit_text_edit();
             let i = app.doc.active;
-            let tone_side = app
-                .doc
-                .layers
-                .get(i)
-                .zip(app.doc.layers.get(i.wrapping_sub(1)))
-                .is_some_and(|(a, b)| a.tone.is_some() || b.tone.is_some());
-            if tone_side {
-                app.set_status(
-                    "merge refuses tone layers — remove the tone first (it is non-destructive)",
-                );
-            } else if app.doc.merge_down(i) {
+            // Every refusal speaks (surface pass 2026-09-02: Ctrl+E on a
+            // clipped, locked or bottom row did nothing and said nothing).
+            if let Some(why) = app.doc.merge_down_refusal(i) {
+                app.set_status(why);
+                return run_cmd_tail(app, cmd_tail);
+            }
+            // A folder's children may carry derived rasters (tones, live
+            // fills) — make sure they are fresh before the group flattens.
+            let was_folder = app.doc.layers[i].folder;
+            let was_clipped = app.doc.layers[i].clip;
+            app.refresh_tones();
+            if app.doc.merge_down(i) {
                 app.object_sel = None;
                 // The merged layer is gone; the active index moved (H1).
                 app.disarm_mask_edit_if_unmasked();
                 app.renderer.invalidate();
                 app.layer_thumbs.clear();
-                app.set_status("merged with layer below");
+                app.set_status(if was_folder {
+                    "folder flattened onto the layer below (one undo)"
+                } else if was_clipped {
+                    "merged with layer below — only what the clip showed was baked (one undo)"
+                } else {
+                    "merged with layer below"
+                });
                 app.mark_dirty();
-            } else if app.doc.layers.get(i).is_some_and(|l| l.is_frame()) {
-                app.set_status("frame layers keep their vectors — they never merge");
+            }
+        }
+        AppCmd::FlattenImage => {
+            app.commit_text_edit();
+            app.refresh_tones();
+            if app.doc.flatten() {
+                app.object_sel = None;
+                app.text_sel = None;
+                app.vector_sel = None;
+                app.disarm_mask_edit_if_unmasked();
+                app.renderer.invalidate();
+                app.layer_thumbs.clear();
+                app.renumber_frames();
+                app.set_status(
+                    "flattened — every visible layer is one raster now, hidden layers gone (one undo)",
+                );
+                app.mark_dirty();
+            } else {
+                app.set_status("already one plain layer — nothing to flatten");
             }
         }
         AppCmd::MergeSelected => {
@@ -657,6 +684,10 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
         // there is one implementation of each verb.
         AppCmd::ActiveLayer(c) => {
             let i = app.doc.active;
+            let n = app.doc.layers.len();
+            // A folder moves as its block; its children sit BELOW the
+            // header in the stack, so "down" is the gap under the block.
+            let block_start = app.doc.block_range(i).start;
             let aimed = app.doc.layers.get(i).map(|l| match c {
                 // Off keeps nothing to come back to, so ON re-uses the tint
                 // the layer last displayed — the Layer palette's own rule.
@@ -668,9 +699,29 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                     },
                 ),
                 ActiveLayerCmd::ToggleClip => AppCmd::SetLayerClip(i, !l.clip),
+                ActiveLayerCmd::MoveUp => AppCmd::MoveLayer {
+                    from: i,
+                    slot: (i + 2).min(n),
+                    depth: l.depth,
+                },
+                ActiveLayerCmd::MoveDown => AppCmd::MoveLayer {
+                    from: i,
+                    slot: block_start.saturating_sub(1),
+                    depth: l.depth,
+                },
             });
+            let moving = matches!(c, ActiveLayerCmd::MoveUp | ActiveLayerCmd::MoveDown);
             match aimed {
-                Some(c) => dispatch(app, c),
+                Some(c) => {
+                    dispatch(app, c);
+                    if moving {
+                        app.set_status(if app.doc.active == i {
+                            "already at that end of the stack"
+                        } else {
+                            "layer moved (one undo)"
+                        });
+                    }
+                }
                 None => app.set_status("no layer"),
             }
         }

@@ -3033,7 +3033,7 @@ impl Document {
     }
 
     /// New empty folder directly above `index`'s block, same depth, active.
-    /// Clears the undo history. Returns the new index.
+    /// Records one structural undo step. Returns the new index.
     pub fn add_folder_above(&mut self, index: usize, name: impl Into<String>) -> usize {
         let (before, active_before) = (self.stack_snapshot(), self.active);
         let depth = self.layers.get(index).map(|l| l.depth).unwrap_or(0);
@@ -3220,7 +3220,7 @@ impl Document {
     /// bottom lands at gap `slot` (an insertion point in the **current**
     /// stack, 0..=len), and give the moved layer depth `depth` (children keep
     /// their relative depths; the result is normalized). Refuses to drop a
-    /// folder into itself. Clears the undo history.
+    /// folder into itself. Records one structural undo step.
     pub fn move_block_to_slot(&mut self, from: usize, slot: usize, depth: u8) -> bool {
         let n = self.layers.len();
         if from >= n || slot > n {
@@ -3414,7 +3414,7 @@ impl Document {
 
     /// Move a layer to a new index (reorder), keeping its depth. `to` is the
     /// index it should end up at in the resulting stack. A folder moves with
-    /// its children. Returns `false` on a bad index. Clears the undo history;
+    /// its children. Returns `false` on a bad index. Records one structural undo step;
     /// keeps the moved layer active if it already was.
     pub fn move_layer(&mut self, from: usize, to: usize) -> bool {
         let n = self.layers.len();
@@ -3441,7 +3441,7 @@ impl Document {
     }
 
     /// New layer above the active one, filled from an image, centred on the
-    /// canvas (oversized images are clipped). Clears the undo history like any
+    /// canvas (oversized images are clipped). Records one structural undo step like any
     /// structural layer op. Returns the new layer's index.
     pub fn add_layer_from_image(
         &mut self,
@@ -3449,26 +3449,8 @@ impl Document {
         img: &image::RgbaImage,
     ) -> usize {
         let at = self.add_layer(name);
-        let (w, h) = (self.size.0 as i64, self.size.1 as i64);
-        let ox = (w - img.width() as i64) / 2;
-        let oy = (h - img.height() as i64) / 2;
-        let layer = &mut self.layers[at];
-        for (px, py, p) in img.enumerate_pixels() {
-            if p.0[3] == 0 {
-                continue;
-            }
-            let (x, y) = (ox + px as i64, oy + py as i64);
-            if x < 0 || y < 0 || x >= w || y >= h {
-                continue;
-            }
-            let idx = TileIdx::of_pixel(x as i32, y as i32);
-            let (tx, ty) = idx.origin();
-            layer.tile_mut(idx).set_pixel(
-                (x as i32 - tx) as usize,
-                (y as i32 - ty) as usize,
-                crate::blend::straight_u8_to_fix15(p.0),
-            );
-        }
+        let size = self.size;
+        fill_layer_from_image(&mut self.layers[at], size, img);
         self.touch();
         at
     }
@@ -4195,38 +4177,152 @@ impl Document {
     /// history like other structural ops. Returns `false` on a bad index.
     /// Vector layers (frames, balloons) refuse to merge — baking the derived
     /// raster into art would destroy both the vectors and the pixels under it.
+    ///
+    /// A FOLDER merges down too (CSP: the group flattens onto the layer
+    /// under it — the everyday "collapse this shading folder into the
+    /// flats"): its isolated composite is baked with the header's own
+    /// opacity and blend, then the whole block leaves. A CLIPPED layer
+    /// bakes what it SHOWS — its ink cut to the base's alpha — when the
+    /// layer under it is that base (CSP's merge); when the layer under it
+    /// is another member of the same clip run the ink lands as-is and
+    /// stays clipped through it.
+    ///
+    /// The "layer below" is the row under the whole BLOCK (a folder's
+    /// children sit below its header in `layers`), see
+    /// [`Self::merge_down_refusal`] for every rule.
     pub fn merge_down(&mut self, index: usize) -> bool {
-        if index == 0 || index >= self.layers.len() {
+        if self.merge_down_refusal(index).is_some() {
             return false;
         }
-        if self.layers[index].is_vector() || self.layers[index - 1].is_vector() {
-            return false;
+        let block = self.block_range(index);
+        let below = block.start - 1;
+        let (before, active_before) = (self.stack_snapshot(), self.active);
+        let mut upper = if self.layers[index].folder {
+            self.flatten_block(block.clone())
+        } else {
+            self.layers[index].clone()
+        };
+        if upper.clip && self.clip_bases()[index] == Some(below) {
+            let base = &self.layers[below];
+            let keys: Vec<TileIdx> = upper.tiles.keys().copied().collect();
+            for idx in keys {
+                let Some(b) = base.display_tile(idx) else {
+                    upper.tiles.remove(&idx);
+                    continue;
+                };
+                let bd = b.data();
+                let ud = Arc::make_mut(upper.tiles.get_mut(&idx).expect("own key")).data_mut();
+                for p in 0..crate::tile::TILE_PIXELS {
+                    let a = bd[p * 4 + 3] as u32;
+                    for c in 0..4 {
+                        ud[p * 4 + c] =
+                            ((ud[p * 4 + c] as u32 * a) / crate::tile::FIX15_ONE as u32) as u16;
+                    }
+                }
+            }
+        }
+        bake_layer_into(&mut self.layers[below], &upper);
+        self.layers.drain(block);
+        self.active = below;
+        self.normalize_depths();
+        self.record_structure("Merge down", before, active_before);
+        self.touch();
+        true
+    }
+
+    /// Why [`Self::merge_down`] would refuse `index`, in the words the
+    /// status line says — `None` = it will merge. One list so the palette
+    /// never refuses silently: Ctrl+E doing nothing with no message was
+    /// the 2026-09-02 surface pass's first finding in this family.
+    pub fn merge_down_refusal(&self, index: usize) -> Option<&'static str> {
+        let l = self.layers.get(index)?;
+        let block = self.block_range(index);
+        let Some(below) = block.start.checked_sub(1) else {
+            return Some("nothing below this layer to merge into");
+        };
+        let b = &self.layers[below];
+        if l.is_frame() {
+            return Some("frame folders keep their vectors — they never merge");
+        }
+        if l.is_vector() {
+            return Some("balloon and text layers keep their vectors — rasterize first");
+        }
+        if b.folder {
+            return Some("the row below is a folder — open it and merge onto a layer inside, or merge the folder itself");
+        }
+        if b.is_vector() {
+            return Some("the row below keeps its vectors (frame/balloon/text) — nothing can merge onto it");
         }
         // The DESTINATION may not be a stroke-recording layer: the merged
         // pixels would land in tiles the next replay zeroes. (The source
         // may be one — that is CSP's rasterize-and-merge, and its record
         // leaves with the layer.)
-        if self.layers[index - 1].records_strokes() {
-            return false;
+        if b.records_strokes() {
+            return Some("the row below is a vector layer — its next edit would replay over the merged ink");
         }
-        // Folders never merge, merging across a folder boundary would smuggle
-        // pixels in or out of a mask, a clipped layer's raw pixels are not
-        // what it shows, and a locked layer refuses edits.
-        if self.layers[index].folder
-            || self.layers[index - 1].folder
-            || self.layers[index].depth != self.layers[index - 1].depth
-            || self.layers[index].clip
-            || self.layers[index].lock
-            || self.layers[index - 1].lock
-        {
-            return false;
+        if l.tone.is_some() || b.tone.is_some() {
+            return Some("merge refuses tone layers — remove the tone first (it is non-destructive)");
+        }
+        if l.lock {
+            return Some("this layer is locked — unlock it to merge");
+        }
+        if b.lock {
+            return Some("the layer below is locked — unlock it to merge into it");
+        }
+        // Merging across a folder boundary would smuggle pixels in or out
+        // of a mask.
+        if l.depth != b.depth {
+            return Some("the row below is outside this folder — move the layer out first");
+        }
+        None
+    }
+
+    /// The isolated composite of the block `r` (a folder header and its
+    /// children) as ONE raster layer, with the header's own opacity and
+    /// blend carried on the result so the caller bakes it exactly as the
+    /// page showed the group. Children are composited through the header
+    /// at full opacity/Normal inside a scratch document, which is the
+    /// group's isolated buffer by construction.
+    fn flatten_block(&self, r: std::ops::Range<usize>) -> Layer {
+        let header = &self.layers[r.end - 1];
+        let mut scratch = Document::new(self.size.0, self.size.1);
+        scratch.layers = self.layers[r].to_vec();
+        let base = header.depth;
+        for l in &mut scratch.layers {
+            l.depth -= base;
+            l.recording = None;
+        }
+        let h = scratch.layers.len() - 1;
+        scratch.layers[h].opacity = 1.0;
+        scratch.layers[h].blend = Blend::Normal;
+        scratch.layers[h].visible = true;
+        let img = crate::export::composite(&scratch, crate::export::Background::Transparent);
+        let mut out = Layer::new(header.name.clone());
+        out.opacity = header.opacity;
+        out.blend = header.blend;
+        out.visible = header.visible;
+        fill_layer_from_image(&mut out, self.size, &img);
+        out
+    }
+
+    /// CSP Layer ▸ Flatten image: every visible layer composites into ONE
+    /// raster layer and the rest of the stack goes — hidden layers too, as
+    /// CSP discards them. One structural undo step. Refused on a
+    /// single-layer stack that is already a plain raster (nothing to do).
+    pub fn flatten(&mut self) -> bool {
+        if self.layers.len() == 1 {
+            let l = &self.layers[0];
+            if !l.folder && !l.is_vector() && l.tone.is_none() && l.strokes.is_none() {
+                return false;
+            }
         }
         let (before, active_before) = (self.stack_snapshot(), self.active);
-        let upper = self.layers[index].clone();
-        bake_layer_into(&mut self.layers[index - 1], &upper);
-        self.layers.remove(index);
-        self.active = index - 1;
-        self.record_structure("Merge down", before, active_before);
+        let img = crate::export::composite(self, crate::export::Background::Transparent);
+        let mut out = Layer::new("Flattened");
+        fill_layer_from_image(&mut out, self.size, &img);
+        self.layers = vec![out];
+        self.active = 0;
+        self.record_structure("Flatten image", before, active_before);
         self.touch();
         true
     }
@@ -4677,8 +4773,12 @@ impl Document {
             return None;
         }
         let backup: Vec<bool> = self.layers.iter().map(|l| l.visible).collect();
+        // The folders ENCLOSING the soloed row stay on: a hidden parent
+        // hides its children, so soloing a layer inside a folder would
+        // otherwise show a blank page (surface pass 2026-09-02).
+        let keep = self.ancestors(index);
         for (i, l) in self.layers.iter_mut().enumerate() {
-            l.visible = i == index;
+            l.visible = i == index || keep.contains(&i);
         }
         self.touch();
         Some(backup)
@@ -4693,8 +4793,30 @@ impl Document {
         self.touch();
     }
 
-    /// Is `index` the only visible layer? (The solo's second-press test.)
+    /// Every folder header enclosing `index`, innermost first.
+    pub fn ancestors(&self, index: usize) -> Vec<usize> {
+        let mut out = Vec::new();
+        let mut cur = index;
+        while let Some(f) = self.enclosing_folder(cur) {
+            out.push(f);
+            cur = f;
+        }
+        out
+    }
+
+    /// Is `index` the only visible layer, its enclosing folders aside?
+    /// (The solo's second-press test.)
     pub fn only_visible(&self, index: usize) -> bool {
+        let keep = self.ancestors(index);
+        if keep.iter().any(|&f| self.layers[f].visible)
+            && self
+                .layers
+                .iter()
+                .enumerate()
+                .all(|(i, l)| l.visible == (i == index || keep.contains(&i)))
+        {
+            return true;
+        }
         self.layers
             .iter()
             .enumerate()
@@ -5960,6 +6082,32 @@ impl Layer {
 /// One definition on purpose: [`Document::merge_down`] and
 /// [`Document::merge_selected`] must agree pixel for pixel, or merging a
 /// two-row selection would come out different from merging down.
+/// Write a straight RGBA8 image into `layer`'s tiles, centred on a canvas
+/// of `size` (oversized images are clipped; fully transparent pixels leave
+/// no tile behind). The one image→tiles door, shared by import, stamp,
+/// flatten and folder merge.
+fn fill_layer_from_image(layer: &mut Layer, size: (u32, u32), img: &image::RgbaImage) {
+    let (w, h) = (size.0 as i64, size.1 as i64);
+    let ox = (w - img.width() as i64) / 2;
+    let oy = (h - img.height() as i64) / 2;
+    for (px, py, p) in img.enumerate_pixels() {
+        if p.0[3] == 0 {
+            continue;
+        }
+        let (x, y) = (ox + px as i64, oy + py as i64);
+        if x < 0 || y < 0 || x >= w || y >= h {
+            continue;
+        }
+        let idx = TileIdx::of_pixel(x as i32, y as i32);
+        let (tx, ty) = idx.origin();
+        layer.tile_mut(idx).set_pixel(
+            (x as i32 - tx) as usize,
+            (y as i32 - ty) as usize,
+            crate::blend::straight_u8_to_fix15(p.0),
+        );
+    }
+}
+
 fn bake_layer_into(dst: &mut Layer, upper: &Layer) {
     use crate::blend::{blend_premul, f32_to_fix15, fix15_to_f32, scale_opacity};
     if !upper.visible {
@@ -7655,7 +7803,7 @@ mod tests {    use super::*;
         // Painting on the header or merging through the mask is refused.
         assert!(!doc.layers[3].paintable());
         assert!(doc.layers[2].paintable());
-        assert!(!doc.merge_down(3), "folder never merges");
+        assert!(!doc.merge_down(3), "a FRAME folder never merges (its vectors)");
         assert!(!doc.merge_down(1), "White sits over a depth boundary");
     }
 
@@ -7885,10 +8033,10 @@ mod tests {    use super::*;
         doc.set_layer_lock(1, true);
         assert!(!doc.merge_down(1));
         doc.set_layer_lock(1, false);
-        doc.set_layer_clip(1, true);
-        assert!(
-            !doc.merge_down(1),
-            "a clipped layer's raw pixels are not what it shows"
+        assert_eq!(
+            doc.merge_down_refusal(1),
+            None,
+            "unlocked again, the merge is allowed (a clipped layer bakes what it shows — see the app suite)"
         );
     }
 

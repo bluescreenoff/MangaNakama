@@ -96,6 +96,18 @@ pub fn command_index() -> Vec<(&'static str, &'static str, AppCmd)> {
             "Layer",
             ActiveLayer(crate::cmd::ActiveLayerCmd::ToggleClip),
         ),
+        // CSP's Layer order ▸ Move up / Move down, aimed at the active row
+        // like the two above, so keys.json can hold a chord for each.
+        (
+            "Move layer up (one row)",
+            "Layer",
+            ActiveLayer(crate::cmd::ActiveLayerCmd::MoveUp),
+        ),
+        (
+            "Move layer down (one row)",
+            "Layer",
+            ActiveLayer(crate::cmd::ActiveLayerCmd::MoveDown),
+        ),
         // Follow-up (b): the palette's own door, so Ctrl+K is rebindable
         // like every other chord. Searching for it from inside itself is a
         // no-op, which is the honest behaviour for "open what is open".
@@ -123,6 +135,9 @@ pub fn command_index() -> Vec<(&'static str, &'static str, AppCmd)> {
             "Layer",
             ReleaseFolder,
         ),
+        // CSP's Flatten image: one raster, hidden layers gone, one undo.
+        // Named so "flatten" finds the destructive one beside the copy.
+        ("Flatten image (everything into one layer)", "Layer", FlattenImage),
         // Row 169: the vector layer's tidy-up window (delete short lines,
         // connect, simplify, adjust width). The four passes take their
         // thresholds from the window, so the palette door is the window.

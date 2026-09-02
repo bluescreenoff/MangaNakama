@@ -682,6 +682,19 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 app.push_cmd(AppCmd::StampVisible);
                 ui.close();
             }
+            if item(ui, "Flatten image", "") {
+                app.push_cmd(AppCmd::FlattenImage);
+                ui.close();
+            }
+            ui.separator();
+            if item(ui, "Move layer up", "") {
+                app.push_cmd(AppCmd::ActiveLayer(crate::cmd::ActiveLayerCmd::MoveUp));
+                ui.close();
+            }
+            if item(ui, "Move layer down", "") {
+                app.push_cmd(AppCmd::ActiveLayer(crate::cmd::ActiveLayerCmd::MoveDown));
+                ui.close();
+            }
             if item(ui, "Release folder", "") {
                 app.push_cmd(AppCmd::ReleaseFolder);
                 ui.close();
