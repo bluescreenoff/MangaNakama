@@ -10,6 +10,25 @@ use super::edit::{auto_note, subsample_path};
 /// following a layer switch). Assumes the caller already decided this
 /// drag must stamp; the identity-cancel check is the arm's, not ours.
 pub(super) fn commit_transform_drag(app: &mut App, drag: crate::app::TransformDrag) {
+    // A LIFTED float off a stroke-recording layer: the records move and
+    // the raster re-derives, so the ink stays editable after the move.
+    // Pastes (never lifted) keep the raster path — they land on a fresh
+    // raster layer anyway.
+    if drag.clear_source
+        && drag.create_in.is_none()
+        && !drag.paste_new_layer
+        && drag.mesh.is_none()
+        && app.doc.active_layer().records_strokes()
+    {
+        let li = app.doc.active;
+        let ok = transform_strokes(app, li, &drag.xform, drag.lift_selection.as_ref(), "Transform");
+        app.set_status(if ok {
+            "transform committed — the strokes moved with it"
+        } else {
+            "transform refused"
+        });
+        return;
+    }
     // Paste-into-panel (owner HIGH): the fresh layer lands INSIDE the
     // frame folder as its topmost child and active, so the stamp below
     // hits it and the folder seal clips the art to the panel. The layer
@@ -209,11 +228,14 @@ pub fn effective_sel_op(
 /// bounds — canvas-clipped either way.
 pub(crate) fn transform_lift_rect(app: &App) -> Option<[i32; 4]> {
     let l = app.doc.active_layer();
+    // No selection: the box hugs the INK (CSP's bounding box sits on the
+    // drawing). The tile-aligned bounds put the handles up to 63 px off
+    // the art and the pivot — so the centre of every rotation and of every
+    // standalone Flip — off its centre, which moved the art on a flip.
     let rect = if let Some(sel) = &app.doc.selection {
         selection_bbox(sel)
     } else {
-        l.tile_bounds()
-            .map(|(x, y, w, h)| [x, y, x + w as i32, y + h as i32])
+        l.ink_bounds()
     };
     rect.map(|r| {
         [
@@ -247,6 +269,41 @@ pub(crate) fn transform_lift_rect(app: &App) -> Option<[i32; 4]> {
 /// active the transform is deliberately NOT armed: the selection already
 /// said where the image goes, and dragging lifted pixels out from under a
 /// freshly built layer mask reads as a bug, not a feature.
+/// Edit ▸ Transform / Flip on a STROKE-RECORDING layer (CSP transforms
+/// vector layers; ours refused them until this): the recorded points go
+/// through `xf` — all of them, or with `sel` the control points under the
+/// ants — and the raster re-derives from the moved records, ONE undo step
+/// (`end_op_vector_set` carries the record and the pixels together). The
+/// float's own resample is never used: a replay of the moved strokes is
+/// the vector layer's truth, and it keeps the line editable afterwards.
+/// `false` = nothing moved (no records, or none under the selection).
+pub(super) fn transform_strokes(
+    app: &mut App,
+    li: usize,
+    xf: &mn_core::Affine2,
+    sel: Option<&mn_core::selection::Selection>,
+    label: &str,
+) -> bool {
+    let Some(before) = app.doc.layers.get(li).and_then(|l| l.strokes.clone()) else {
+        return false;
+    };
+    let mut after = before.clone();
+    let moved = after.transform(xf, |x, y| {
+        sel.is_none_or(|s| s.coverage(x.floor() as i32, y.floor() as i32) > 0)
+    });
+    if !moved {
+        return false;
+    }
+    app.doc.begin_op_on(li);
+    app.doc.layers[li].strokes = Some(after);
+    // The Object tool's stroke pick indexes the record it just replaced.
+    app.vector_sel = None;
+    app.rederive_vector_layer(li);
+    app.doc.end_op_vector_set(before, label);
+    app.renderer.invalidate();
+    true
+}
+
 fn import_image_layer(app: &mut App, path: &std::path::Path, draft: bool) {
     let img = match image::open(path) {
         Ok(i) => i.to_rgba8(),
@@ -478,9 +535,13 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
             let l = app.doc.active_layer();
             if l.lock {
                 app.set_status("layer is locked");
-            } else if l.is_vector() || l.records_strokes() || l.folder {
-                app.set_status("Transform applies to raster layers");
+            } else if l.is_vector() || l.folder {
+                app.set_status("Transform applies to raster and vector-ink layers");
             } else {
+                // A stroke-recording layer lifts its raster for the preview
+                // like any other; the COMMIT moves the records and
+                // re-derives (`transform_strokes`), so the ink stays
+                // editable — CSP transforms vector layers the same way.
                 // Source rect: the selection's bounds when one exists, else
                 // the layer's populated tile bounds (shared with Flip).
                 match transform_lift_rect(app) {
@@ -603,12 +664,27 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                 let l = app.doc.active_layer();
                 if l.lock {
                     app.set_status("layer is locked");
-                } else if l.is_vector() || l.records_strokes() || l.folder {
-                    app.set_status("Flip applies to raster layers");
+                } else if l.is_vector() || l.folder {
+                    app.set_status("Flip applies to raster and vector-ink layers");
                 } else {
                     let rect = transform_lift_rect(app);
                     let valid = rect.is_some_and(|r| r[0] < r[2] && r[1] < r[3]);
                     match (rect, valid) {
+                        (Some(r), true) if l.records_strokes() => {
+                            let pivot = [(r[0] + r[2]) as f32 * 0.5, (r[1] + r[3]) as f32 * 0.5];
+                            let (sx, sy) = if horizontal { (-1.0, 1.0) } else { (1.0, -1.0) };
+                            let xform =
+                                mn_core::Affine2::scale_rotate_around(pivot, sx, sy, 0.0, [0.0, 0.0]);
+                            let li = app.doc.active;
+                            let sel = app.doc.selection.clone();
+                            let ok = transform_strokes(app, li, &xform, sel.as_ref(), "Flip");
+                            app.set_status(match (ok, horizontal) {
+                                (true, true) => "flipped horizontally — the strokes with it",
+                                (true, false) => "flipped vertically — the strokes with it",
+                                (false, _) => "nothing to flip",
+                            });
+                            app.mark_dirty();
+                        }
                         (Some(r), true) => {
                             let src =
                                 mn_core::transform::lift_region(l, r, app.doc.selection.as_ref());

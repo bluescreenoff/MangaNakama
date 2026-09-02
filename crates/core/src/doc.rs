@@ -1152,6 +1152,33 @@ impl Layer {
         self.tiles.values().map(|t| t.revision()).max().unwrap_or(0)
     }
 
+    /// Tight bounding box of the INK in **canvas pixels** — `[x0, y0, x1, y1]`,
+    /// far edges exclusive — every pixel with any alpha at all. `None` when
+    /// nothing is painted. This is the box a transform float hugs: CSP's
+    /// bounding box sits on the drawing, and a box on the TILE grid
+    /// (`tile_bounds`) put the handles up to 63 px off the art and the
+    /// centre of rotation — and of every standalone Flip — off its centre.
+    pub fn ink_bounds(&self) -> Option<[i32; 4]> {
+        let mut b = [i32::MAX, i32::MAX, i32::MIN, i32::MIN];
+        for (ti, t) in self.tiles() {
+            if t.is_blank() {
+                continue;
+            }
+            let (ox, oy) = ti.origin();
+            for py in 0..TILE_SIZE {
+                for px in 0..TILE_SIZE {
+                    if t.pixel(px, py)[3] > 0 {
+                        b[0] = b[0].min(ox + px as i32);
+                        b[1] = b[1].min(oy + py as i32);
+                        b[2] = b[2].max(ox + px as i32 + 1);
+                        b[3] = b[3].max(oy + py as i32 + 1);
+                    }
+                }
+            }
+        }
+        (b[0] < b[2]).then_some(b)
+    }
+
     /// Bounding box of the populated tiles in **canvas pixels**, tile-aligned:
     /// `(x, y, w, h)`. `None` when the layer has no tiles. Used by ORA save,
     /// which stores each layer cropped with an x/y offset.

@@ -932,3 +932,6 @@ pub fn transform_preview(src: &mn_core::FloatSource, max_px: u32) -> Option<egui
     }
     Some(img)
 }
+
+#[cfg(test)]
+mod surface_tests;

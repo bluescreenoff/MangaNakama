@@ -658,9 +658,12 @@ fn raster_edits_refuse_a_recording_layer_instead_of_vanishing() {
         0,
         "the bucket refuses one too"
     );
-    // The command guards.
+    // The command guards. Transform OPENS on a recording layer now (its
+    // commit moves the records and re-derives — see the transform surface
+    // tests), but an untouched float cancels without writing a pixel.
     crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::TransformStart);
-    assert!(app.transform_drag.is_none(), "Transform never opens");
+    assert!(app.transform_drag.is_some(), "Transform opens on a recording layer");
+    crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::TransformCancel);
     crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::ClearLayer);
     crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::Cut);
     assert_eq!(tiles(&app, li), drawn, "not one of them wrote a pixel");

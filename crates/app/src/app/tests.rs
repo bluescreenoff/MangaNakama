@@ -6782,10 +6782,10 @@ fn transform_fields_flip_pivot_and_midpoint() {
     let mut app = App::new(renderer, (600, 400), 1.0);
     let empty: [PenSample; 0] = [];
     const W: u16 = mn_core::FIX15_ONE as u16;
-    // A square of ink spanning FOUR tiles, so the lift rect is
-    // [0,0,128,128]: pivot (64,64), right-edge midpoint (128,64) — 64px
-    // from either corner, beyond the hit-test tolerance even at the
-    // fitted zoom (≈0.4 → tol·1.4 ≈ 35px).
+    // A square of ink at 20..108: the lift rect hugs it, [20,20,108,108]
+    // (pivot (64,64), right-edge midpoint (108,64) — 44px from either
+    // corner, beyond the corner slack, which is capped at a third of the
+    // side anyway).
     app.doc.begin_op();
     for y in 20..108 {
         for x in 20..108 {
@@ -6860,7 +6860,7 @@ fn transform_fields_flip_pivot_and_midpoint() {
     crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::TransformCancel);
 
     // TR-004: the right-edge midpoint drag scales ONE axis — down at
-    // (128,64), up at (192,64). Identity view first: the fitted zoom
+    // (108,64), up at (152,64). Identity view first: the fitted zoom
     // shrinks the hit-test tolerance slack and the corner test (tol·1.4)
     // would swallow the midpoint at low zoom.
     app.viewport.zoom = 1.0;
@@ -6869,8 +6869,8 @@ fn transform_fields_flip_pivot_and_midpoint() {
     // ONE-axis behaviour, so turn the setting off the way the checkbox does.
     app.transform_keep_aspect = false;
     crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::TransformStart);
-    let (x0, y0) = app.viewport.to_screen(128.0, 64.0);
-    let (x1, y1) = app.viewport.to_screen(192.0, 64.0);
+    let (x0, y0) = app.viewport.to_screen(108.0, 64.0);
+    let (x1, y1) = app.viewport.to_screen(152.0, 64.0);
     app.canvas_down(x0, y0, PointerKind::Mouse, &empty);
     app.canvas_up(x1, y1, &empty);
     {
@@ -6879,16 +6879,15 @@ fn transform_fields_flip_pivot_and_midpoint() {
         //
         // sx is 1.5, not 2.0: the ANCHOR changed (2026-08-23, owner bug).
         // A side handle used to scale about the reference point — the
-        // centre, 64px away, so 128→192 read as ×2 and the LEFT edge ran
-        // away by the same amount. CSP anchors on the opposite edge, 128px
+        // centre, 44px away, so 108→152 read as ×2 and the LEFT edge ran
+        // away by the same amount. CSP anchors on the opposite edge, 88px
         // away, so the same pull is ×1.5 and the left edge holds still.
         let d = app.transform_drag.as_ref().unwrap();
         assert!((d.sx - 1.5).abs() < 0.05, "sx off the left edge: {}", d.sx);
         assert!((d.sy - 1.0).abs() < 1e-5, "sy untouched: {}", d.sy);
     }
-    // Commit the one-axis scale: the left edge (x=0) is pinned, so
-    // x' = 1.5x → the square's x-extent 20..108 becomes 30..162, y
-    // unchanged 20..108.
+    // Commit the one-axis scale: the left edge (x=20) is pinned, so the
+    // square's x-extent 20..108 becomes 20..152, y unchanged 20..108.
     crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::TransformCommit);
     assert!(
         ink_at(&app.doc, 140, 64),

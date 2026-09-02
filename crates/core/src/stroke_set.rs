@@ -185,6 +185,46 @@ impl StrokeSet {
         }
     }
 
+    /// Edit ▸ Transform / Flip on a vector layer: every recorded point that
+    /// `inside` accepts goes through `xf` (whole layer = everything; with a
+    /// selection, the control points under the ants, which is what CSP
+    /// moves too). A stroke whose points ALL moved also has its px widths
+    /// scaled by √|det| — CSP's "Change vector width" — so a line scaled
+    /// to half comes back half as thick, exactly as its raster would have;
+    /// a partly-moved stroke keeps its width (its unmoved half must not
+    /// change). Returns whether any point moved.
+    pub fn transform(&mut self, xf: &crate::Affine2, inside: impl Fn(f32, f32) -> bool) -> bool {
+        let det = xf.m[0][0] * xf.m[1][1] - xf.m[0][1] * xf.m[1][0];
+        let s = det.abs().sqrt();
+        let mut moved = false;
+        for st in &mut self.strokes {
+            let mut all = true;
+            let mut any = false;
+            for p in &mut st.points {
+                if inside(p.0, p.1) {
+                    let q = xf.apply([p.0, p.1]);
+                    p.0 = q[0];
+                    p.1 = q[1];
+                    any = true;
+                } else {
+                    all = false;
+                }
+            }
+            moved |= any;
+            if any && all && s.is_finite() && s > 0.0 && (s - 1.0).abs() > 1e-4 {
+                st.size_px *= s;
+                if let Some(cfg) = &mut st.settings {
+                    cfg.taper_px *= s;
+                    cfg.correct.start_px *= s;
+                    cfg.correct.end_px *= s;
+                    cfg.water_edge.px *= s;
+                    cfg.water_edge.blur_px *= s;
+                }
+            }
+        }
+        moved
+    }
+
     /// The vector eraser (docs/VECTOR-INKING.md phase 3): every stroke the
     /// eraser path touches (within `radius`) loses ink, how much decided by
     /// `mode` — the touched samples only, the touched span widened to the
