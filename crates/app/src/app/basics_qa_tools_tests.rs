@@ -31,28 +31,32 @@ fn mods(app: &mut App, ctrl: bool, shift: bool, alt: bool) {
     });
 }
 
-const VK: &[(&str, u16)] = &[
-    ("P", 0x50),
-    ("B", 0x42),
-    ("E", 0x45),
-    ("G", 0x47),
-    ("M", 0x4D),
-    ("W", 0x57),
-    ("O", 0x4F),
-    ("U", 0x55),
-    ("T", 0x54),
-    ("F", 0x46),
-    ("V", 0x56),
-    ("I", 0x49),
-    ("H", 0x48),
-    ("R", 0x52),
-    ("J", 0x4A),
-    ("K", 0x4B),
-    ("Y", 0x59),
-    ("Z", 0x5A),
-    ("D", 0x44),
-    ("L", 0x4C),
-];
+/// One pen stroke through the real arms, from canvas a to canvas b.
+fn stroke(app: &mut App, a: (f32, f32), b: (f32, f32)) {
+    let (x0, y0) = app.viewport.to_screen(a.0, a.1);
+    app.canvas_down(x0, y0, PointerKind::Mouse, &[]);
+    for i in 1..=16 {
+        let t = i as f32 / 16.0;
+        let (mx, my) = app
+            .viewport
+            .to_screen(a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t);
+        app.canvas_move(
+            mx,
+            my,
+            &[PenSample {
+                x: mx,
+                y: my,
+                pressure: 0.9,
+                tilt_x: 0.0,
+                tilt_y: 0.0,
+                t_ms: i as f64 * 8.0,
+            }],
+        );
+    }
+    let (x1, y1) = app.viewport.to_screen(b.0, b.1);
+    app.canvas_up(x1, y1, &[]);
+    pump(app);
+}
 
 /// Picking a Figure sub tool and dragging it must lay the shape WHERE IT
 /// WAS DRAGGED — at whatever zoom and pan the page happens to be sitting.
@@ -217,317 +221,147 @@ fn j_and_d_reach_liquify_and_select_layer() {
     mods(&mut app, false, false, false);
 }
 
+/// Every row the Sub Tool palette draws must actually TAKE when it is
+/// picked — the state-level form of the Dot Pen finding (`7e9578f`),
+/// where a row was selectable, previewed correctly, and left the tool
+/// doing what the previous row did.
+///
+/// The registry is the source of the list, so a row added later is
+/// covered the day it appears rather than the day someone remembers to
+/// extend a hand-written array.
 #[test]
-#[ignore = "survey"]
-fn survey_tool_keys() {
+fn every_sub_tool_row_takes_when_you_pick_it() {
     let Some(mut app) = headless() else { return };
-    for (name, vk) in VK {
-        let before = app.tool;
-        app.status.clear();
-        press(&mut app, *vk);
-        println!(
-            "{name}: {:?} -> {:?} pan={:?} status={:?} brush={} spring={:?}",
-            before,
-            app.tool,
-            app.pan_mode,
-            app.status,
-            app.brush_name(),
-            app.spring.as_ref().map(|s| s.borrowed),
-        );
-        app.spring = None;
-        // back to the pen for the next probe
-        dispatch(&mut app, AppCmd::SetTool(Tool::Pen));
-    }
-}
-
-#[test]
-#[ignore = "survey"]
-fn survey_cycles_and_stepping() {
-    let Some(mut app) = headless() else { return };
-    for (name, vk) in [("E", 0x45u16), ("T", 0x54), ("P", 0x50), ("O", 0x4F)] {
-        dispatch(&mut app, AppCmd::SetTool(Tool::Pen));
-        let mut seen = Vec::new();
-        for _ in 0..4 {
-            press(&mut app, vk);
-            app.spring = None;
-            seen.push(app.tool);
-        }
-        println!("{name} x4: {seen:?}");
-    }
-    // `,` / `.` stepping per tool.
+    let mut checked = 0;
     for tool in [
-        Tool::Pen,
         Tool::Fill,
+        Tool::Tone,
+        Tool::Wand,
         Tool::Select,
-        Tool::Figure,
         Tool::Frame,
         Tool::Balloon,
-        Tool::Gradient,
-        Tool::Object,
-        Tool::Wand,
-        Tool::Eyedrop,
-        Tool::Tone,
-        Tool::Liquify,
         Tool::Text,
-        Tool::Eraser,
+        Tool::Object,
+        Tool::Figure,
+        Tool::Gradient,
+        Tool::Eyedrop,
+        Tool::Pan,
     ] {
-        dispatch(&mut app, AppCmd::SetTool(tool));
-        let rows = crate::subtools::step_rows(&app);
-        let names: Vec<&str> = rows.iter().map(|s| s.label()).collect();
-        let mut walk = Vec::new();
-        for _ in 0..3 {
-            app.status.clear();
-            press(&mut app, 0xBE); // .
-            walk.push(format!("{:?}/{}", app.tool, app.status));
+        for g in crate::subtools::groups_of(tool) {
+            for &row in &g.subs {
+                dispatch(&mut app, AppCmd::SetSubTool(row));
+                assert!(
+                    crate::subtools::is_current(&app, row),
+                    "{tool:?} ▸ {} ▸ {}: picked, and the tool did not move to it",
+                    g.name,
+                    row.label()
+                );
+                assert!(
+                    crate::subtools::is_lit(&app, row),
+                    "{tool:?} ▸ {} ▸ {}: took, but the palette lights a different row",
+                    g.name,
+                    row.label()
+                );
+                checked += 1;
+            }
         }
-        println!("{:?}: rows={names:?}\n    walk={walk:?}", tool);
     }
+    assert!(checked > 30, "the registry went quiet: only {checked} rows");
 }
 
+/// Undo grouping, as a hand experiences it: one stroke is one press, and
+/// nothing you do to the TOOLS costs a press. A tool switch, a sub tool
+/// step and a brush-size step are settings, not history — if any of them
+/// pushed a step, Ctrl+Z after a mistake would undo the settings first
+/// and leave the mistake on the page.
 #[test]
-#[ignore = "survey"]
-fn survey_modifiers() {
+fn one_stroke_is_one_press_and_changing_tools_costs_none() {
     let Some(mut app) = headless() else { return };
     app.doc = mn_core::Document::new(256, 256);
-    let (x, y) = app.viewport.to_screen(128.0, 128.0);
-
-    // Space = pan.
-    app.space_down = true;
-    app.canvas_down(x, y, PointerKind::Mouse, &[]);
-    println!("space+drag: panning={} rotating={}", app.panning(), app.rotating());
-    app.canvas_up(x, y, &[]);
-    app.space_down = false;
-
-    // CSP: Shift+Space+drag = rotate.
-    mods(&mut app, false, true, false);
-    app.space_down = true;
-    app.canvas_down(x, y, PointerKind::Mouse, &[]);
-    println!(
-        "shift+space+drag: panning={} rotating={}",
-        app.panning(),
-        app.rotating()
-    );
-    app.canvas_up(x, y, &[]);
-    app.space_down = false;
-    mods(&mut app, false, false, false);
-
-    // CSP: Ctrl+Space+click = zoom in, Alt+Space+click = zoom out.
-    let z0 = app.viewport.zoom;
-    mods(&mut app, true, false, false);
-    app.space_down = true;
-    app.canvas_down(x, y, PointerKind::Mouse, &[]);
-    app.canvas_up(x, y, &[]);
-    pump(&mut app);
-    println!("ctrl+space+click: zoom {z0} -> {}", app.viewport.zoom);
-    app.space_down = false;
-    mods(&mut app, false, false, false);
-
-    // Alt = eyedropper while a brush is in hand.
     dispatch(&mut app, AppCmd::SetTool(Tool::Pen));
-    let before = app.doc.layers[0].tiles().count();
-    mods(&mut app, false, false, true);
-    app.canvas_down(x, y, PointerKind::Mouse, &[]);
-    app.canvas_up(x, y, &[]);
-    let picked = matches!(app.cmds.front(), Some(AppCmd::PickColor(..)));
-    pump(&mut app);
-    println!("alt+click on the pen: PickColor queued={picked} tiles {before}");
-    mods(&mut app, false, false, false);
-
-    // Shift = straight line while a brush is in hand (CSP "Draw straight line").
-    dispatch(&mut app, AppCmd::SetTool(Tool::Pen));
-    app.doc = mn_core::Document::new(256, 256);
-    // The Alt probe above picked white off the paper — ink black again.
     dispatch(&mut app, AppCmd::SetSlotColor([0.0, 0.0, 0.0]));
-    mods(&mut app, false, true, false);
-    let (ax, ay) = app.viewport.to_screen(40.0, 40.0);
-    app.canvas_down(ax, ay, PointerKind::Mouse, &[]);
-    // A deliberately curved drag: straight-line mode must flatten it.
-    for i in 1..=24 {
-        let t = i as f32 / 24.0;
-        let cx = 40.0 + t * 160.0;
-        let cy = 40.0 + (t * std::f32::consts::PI).sin() * 60.0;
-        let (mx, my) = app.viewport.to_screen(cx, cy);
-        app.canvas_move(
-            mx,
-            my,
-            &[PenSample {
-                x: mx,
-                y: my,
-                pressure: 0.9,
-                tilt_x: 0.0,
-                tilt_y: 0.0,
-                t_ms: i as f64 * 8.0,
-            }],
-        );
-    }
-    let (ux, uy) = app.viewport.to_screen(200.0, 40.0);
-    app.canvas_up(ux, uy, &[]);
-    pump(&mut app);
-    // Ink well above the straight chord means the bow survived.
-    let bowed = ink_in_band(&mut app, 90, 120);
-    println!("(paper is opaque, so this is a luma sum)");
-    println!("shift+drag with the pen: ink in the bowed band = {bowed}");
-    mods(&mut app, false, false, false);
-}
-
-/// Ink on rows `y0..y1` of the EXPORTED page — a curved stroke leaves ink
-/// there, a straight one between two points on y=40 does not.
-fn ink_in_band(app: &mut App, y0: u32, y1: u32) -> u64 {
-    let (w, h) = app.doc.size;
-    let App { renderer, doc, .. } = app;
-    let img = super::pages::render_offscreen_drafts_off(renderer, doc, w, h);
-    let mut sum = 0u64;
-    for y in y0..y1.min(h) {
-        for x in 0..w {
-            sum += 255 - img.get_pixel(x, y).0[0] as u64;
-        }
-    }
-    sum
-}
-
-/// One pen stroke through the real arms, from canvas a to canvas b.
-fn stroke(app: &mut App, a: (f32, f32), b: (f32, f32)) {
-    let (x0, y0) = app.viewport.to_screen(a.0, a.1);
-    app.canvas_down(x0, y0, PointerKind::Mouse, &[]);
-    for i in 1..=16 {
-        let t = i as f32 / 16.0;
-        let (mx, my) = app
-            .viewport
-            .to_screen(a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t);
-        app.canvas_move(
-            mx,
-            my,
-            &[PenSample {
-                x: mx,
-                y: my,
-                pressure: 0.9,
-                tilt_x: 0.0,
-                tilt_y: 0.0,
-                t_ms: i as f64 * 8.0,
-            }],
-        );
-    }
-    let (x1, y1) = app.viewport.to_screen(b.0, b.1);
-    app.canvas_up(x1, y1, &[]);
-    pump(app);
-}
-
-#[test]
-#[ignore = "survey"]
-fn survey_undo_grouping() {
-    let Some(mut app) = headless() else { return };
-    app.doc = mn_core::Document::new(256, 256);
-    let n0 = app.doc.undo_len();
-    stroke(&mut app, (40.0, 40.0), (200.0, 200.0));
-    let n1 = app.doc.undo_len();
-    println!("one stroke: {n0} -> {n1}");
-    press(&mut app, 0x45); // E
-    app.spring = None;
-    press(&mut app, 0x50); // P
-    app.spring = None;
-    press(&mut app, 0xBE); // .
-    press(&mut app, 0xDD); // ]
-    pump(&mut app);
-    println!(
-        "two tool switches + a sub tool step + a size step: {n1} -> {}",
-        app.doc.undo_len()
-    );
-    // A tool-property slider drag: many size commands, how many steps?
-    for s in [20.0f32, 24.0, 28.0, 32.0] {
-        dispatch(&mut app, AppCmd::SetBrushSizePx(s));
-    }
-    println!("size slider x4: {}", app.doc.undo_len());
-    // Undo once: the stroke must be the thing that goes.
-    let ink = |a: &mut App| -> u64 {
-        let (w, h) = a.doc.size;
-        let App { renderer, doc, .. } = a;
+    let ink = |app: &mut App| -> u64 {
+        let (w, h) = app.doc.size;
+        let App { renderer, doc, .. } = app;
         let img = super::pages::render_offscreen_drafts_off(renderer, doc, w, h);
         img.pixels().map(|p| 255 - p.0[0] as u64).sum()
     };
-    let before = ink(&mut app);
+    assert_eq!(app.doc.undo_len(), 0);
+    stroke(&mut app, (40.0, 40.0), (200.0, 200.0));
+    assert_eq!(app.doc.undo_len(), 1, "one stroke, one press");
+    let inked = ink(&mut app);
+    assert!(inked > 0, "the stroke landed");
+
+    press(&mut app, 0x45); // E — the eraser
+    app.spring = None;
+    press(&mut app, 0x45); // E again — back to the pen
+    app.spring = None;
+    press(&mut app, 0xBE); // . — step a sub tool
+    press(&mut app, 0xDD); // ] — step the size
+    pump(&mut app);
+    assert_eq!(
+        app.doc.undo_len(),
+        1,
+        "tool switches, a sub tool step and a size step are settings, not history"
+    );
+
     dispatch(&mut app, AppCmd::Undo);
-    println!("ink {before} -> {} after ONE undo", ink(&mut app));
+    assert_eq!(ink(&mut app), 0, "one press took the whole stroke back");
 }
 
+/// TL-013 across the door a hand actually uses: a LOCKED sub tool takes
+/// a nudge live, and coming back to it after a switch restores the
+/// snapshot rather than the nudge. Driven through the `E` key both ways,
+/// because that is how the calibrated pen is left and picked up again.
 #[test]
-#[ignore = "survey"]
-fn survey_subtool_changes_the_gesture() {
-    let Some(mut app) = headless() else { return };
-    use crate::cmd::{FigureMode, SelectMode, SubTool};
-    let fitted = app.viewport;
-    // Picking a Figure sub tool must change what a drag DRAWS.
-    for m in [FigureMode::Line, FigureMode::Rect, FigureMode::Ellipse] {
-        app.doc = mn_core::Document::new(256, 256);
-        dispatch(&mut app, AppCmd::SetSubTool(SubTool::Figure(m)));
-        assert_eq!(app.tool, Tool::Figure);
-        stroke(&mut app, (60.0, 60.0), (190.0, 190.0));
-        let (w, h) = app.doc.size;
-        let App { renderer, doc, .. } = &mut app;
-        let img = super::pages::render_offscreen_drafts_off(renderer, doc, w, h);
-        let dark = img.pixels().filter(|p| p.0[0] < 128).count();
-        // A pixel on the top-right corner of the bounding box: only the
-        // rectangle inks there.
-        let corner = img.get_pixel(190, 62).0[0];
-        println!("{m:?}: dark={dark} corner={corner} mode={:?} undo={} drag={:?}", app.figure_mode, app.doc.undo_len(), app.figure_drag.is_some());
-    }
-    // The differential: the SAME drag at the identity viewport.
-    for identity in [true, false] {
-        app.doc = mn_core::Document::new(256, 256);
-        if identity {
-            app.viewport = mn_gpu::Viewport::default();
-        } else {
-            app.viewport = fitted;
-        }
-        dispatch(&mut app, AppCmd::SetSubTool(SubTool::Figure(FigureMode::Rect)));
-        stroke(&mut app, (60.0, 60.0), (190.0, 190.0));
-        let (w, h) = app.doc.size;
-        let App { renderer, doc, .. } = &mut app;
-        let img = super::pages::render_offscreen_drafts_off(renderer, doc, w, h);
-        let dark = img.pixels().filter(|p| p.0[0] < 128).count();
-        println!("identity={identity}: dark={dark} zoom={}", app.viewport.zoom);
-    }
-
-    // Selection shapes.
-    for m in [SelectMode::Rect, SelectMode::Lasso] {
-        app.doc = mn_core::Document::new(256, 256);
-        dispatch(&mut app, AppCmd::SetSubTool(SubTool::Select(m)));
-        println!("{m:?}: tool={:?} select_mode={:?}", app.tool, app.select_mode);
-    }
-}
-
-#[test]
-#[ignore = "survey"]
-fn survey_locked_props_across_a_switch() {
+fn a_locked_tool_property_comes_home_after_a_tool_key_round_trip() {
     let Some(mut app) = headless() else { return };
     dispatch(&mut app, AppCmd::SetBrushSizePx(18.0));
     app.props_current.locked = true;
     app.snapshot_current_props();
     dispatch(&mut app, AppCmd::SetBrushSizePx(60.0));
-    println!("locked, nudged: {}", app.props_current.size_px);
-    press(&mut app, 0x45); // E — the eraser
+    assert_eq!(app.props_current.size_px, 60.0, "a locked tool still takes it");
+
+    press(&mut app, 0x45); // E
     app.spring = None;
-    press(&mut app, 0x45); // E again — back to the pen
+    press(&mut app, 0x45); // E again
     app.spring = None;
-    println!(
-        "after E,E: tool={:?} size={} locked={}",
-        app.tool, app.props_current.size_px, app.props_current.locked
+    assert_eq!(app.tool, Tool::Pen, "E cycles back to the pen");
+    assert_eq!(
+        app.props_current.size_px, 18.0,
+        "the locked snapshot came home, not the one-panel nudge"
     );
+    assert!(app.props_current.locked, "and it is still locked");
 }
 
+/// `keys.json`'s three target lengths, through the REAL key path: a
+/// three-part path lands on that exact row every time, and a list on one
+/// key walks its targets in written order.
 #[test]
-#[ignore = "survey"]
-fn survey_a_keys_json_tool_target() {
+fn a_keys_json_tool_target_reaches_its_exact_row() {
+    use crate::cmd::FigureMode;
     let Some(mut app) = headless() else { return };
     app.keymap = crate::keymap::Keymap::parse(
-        r#"{ "q": "tool: Figure / Direct draw / Ellipse", "n": ["tool: Fill", "tool: Auto select"] }"#,
+        r#"{
+            "q": "tool: Figure / Direct draw / Ellipse",
+            "n": ["tool: Fill", "tool: Auto select"]
+        }"#,
     );
-    println!("problems: {:?}", app.keymap.problems);
+    assert!(app.keymap.problems.is_empty(), "{:?}", app.keymap.problems);
+
+    // Leave Figure on another row first: an exact target must not defer
+    // to the tool's memory.
+    dispatch(&mut app, AppCmd::SetSubTool(crate::cmd::SubTool::Figure(
+        FigureMode::Rect,
+    )));
     press(&mut app, 0x51);
-    println!("q: tool={:?} figure_mode={:?}", app.tool, app.figure_mode);
+    assert_eq!(app.tool, Tool::Figure);
+    assert_eq!(app.figure_mode, FigureMode::Ellipse, "the exact row, always");
+    app.spring = None;
+
+    press(&mut app, 0x4E);
+    assert_eq!(app.tool, Tool::Fill, "first target");
     app.spring = None;
     press(&mut app, 0x4E);
-    let a = app.tool;
-    app.spring = None;
-    press(&mut app, 0x4E);
-    println!("n,n: {a:?} -> {:?}", app.tool);
+    assert_eq!(app.tool, Tool::Wand, "press again walks the cycle on");
 }
