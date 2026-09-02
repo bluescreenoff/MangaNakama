@@ -642,6 +642,27 @@ kept twelve and High accuracy kept all twenty. <span class="why">Hard
 edges invents no new colours at all (pixel art, 1-bit pages); Clear edges
 sharpens an enlargement. The row is greyed out during a mesh warp, which
 resamples through its own lattice instead.</span></div>
+<div class="quirk"><b>The transform box hugs the ink.</b> With no
+selection, <kbd>Ctrl+T</kbd> (and the Object tool's grab) draws the box
+around the drawing itself — the handles sit on the art and the reference
+point starts at its centre, so a rotation turns about the drawing and a
+standalone <em>Flip</em> mirrors it in place. <span class="why">The box
+used to sit on the 64&nbsp;px tile grid underneath, which put the handles
+up to a tile away from the line and made a whole-layer flip shift the art
+sideways.</span></div>
+<div class="quirk"><b>A vector-ink layer transforms too, and stays
+vector.</b> <kbd>Ctrl+T</kbd>, Flip and the Object tool's grab work on a
+vector-ink layer exactly as on a raster one; what moves is the recorded
+strokes, and the ink is re-drawn from them — so the lines are still
+editable afterwards, and a line scaled to half comes back half as thick
+(CSP's "change vector width"). With a selection up, only the control
+points under the ants move. Mesh transform and Puppet warp are still
+raster-only.</div>
+<div class="quirk"><b>Alt on a handle scales about the reference
+point.</b> Corner and midpoint handles normally pin the opposite side;
+hold <kbd>Alt</kbd> and they scale around the reference point instead
+(CSP's Ctrl+Alt). Alt anywhere else grabs the reference point. A linked
+layer mask follows a pure move, but not a scale or rotation.</div>
 <div class="quirk"><b>The magnetic lasso only re-aims while the pen is
 down.</b> Press and drag and the outline snaps to the lineart as you
 go. Lift the pen and the line to the cursor goes straight and stays

@@ -308,7 +308,11 @@ scanner leaves behind.</div>
 Thickening moves the whole anti-aliased edge outward by the number of
 pixels you asked for instead of hardening it, and thinning moves it in;
 the ink keeps its colour either way. Thickening spreads past where the
-drawing was, like a blur does.</div>
+drawing was, like a blur does. <b>Thinning never deletes a line:</b>
+every line keeps its centre pixel at its own strength (CSP's "at least
+1 pixel", always on here), so a 1&nbsp;px hairline survives a Narrow that
+takes a 5&nbsp;px line to 3. <span class="why">The plain erosion erased
+every hairline on the page the first time it was tried.</span></div>
 
 <h2>Solos</h2>
 <div class="quirk"><b>Alt+click an EYE solos the layer.</b> Every other
@@ -362,7 +366,9 @@ meant the whole layer.</div>
 No correction here changes alpha, Binarization included: it drives
 colour to pure black or pure white and leaves opacity untouched, so
 binarizing scanned lineart does not flood the page with white. CSP's
-"Leave transparency" switch has no off position here.</div>
+"Leave transparency" switch has no off position here. To make a grey
+wash truly one-bit — alpha included — set the layer's expression colour
+to Monochrome instead; that is the manga door.</div>
 <div class="quirk warn"><b>The preview is the real canvas, and anything
 else abandons it.</b> While the dialog is open the correction is painted
 into the actual pixels so you judge it at full size. That means nothing
