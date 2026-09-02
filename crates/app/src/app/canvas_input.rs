@@ -697,7 +697,25 @@ impl App {
             return;
         }
         if self.space_down || self.tool == Tool::Pan {
-            if !self.space_down && self.pan_mode == PanMode::Rotate {
+            // CSP's canvas modifiers, the three that live on Space
+            // ("Shortcuts usable during operation"): Space+drag pans,
+            // Shift+Space+drag ROTATES, Ctrl+Space+click zooms in and
+            // Alt+Space+click zooms out — both about the point clicked,
+            // like the wheel. Only the first of the three was here, so
+            // rotating the page mid-stroke meant letting go of the pen
+            // to press R.
+            let m = self.shell.sync_modifiers();
+            if self.space_down && (m.ctrl || m.alt) {
+                let step = self.prefs.wheel_step.max(1.02);
+                self.zoom_at(x, y, if m.ctrl { step } else { 1.0 / step });
+                return;
+            }
+            let rotate = if self.space_down {
+                m.shift
+            } else {
+                self.pan_mode == PanMode::Rotate
+            };
+            if rotate {
                 self.begin_rotate(x, y);
             } else {
                 self.begin_pan(x, y);

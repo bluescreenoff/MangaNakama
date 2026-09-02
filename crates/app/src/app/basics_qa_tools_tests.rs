@@ -114,6 +114,109 @@ fn a_figure_lands_where_it_was_dragged_at_any_zoom() {
     );
 }
 
+/// `,` / `.` must SAY where they landed, for every tool that has rows.
+///
+/// The Sub Tool palette's highlight moves, but `Tab` hides every palette
+/// and the status bar carries no tool name, so stepping the Figure tool
+/// from Straight line to Rectangle used to change nothing you could see.
+/// Fill / Tone / Object said their row; Select, Figure, Frame, Balloon,
+/// Gradient, Auto select and the Eyedropper said nothing.
+#[test]
+fn stepping_a_sub_tool_says_which_one_you_landed_on() {
+    let Some(mut app) = headless() else { return };
+    for tool in [
+        Tool::Select,
+        Tool::Figure,
+        Tool::Frame,
+        Tool::Balloon,
+        Tool::Gradient,
+        Tool::Wand,
+        Tool::Eyedrop,
+        Tool::Fill,
+        Tool::Tone,
+        Tool::Object,
+    ] {
+        dispatch(&mut app, AppCmd::SetTool(tool));
+        app.status.clear();
+        press(&mut app, 0xBE); // .
+        assert!(
+            !app.status.is_empty(),
+            "{tool:?}: a sub tool step left the status bar silent"
+        );
+        // The row it landed on is the one the palette now lights.
+        let landed = crate::subtools::step_rows(&app)
+            .into_iter()
+            .find(|&s| crate::subtools::is_lit(&app, s));
+        assert!(
+            landed.is_some(),
+            "{tool:?}: the step landed on no row the palette lights"
+        );
+    }
+}
+
+/// CSP's Space family, all three of them. Space+drag pans (it always
+/// did); Shift+Space+drag rotates; Ctrl+Space / Alt+Space click zoom in
+/// and out about the point clicked. Only the pan was here, so rotating
+/// the page mid-stroke meant letting go of the pen to reach R.
+#[test]
+fn the_space_modifiers_pan_rotate_and_zoom_like_csp() {
+    let Some(mut app) = headless() else { return };
+    app.doc = mn_core::Document::new(256, 256);
+    let (x, y) = app.viewport.to_screen(128.0, 128.0);
+
+    let mut with = |ctrl, shift, alt| {
+        mods(&mut app, ctrl, shift, alt);
+        app.space_down = true;
+        app.canvas_down(x, y, PointerKind::Mouse, &[]);
+        let state = (app.panning(), app.rotating(), app.viewport.zoom);
+        app.canvas_up(x, y, &[]);
+        app.end_pan();
+        app.space_down = false;
+        mods(&mut app, false, false, false);
+        state
+    };
+
+    let (pan, rot, z0) = with(false, false, false);
+    assert!(pan && !rot, "Space+drag pans");
+    let (pan, rot, _) = with(false, true, false);
+    assert!(rot && !pan, "Shift+Space+drag rotates");
+    let (_, _, zin) = with(true, false, false);
+    assert!(zin > z0, "Ctrl+Space+click zoomed in ({z0} -> {zin})");
+    let (_, _, zout) = with(false, false, true);
+    assert!(zout < zin, "Alt+Space+click zoomed out ({zin} -> {zout})");
+}
+
+/// Two tools we shipped with no key at all: CSP puts Liquify on `J`
+/// (with Blend, which we do not have) and Operation ▸ Select layer on
+/// `D`. Both were mouse-only. `D` must land on the ROW, not on whatever
+/// row the Object tool was last left on.
+#[test]
+fn j_and_d_reach_liquify_and_select_layer() {
+    use crate::cmd::ObjectMode;
+    let Some(mut app) = headless() else { return };
+    press(&mut app, 0x4A);
+    assert_eq!(app.tool, Tool::Liquify, "J is Liquify");
+    app.spring = None;
+
+    // Leave the Object tool on its OTHER row first, so a bare-tool
+    // binding would be caught landing back on it.
+    dispatch(&mut app, AppCmd::SetTool(Tool::Object));
+    app.object_mode = ObjectMode::Object;
+    press(&mut app, 0x44);
+    assert_eq!(app.tool, Tool::Object);
+    assert_eq!(app.object_mode, ObjectMode::PickLayer, "D is Select layer");
+    app.spring = None;
+
+    // Ctrl+D still deselects — the tool keys sit after the Ctrl chords.
+    mods(&mut app, true, false, false);
+    crate::key_down(&mut app, 0x44, false);
+    assert!(
+        matches!(app.cmds.back(), Some(AppCmd::Deselect)),
+        "Ctrl+D is still Deselect, not the tool key"
+    );
+    mods(&mut app, false, false, false);
+}
+
 #[test]
 #[ignore = "survey"]
 fn survey_tool_keys() {

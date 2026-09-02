@@ -22,7 +22,30 @@
 <tr><td><kbd>U</kbd></td><td>Frame</td></tr>
 <tr><td><kbd>T</kbd></td><td>Text (press again to flip to Balloon)</td></tr>
 <tr><td><kbd>F</kbd> / <kbd>V</kbd></td><td>Figure / Gradient</td></tr>
+<tr><td><kbd>I</kbd></td><td>Eyedropper</td></tr>
+<tr><td><kbd>H</kbd> / <kbd>R</kbd></td><td>Move view: hand / rotate</td></tr>
+<tr><td><kbd>J</kbd></td><td>Liquify</td></tr>
+<tr><td><kbd>D</kbd></td><td>Select layer — click a pixel, the Layers palette jumps to whichever layer drew it</td></tr>
 </table>
+
+<h2>Modifiers on the canvas</h2>
+<p>Clip Studio's own set, and they mean the same here. They work
+whatever tool is in your hand, so none of them costs you the tool.</p>
+<table>
+<tr><th>Keys</th><th>Does</th></tr>
+<tr><td><kbd>Space</kbd>+drag</td><td>Pan</td></tr>
+<tr><td><kbd>Shift+Space</kbd>+drag</td><td>Rotate the view</td></tr>
+<tr><td><kbd>Ctrl+Space</kbd>+click</td><td>Zoom in, about the point you clicked</td></tr>
+<tr><td><kbd>Alt+Space</kbd>+click</td><td>Zoom out, same anchor</td></tr>
+<tr><td><kbd>Alt</kbd>+click</td><td>Eyedropper, while a brush or the Fill tool is in hand</td></tr>
+<tr><td><kbd>Ctrl</kbd>+drag</td><td>Temporary Object grab (the tool never changes)</td></tr>
+<tr><td><kbd>Ctrl+Alt</kbd>+drag</td><td>Brush size, live</td></tr>
+</table>
+<div class="quirk"><b>Space first, then the modifier.</b> For the
+<kbd>Alt+Space</kbd> zoom-out in particular: Alt pressed <em>before</em>
+Space is Windows' own window menu and never reaches the canvas. <span
+class="why">Clip Studio's manual gives the same order for its macOS
+equivalent.</span></div>
 
 <h2>Every day</h2>
 <table>
@@ -207,6 +230,14 @@ Saturated line on Dark burst, and that is where <kbd>F</kbd> puts you
 tomorrow.</p>
 
 <h2>Recorded deviations</h2>
+<div class="quirk"><b>Three tool letters moved.</b> CSP stacks Figure,
+Frame border and Ruler all on <kbd>U</kbd> and Gradient with Fill on
+<kbd>G</kbd>; here <kbd>U</kbd> is Frame border alone, Figure is
+<kbd>F</kbd> and Gradient is <kbd>V</kbd>. <kbd>B</kbd> is a second Pen
+key rather than CSP's Brush. <span class="why">If your hands want CSP's
+stacking back, one <code>keys.json</code> line does it:
+<code>"u": ["tool: Frame border", "tool: Figure"]</code> — a list on one
+key is exactly the repeat-press cycle CSP uses.</span></div>
 <div class="quirk"><b><kbd>Ctrl+D</kbd> is Deselect.</b> CSP uses it for
 Reselect; we kept Deselect on the plain chord deliberately, and
 Reselect lives on <kbd>Ctrl+Shift+D</kbd>.</div>

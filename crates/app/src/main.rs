@@ -1655,6 +1655,16 @@ fn builtin_targets(vk: u16, shift: bool) -> Option<&'static [Target]> {
         group: group::MOVE,
         sub: SubTool::Pan(PanMode::Rotate),
     })];
+    // CSP's own letter for Operation ▸ Select layer, the row that answers
+    // "which of these 200 layers drew that pixel". It is a SUB TOOL of the
+    // Object tool here, so the key has to name the row: a bare
+    // `Target::Tool(Object)` would land on whichever row the tool was last
+    // left on, which is the one thing D must not do.
+    const PICK_LAYER: &[Target] = &[Target::SubTool(SubToolPath {
+        tool: Tool::Object,
+        group: group::OPERATION,
+        sub: SubTool::Object(crate::cmd::ObjectMode::PickLayer),
+    })];
     Some(match vk {
         // P / B — B stays a pen alias (old MangaNakama habit).
         0x50 | 0x42 => &[Target::Tool(Tool::Pen)],
@@ -1674,6 +1684,11 @@ fn builtin_targets(vk: u16, shift: bool) -> Option<&'static [Target]> {
         0x48 => HAND,
         0x52 if !shift => ROTATE,
         0x45 => &[Target::Tool(Tool::Eraser), Target::Tool(Tool::Pen)], // E
+        // The two CSP letters for tools we HAVE and had no key for at all:
+        // J is Blend / Liquify (it is in the owner's own set too), D is
+        // Operation ▸ Select layer. Both were mouse-only until now.
+        0x4A => &[Target::Tool(Tool::Liquify)], // J
+        0x44 => PICK_LAYER,                     // D (Ctrl+D is Deselect, above)
         _ => return None,
     })
 }
@@ -1751,6 +1766,8 @@ pub(crate) fn builtin_chords() -> Vec<((bool, bool, bool, u16), &'static str)> {
         b(0x48, "Hand (move)"),
         b(0x52, "Rotate view"),
         b(0x45, "Eraser / Pen"),
+        b(0x4A, "Liquify"),
+        b(0x44, "Select layer"),
         b(0xDB, "Brush size down"),
         b(0xDD, "Brush size up"),
         b(0xBC, "Previous sub tool"),

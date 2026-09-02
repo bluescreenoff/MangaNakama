@@ -4440,6 +4440,15 @@ impl App {
                     .position(|&s| crate::subtools::is_lit(self, s))
                     .unwrap_or(0);
                 let next = rows[((cur as i32 + dir).rem_euclid(rows.len() as i32)) as usize];
+                // SAY where the step landed. In CSP the Sub Tool palette's
+                // highlight is the answer; ours moves too, but a single
+                // Tab hides every palette and the status bar carries no
+                // tool name — so `.` on the Figure tool walked Straight
+                // line → Rectangle → Ellipse with nothing on screen
+                // changing at all. Set FIRST, so the arms below that have
+                // a richer line of their own (the fill modes, the tone
+                // patterns, the Object rows) still win.
+                self.set_status(next.label());
                 match next {
                     // The refer trio's ONE stop: "click, at the referent
                     // already set" — landing here never moves the referent.
