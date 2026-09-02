@@ -3132,12 +3132,14 @@ impl App {
             if let Some(li) = ink {
                 self.doc.set_active(li);
                 let size = self.doc.size;
-                let rect = self.doc.layers[li].tile_bounds().map(|(x, y, w, h)| {
+                // The box hugs the ink, not the tile grid — same rule as
+                // Ctrl+T (`transform_lift_rect`).
+                let rect = self.doc.layers[li].ink_bounds().map(|b| {
                     [
-                        x.max(0),
-                        y.max(0),
-                        (x + w as i32).min(size.0 as i32),
-                        (y + h as i32).min(size.1 as i32),
+                        b[0].max(0),
+                        b[1].max(0),
+                        b[2].min(size.0 as i32),
+                        b[3].min(size.1 as i32),
                     ]
                 });
                 if let Some(r) = rect.filter(|r| r[0] < r[2] && r[1] < r[3])
