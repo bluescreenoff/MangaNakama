@@ -29,6 +29,17 @@ follow the style; position, rotation, orientation, furigana and
 per-character runs stay yours. Editing a styled text's size by hand is
 fine too — it simply snaps back the next time the style is applied.</div>
 
+<h2>One balloon layer, one text layer</h2>
+A new bubble joins the balloon layer you have selected; if you are on
+some other layer it joins the topmost visible, unlocked balloon layer the
+page already has, and only a page with none gets a fresh
+<i>Balloon N</i>. New text does the same with text layers. So bubble,
+words, bubble, words leaves you with two layers, not a pair per balloon
+— the shape a Clip Studio page has, where the words live inside the
+balloon layer. Hidden and locked layers are never joined.
+<div class="quirk"><b>Want a second balloon layer?</b> Make one (or
+select the one you want) in the Layers palette first — the selected
+balloon or text layer always wins over the topmost one.</div>
 <h2>The Object key cycles the stack</h2>
 <div class="quirk"><b>Press <kbd>O</kbd> again to move onward.</b> With
 something selected in the Object tool, pressing the Object key again

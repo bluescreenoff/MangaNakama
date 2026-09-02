@@ -299,10 +299,20 @@ pub(crate) fn balloons_remove(app: &mut App, layer: usize, ids: &[u64]) -> usize
 pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
     match cmd {
         AppCmd::BalloonAdd { balloon } => {
+            // The active balloon layer takes it; failing that, the topmost
+            // visible, unlocked balloon layer does (CSP keeps a page's
+            // balloons on one layer — the "Add to selected" default). A
+            // fresh layer only when the page has none to join: before
+            // this, bubble → words → bubble → words bred a layer pair per
+            // balloon, eight balloons = sixteen layers (surface pass
+            // 2026-09-02).
             let li = if app.doc.active_layer().is_balloon() {
                 Some(app.doc.active)
             } else {
-                None
+                (0..app.doc.layers.len()).rev().find(|&i| {
+                    let l = &app.doc.layers[i];
+                    l.is_balloon() && l.visible && !l.lock
+                })
             };
             let selected = match li {
                 Some(li) => {
@@ -310,6 +320,10 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                     bs.balloons.push(balloon);
                     let last = bs.balloons.len() - 1;
                     app.doc.set_balloons(li, bs);
+                    // The drawn object's layer is the selected one (CSP),
+                    // so the Layers palette and the next tail drag agree
+                    // on where it went.
+                    app.doc.active = li;
                     (li, last)
                 }
                 None => {

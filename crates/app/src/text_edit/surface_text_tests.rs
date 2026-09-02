@@ -52,9 +52,6 @@ fn select(app: &mut App, a: u32, b: u32) {
     }
 }
 
-fn enter(app: &mut App) {
-    app.text_key(0x0D, false, false);
-}
 
 fn esc(app: &mut App) {
     app.text_key(0x1B, false, false);
@@ -794,4 +791,96 @@ fn a_tail_joins_the_body_without_a_seam() {
     // would ink at (300, 348..352). The tail interior there must be paper.
     let seam = ink_in(&img, [296, 346, 304, 354]);
     assert_eq!(seam, 0, "no line across the tail's base: {seam} px inked");
+}
+
+/// The day-long workflow: bubble, words, bubble, words. CSP keeps one
+/// balloon layer per page (a text typed into a bubble joins its layer,
+/// and the next bubble joins the selected balloon layer). We cannot mix
+/// kinds in one layer, but the count must not grow with every balloon —
+/// eight balloons on a page is eight balloons, not sixteen layers.
+#[test]
+fn alternating_bubbles_and_lettering_share_two_layers() {
+    let Some(mut app) = app() else { return };
+    let n0 = app.doc.layers.len();
+    for i in 0..3 {
+        let x = 120.0 + i as f32 * 260.0;
+        app.tool = Tool::Balloon;
+        app.balloon_mode = BalloonMode::Ellipse;
+        drag(&mut app, (x, 100.0), (x + 200.0, 260.0));
+        app.tool = Tool::Text;
+        click(&mut app, (x + 120.0, 140.0));
+        type_str(&mut app, "せりふ");
+        esc(&mut app);
+    }
+    let balloon_layers = (0..app.doc.layers.len())
+        .filter(|&i| app.doc.layers[i].is_balloon())
+        .count();
+    let text_layers_n = text_layers(&app).len();
+    assert_eq!(
+        (balloon_layers, text_layers_n),
+        (1, 1),
+        "one balloon layer + one text layer, not a pair per bubble ({} layers grew to {})",
+        n0,
+        app.doc.layers.len()
+    );
+    let bl = (0..app.doc.layers.len())
+        .find(|&i| app.doc.layers[i].is_balloon())
+        .unwrap();
+    assert_eq!(app.doc.layers[bl].balloons().unwrap().balloons.len(), 3);
+    assert_eq!(app.doc.layers[text_layers(&app)[0]].texts().unwrap().texts.len(), 3);
+    render(&mut app, "t16_three_bubbles_two_layers");
+}
+
+/// CSP "Combining balloons": two bubbles overlapping on one layer become
+/// one — the shared edge is erased.
+#[test]
+fn overlapping_bubbles_on_one_layer_merge_without_an_inner_edge() {
+    let Some(mut app) = app() else { return };
+    let mut bs = mn_core::BalloonSet::new(5.0);
+    bs.balloons.push(ellipse(300.0, 300.0, 140.0, 100.0));
+    bs.balloons.push(ellipse(460.0, 340.0, 140.0, 100.0));
+    app.doc.add_balloon_layer("bubbles", bs);
+    let img = render(&mut app, "t17_merged_bubbles");
+    // The first ellipse's right rim at (440, 300) lies inside the second
+    // body: no line may be drawn there.
+    assert_eq!(ink_in(&img, [436, 296, 444, 304]), 0, "the inner rim is gone");
+    // But the outer rims still ink.
+    assert!(ink_in(&img, [158, 296, 166, 304]) > 0, "left rim of bubble 1");
+    assert!(ink_in(&img, [596, 336, 604, 344]) > 0, "right rim of bubble 2");
+}
+
+/// A thought balloon at print resolution: the puffs must read as
+/// bubbles, not as a dotted line — the tail width comes from Tool
+/// Property's mm, so this is what the page will print.
+#[test]
+fn a_thought_tail_at_print_dpi_reads_as_puffs() {
+    let Some(mut app) = app() else { return };
+    app.new_doc_draft.pages = 1;
+    dispatch(&mut app, AppCmd::NewComicCreate);
+    let dpi = app.doc_dpi();
+    let (w, h) = app.doc.size;
+    app.viewport = mn_gpu::Viewport::default();
+    let (cx, cy) = (w as f32 * 0.5, h as f32 * 0.35);
+    let r = app.mm_to_px(22.0);
+    let mut bs = mn_core::BalloonSet::new(app.mm_to_px(app.balloon_border_mm).max(2.0));
+    bs.balloons.push(ellipse(cx, cy, r * 1.3, r));
+    let li = app.doc.add_balloon_layer("bubble", bs);
+    app.doc.active = li;
+    app.tool = Tool::Balloon;
+    app.balloon_mode = BalloonMode::Tail;
+    app.balloon_tail_kind = TailKind::Thought;
+    drag(&mut app, (cx, cy + r * 0.6), (cx - r * 0.8, cy + r * 2.6));
+    let b = &app.doc.layers[li].balloons().unwrap().balloons[0];
+    assert_eq!(b.tails.len(), 1);
+    let width_mm = b.tails[0].width / dpi as f32 * 25.4;
+    println!("[surface] thought tail width {:.0} px = {width_mm:.1} mm at {dpi} dpi", b.tails[0].width);
+    let img = app.renderer.render_offscreen(&app.doc, w, h);
+    let x0 = (cx - r * 2.0).max(0.0) as u32;
+    let y0 = (cy - r * 1.5).max(0.0) as u32;
+    let crop = image::imageops::crop_imm(&img, x0, y0, (r * 4.0) as u32, (r * 4.5) as u32).to_image();
+    if let Ok(dir) = std::env::var("MN_SURFACE_OUT") {
+        let _ = std::fs::create_dir_all(&dir);
+        crop.save(format!("{dir}/t18_thought_tail_600dpi_crop.png")).unwrap();
+    }
+    assert!(ink_bbox(&crop).is_some());
 }

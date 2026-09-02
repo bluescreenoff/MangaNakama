@@ -553,11 +553,28 @@ impl App {
                 l.texts().cloned().unwrap_or_default(),
             ),
             _ => {
-                let n = 1 + self.doc.layers.iter().filter(|l| l.is_text()).count();
-                let li = self
-                    .doc
-                    .add_text_layer(format!("Text {n}"), TextSet::default());
-                (li, true, TextSet::default())
+                // Not on a text layer: join the topmost visible, unlocked
+                // one the page already has (CSP's "add to selected text"
+                // — one text layer per page is the working shape), and
+                // only make "Text N" when there is none. Before this every
+                // balloon-then-words pair made a fresh text layer.
+                let join = (0..self.doc.layers.len()).rev().find(|&i| {
+                    let l = &self.doc.layers[i];
+                    l.is_text() && l.visible && !l.lock
+                });
+                match join {
+                    Some(li) => {
+                        self.doc.active = li;
+                        (li, false, self.doc.layers[li].texts().cloned().unwrap_or_default())
+                    }
+                    None => {
+                        let n = 1 + self.doc.layers.iter().filter(|l| l.is_text()).count();
+                        let li = self
+                            .doc
+                            .add_text_layer(format!("Text {n}"), TextSet::default());
+                        (li, true, TextSet::default())
+                    }
+                }
             }
         };
         self.warm_texts(layer);
