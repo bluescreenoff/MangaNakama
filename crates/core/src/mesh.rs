@@ -66,13 +66,23 @@ fn inverse_quad(q: &[[f32; 2]; 4], p: [f32; 2], iters: usize) -> [f32; 2] {
     let mut uv = [0.5f32, 0.5];
     for _ in 0..iters {
         let f = bilinear_quad(q, uv[0], uv[1]);
-        let (e, r) = (1.0 / 256.0, 1.0 / 256.0);
-        let fx = bilinear_quad(q, (uv[0] + e).min(1.0), uv[1]);
-        let fy = bilinear_quad(q, uv[0], (uv[1] + r).min(1.0));
-        let j = [
-            [(fx[0] - f[0]) / e, (fy[0] - f[0]) / r],
-            [(fx[1] - f[1]) / e, (fy[1] - f[1]) / r],
+        // The analytic Jacobian of the bilinear map. The numerically
+        // differenced one clamped its probe at u = 1, so at the far edge
+        // of every quad the derivative collapsed to zero (or, once the
+        // iterate had overshot past 1, to garbage) and the Newton stalled
+        // with `uv` a hair outside [0,1]² — both quads sharing that edge
+        // then disowned the pixel and the commit left a transparent seam
+        // through solid ink along the lattice lines.
+        let (u, v) = (uv[0], uv[1]);
+        let du = [
+            (1.0 - v) * (q[1][0] - q[0][0]) + v * (q[3][0] - q[2][0]),
+            (1.0 - v) * (q[1][1] - q[0][1]) + v * (q[3][1] - q[2][1]),
         ];
+        let dv = [
+            (1.0 - u) * (q[2][0] - q[0][0]) + u * (q[3][0] - q[1][0]),
+            (1.0 - u) * (q[2][1] - q[0][1]) + u * (q[3][1] - q[1][1]),
+        ];
+        let j = [[du[0], dv[0]], [du[1], dv[1]]];
         let det = j[0][0] * j[1][1] - j[0][1] * j[1][0];
         if det.abs() < 1e-9 {
             break;
@@ -123,18 +133,29 @@ pub fn warp_buffer(src: &FloatSource, pts: &[[f32; 2]], n: usize) -> ([i32; 4], 
             for cj in 0..n - 1 {
                 for ci in 0..n - 1 {
                     let q = quad(ci, cj);
-                    // Cheap bbox reject before the Newton.
-                    if p[0] < q[0][0].min(q[2][0]) - 1.0
-                        || p[0] > q[1][0].max(q[3][0]) + 1.0
-                        || p[1] < q[0][1].min(q[1][1]) - 1.0
-                        || p[1] > q[2][1].max(q[3][1]) + 1.0
-                    {
+                    // Cheap bbox reject before the Newton — over ALL four
+                    // corners: a bent quad's leftmost point can be its
+                    // top-right corner.
+                    let (mut qx0, mut qy0, mut qx1, mut qy1) = (q[0][0], q[0][1], q[0][0], q[0][1]);
+                    for c in &q[1..] {
+                        qx0 = qx0.min(c[0]);
+                        qy0 = qy0.min(c[1]);
+                        qx1 = qx1.max(c[0]);
+                        qy1 = qy1.max(c[1]);
+                    }
+                    if p[0] < qx0 - 1.0 || p[0] > qx1 + 1.0 || p[1] < qy0 - 1.0 || p[1] > qy1 + 1.0 {
                         continue;
                     }
-                    let uv = inverse_quad(&q, p, 3);
-                    if uv[0] < 0.0 || uv[0] > 1.0 || uv[1] < 0.0 || uv[1] > 1.0 {
+                    let mut uv = inverse_quad(&q, p, 8);
+                    // A pixel centre on a shared lattice edge belongs to
+                    // one of the two quads; float error must not let both
+                    // refuse it.
+                    const EPS: f32 = 1e-3;
+                    if uv[0] < -EPS || uv[0] > 1.0 + EPS || uv[1] < -EPS || uv[1] > 1.0 + EPS {
                         continue;
                     }
+                    uv[0] = uv[0].clamp(0.0, 1.0);
+                    uv[1] = uv[1].clamp(0.0, 1.0);
                     let sp = [
                         x0 + w * ((ci as f32 + uv[0]) / k),
                         y0 + h * ((cj as f32 + uv[1]) / k),
@@ -411,5 +432,36 @@ mod tests {
         let mut moved = pts.clone();
         moved[5][1] += 3.0;
         assert!(!lattice_is_identity(r, 4, &moved));
+    }
+
+    /// Pull the centre of a 5×5 lattice over SOLID ink and look for
+    /// seams: a transparent pixel with opaque ink on both sides (left and
+    /// right, or above and below) is a hole the warp punched along a
+    /// lattice edge, and there must be none. The numerically-differenced
+    /// Newton left a one-pixel transparent line through the disc from
+    /// the pulled point to the lattice corner.
+    #[test]
+    fn a_bent_lattice_leaves_no_seams_through_solid_ink() {
+        let mut doc = Document::new(160, 160);
+        ink(&mut doc, 0, 20, 20, 140, 140);
+        let r = [20, 20, 140, 140];
+        let s = src(&doc, 0, r);
+        let mut pts = identity_lattice(r, 5);
+        pts[2 * 5 + 2] = [80.0 + 12.0, 80.0 + 14.0];
+        pts[5 + 1] = [50.0 - 6.0, 50.0 + 3.0];
+        let (dst, buf) = warp_buffer(&s, &pts, 5);
+        let a = |x: i32, y: i32| buf_px(dst, &buf, x, y);
+        let mut seams = Vec::new();
+        for y in dst[1] + 1..dst[3] - 1 {
+            for x in dst[0] + 1..dst[2] - 1 {
+                if a(x, y) == 0
+                    && ((a(x - 1, y) > 0 && a(x + 1, y) > 0)
+                        || (a(x, y - 1) > 0 && a(x, y + 1) > 0))
+                {
+                    seams.push((x, y));
+                }
+            }
+        }
+        assert!(seams.is_empty(), "{} seam pixels, first {:?}", seams.len(), &seams[..seams.len().min(8)]);
     }
 }

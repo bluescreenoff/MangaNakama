@@ -152,9 +152,88 @@ pub(super) fn line_width(buf: &mut Raster, delta: i32) {
         return;
     }
     let grow = delta > 0;
+    let orig = (!grow).then(|| buf.clone());
     let mut tmp = Raster::new(buf.w, buf.h);
     morph_pass(buf, &mut tmp, r, false, grow);
     std::mem::swap(buf, &mut tmp);
     morph_pass(buf, &mut tmp, r, true, grow);
     std::mem::swap(buf, &mut tmp);
+    if let Some(orig) = orig {
+        keep_centre_line(&orig, buf);
+    }
+}
+
+/// CSP's "At least 1 pixel" on Narrow, always on: a thinning never DELETES
+/// a line. The erosion alone kills every line thinner than `2r + 1` —
+/// on a 1 px hairline page, Narrow by 1 erased all of it, which is the one
+/// result a mangaka thinning a scan can never want. So the medial axis of
+/// the original ink is put back: a pixel whose Chebyshev distance to the
+/// nearest transparent pixel is no smaller than any 4-neighbour's is the
+/// centre of its line (ties keep, so a flat 2 px line keeps both rows and
+/// a 1 px line keeps itself), and it is restored at its own colour and
+/// alpha wherever the erosion left less. Wide lines thin as before; the
+/// ridge of a wide line is inside the eroded core anyway.
+fn keep_centre_line(orig: &Raster, out: &mut Raster) {
+    let (w, h) = (orig.w, orig.h);
+    if w == 0 || h == 0 {
+        return;
+    }
+    // Two-pass chamfer: Chebyshev distance to the nearest transparent
+    // pixel, the buffer's edge counting as transparent.
+    const FAR: u16 = u16::MAX / 2;
+    let mut d: Vec<u16> = (0..w * h)
+        .map(|i| if orig.px[i * TILE_CHANNELS + 3] > 0 { FAR } else { 0 })
+        .collect();
+    let get = |d: &[u16], x: isize, y: isize| -> u16 {
+        if x < 0 || y < 0 || x >= w as isize || y >= h as isize {
+            0
+        } else {
+            d[y as usize * w + x as usize]
+        }
+    };
+    for y in 0..h as isize {
+        for x in 0..w as isize {
+            let i = y as usize * w + x as usize;
+            if d[i] == 0 {
+                continue;
+            }
+            let m = get(&d, x - 1, y - 1)
+                .min(get(&d, x, y - 1))
+                .min(get(&d, x + 1, y - 1))
+                .min(get(&d, x - 1, y));
+            d[i] = d[i].min(m + 1);
+        }
+    }
+    for y in (0..h as isize).rev() {
+        for x in (0..w as isize).rev() {
+            let i = y as usize * w + x as usize;
+            if d[i] == 0 {
+                continue;
+            }
+            let m = get(&d, x + 1, y)
+                .min(get(&d, x - 1, y + 1))
+                .min(get(&d, x, y + 1))
+                .min(get(&d, x + 1, y + 1));
+            d[i] = d[i].min(m + 1);
+        }
+    }
+    for y in 0..h as isize {
+        for x in 0..w as isize {
+            let here = get(&d, x, y);
+            if here == 0 {
+                continue;
+            }
+            let ridge = get(&d, x - 1, y) <= here
+                && get(&d, x + 1, y) <= here
+                && get(&d, x, y - 1) <= here
+                && get(&d, x, y + 1) <= here;
+            if ridge {
+                let (xu, yu) = (x as usize, y as usize);
+                let o = orig.pixel(xu, yu);
+                if out.pixel(xu, yu)[3] < o[3] {
+                    out.set_pixel(xu, yu, o);
+                }
+            }
+        }
+    }
 }

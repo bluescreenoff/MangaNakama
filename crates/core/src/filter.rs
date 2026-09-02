@@ -1800,6 +1800,41 @@ mod tests {
         assert!(Filter::LineWidth { delta: 0 }.is_identity());
     }
 
+    /// CSP's Narrow leaves "at least 1 pixel": a thinning must never delete
+    /// a line. The plain erosion killed everything under `2r + 1` wide — on
+    /// a hairline page, Narrow by 1 erased every line — so the centre line
+    /// of each stroke is restored at its own alpha: a 1 px line survives
+    /// whole, a 2 px line keeps both columns (ties), a 5 px line thins to 3.
+    #[test]
+    fn narrow_keeps_at_least_one_pixel_of_every_line() {
+        let mut r = Raster::new(96, 64);
+        for y in 8..56 {
+            r.set_pixel(20, y, [0, 0, 0, 32768]); // 1 px, opaque
+            r.set_pixel(30, y, [0, 0, 0, 20000]); // 1 px, translucent
+            r.set_pixel(40, y, [0, 0, 0, 32768]); // 2 px
+            r.set_pixel(41, y, [0, 0, 0, 32768]);
+            for x in 60..65 {
+                r.set_pixel(x, y, [0, 0, 0, 32768]); // 5 px
+            }
+        }
+        let mut out = r.clone();
+        Filter::LineWidth { delta: -1 }.run(&mut out, 0, 0);
+        for y in 9..55 {
+            assert_eq!(out.pixel(20, y)[3], 32768, "the 1 px line is whole at y={y}");
+            assert_eq!(out.pixel(30, y)[3], 20000, "…at its own alpha");
+            assert_eq!(out.pixel(19, y)[3], 0, "and no wider");
+            assert_eq!(out.pixel(21, y)[3], 0);
+            assert!(out.pixel(40, y)[3] > 0 && out.pixel(41, y)[3] > 0, "the 2 px line stays");
+        }
+        assert_eq!(out.pixel(60, 32)[3], 0, "the 5 px line lost its left column");
+        assert_eq!(out.pixel(61, 32)[3], 32768);
+        assert_eq!(out.pixel(63, 32)[3], 32768);
+        assert_eq!(out.pixel(64, 32)[3], 0, "and its right one");
+        // The 1 px line's END: the top pixel at y=8 also survives (its
+        // distance to the transparent row above is 1, like its neighbours').
+        assert_eq!(out.pixel(20, 8)[3], 32768, "the line's end pixel too");
+    }
+
     /// LC-002 through the document: a grow spreads ink PAST the layer's old
     /// footprint (so the halo has to be there), it is one undo step, and it
     /// crosses a tile boundary without a seam.
