@@ -87,12 +87,14 @@ below it (or ignores). This is CSP behaviour and is *usually* wanted
 eye-testing says this surprises more than it helps, the alternative is
 clearing the flag on any drag that changes the base — owner's call.
 
-**3d. Merge down a clipped layer onto its base.** ✅ — it **refuses**.
-`merge_down` bails on a clipped upper layer because "a clipped layer's raw
-pixels are not what it shows": merging copies the layer's own tiles, so the
-part the clip was hiding would come back as ink. Nothing is baked and
-nothing is lost — unclip first if you want the merge. Pinned by
-`alpha_lock_masks_the_open_op_and_locks_guard_merge` (mn-core).
+**3d. Merge down a clipped layer onto its base.** ✅ — it **bakes what
+the clip showed** (CSP's behaviour; until 2026-09-02 it refused, silently).
+When the row below IS the base, `merge_down` cuts the upper's tiles to the
+base's display alpha before baking, so the part the clip was hiding never
+comes back as ink. When the row below is another member of the same run the
+raw ink lands and the result stays clipped through it — the page is the
+same either way. Pinned by
+`s16_merge_down_of_a_clipped_layer_bakes_what_it_showed` (mn-app).
 
 **3e. Duplicate a clipped layer.** 🟡 — the duplicate carries the flag and
 sits inside the run, so it joins it. That is the wanted outcome (duplicate

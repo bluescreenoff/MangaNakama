@@ -93,6 +93,27 @@ are ours; a foreign editor falls back to Normal for those layers. Your
 own files reload correctly — this only affects handing a .ora to
 someone else.</div>
 
+<h2>Merging</h2>
+<div class="quirk"><b>Merge with layer below works on folders and on
+clipped layers, the way Clip Studio's does.</b> A folder flattens onto the
+layer under it — its combined ink, at the folder's own opacity and blend —
+and the whole group leaves in one undo step. A clipped layer bakes what the
+clip <i>showed</i>: the ink is cut to the base's silhouette before it lands,
+so collapsing a shading layer into the flats never floods the page with the
+part the clip was hiding. (Merging a clipped layer onto another clipped
+member of the same run bakes the raw ink and the result stays clipped —
+nothing changes on the page either way.)</div>
+<div class="quirk"><b>A merge that cannot happen says why.</b> The bottom
+row, a locked row on either side, a frame or balloon or text row, a vector
+layer underneath, a tone layer on either side, and a row whose neighbour is
+outside its folder all refuse — and the status line names which one, so
+Ctrl+E is never a dead key.</div>
+<div class="quirk"><b>Flatten image is the destructive one.</b> Layer ▸
+Flatten image composites every <i>visible</i> layer into one raster and
+discards the rest, hidden layers included, as Clip Studio does. One undo
+press brings the whole stack back. Merge visible to new layer
+(Ctrl+Shift+E) is the copy that keeps your layers.</div>
+
 <h2>Clipping, including to a folder</h2>
 <div class="quirk"><b>A layer can clip to a FOLDER, not just to a
 layer.</b> The base is the nearest row below at the same depth that is not
@@ -291,9 +312,11 @@ drawing was, like a blur does.</div>
 
 <h2>Solos</h2>
 <div class="quirk"><b>Alt+click an EYE solos the layer.</b> Every other
-layer's eye goes off; Alt+click the same eye again and the exact
-previous visibility comes back. The snapshot lives per page — switching
-pages forgets it (the second press then starts a fresh solo).</div>
+layer's eye goes off — except the folders the layer sits inside, which
+stay on (a hidden parent would hide the solo too); Alt+click the same eye
+again and the exact previous visibility comes back. The snapshot lives per
+page — switching pages forgets it (the second press then starts a fresh
+solo).</div>
 <div class="quirk"><b>The Reference checkbox has its own solo.</b>
 Alt+click the "Reference layer" checkbox solos the REFERENCE set (every
 other layer's reference flag clears) — a different solo from the eye's,
