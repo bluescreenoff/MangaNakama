@@ -1688,7 +1688,10 @@ pub fn translate_texts_in(
         if !body.contains(t.center()) {
             continue;
         }
-        t.pos = [t.pos[0] + d[0], t.pos[1] + d[1]];
+        // `translate`, not a bare `pos` write: the shaped sprite is placed by
+        // its own canvas origin, and a sprite left behind draws the words
+        // where the bubble WAS.
+        t.translate(d[0], d[1]);
         moved.push(i);
     }
     moved
@@ -1724,7 +1727,8 @@ pub fn scale_texts_in(
             new_bbox[0] + (c[0] - b0[0]) / w0 * w1,
             new_bbox[1] + (c[1] - b0[1]) / h0 * h1,
         ];
-        t.pos = [t.pos[0] + to[0] - c[0], t.pos[1] + to[1] - c[1]];
+        // Same as the move: the sprite's origin rides along with `pos`.
+        t.translate(to[0] - c[0], to[1] - c[1]);
         moved.push(i);
     }
     moved
@@ -3329,6 +3333,51 @@ mod tests {
         assert!(
             translate_texts_in(&body, &mut ts, [0.0, 0.0]).is_empty(),
             "a zero delta is a no-op"
+        );
+    }
+
+    /// The sprite is placed on the canvas by its own `origin`, so a carry
+    /// that moves `pos` and leaves the origin behind draws the words where
+    /// the bubble WAS — the page showed the balloon leave and the lettering
+    /// stay (surface pass 2026-09-02; the pos-only test above never gave
+    /// its item a cache, so it could not see this).
+    #[test]
+    fn a_carried_sprite_moves_with_its_item() {
+        use crate::text::{RenderedText, StyleRun, TextItem, TextSet};
+        use std::sync::Arc;
+        let sprite = || {
+            Some(Arc::new(RenderedText {
+                origin: [78, 88],
+                size: [1, 1],
+                rgba: vec![0; 4],
+            }))
+        };
+        let body = ellipse(100.0, 100.0, 60.0, 40.0); // bbox 40..160 × 60..140
+        let mut t = TextItem::new([80.0, 90.0], "Gothic".into(), 9.0, [0, 0, 0], true);
+        t.text = "オイ".into();
+        t.runs = vec![StyleRun::plain(2)];
+        t.size = [40.0, 20.0];
+        t.cache = sprite();
+        let mut ts = TextSet { texts: vec![t] };
+        translate_texts_in(&body, &mut ts, [30.0, -12.0]);
+        assert_eq!(
+            ts.texts[0].cache.as_ref().unwrap().origin,
+            [108, 76],
+            "translate: the sprite came along"
+        );
+
+        let mut t = ts.texts.remove(0);
+        t.pos = [80.0, 90.0];
+        t.cache = sprite();
+        let mut ts = TextSet { texts: vec![t] };
+        scale_texts_in(&body, &mut ts, [40.0, 60.0, 280.0, 140.0]);
+        let t = &ts.texts[0];
+        let d = [t.pos[0] - 80.0, t.pos[1] - 90.0];
+        assert!(d[0] > 1.0, "the resize moved it: {d:?}");
+        assert_eq!(
+            t.cache.as_ref().unwrap().origin,
+            [78 + d[0].round() as i32, 88 + d[1].round() as i32],
+            "resize: the sprite came along by the same delta"
         );
     }
 

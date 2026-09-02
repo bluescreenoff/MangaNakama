@@ -2338,3 +2338,8 @@ mod in_editor_undo_tests {
         assert_eq!(typed(&app), "hello", "editing the box that was clicked");
     }
 }
+
+/// Surface pass (lettering): every text/balloon flow driven end to end
+/// through the real doors and rendered, PNGs kept under `MN_SURFACE_OUT`.
+#[cfg(test)]
+mod surface_text_tests;
