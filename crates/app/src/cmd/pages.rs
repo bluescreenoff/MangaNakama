@@ -215,14 +215,27 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                 app.set_status("no next page to combine with");
                 return;
             }
-            let Some(b_bytes) = app.pages[i + 1].bytes.take() else {
-                app.set_error("next page has no data");
-                return;
-            };
-            let Ok(b_doc) = mn_core::project::bytes_to_doc(&b_bytes) else {
-                app.pages[i + 1].bytes = Some(b_bytes);
-                app.set_error("next page failed to decode");
-                return;
+            // The next page is decoded from its bytes — or BUILT, when it
+            // is a still-lazy blank: a fresh comic's pages 2..n carry only
+            // the template marker until something touches them, and "make
+            // pages 2-3 a spread" is the first thing a mangaka does on one.
+            // Taking the bytes alone refused with "next page has no data".
+            let b_doc = match app.pages[i + 1].bytes.take() {
+                Some(b_bytes) => match mn_core::project::bytes_to_doc(&b_bytes) {
+                    Ok(d) => d,
+                    Err(_) => {
+                        app.pages[i + 1].bytes = Some(b_bytes);
+                        app.set_error("next page failed to decode");
+                        return;
+                    }
+                },
+                None => match app.pages[i + 1].blank {
+                    Some((bw, bh, n1)) => app.blank_page_doc_at(bw, bh, n1),
+                    None => {
+                        app.set_error("next page has no data");
+                        return;
+                    }
+                },
             };
             let mut doc = mn_core::page::combine_spread(&app.doc, &b_doc, gap);
             if delete_empty {
@@ -304,12 +317,15 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
             let e = app.fresh_page(blank, None);
             app.pages.insert(at, e);
             app.mark_pages_dirty();
+            // AFTER the switch: `switch_page` writes "page N" to the status
+            // line, and said before it the add — and whether it came from
+            // the template page — was overwritten in the same frame.
+            app.switch_page(at);
             if from_template {
                 app.set_status(format!("page {} added from the template page", at + 1));
             } else {
                 app.set_status(format!("page {} added", at + 1));
             }
-            app.switch_page(at);
         }
         AppCmd::DeletePage => {
             let n = app.pages.len();

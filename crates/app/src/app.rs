@@ -5107,6 +5107,11 @@ mod basics_qa_fill_tests;
 #[cfg(test)]
 mod surface_layers_tests;
 
+/// Surface pass (2026-09-02, Phase 3), File + Pages family: new work,
+/// page manager, spreads, save/load round trips, PSD, autosave, imports.
+#[cfg(test)]
+mod surface_file_tests;
+
 /// Mangaka-basics QA (2026-09-02 round), selection + paneling family: the
 /// selection tools, the launcher's own commands, transform, and the frame
 /// folders a comic page is made of — every one judged on an EXPORT render.
