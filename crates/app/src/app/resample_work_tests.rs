@@ -18,12 +18,8 @@ use mn_core::{Document, transform::Interp};
 /// A refusal made before the run starts comes back from `begin`; one made
 /// while building a page lands on the status line as an error, because by
 /// then there is no caller left to return it to.
-fn resample(
-    app: &mut crate::App,
-    dpi: u32,
-    interp: Interp,
-) -> Result<usize, String> {
-    app.resample_work_begin(dpi, interp, String::new())?;
+fn resample(app: &mut crate::App, dpi: u32, interp: Interp) -> Result<usize, String> {
+    app.resample_work_begin(dpi, interp, None, String::new())?;
     // Bounded: a step that neither advances nor finishes is a hang, and a
     // test that hangs tells nobody anything.
     for _ in 0..10_000 {
@@ -100,7 +96,11 @@ fn the_work_resample_moves_every_page_and_leaves_the_paper_alone() {
              document at the old resolution would be reinstated as fresh",
             i + 1
         );
-        assert!(app.pages[i].thumb.is_none(), "page {}: thumb dropped", i + 1);
+        assert!(
+            app.pages[i].thumb.is_none(),
+            "page {}: thumb dropped",
+            i + 1
+        );
         assert!(
             app.pages[i].preview_img.is_none(),
             "page {}: sharp preview dropped",
@@ -208,9 +208,18 @@ fn one_unreadable_page_leaves_the_whole_work_untouched() {
     assert!(err.contains("page 3"), "the offender is named: {err}");
 
     assert_eq!(app.doc.size, open_px, "the open page never moved");
-    assert_eq!(app.page.as_ref().map(|s| s.dpi), Some(dpi), "nor did the dpi");
+    assert_eq!(
+        app.page.as_ref().map(|s| s.dpi),
+        Some(dpi),
+        "nor did the dpi"
+    );
     for i in 0..4 {
-        assert_eq!(app.pages[i].rev, revs[i], "page {}: no revision bump", i + 1);
+        assert_eq!(
+            app.pages[i].rev,
+            revs[i],
+            "page {}: no revision bump",
+            i + 1
+        );
         if i != 2 {
             assert_eq!(parked_size(&app, i), sizes[i], "page {} untouched", i + 1);
         }
@@ -243,7 +252,7 @@ fn the_run_counts_pages_off_one_per_step_and_installs_only_at_the_end() {
     four_real_pages(&mut app);
     let before = app.doc.size;
 
-    app.resample_work_begin(dpi * 2, Interp::HighAccuracy, String::new())
+    app.resample_work_begin(dpi * 2, Interp::HighAccuracy, None, String::new())
         .expect("the run starts");
     assert!(
         app.status.contains("page 1 of 4"),
@@ -302,7 +311,7 @@ fn cancelling_part_way_leaves_the_whole_work_untouched() {
     let sizes: Vec<(u32, u32)> = (1..4).map(|i| parked_size(&app, i)).collect();
     let revs: Vec<u64> = app.pages.iter().map(|e| e.rev).collect();
 
-    app.resample_work_begin(dpi * 2, Interp::HighAccuracy, String::new())
+    app.resample_work_begin(dpi * 2, Interp::HighAccuracy, None, String::new())
         .expect("the run starts");
     app.resample_work_step();
     app.resample_work_step();
@@ -317,7 +326,12 @@ fn cancelling_part_way_leaves_the_whole_work_untouched() {
     assert_eq!(app.doc.size, open_px, "the open page never moved");
     assert_eq!(app.page.as_ref().map(|s| s.dpi), Some(dpi), "nor the dpi");
     for i in 1..4 {
-        assert_eq!(app.pages[i].rev, revs[i], "page {}: no revision bump", i + 1);
+        assert_eq!(
+            app.pages[i].rev,
+            revs[i],
+            "page {}: no revision bump",
+            i + 1
+        );
         assert_eq!(
             parked_size(&app, i),
             sizes[i - 1],
@@ -350,7 +364,7 @@ fn no_command_lands_while_the_run_is_going() {
     four_real_pages(&mut app);
     let page = app.page_index;
 
-    app.resample_work_begin(dpi * 2, Interp::HighAccuracy, String::new())
+    app.resample_work_begin(dpi * 2, Interp::HighAccuracy, None, String::new())
         .expect("the run starts");
     app.resample_work_step();
     dispatch(&mut app, AppCmd::PageNext);
@@ -408,8 +422,8 @@ fn a_pixel_canvas_and_a_no_op_are_both_refused_by_name() {
     small_draft(&mut app, 1, "No-op");
     dispatch(&mut app, AppCmd::NewComicCreate);
     let dpi = app.page.as_ref().expect("setup").dpi;
-    let err = resample(&mut app, dpi, Interp::HighAccuracy)
-        .expect_err("the same dpi is not a resample");
+    let err =
+        resample(&mut app, dpi, Interp::HighAccuracy).expect_err("the same dpi is not a resample");
     assert!(err.contains("already"), "{err}");
 }
 
@@ -451,7 +465,11 @@ fn the_export_tone_choice_only_moves_the_derive_dpi_on_a_reduction() {
     }
     // Nor does the other arm when nothing is being reduced.
     assert_eq!(tone_export_dpi(600, 1.0, ToneScale::Dots), 600);
-    assert_eq!(tone_export_dpi(600, 0.0, ToneScale::Dots), 600, "no divide by zero");
+    assert_eq!(
+        tone_export_dpi(600, 0.0, ToneScale::Dots),
+        600,
+        "no divide by zero"
+    );
     // 600 -> 350 dpi is a 0.5833 scale: the screen derives at ~1029 dpi, so
     // a 60 lpi cell is 17.1 work px and lands at 10.0 px in the output —
     // the size it had in the work, on whole pixels, no beat.

@@ -898,6 +898,30 @@ pub(super) fn resample_work_window(ctx: &egui::Context, app: &mut App) {
                     });
                     ui.end_row();
 
+                    // W01: the paper itself, which Work Settings can only
+                    // re-draw the guides for. Changing it HERE is the one
+                    // door where the pixels move with the guides, because
+                    // the whole-work resample is already walking every page.
+                    ui.label("Paper");
+                    egui::ComboBox::from_id_salt("mn.resamplework.paper")
+                        .selected_text(match d.paper.as_ref() {
+                            Some(p) => p.name.clone(),
+                            None => "Keep this work's paper".to_owned(),
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut d.paper, None, "Keep this work's paper");
+                            // A pixel preset's `paper_mm` holds PIXELS, so it
+                            // is not a paper anything can be rescaled onto.
+                            for p in mn_core::PageSetup::presets()
+                                .into_iter()
+                                .filter(|p| p.has_guides())
+                            {
+                                let name = p.name.clone();
+                                ui.selectable_value(&mut d.paper, Some(p), name);
+                            }
+                        });
+                    ui.end_row();
+
                     ui.label("Interpolation");
                     egui::ComboBox::from_id_salt("mn.resamplework.interp")
                         .selected_text(d.interp.label())
@@ -911,17 +935,26 @@ pub(super) fn resample_work_window(ctx: &egui::Context, app: &mut App) {
 
             let dpi = d.dpi.max(1);
             let interp = d.interp;
+            let paper = d.paper.clone();
             // The px consequence, stated for THIS work's own paper. The
             // page size is derived, never typed: a work has as many pixel
             // sizes as it has pages (a spread is double width), and the dpi
             // is the one number that means the same thing on all of them.
-            let mut probe = setup.clone();
-            probe.dpi = dpi;
+            let probe = crate::app::App::resample_target(&setup, dpi, paper.as_ref())
+                .unwrap_or_else(|_| setup.clone());
             let new_px = probe.paper_px();
-            ui.weak(format!(
-                "{:.0} × {:.0} mm stays {:.0} × {:.0} mm — the page is the same paper.",
-                setup.paper_mm.0, setup.paper_mm.1, setup.paper_mm.0, setup.paper_mm.1
-            ));
+            if probe.paper_mm == setup.paper_mm {
+                ui.weak(format!(
+                    "{:.0} × {:.0} mm stays {:.0} × {:.0} mm — the page is the same paper.",
+                    setup.paper_mm.0, setup.paper_mm.1, setup.paper_mm.0, setup.paper_mm.1
+                ));
+            } else {
+                ui.weak(format!(
+                    "{:.0} × {:.0} mm  →  {:.0} × {:.0} mm — every page is rescaled onto \
+                     the new paper, and the trim, bleed and inner border come with it.",
+                    setup.paper_mm.0, setup.paper_mm.1, probe.paper_mm.0, probe.paper_mm.1
+                ));
+            }
             ui.label(format!(
                 "{} × {} px  →  {} × {} px",
                 cur_px.0, cur_px.1, new_px.0, new_px.1
@@ -934,9 +967,7 @@ pub(super) fn resample_work_window(ctx: &egui::Context, app: &mut App) {
                 );
             }
             // The JP-guide honesty, said where the decision is made.
-            if let Some(w) =
-                crate::app::mono_resample_warning(app.expression, setup.dpi, dpi)
-            {
+            if let Some(w) = crate::app::mono_resample_warning(app.expression, setup.dpi, dpi) {
                 ui.colored_label(ui.visuals().warn_fg_color, w);
             }
             ui.weak(format!(
@@ -950,10 +981,10 @@ pub(super) fn resample_work_window(ctx: &egui::Context, app: &mut App) {
             ui.add_space(2.0);
             ui.separator();
             ui.horizontal(|ui| {
-                let ok = dpi != setup.dpi;
+                let ok = probe != setup;
                 if ui
                     .add_enabled(ok, egui::Button::new("  Apply  "))
-                    .on_disabled_hover_text("that is already the work's resolution")
+                    .on_disabled_hover_text("that is already the work's paper and resolution")
                     .clicked()
                 {
                     apply = true;
@@ -1361,10 +1392,8 @@ pub(super) fn adjust_window(ctx: &egui::Context, app: &mut App) {
                                 (st[3].clamp(0.0, 1.0) * 255.0) as u8,
                             ));
                         }
-                        let (_r, resp) = ui.allocate_exact_size(
-                            egui::vec2(220.0, 14.0),
-                            egui::Sense::hover(),
-                        );
+                        let (_r, resp) =
+                            ui.allocate_exact_size(egui::vec2(220.0, 14.0), egui::Sense::hover());
                         let p = ui.painter_at(resp.rect);
                         let w = resp.rect.width() / preview.len().max(1) as f32;
                         for (i, c) in preview.iter().enumerate() {
@@ -1389,8 +1418,7 @@ pub(super) fn adjust_window(ctx: &egui::Context, app: &mut App) {
                                     (stops[i][2].clamp(0.0, 1.0) * 255.0) as u8,
                                     (stops[i][3].clamp(0.0, 1.0) * 255.0) as u8,
                                 ];
-                                if ui.color_edit_button_srgb(&mut c).changed()
-                                {
+                                if ui.color_edit_button_srgb(&mut c).changed() {
                                     stops[i][1] = c[0] as f32 / 255.0;
                                     stops[i][2] = c[1] as f32 / 255.0;
                                     stops[i][3] = c[2] as f32 / 255.0;
@@ -1406,7 +1434,10 @@ pub(super) fn adjust_window(ctx: &egui::Context, app: &mut App) {
                         ui.label("");
                         ui.horizontal(|ui| {
                             if ui
-                                .add_enabled(*n < mn_core::adjust::GRADIENT_MAP_MAX as u8, egui::Button::new("+ stop"))
+                                .add_enabled(
+                                    *n < mn_core::adjust::GRADIENT_MAP_MAX as u8,
+                                    egui::Button::new("+ stop"),
+                                )
                                 .clicked()
                             {
                                 let i = *n as usize;
@@ -1985,7 +2016,9 @@ pub(super) fn export_preflight_window(ctx: &egui::Context, app: &mut App) {
             ui.add_space(4.0);
             for f in &findings {
                 let (word, color) = match f.level {
-                    mn_core::PreflightLevel::Error => ("error", egui::Color32::from_rgb(196, 74, 74)),
+                    mn_core::PreflightLevel::Error => {
+                        ("error", egui::Color32::from_rgb(196, 74, 74))
+                    }
                     mn_core::PreflightLevel::Warn => {
                         ("warning", egui::Color32::from_rgb(196, 158, 46))
                     }
@@ -2199,8 +2232,7 @@ pub(super) fn export_all_window(ctx: &egui::Context, app: &mut App) {
                     // only when the dpi finish is what drives it — the
                     // exact-height fit computes its own scale per page,
                     // after the crop, which the tone derive cannot see.
-                    let scale =
-                        mn_core::export::finish_scale(app.export_all_dpi, app.work_dpi());
+                    let scale = mn_core::export::finish_scale(app.export_all_dpi, app.work_dpi());
                     let tone_live = scale < 1.0 && app.export_all_px_height == 0;
                     ui.label("Tone");
                     ui.add_enabled_ui(tone_live, |ui| {
@@ -2333,7 +2365,9 @@ pub(super) fn export_all_window(ctx: &egui::Context, app: &mut App) {
             // deliver `.jpg`.
             let ext = app.export_all_format.ext();
             let sample = if app.export_all_split {
-                format!("{prefix}-p001.{ext} · a spread: {prefix}-p003a.{ext} + {prefix}-p003b.{ext}")
+                format!(
+                    "{prefix}-p001.{ext} · a spread: {prefix}-p003a.{ext} + {prefix}-p003b.{ext}"
+                )
             } else {
                 format!("{prefix}-p001.{ext}, {prefix}-p002.{ext}, …")
             };
@@ -2853,7 +2887,9 @@ pub(super) fn filter_window(ctx: &egui::Context, app: &mut App) {
                                 .fixed_decimals(2)
                                 .text("×"),
                         )
-                        .on_hover_text("how much of the original-minus-blur difference is added back");
+                        .on_hover_text(
+                            "how much of the original-minus-blur difference is added back",
+                        );
                         ui.end_row();
                     }
                     mn_core::Filter::Pinch { amount } => {
@@ -2863,9 +2899,7 @@ pub(super) fn filter_window(ctx: &egui::Context, app: &mut App) {
                                 .fixed_decimals(2)
                                 .text("pinch ⇠ ⇢ bulge"),
                         )
-                        .on_hover_text(
-                            "positive squeezes toward the centre, negative bulges out",
-                        );
+                        .on_hover_text("positive squeezes toward the centre, negative bulges out");
                         ui.end_row();
                     }
                     mn_core::Filter::Ripple {
@@ -2947,10 +2981,8 @@ pub(super) fn filter_window(ctx: &egui::Context, app: &mut App) {
                     }
                     mn_core::Filter::LineWidth { delta } => {
                         ui.label("Width");
-                        ui.add(
-                            egui::Slider::new(delta, -32..=32).text("thin ⇠ ⇢ thick"),
-                        )
-                        .on_hover_text("how many pixels the ink grows, or shrinks by");
+                        ui.add(egui::Slider::new(delta, -32..=32).text("thin ⇠ ⇢ thick"))
+                            .on_hover_text("how many pixels the ink grows, or shrinks by");
                         ui.end_row();
                     }
                     mn_core::Filter::Mosaic { cell } => {

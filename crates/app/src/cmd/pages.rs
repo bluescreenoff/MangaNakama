@@ -2,8 +2,8 @@
 //! duplicate/import/spread), work settings, canvas + page size,
 //! resampling, and the all-pages export.
 
-use super::*;
 use super::transform::selection_bbox;
+use super::*;
 
 /// One canvas resize through the whole app: end any stroke/edit, drop stale
 /// view state (selection, transform float), run the core resize, and rebuild
@@ -445,41 +445,38 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                 app.set_status(s);
             }
         },
-        AppCmd::ReplacePagePath(p) => match app
-            .file_to_page_bytes(&p, app.page_number1(app.page_index))
-        {
-            Err(e) => app.set_error(format!("replace failed: {e}")),
-            Ok((bytes, note)) => match mn_core::project::bytes_to_doc(&bytes) {
-                Err(e) => app.set_error(format!("replace decode failed: {e}")),
-                Ok(doc) => {
-                    app.commit_text_edit();
-                    app.adopt_page_doc(doc);
-                    let i = app.page_index;
-                    // The page's content was swapped wholesale: give it a
-                    // fresh revision so a folder save rewrites its file even
-                    // though the decoded doc may carry a coincidental
-                    // matching revision.
-                    app.pages[i].rev = app.page_rev_next();
-                    app.pages[i].doc_rev = app.doc.revision;
-                    app.pages[i].bytes = None;
-                    app.pages[i].thumb = None;
-                    app.renderer.invalidate();
-                    app.layer_thumbs.clear();
-                    app.fit_to_view();
-                    app.mark_pages_dirty();
-                    let mut s = format!(
-                        "page {} replaced with {}",
-                        app.page_index + 1,
-                        p.display()
-                    );
-                    if let Some(n) = note {
-                        s.push_str(&format!(" — {n}"));
+        AppCmd::ReplacePagePath(p) => {
+            match app.file_to_page_bytes(&p, app.page_number1(app.page_index)) {
+                Err(e) => app.set_error(format!("replace failed: {e}")),
+                Ok((bytes, note)) => match mn_core::project::bytes_to_doc(&bytes) {
+                    Err(e) => app.set_error(format!("replace decode failed: {e}")),
+                    Ok(doc) => {
+                        app.commit_text_edit();
+                        app.adopt_page_doc(doc);
+                        let i = app.page_index;
+                        // The page's content was swapped wholesale: give it a
+                        // fresh revision so a folder save rewrites its file even
+                        // though the decoded doc may carry a coincidental
+                        // matching revision.
+                        app.pages[i].rev = app.page_rev_next();
+                        app.pages[i].doc_rev = app.doc.revision;
+                        app.pages[i].bytes = None;
+                        app.pages[i].thumb = None;
+                        app.renderer.invalidate();
+                        app.layer_thumbs.clear();
+                        app.fit_to_view();
+                        app.mark_pages_dirty();
+                        let mut s =
+                            format!("page {} replaced with {}", app.page_index + 1, p.display());
+                        if let Some(n) = note {
+                            s.push_str(&format!(" — {n}"));
+                        }
+                        app.set_status(s);
+                        app.mark_dirty();
                     }
-                    app.set_status(s);
-                    app.mark_dirty();
-                }
-            },
-        },
+                },
+            }
+        }
         AppCmd::WorkSettings => {
             app.work_settings_draft = crate::app::WorkSettingsDraft {
                 setup: app
@@ -589,7 +586,7 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
             app.mark_dirty();
         }
         AppCmd::ResampleWorkApply => {
-            let d = app.resample_work_draft;
+            let d = app.resample_work_draft.clone();
             // THE DOOR THAT STANDS IN FOR UNDO. A whole-work resample is
             // not an undo step (see `App::resample_work`), so the file on
             // disk has to be the way back — which means there has to BE
@@ -608,11 +605,13 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
             } else {
                 let back = saved
                     .as_ref()
-                    .map(|p| format!(" — the {} on disk is still at the old resolution", {
-                        p.file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| p.display().to_string())
-                    }))
+                    .map(|p| {
+                        format!(" — the {} on disk is still at the old resolution", {
+                            p.file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| p.display().to_string())
+                        })
+                    })
                     .unwrap_or_default();
                 app.resample_work_open = false;
                 app.end_stroke();
@@ -624,7 +623,7 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                 // The command's job ends at starting it; the finishing status
                 // line is composed by the last step, which is the only place
                 // that knows how many pages actually landed.
-                if let Err(e) = app.resample_work_begin(d.dpi, d.interp, back) {
+                if let Err(e) = app.resample_work_begin(d.dpi, d.interp, d.paper, back) {
                     app.set_error(format!("resolution unchanged: {e}"));
                 }
             }
@@ -779,9 +778,7 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                         None => full,
                     };
                     let mut out = if r != full || px_h > 0 {
-                        mn_core::export::finish_image_cropped(
-                            img, r, scale, px_h, colour, resample,
-                        )
+                        mn_core::export::finish_image_cropped(img, r, scale, px_h, colour, resample)
                     } else {
                         mn_core::export::finish_image(img, scale, colour, resample)
                     };
@@ -849,14 +846,14 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                                 // `a` is the half a reader meets first —
                                 // the RIGHT one in a right-bound work.
                                 let (h1, h2) = if rtl { (right, left) } else { (left, right) };
-                            for (tag, half) in [("a", &h1), ("b", &h2)] {
-                                let img = finish(
-                                    mn_core::export::composite_for_export(
-                                        half,
-                                        d.paper_export_background(),
-                                    ),
-                                    &(i + 1).to_string(),
-                                );
+                                for (tag, half) in [("a", &h1), ("b", &h2)] {
+                                    let img = finish(
+                                        mn_core::export::composite_for_export(
+                                            half,
+                                            d.paper_export_background(),
+                                        ),
+                                        &(i + 1).to_string(),
+                                    );
                                     let path =
                                         dir.join(format!("{prefix}-p{:03}{tag}.{ext}", i + 1));
                                     if write(&img, &path) {

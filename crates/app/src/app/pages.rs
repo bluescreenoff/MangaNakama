@@ -273,10 +273,21 @@ pub struct CanvasSizeDraft {
 /// double-width), so the only number that means the same thing on all of
 /// them is the resolution. The px consequence is stated per the work's own
 /// page setup instead of being typed in.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct ResampleWorkDraft {
     pub dpi: u32,
     pub interp: mn_core::transform::Interp,
+    /// W01: the paper to move TO, or `None` to keep the work's own. Only
+    /// the GEOMETRY travels (paper/trim/inner/bleed/safety in mm) — the
+    /// preset's own dpi is ignored, because the resolution field above is
+    /// the one the artist is looking at while they decide.
+    ///
+    /// This is what makes the paper changeable after creation at all: Work
+    /// Settings moves the guides but not a single pixel, so switching a B4
+    /// chapter to B5 there left every page the wrong size for its own
+    /// paper. Here the pages are rescaled onto the new paper in the same
+    /// pass that changes the resolution.
+    pub paper: Option<mn_core::PageSetup>,
 }
 
 impl Default for ResampleWorkDraft {
@@ -287,12 +298,12 @@ impl Default for ResampleWorkDraft {
             // (600 → 350 is the common ask), and that is the case where
             // bilinear drops hairlines outright.
             interp: mn_core::transform::Interp::HighAccuracy,
+            paper: None,
         }
     }
 }
 
 impl App {
-
     // --- comic pages -------------------------------------------------------
 
     pub fn is_comic(&self) -> bool {
@@ -891,7 +902,13 @@ impl App {
     /// and the White base would hide it across the whole panel interior
     /// (the part-19 lesson: the White layer's job is to hide what is
     /// below the folder).
-    pub(super) fn seeded_page_doc(&self, w: u32, h: u32, number1: usize, fill_white: bool) -> Document {
+    pub(super) fn seeded_page_doc(
+        &self,
+        w: u32,
+        h: u32,
+        number1: usize,
+        fill_white: bool,
+    ) -> Document {
         let mut doc = Document::new(w, h);
         if self.seed_frame_folder {
             if let Some(p) = self.page.as_ref().filter(|p| p.has_guides()) {

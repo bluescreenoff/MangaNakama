@@ -57,6 +57,10 @@ enum PageResample {
 /// state to cancel into and nothing to refuse.
 pub struct ResampleJob {
     dpi: u32,
+    /// W01: the page setup the work lands on — the target paper (or the
+    /// current one) at the new dpi. Installed whole in phase 2, so the
+    /// guides and the pixels can never disagree about which paper this is.
+    target: mn_core::PageSetup,
     interp: mn_core::transform::Interp,
     /// New paper over old, per axis — see [`App::resample_work`] for why it
     /// comes from the paper's pixels and not from the dpi.
@@ -96,23 +100,54 @@ impl App {
     /// the ones beside it. Deriving the ratio from the paper makes a
     /// paper-sized page land EXACTLY on the new paper, and a double-width
     /// spread on exactly twice it.
-    fn resample_ratio(&self, new_dpi: u32) -> Result<(f64, f64), String> {
+    /// W01: the setup a resample lands on — `paper`'s geometry, or the
+    /// work's own, at `new_dpi`. The target preset's own dpi is deliberately
+    /// dropped: the dialog's resolution field decides, so picking "A4 Color
+    /// 350dpi" as a SHAPE does not also drag a resolution the artist did not
+    /// ask for. A paper with no guides (a pixel preset, where `paper_mm`
+    /// holds pixels) is refused rather than read as millimetres.
+    pub(crate) fn resample_target(
+        setup: &mn_core::PageSetup,
+        new_dpi: u32,
+        paper: Option<&mn_core::PageSetup>,
+    ) -> Result<mn_core::PageSetup, String> {
+        let mut t = match paper {
+            Some(p) if !p.has_guides() => {
+                return Err(format!("{} is a pixel size, not a paper", p.name));
+            }
+            Some(p) => p.clone(),
+            None => setup.clone(),
+        };
+        t.dpi = new_dpi;
+        Ok(t)
+    }
+
+    fn resample_plan(
+        &self,
+        new_dpi: u32,
+        paper: Option<&mn_core::PageSetup>,
+    ) -> Result<((f64, f64), mn_core::PageSetup), String> {
         let Some(setup) = self.page.as_ref().filter(|s| s.has_guides()) else {
             return Err("this work is a pixel canvas — it has no resolution to change".into());
         };
         if new_dpi == 0 {
             return Err("pick a resolution above zero".into());
         }
-        if new_dpi == setup.dpi {
-            return Err(format!("the work is already {new_dpi} dpi"));
+        let target = Self::resample_target(setup, new_dpi, paper)?;
+        if target == *setup {
+            return Err(format!(
+                "the work is already {} at {new_dpi} dpi",
+                setup.name
+            ));
         }
         let old_px = setup.paper_px();
-        let mut probe = setup.clone();
-        probe.dpi = new_dpi;
-        let new_px = probe.paper_px();
+        let new_px = target.paper_px();
         Ok((
-            new_px.0 as f64 / old_px.0.max(1) as f64,
-            new_px.1 as f64 / old_px.1.max(1) as f64,
+            (
+                new_px.0 as f64 / old_px.0.max(1) as f64,
+                new_px.1 as f64 / old_px.1.max(1) as f64,
+            ),
+            target,
         ))
     }
 
@@ -169,7 +204,7 @@ impl App {
     fn resample_install(
         &mut self,
         pending: Vec<(usize, PageResample)>,
-        new_dpi: u32,
+        new_setup: mn_core::PageSetup,
         interp: mn_core::transform::Interp,
         ratio: (f64, f64),
     ) -> usize {
@@ -223,10 +258,10 @@ impl App {
         e.prev_tex = None;
         e.pane_tex = None;
 
-        // The paper is the SAME paper: only the resolution moved.
-        if let Some(s) = self.page.as_mut() {
-            s.dpi = new_dpi;
-        }
+        // W01: the finished setup goes in whole — the same paper at a new
+        // resolution when no target was picked, the new paper otherwise.
+        // Guides and pixels move in the same breath or they disagree.
+        self.page = Some(new_setup);
         self.preflight_stale = true;
         self.mark_pages_dirty();
         self.mark_dirty();
@@ -272,17 +307,19 @@ impl App {
         &mut self,
         new_dpi: u32,
         interp: mn_core::transform::Interp,
+        paper: Option<mn_core::PageSetup>,
         back: String,
     ) -> Result<(), String> {
         if self.resample_job.is_some() {
             return Err("a work resample is already running".into());
         }
-        let ratio = self.resample_ratio(new_dpi)?;
+        let (ratio, target) = self.resample_plan(new_dpi, paper.as_ref())?;
         self.stash_current_page()
             .map_err(|e| format!("the open page could not be stashed: {e}"))?;
         let total = self.pages.len();
         self.resample_job = Some(ResampleJob {
             dpi: new_dpi,
+            target,
             interp,
             ratio,
             pending: Vec::new(),
@@ -341,14 +378,27 @@ impl App {
         let Some(job) = self.resample_job.take() else {
             return;
         };
-        let ResampleJob { pending, back, .. } = job;
-        let n = self.resample_install(pending, dpi, interp, ratio);
+        let ResampleJob {
+            pending,
+            back,
+            target,
+            ..
+        } = job;
+        let paper_moved = self
+            .page
+            .as_ref()
+            .is_some_and(|s| s.paper_mm != target.paper_mm);
+        let paper_note = paper_moved
+            .then(|| format!(" on {}", target.name))
+            .unwrap_or_default();
+        let n = self.resample_install(pending, target, interp, ratio);
         // Structural: the texture changes size and every cached thumb is
         // stale (the canvas-resize rule).
         self.renderer.invalidate();
         self.layer_thumbs.clear();
         self.set_status(format!(
-            "work resampled to {dpi} dpi ({}) — {n} page(s), {}×{} — history cleared{back}",
+            "work resampled to {dpi} dpi{paper_note} ({}) — {n} page(s), {}×{} — \
+             history cleared{back}",
             interp.label(),
             self.doc.size.0,
             self.doc.size.1,

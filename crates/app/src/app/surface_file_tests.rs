@@ -11,8 +11,8 @@
 use super::new_document_tests::{headless, scribble, small_draft};
 use crate::app::{App, PenSample, PointerKind};
 use crate::cmd::{AppCmd, Tool, dispatch};
-use mn_core::tile::TileIdx;
 use mn_core::FIX15_ONE;
+use mn_core::tile::TileIdx;
 
 const ONE: u16 = FIX15_ONE as u16;
 const BLACK: [u16; 4] = [0, 0, 0, ONE];
@@ -83,13 +83,18 @@ fn paint(app: &mut App, li: usize, colour: [u16; 4], inside: impl Fn(i32, i32) -
 }
 
 fn disc(app: &mut App, li: usize, cx: i32, cy: i32, r: i32, colour: [u16; 4]) {
-    paint(app, li, colour, |x, y| (x - cx).pow(2) + (y - cy).pow(2) <= r * r);
+    paint(app, li, colour, |x, y| {
+        (x - cx).pow(2) + (y - cy).pow(2) <= r * r
+    });
 }
 
 /// One pen drag through the real pointer path, canvas coordinates.
 fn drag(app: &mut App, from: (f32, f32), to: (f32, f32)) {
     let steps = 32;
-    let (dx, dy) = ((to.0 - from.0) / steps as f32, (to.1 - from.1) / steps as f32);
+    let (dx, dy) = (
+        (to.0 - from.0) / steps as f32,
+        (to.1 - from.1) / steps as f32,
+    );
     let (x0, y0) = app.viewport.to_screen(from.0, from.1);
     app.canvas_down(x0, y0, PointerKind::Pen, &[]);
     for i in 1..=steps {
@@ -170,8 +175,15 @@ fn f01_new_comic_defaults() {
     let d = app.new_doc_draft.clone();
     println!(
         "[note] default preset {:?} dpi {} paper {:?} trim {:?} bleed {} inner {:?} pages {} binding_right {} frame_folder {}",
-        d.setup.name, d.setup.dpi, d.setup.paper_mm, d.setup.trim_mm, d.setup.bleed_mm,
-        d.setup.inner_mm, d.pages, d.binding_right, d.frame_folder
+        d.setup.name,
+        d.setup.dpi,
+        d.setup.paper_mm,
+        d.setup.trim_mm,
+        d.setup.bleed_mm,
+        d.setup.inner_mm,
+        d.pages,
+        d.binding_right,
+        d.frame_folder
     );
     assert_eq!(d.setup.dpi, 600, "CSP mono comic default = 600 dpi");
     assert!(d.binding_right, "JP manga = right binding");
@@ -187,7 +199,10 @@ fn f01_new_comic_defaults() {
     assert_eq!(app.pages.len(), 3);
     assert_eq!(app.doc.size, (w, h));
     println!("[note] seeded layers {:?}", names(&app));
-    assert!(app.doc.layers.iter().any(|l| l.is_frame()), "a frame folder is seeded");
+    assert!(
+        app.doc.layers.iter().any(|l| l.is_frame()),
+        "a frame folder is seeded"
+    );
     assert!(app.doc_path.is_none());
     assert!(!app.dirty(), "a fresh comic is clean");
     shot(&mut app, "f01-new-page1");
@@ -213,9 +228,17 @@ fn f02_page_manager_ops() {
     dispatch(&mut app, AppCmd::SelectPage(0));
     dispatch(&mut app, AppCmd::DuplicatePage);
     assert_eq!(app.pages.len(), 4);
-    println!("[note] duplicate status: {} (stays on page {})", app.status, app.page_index + 1);
+    println!(
+        "[note] duplicate status: {} (stays on page {})",
+        app.status,
+        app.page_index + 1
+    );
     dispatch(&mut app, AppCmd::SelectPage(1));
-    let li = app.doc.layers.iter().position(|l| !l.folder && l.tiles().any(|(_, t)| t.alpha_sum() > 0));
+    let li = app
+        .doc
+        .layers
+        .iter()
+        .position(|l| !l.folder && l.tiles().any(|(_, t)| t.alpha_sum() > 0));
     assert!(li.is_some(), "the duplicate carries page 1's ink");
     // Move the duplicate to the end.
     dispatch(&mut app, AppCmd::MovePage { from: 1, to: 3 });
@@ -224,7 +247,11 @@ fn f02_page_manager_ops() {
     // Delete it: lands on a neighbour.
     dispatch(&mut app, AppCmd::DeletePage);
     assert_eq!(app.pages.len(), 3);
-    println!("[note] delete status: {} now on page {}", app.status, app.page_index + 1);
+    println!(
+        "[note] delete status: {} now on page {}",
+        app.status,
+        app.page_index + 1
+    );
     // Navigation guards.
     dispatch(&mut app, AppCmd::PageLast);
     dispatch(&mut app, AppCmd::PageNext);
@@ -241,7 +268,10 @@ fn f02_page_manager_ops() {
     assert_eq!(app.pages.len(), 1);
     println!("[note] last-page delete status: {}", app.status);
     // Undo does NOT reach page ops (CSP: neither).
-    println!("[note] undo labels after page ops: {:?}", app.doc.undo_labels());
+    println!(
+        "[note] undo labels after page ops: {:?}",
+        app.doc.undo_labels()
+    );
 }
 
 /// F03 — spreads: combine 1+2, draw across the gutter, split back; the
@@ -254,11 +284,21 @@ fn f03_spread_combine_and_split() {
     let page1 = cpu(&app);
     dispatch(&mut app, AppCmd::PageCombineSpread);
     assert!(app.spread_op.is_some());
-    dispatch(&mut app, AppCmd::PageCombineApply { gap: 0, delete_empty: false });
+    dispatch(
+        &mut app,
+        AppCmd::PageCombineApply {
+            gap: 0,
+            delete_empty: false,
+        },
+    );
     assert_eq!(app.pages.len(), 2);
     assert_eq!(app.doc.size, (w * 2, h), "double width, no gutter");
     assert!(app.pages[0].spread);
-    assert_eq!(app.page_number1(1), 3, "the page after a spread is number 3");
+    assert_eq!(
+        app.page_number1(1),
+        3,
+        "the page after a spread is number 3"
+    );
     println!("[note] combine status: {}", app.status);
     let img = shot(&mut app, "f03-spread");
     assert_eq!(img.width(), w * 2);
@@ -270,9 +310,18 @@ fn f03_spread_combine_and_split() {
         .chunks(2)
         .flat_map(|xy| left.get_pixel(xy[0], xy[1]).0)
         .collect();
-    assert_eq!(left_half, page1, "page 1's pixels are the spread's left half");
+    assert_eq!(
+        left_half, page1,
+        "page 1's pixels are the spread's left half"
+    );
     dispatch(&mut app, AppCmd::PageSplitSpread);
-    dispatch(&mut app, AppCmd::PageSplitApply { gap: 0, delete_empty: false });
+    dispatch(
+        &mut app,
+        AppCmd::PageSplitApply {
+            gap: 0,
+            delete_empty: false,
+        },
+    );
     assert_eq!(app.pages.len(), 3);
     assert_eq!(app.doc.size, (w, h));
     assert_eq!(cpu(&app), page1, "split gives page 1 back byte-identical");
@@ -295,14 +344,22 @@ fn f04_round_trip_every_layer_kind() {
     disc(&mut app, draw, (w / 2) as i32, (h / 2) as i32, 40, BLACK);
     // a clipped red layer above it, layer colour on, label
     let red = app.doc.add_layer("red");
-    paint(&mut app, red, [ONE, 0, 0, ONE], |x, _| x < (w / 2) as i32 + 10);
+    paint(&mut app, red, [ONE, 0, 0, ONE], |x, _| {
+        x < (w / 2) as i32 + 10
+    });
     app.doc.set_layer_clip(red, true);
     app.doc.set_layer_label(red, Some([200, 40, 40]));
     // a masked layer (mask outside a rect selection)
     let masked = app.doc.add_layer("masked");
-    paint(&mut app, masked, [0, 0, ONE, ONE], |_, y| y > (h * 3 / 4) as i32);
+    paint(&mut app, masked, [0, 0, ONE, ONE], |_, y| {
+        y > (h * 3 / 4) as i32
+    });
     app.doc.selection = Some(mn_core::selection::Selection::from_rect(
-        &app.doc, 10.0, (h * 3 / 4) as f32, (w / 2) as f32, h as f32,
+        &app.doc,
+        10.0,
+        (h * 3 / 4) as f32,
+        (w / 2) as f32,
+        h as f32,
     ));
     assert!(app.doc.mask_outside_selection(masked));
     app.doc.selection = None;
@@ -317,15 +374,24 @@ fn f04_round_trip_every_layer_kind() {
     // a plain folder with a child, opacity + blend
     let folder = app.doc.add_folder_above(masked, "Folder");
     let child = app.doc.add_layer_in_folder(folder, "child").unwrap();
-    paint(&mut app, child, BLACK, |x, y| x > (w - 40) as i32 && y > (h - 40) as i32);
+    paint(&mut app, child, BLACK, |x, y| {
+        x > (w - 40) as i32 && y > (h - 40) as i32
+    });
     app.doc.set_layer_opacity(folder, 0.5);
     app.doc.set_layer_blend(child, mn_core::Blend::Multiply);
     // live tone + live gradient
     app.doc.selection = Some(mn_core::selection::Selection::from_rect(
-        &app.doc, 0.0, 0.0, (w / 3) as f32, (h / 3) as f32,
+        &app.doc,
+        0.0,
+        0.0,
+        (w / 3) as f32,
+        (h / 3) as f32,
     ));
     let _tone = app.doc.add_fill_layer(
-        mn_core::FillKind::Tone { tone: mn_core::tone::ToneParams::default(), density: 0.4 },
+        mn_core::FillKind::Tone {
+            tone: mn_core::tone::ToneParams::default(),
+            density: 0.4,
+        },
         true,
     );
     app.doc.selection = None;
@@ -344,7 +410,10 @@ fn f04_round_trip_every_layer_kind() {
     // vector layer with a real pen stroke
     dispatch(&mut app, AppCmd::AddVectorLayer);
     let vec_li = app.doc.active;
-    assert!(app.doc.layers[vec_li].strokes.is_some(), "a vector-stroke layer");
+    assert!(
+        app.doc.layers[vec_li].strokes.is_some(),
+        "a vector-stroke layer"
+    );
     dispatch(&mut app, AppCmd::SetTool(Tool::Pen));
     dispatch(&mut app, AppCmd::SetBrushSizePx(6.0));
     drag(&mut app, (20.0, 20.0), (w as f32 - 20.0, h as f32 - 20.0));
@@ -353,7 +422,9 @@ fn f04_round_trip_every_layer_kind() {
     // text + balloon
     let tl = app.doc.add_text_layer(
         "text",
-        mn_core::TextSet { texts: vec![text_item("セリフ", (w / 2) as f32, (h / 4) as f32)] },
+        mn_core::TextSet {
+            texts: vec![text_item("セリフ", (w / 2) as f32, (h / 4) as f32)],
+        },
     );
     app.warm_texts(tl);
     app.doc.reraster_text(tl);
@@ -367,7 +438,10 @@ fn f04_round_trip_every_layer_kind() {
     });
     let bl = app.doc.add_balloon_layer("balloon", bs);
     // rulers + a selection on the page
-    app.doc.rulers.items.push(mn_core::ruler::Ruler::Line { a: [0.0, 0.0], b: [100.0, 50.0] });
+    app.doc.rulers.items.push(mn_core::ruler::Ruler::Line {
+        a: [0.0, 0.0],
+        b: [100.0, 50.0],
+    });
     app.doc.rulers.fix_len();
     app.doc.rulers.on = true;
     app.doc.selection = Some(mn_core::selection::Selection::from_rect(
@@ -426,8 +500,14 @@ fn f04_round_trip_every_layer_kind() {
     app.refresh_tones();
     assert_eq!(names(&app), before_names);
     assert_eq!(flags(&app), before_flags, "every flag survived the .mnc");
-    assert!(app.doc.rulers.on && app.doc.rulers.items.len() == 1, "rulers ride the page");
-    println!("[note] selection after reopen: {}", app.doc.selection.is_some());
+    assert!(
+        app.doc.rulers.on && app.doc.rulers.items.len() == 1,
+        "rulers ride the page"
+    );
+    println!(
+        "[note] selection after reopen: {}",
+        app.doc.selection.is_some()
+    );
     shot(&mut app, "f04-after-mnc");
     round_trip_ok(&mut app, &before, &before_nv, w, ".mnc");
 
@@ -436,11 +516,21 @@ fn f04_round_trip_every_layer_kind() {
     std::fs::create_dir_all(folder_index.parent().unwrap()).unwrap();
     dispatch(&mut app, AppCmd::SaveOraPath(folder_index.clone()));
     assert!(folder_index.exists(), "{}", app.status);
-    println!("[note] work folder files: {:?}", std::fs::read_dir(folder_index.parent().unwrap()).unwrap().map(|e| e.unwrap().file_name()).collect::<Vec<_>>());
+    println!(
+        "[note] work folder files: {:?}",
+        std::fs::read_dir(folder_index.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect::<Vec<_>>()
+    );
     scribble(&mut app);
     dispatch(&mut app, AppCmd::OpenOraPath(folder_index.clone()));
     app.refresh_tones();
-    assert_eq!(flags(&app), before_flags, "every flag survived the work folder");
+    assert_eq!(
+        flags(&app),
+        before_flags,
+        "every flag survived the work folder"
+    );
     round_trip_ok(&mut app, &before, &before_nv, w, "work folder");
 
     // 3. bare .ora of the page
@@ -451,8 +541,19 @@ fn f04_round_trip_every_layer_kind() {
     dispatch(&mut app, AppCmd::OpenOraPath(ora.clone()));
     app.refresh_tones();
     assert_eq!(flags(&app), before_flags, "every flag survived the .ora");
-    let vl = app.doc.layers.iter().position(|l| l.strokes.is_some()).expect("vector layer");
-    println!("[note] .ora leg: vector ink {} (was {}), tone dpi {} work dpi {:?}", ink(&app, vl), vec_ink, app.tone_dpi(), app.work_dpi());
+    let vl = app
+        .doc
+        .layers
+        .iter()
+        .position(|l| l.strokes.is_some())
+        .expect("vector layer");
+    println!(
+        "[note] .ora leg: vector ink {} (was {}), tone dpi {} work dpi {:?}",
+        ink(&app, vl),
+        vec_ink,
+        app.tone_dpi(),
+        app.work_dpi()
+    );
     shot(&mut app, "f04-after-ora");
     // MEASURED, not asserted: a bare .ora carries no page setup, so the
     // live tone re-screens at the default 600 dpi instead of the work's
@@ -515,14 +616,21 @@ fn f06_autosave_and_recovery() {
     let mnc = dir.join("auto.mnc");
     dispatch(&mut app, AppCmd::SaveOraPath(mnc.clone()));
     assert!(!app.dirty());
-    assert!(!stash.exists() || true, "temp stash cleared on save (checked below)");
+    assert!(
+        !stash.exists() || true,
+        "temp stash cleared on save (checked below)"
+    );
     println!("[note] stash after save exists: {}", stash.exists());
     scribble(&mut app);
     dispatch(&mut app, AppCmd::Autosave);
     let sib = crate::recovery::sibling_autosave(&mnc);
     assert!(sib.exists(), "sibling autosave: {}", app.status);
     let found = crate::recovery::newest_autosave(&[mnc.clone()], &dir);
-    assert_eq!(found.as_deref(), Some(sib.as_path()), "the sibling is newer than its file");
+    assert_eq!(
+        found.as_deref(),
+        Some(sib.as_path()),
+        "the sibling is newer than its file"
+    );
     dispatch(&mut app, AppCmd::SaveOraPath(mnc.clone()));
     assert!(!sib.exists(), "a real save deletes the shadow");
     // A clean doc never autosaves.
@@ -608,7 +716,11 @@ fn write_jpeg_with_dpi(path: &std::path::Path, w: u32, h: u32, dpi: u16) {
     let img = image::RgbImage::from_pixel(w, h, image::Rgb([0, 0, 0]));
     img.save(path).expect("jpeg fixture");
     let mut b = std::fs::read(path).expect("read back");
-    assert_eq!(&b[..4], &[0xFF, 0xD8, 0xFF, 0xE0], "the encoder writes APP0");
+    assert_eq!(
+        &b[..4],
+        &[0xFF, 0xD8, 0xFF, 0xE0],
+        "the encoder writes APP0"
+    );
     assert_eq!(&b[6..11], b"JFIF\0", "and it is a JFIF one");
     b[13] = 1;
     b[14..16].copy_from_slice(&dpi.to_be_bytes());
@@ -652,14 +764,22 @@ fn f08_an_imported_asset_lands_at_its_printed_size() {
     write_png_with_dpi(&plain, 100, 80, None);
     dispatch(&mut app, AppCmd::ImportImagePath(plain.clone()));
     println!("[note] silent asset: {}", app.status);
-    assert_eq!(placed(&app), (100, 80), "a file that says nothing is a pixel dump");
+    assert_eq!(
+        placed(&app),
+        (100, 80),
+        "a file that says nothing is a pixel dump"
+    );
     dispatch(&mut app, AppCmd::TransformCancel);
 
     let scan = dir.join("scan300.png");
     write_png_with_dpi(&scan, 100, 80, Some(300));
     dispatch(&mut app, AppCmd::ImportImagePath(scan.clone()));
     println!("[note] 300 dpi png: {}", app.status);
-    assert_eq!(placed(&app), (200, 160), "300 dpi on a 600 dpi page = twice the pixels");
+    assert_eq!(
+        placed(&app),
+        (200, 160),
+        "300 dpi on a 600 dpi page = twice the pixels"
+    );
     assert!(app.status.contains("300 dpi"), "{}", app.status);
     dispatch(&mut app, AppCmd::TransformCancel);
 
@@ -667,7 +787,11 @@ fn f08_an_imported_asset_lands_at_its_printed_size() {
     write_jpeg_with_dpi(&photo, 120, 90, 1200);
     dispatch(&mut app, AppCmd::ImportImagePath(photo.clone()));
     println!("[note] 1200 dpi jpeg: {}", app.status);
-    assert_eq!(placed(&app), (60, 45), "1200 dpi on a 600 dpi page = half the pixels");
+    assert_eq!(
+        placed(&app),
+        (60, 45),
+        "1200 dpi on a 600 dpi page = half the pixels"
+    );
     dispatch(&mut app, AppCmd::TransformCancel);
 
     // A work with no resolution of its own has nothing to be relative to,
@@ -680,6 +804,86 @@ fn f08_an_imported_asset_lands_at_its_printed_size() {
     shot(&mut app, "f08-imports");
 }
 
+/// F09 (ledger W01) — the paper can be changed after the work exists, and
+/// the pixels move with the guides.
+///
+/// Work Settings re-draws the guides and not one pixel, so a B4 chapter
+/// switched to B5 there ended up with every page the wrong size for its own
+/// paper. The whole-work resample is already walking every page, so the new
+/// paper rides along with it: pages are rescaled onto it, the trim, bleed
+/// and inner border come with it, and the resolution field — not the
+/// preset's own dpi — decides the resolution.
+#[test]
+fn f09_a_work_moves_to_a_new_paper_pixels_and_guides_together() {
+    let Some(mut app) = headless() else { return };
+    let (w, h) = new_comic(&mut app, 2, "Paper");
+    let from = app.page.clone().expect("page setup");
+    disc(
+        &mut app,
+        0,
+        (w / 2) as i32,
+        (h / 2) as i32,
+        (w / 4) as i32,
+        BLACK,
+    );
+    let inked = ink(&app, 0);
+    assert!(inked > 0);
+    shot(&mut app, "f09-before-b4");
+
+    // The op stands in its own way without a file to fall back to, so the
+    // real door is only open on a saved work.
+    let dir = tmp("paper");
+    dispatch(&mut app, AppCmd::SaveOraPath(dir.join("work.mnc")));
+    assert!(!app.dirty(), "{}", app.status);
+
+    let b5 = mn_core::PageSetup::presets()
+        .into_iter()
+        .find(|p| p.name.starts_with("Doujinshi B5"))
+        .expect("the B5 preset");
+    app.resample_work_draft = crate::app::ResampleWorkDraft {
+        dpi: from.dpi,
+        interp: mn_core::transform::Interp::HighAccuracy,
+        paper: Some(b5.clone()),
+    };
+    app.resample_work_open = true;
+    dispatch(&mut app, AppCmd::ResampleWorkApply);
+    assert!(!app.status_warn, "the door refused: {}", app.status);
+    for _ in 0..10_000 {
+        if app.resample_job.is_none() {
+            break;
+        }
+        app.resample_work_step();
+    }
+    assert!(app.resample_job.is_none(), "the run terminated");
+    println!("[note] {}", app.status);
+
+    let now = app.page.clone().expect("page setup");
+    assert_eq!(now.paper_mm, b5.paper_mm, "the work is on the new paper");
+    assert_eq!(now.trim_mm, b5.trim_mm, "and its trim came with it");
+    assert_eq!(now.inner_mm, b5.inner_mm, "and its inner border");
+    assert_eq!(
+        now.dpi, from.dpi,
+        "the resolution field decides, not the preset's own dpi"
+    );
+    let mut want = b5.clone();
+    want.dpi = from.dpi;
+    assert_eq!(
+        app.doc.size,
+        want.paper_px(),
+        "the open page IS the new paper"
+    );
+    assert_ne!(app.doc.size, (w, h), "and it is not the old one");
+    assert!(ink(&app, 0) > 0, "the art came with it");
+    // The still-lazy blank page 2 moves too — its size is its whole content.
+    println!("[note] parked page 2: {:?}", app.pages[1].blank);
+    assert_eq!(
+        app.pages[1].blank.map(|(bw, bh, _)| (bw, bh)),
+        Some(want.paper_px()),
+        "every page landed on the new paper, parked ones included"
+    );
+    shot(&mut app, "f09-after-b5");
+}
+
 /// F10 — templates, open-recent, close-with-unsaved, two works open.
 #[test]
 fn f10_template_recent_close_tabs() {
@@ -690,7 +894,11 @@ fn f10_template_recent_close_tabs() {
     let dir = tmp("tabs");
     let a = dir.join("a.mnc");
     dispatch(&mut app, AppCmd::SaveOraPath(a.clone()));
-    assert_eq!(app.recent.first(), Some(&a), "Open Recent leads with the save");
+    assert_eq!(
+        app.recent.first(),
+        Some(&a),
+        "Open Recent leads with the save"
+    );
     // Second work in its own tab.
     new_comic(&mut app, 2, "Tabs B");
     // The headless App starts with a blank tab, so A + B make three.
@@ -703,7 +911,11 @@ fn f10_template_recent_close_tabs() {
     // Close-with-unsaved: the close flow asks first_dirty_doc.
     assert_eq!(app.first_dirty_doc(), Some(app.active_doc));
     app.discard_changes();
-    assert_eq!(app.first_dirty_doc(), None, "after discarding nothing is dirty");
+    assert_eq!(
+        app.first_dirty_doc(),
+        None,
+        "after discarding nothing is dirty"
+    );
     // Template page: designate page 1, add -> a copy.
     scribble(&mut app);
     app.template_page = Some(0);
@@ -718,7 +930,11 @@ fn f10_template_recent_close_tabs() {
     assert!(app.close_doc(app.active_doc), "close B");
     assert_eq!(app.doc_count(), 2);
     dispatch(&mut app, AppCmd::OpenOraPath(b.clone()));
-    assert_eq!(app.template_page, Some(0), "the template page survives the reopen");
+    assert_eq!(
+        app.template_page,
+        Some(0),
+        "the template page survives the reopen"
+    );
     assert_eq!(app.doc_count(), 3, "open lands in a new tab beside A");
 }
 
@@ -761,13 +977,33 @@ fn round_trip_ok(app: &mut App, before: &[u8], before_nv: &[u8], w: u32, label: 
         }
     }
     save(&map, &format!("f04-diff-{}", label.trim_start_matches('.')));
-    let max = before.iter().zip(&after).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0);
-    assert!(max <= 1, "the {label} round trip changed the export by more than a re-raster rounding");
-    let vl = app.doc.layers.iter().position(|l| l.strokes.is_some()).expect("vector layer");
+    let max = before
+        .iter()
+        .zip(&after)
+        .map(|(a, b)| a.abs_diff(*b))
+        .max()
+        .unwrap_or(0);
+    assert!(
+        max <= 1,
+        "the {label} round trip changed the export by more than a re-raster rounding"
+    );
+    let vl = app
+        .doc
+        .layers
+        .iter()
+        .position(|l| l.strokes.is_some())
+        .expect("vector layer");
     app.doc.layers[vl].visible = false;
     let after_nv = cpu(app);
     app.doc.layers[vl].visible = true;
     assert_eq!(before_nv.len(), after_nv.len());
-    let nv_diff = before_nv.iter().zip(&after_nv).filter(|(a, b)| a != b).count();
-    assert_eq!(nv_diff, 0, "with the vector re-raster out, the {label} round trip is byte-identical");
+    let nv_diff = before_nv
+        .iter()
+        .zip(&after_nv)
+        .filter(|(a, b)| a != b)
+        .count();
+    assert_eq!(
+        nv_diff, 0,
+        "with the vector re-raster out, the {label} round trip is byte-identical"
+    );
 }
