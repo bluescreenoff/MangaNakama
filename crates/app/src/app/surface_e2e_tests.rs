@@ -799,15 +799,18 @@ fn page_two(app: &mut App) {
     // CSP "Special ruler ▸ Radial line" (集中線): CLICK the centre, then
     // every stroke runs along the line through it. Two steps, same as ours.
     let (cx, cy) = centre(p4);
-    // Rulers follow you across a page turn — page 1's parallel ruler is
-    // still here (ledger row R-04). Clear it, or the pen has two rulers
-    // arguing over every stroke.
-    assert_eq!(
-        app.doc.rulers.items.len(),
-        1,
-        "page 1's parallel ruler came along to page 2"
+    // Ledger row R-04, closed 2026-09-04: rulers are PER PAGE now. Page 1's
+    // parallel ruler stayed on page 1, so page 2 opens clean and the radial
+    // is the only ruler the pen can hear — no hand-clearing step here.
+    println!(
+        "[note] page 2 opened with {} rulers (page 1's parallel stayed home)",
+        app.doc.rulers.items.len()
     );
-    dispatch(app, AppCmd::RulerClear);
+    assert!(
+        app.doc.rulers.items.is_empty(),
+        "the page turn left page 1's ruler on page 1: {:?}",
+        app.doc.rulers.items
+    );
     dispatch(app, AppCmd::RulerArm(RulerKind::Radial));
     click(app, cx, cy);
     assert_eq!(app.doc.rulers.items.len(), 1, "one radial ruler, one click");
@@ -872,7 +875,14 @@ fn one_panel_with_a_ruled_line(app: &mut App, page0: usize) {
     let b = panels(app, head)[0];
     draw_inside_frame(app);
     black(app);
-    dispatch(app, AppCmd::RulerClear); // the previous page's ruler rode along
+    // Per-page rulers again: nothing rode along from the page before, so
+    // the straight ruler drawn here is the only one on this page.
+    assert!(
+        app.doc.rulers.items.is_empty(),
+        "page {} opened clean: {:?}",
+        page0 + 1,
+        app.doc.rulers.items
+    );
     dispatch(app, AppCmd::RulerArm(RulerKind::Line));
     let y = b[1] + (b[3] - b[1]) * 0.5;
     drag(app, (b[0] + 20.0, y), (b[2] - 20.0, y));

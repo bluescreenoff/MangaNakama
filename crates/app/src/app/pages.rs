@@ -654,17 +654,18 @@ impl App {
         Ok(())
     }
 
-    /// Install a document decoded for the page (or pages) THIS TAB is
-    /// already editing.
+    /// Install a document REBUILT FOR THE PAGE THE TAB IS ALREADY ON — a
+    /// spread combined or split, a page's art replaced by an import.
     ///
-    /// Rulers persist per page now (`mnc/rulers.json`), so a page that
-    /// carries its OWN set wins — that is the perspective grid the user
-    /// built on that page. A page with no saved set still inherits the
-    /// tab's working set (the old carry behaviour): rulers keep following
-    /// the artist onto fresh pages, and a saved grid is never clobbered
-    /// by the page you happened to switch away from. (Opening a file or
-    /// making a new document does NOT come through here — a different
-    /// document gets its own set as loaded.)
+    /// The page did not change under the artist here, only its content, so
+    /// the ruler set carries: those rebuilt documents are assembled from
+    /// scratch and arrive with no rulers of their own, and dropping the
+    /// grid because a spread was split would be the app throwing work
+    /// away. A page TURN is the opposite case and does not come through
+    /// here — see [`App::switch_page`], where rulers are per page.
+    ///
+    /// A doc that does bring its own geometry keeps it: it saved that set
+    /// and it is the truth for this page.
     ///
     /// Returns the document it replaced. The ruler carry CLONES rather than
     /// takes: the leaving document may be parked (workflow-audit #1), and a
@@ -778,7 +779,31 @@ impl App {
         {
             let doc = arriving;
             let leaving_size = self.doc.size;
-            let leaving = self.adopt_page_doc(doc);
+            // Owner ruling 2026-09-04: rulers belong to a PAGE, like CSP's
+            // per-page ruler layer. Perspective changes per scene, so the
+            // arriving page brings its OWN set (it rides the page bytes as
+            // `mnc/rulers.json`) and nothing at all when nothing was ever
+            // built there — no `adopt_page_doc` carry on a page turn.
+            let leaving = std::mem::replace(&mut self.doc, doc);
+            // Nothing app-side may still point into the set we just left:
+            // an in-flight grab holds indices, an armed creation belongs to
+            // the page it was armed on.
+            self.ruler_move = None;
+            self.ruler_drag = None;
+            self.ruler_pending = None;
+            self.curve_pending = None;
+            // Frame-border curves are DERIVED per page, and the arriving
+            // page's set already carries its own; `sync_frame_rulers`
+            // (through `renumber_frames`, below) retracts by value against
+            // this list, so it must describe the page we are ON.
+            self.frame_rulers = self
+                .doc
+                .layers
+                .iter()
+                .filter_map(|l| l.frames())
+                .flat_map(|fs| fs.ruler_curves())
+                .filter(|c| self.doc.rulers.curves.contains(c))
+                .collect();
             self.park_page_doc(old, leaving);
             self.page_index = i;
             // The page's bytes now equal the decoded doc — record its

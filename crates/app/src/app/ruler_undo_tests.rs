@@ -6,8 +6,9 @@
 //! species beside it — and these tests pin the four rules that decision
 //! carries: one step per gesture, exact geometry on the way back, the
 //! frame-PUBLISHED curves are derived state and spend no step at all, and
-//! a page switch (which decodes a fresh `Document` from bytes rulers never
-//! ride) does not silently wipe the set.
+//! a ruler set belongs to ONE PAGE (owner ruling 2026-09-04) — perspective
+//! changes per scene, so a page turn brings the arriving page's own set,
+//! empty when nothing was ever built there.
 
 use super::*;
 use crate::cmd::{AppCmd, RulerKind, dispatch};
@@ -229,14 +230,14 @@ fn publishing_a_frame_border_ruler_spends_no_ruler_undo_step() {
     assert_eq!(app.doc.undo_len(), steps + 1);
 }
 
-/// The trap of moving rulers into the `Document`: a page switch DECODES a
-/// fresh document from bytes, and rulers are session-only — they are not
-/// in those bytes. Before the move they lived on the App and survived a
-/// page switch; they still must (`App::adopt_page_doc` carries them), or
-/// building a perspective set and flipping to the facing page to check it
-/// would throw the set away.
+/// Owner ruling 2026-09-04: a ruler belongs to a PAGE, the way CSP keeps a
+/// ruler layer per page. Perspective changes per scene, so page 2 opens
+/// with ITS OWN set — nothing at all when nothing was ever built there —
+/// and a turn back to page 1 brings page 1's grid home unchanged. Rulers
+/// ride the page bytes (`mnc/rulers.json`), so that survives the page
+/// being evicted from the live-document park and decoded again.
 #[test]
-fn rulers_survive_a_page_switch() {
+fn a_ruler_set_belongs_to_the_page_it_was_made_on() {
     let Some(mut app) = super::new_document_tests::headless() else {
         return;
     };
@@ -252,15 +253,51 @@ fn rulers_survive_a_page_switch() {
 
     app.switch_page(1);
     assert_eq!(app.page_index, 1, "the switch happened: {}", app.status);
+    assert!(
+        app.doc.rulers.items.is_empty() && app.doc.rulers.curves.is_empty(),
+        "page 2 never had a ruler, so page 2 starts clean: {:?}",
+        app.doc.rulers.items
+    );
+    assert!(!app.doc.rulers.on, "and with nothing to snap to, no snapping");
+    assert!(
+        !app.doc.undo_labels().iter().any(|l| l == "Add ruler"),
+        "page 1's ruler step stayed with page 1: {:?}",
+        app.doc.undo_labels()
+    );
+
+    // A ruler built HERE is page 2's own.
+    create_line_ruler(&mut app, [10.0, 10.0], [10.0, 90.0]);
+    let page2 = app.doc.rulers.items[0];
+    assert_ne!(page2, made);
+
+    app.switch_page(0);
+    assert_eq!(app.page_index, 0, "back on page 1: {}", app.status);
     assert_eq!(
         app.doc.rulers.items,
         vec![made],
-        "the ruler set followed the tab across the page switch"
+        "page 1's own set came home, and only its own"
     );
-    assert!(app.doc.rulers.on, "snapping with it");
+    assert!(app.doc.rulers.on, "with its snapping as it was left");
+    // The undo entry belongs to the page the ruler was made on — a page's
+    // history rides its live document (parked here), so undo on page 1
+    // still takes page 1's ruler back and nothing of page 2's.
+    assert_eq!(app.doc.undo_labels().last().unwrap(), "Add ruler");
+    dispatch(&mut app, AppCmd::Undo);
+    assert!(app.doc.rulers.items.is_empty(), "undone from its own page");
+    dispatch(&mut app, AppCmd::Redo);
+    assert_eq!(app.doc.rulers.items, vec![made]);
 
+    // …and page 2 still holds page 2's, untouched by any of that.
+    app.switch_page(1);
+    assert_eq!(app.doc.rulers.items, vec![page2]);
+
+    // The set is not merely parked in memory: drop page 1's parked live
+    // document and the switch has to DECODE the page, which brings the
+    // rulers back out of its own bytes (`mnc/rulers.json`).
+    app.pages[0].parked = None;
     app.switch_page(0);
-    assert_eq!(app.doc.rulers.items, vec![made], "and back again");
+    assert_eq!(app.doc.rulers.items, vec![made], "decoded from the page");
+    assert!(app.doc.rulers.on);
 }
 
 /// CSP: "Hold Shift while dragging to draw a straight line ruler in 45
