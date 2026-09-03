@@ -825,14 +825,57 @@ impl App {
         }
     }
 
+    /// `L-03` — the interior box of the balloon under `p`, if a balloon is
+    /// there: the topmost VISIBLE balloon layer wins, and inside a layer the
+    /// topmost balloon.
+    ///
+    /// Which balloon a text belongs to is decided by GEOMETRY, not by a
+    /// stored link — the same rule `carry_texts_with_balloon` and
+    /// `fit_balloon_to_text` already use. A locked layer still counts: this
+    /// reads a bubble to size a text box and writes nothing to it.
+    fn balloon_interior_at(&self, p: [f32; 2]) -> Option<[f32; 4]> {
+        let em = mn_text::font_px(
+            &mn_core::TextItem::new(p, String::new(), self.text_size_pt, [0, 0, 0], false),
+            self.doc_dpi(),
+        );
+        for li in (0..self.doc.layers.len()).rev() {
+            let l = &self.doc.layers[li];
+            if !l.visible {
+                continue;
+            }
+            let Some(bs) = l.balloons() else { continue };
+            if let Some(bi) = bs.balloon_at(p) {
+                return bs.balloons[bi].text_interior(em);
+            }
+        }
+        None
+    }
+
     pub fn text_tool_up(&mut self, cx: f32, cy: f32) {
         match self.text_gesture.take() {
             Some(TextGesture::Box { start, .. }) => {
                 let (w, h) = ((cx - start.0).abs(), (cy - start.1).abs());
                 if w > 12.0 && h > 12.0 {
+                    // A dragged box is the letterer's own: CSP sizes the box
+                    // by the drag and wraps at it, balloon or no balloon.
                     self.start_new_text(
                         [start.0.min(cx), start.1.min(cy)],
                         Some([w.max(ct::MIN_TEXT_EXTENT), h.max(ct::MIN_TEXT_EXTENT)]),
+                    );
+                } else if let Some(r) = self.balloon_interior_at([start.0, start.1]) {
+                    // Ledger L-03: a CLICK inside a balloon writes INTO that
+                    // balloon. CSP ties the two (manual, Text tool ▸ How to
+                    // add ▸ "Auto detect where to insert": "If you enter text
+                    // within a balloon […] you can add text to an existing
+                    // Text or Balloon layer"); the box it hands you is still
+                    // the plain click-sized one, which is how a line came out
+                    // 22 px wider than its 156 px bubble. Ours arrives wrapped
+                    // to the bubble's inside — the same rectangle
+                    // `fit_balloon_to_text` would fit back around it — and the
+                    // letterer resizes it like any other box.
+                    self.start_new_text([r[0], r[1]], Some([r[2] - r[0], r[3] - r[1]]));
+                    self.set_status(
+                        "typing into the balloon — the box wraps to it (drag a box instead for your own width)",
                     );
                 } else {
                     self.start_new_text([start.0, start.1], None);

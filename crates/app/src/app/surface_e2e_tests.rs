@@ -334,8 +334,10 @@ fn balloon_with_words(app: &mut App, panel: [f32; 4], words: &str, scale: f32) {
         cx - rx * 0.62,
         cy - 12.0 * words.lines().count() as f32,
     );
-    // A click-placed box does not know the balloon it landed in, so the
-    // line breaks are the letterer's — see the ledger's L-03 row.
+    // Ledger L-03, closed 2026-09-04: a click INSIDE a balloon makes a box
+    // wrapped to that bubble, so nothing has to run past its edge. The hard
+    // breaks below are still the letterer's own — a wrap box takes Enter
+    // like any other.
     for c in words.chars() {
         if c == '\n' {
             app.text_key(0x0D, false, false);

@@ -1829,6 +1829,54 @@ impl Balloon {
         }
     }
 
+    /// `L-03` — **the text box that fits inside this bubble**, `[x0, y0, x1,
+    /// y1]` in canvas px, with the same [`FIT_PAD_EM`] margin
+    /// [`Self::fit_to_text`] leaves around lettering. It is that function read
+    /// backwards: set a box to this and the fit would not move the bubble.
+    ///
+    /// `em_px` is the type size in canvas px (`mn_text::font_px`), so the
+    /// margin scales with the lettering like everywhere else.
+    ///
+    /// The tails are NOT part of it — nobody letters into the tail. A drawn
+    /// [`BalloonShape::Polygon`] has no closed-form inscribed rectangle, so
+    /// its bounding box (less the margin) is the answer; a deeply concave
+    /// drawn bubble can therefore be given a box wider than its narrow waist,
+    /// which the letterer resizes like any other box.
+    ///
+    /// `None` when the body has no room for a box at all.
+    pub fn text_interior(&self, em_px: f32) -> Option<[f32; 4]> {
+        let pad = (em_px.max(1.0) * FIT_PAD_EM).max(2.0);
+        let inner = match &self.shape {
+            // The largest rectangle inside an axis-aligned ellipse has
+            // half-extents radii/√2 — the exact inverse of the √2 the fit
+            // multiplies by, so the two agree by construction.
+            BalloonShape::Ellipse { center, radii } => {
+                let s = std::f32::consts::SQRT_2;
+                let (hx, hy) = (radii[0].abs() / s, radii[1].abs() / s);
+                [center[0] - hx, center[1] - hy, center[0] + hx, center[1] + hy]
+            }
+            // A rounded corner eats the same amount off the box a circle of
+            // that radius does.
+            BalloonShape::RoundRect { rect, corner } => {
+                let c = corner.max(0.0) * (1.0 - 1.0 / std::f32::consts::SQRT_2);
+                [
+                    rect[0].min(rect[2]) + c,
+                    rect[1].min(rect[3]) + c,
+                    rect[0].max(rect[2]) - c,
+                    rect[1].max(rect[3]) - c,
+                ]
+            }
+            BalloonShape::Polygon { .. } => self.shape.bbox(),
+        };
+        let r = [
+            inner[0] + pad,
+            inner[1] + pad,
+            inner[2] - pad,
+            inner[3] - pad,
+        ];
+        (r[2] - r[0] >= MIN_BALLOON_EXTENT && r[3] - r[1] >= MIN_BALLOON_EXTENT).then_some(r)
+    }
+
     /// **Fit this bubble around `text`** — the ROADMAP's good-first-issue #1.
     ///
     /// `em_px` is the text's type size in canvas px (`mn_text::font_px`); the
