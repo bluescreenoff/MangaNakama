@@ -444,6 +444,14 @@ page the answer is usually a tone or the text — which is what the
 Exclude switches in Tool Property are for. Draft, text and locked layers
 are skipped by default; fill/tone layers are not, because sometimes the
 tone IS what you were pointing at.</div>
+<div class="quirk"><b>A draft layer does not stop the bucket.</b> Flag a
+layer as draft and it stops being part of the page: it is not printed,
+and the fill, the wand and the tone region no longer look at it either.
+So the rough can stay on screen while you lay ベタ down over it, and the
+black runs to the inked line instead of to a pencil line nobody will
+see. If you WANT the rough to act as a wall — closing a gap you have not
+inked yet — tick <b>Refer draft layers</b> in that tool's Tool
+Property.</div>
 <div class="quirk"><b>Select layer ignores hidden layers whatever the
 Exclude switches say, and needs real ink, not a fringe.</b> A layer you
 cannot see is never the answer. Neither is a pixel less than about 10%

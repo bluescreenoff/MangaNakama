@@ -161,7 +161,14 @@ impl Default for FillOpts {
             gap_close_px: 2,
             expand_px: 1,
             refer: FillRefer::All,
-            refer_drafts: true,
+            // A 下書き layer is a layer that will not be printed, and the
+            // app says so the moment you flag one ("shown on screen,
+            // skipped by fill refs and export"). Sampling one by default
+            // made that a half-truth: ベタ on a page whose rough is still
+            // showing stopped on rough lines nobody will ever see. Off,
+            // like CSP's 参照しない ▸ 下書きレイヤー; the Fill / wand /
+            // Tone property rows all carry the switch to turn it back on.
+            refer_drafts: false,
             refer_border: false,
             expand_mode: ExpandMode::Rect,
             auto: false,
