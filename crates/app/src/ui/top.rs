@@ -1251,6 +1251,46 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 ui.close();
             }
             ui.separator();
+            // CV-046/045: the grid and its two numbers, together, because
+            // "10 mm cut into 4" is one decision and CSP splits it across a
+            // menu item and a dialog you have to go find.
+            let (mut on, mut mm, mut div) = (
+                app.layout.grid_on,
+                app.layout.grid_mm,
+                app.layout.grid_div,
+            );
+            let mut grid_changed = ui
+                .checkbox(&mut on, "Grid")
+                .on_hover_text(
+                    "Rules the canvas in millimetres from the page's top-left \
+                     corner. A guide only: it never snaps the pen, never \
+                     enters the page, and never exports.",
+                )
+                .changed();
+            ui.horizontal(|ui| {
+                ui.label("cell");
+                grid_changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut mm)
+                            .range(crate::app::GRID_MM_MIN..=crate::app::GRID_MM_MAX)
+                            .speed(0.5)
+                            .fixed_decimals(1)
+                            .suffix(" mm"),
+                    )
+                    .changed();
+                ui.label("÷");
+                grid_changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut div)
+                            .range(1..=crate::app::GRID_DIV_MAX)
+                            .speed(0.1),
+                    )
+                    .changed();
+            });
+            if grid_changed {
+                app.push_cmd(AppCmd::SetGrid { on, mm, div });
+            }
+            ui.separator();
             // UI-031/032. Menu items as well as keys: a hide whose only
             // way back is a key you have to remember is a trap, and the
             // top bar is also this window's title bar.

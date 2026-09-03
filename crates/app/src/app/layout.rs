@@ -8,6 +8,16 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+/// CV-045's shipped grid: CSP's own defaults (10 mm cells, cut into 4) and
+/// the bounds the View menu's two fields offer. The ceiling on divisions is
+/// low on purpose — past a handful the sub-lines stop being countable and
+/// the guard in `grid_lines` drops them anyway.
+pub const GRID_MM: f32 = 10.0;
+pub const GRID_DIV: u32 = 4;
+pub const GRID_MM_MIN: f32 = 1.0;
+pub const GRID_MM_MAX: f32 = 100.0;
+pub const GRID_DIV_MAX: u32 = 10;
+
 /// Parse a JSON string-array of paths, healing the one hand-edit mistake
 /// that actually happens: a raw Windows path pasted with single backslashes
 /// (`"F:\Projects\…"` — `\P` is not a JSON escape, so strict parsing fails).
@@ -137,6 +147,21 @@ pub struct UiLayout {
     /// vanish. Persisted, unlike the Tab hides, because it is a workspace
     /// preference rather than a panic button.
     pub guides_hidden: bool,
+    /// CV-046/CV-045: the canvas grid. `grid_on` draws it, `grid_mm` is the
+    /// cell size in MILLIMETRES and `grid_div` how many parts each cell is
+    /// cut into — CSP's own unit and defaults (10 mm, 4 divisions), and
+    /// millimetres rather than pixels because a grid you rule a page by is
+    /// a paper measurement, so the same setting means the same thing on a
+    /// 600 dpi B4 and a 350 dpi A4.
+    ///
+    /// **Default off**, and the same junk rule as `guides_hidden`: only a
+    /// literal `1` turns it on, and a spacing that does not parse or is not
+    /// positive leaves the default alone rather than ruling an invisible or
+    /// infinite grid. A view preference — the page never carries it, undo
+    /// never sees it, export never sees it.
+    pub grid_on: bool,
+    pub grid_mm: f32,
+    pub grid_div: u32,
     /// The brush panel's LIVE test stroke is folded away. **Default false
     /// (shown)** — the strip is the answer to tuning sixteen parameter pages
     /// blind, so an absent key and any junk value both leave it visible; only
@@ -209,6 +234,9 @@ impl Default for UiLayout {
             auto_swatch: false,
             reader_page: 0,
             guides_hidden: false,
+            grid_on: false,
+            grid_mm: GRID_MM,
+            grid_div: GRID_DIV,
             test_stroke_hidden: false,
             gradients: String::new(),
             sub_tool_size_px: BTreeMap::new(),
@@ -400,6 +428,24 @@ impl UiLayout {
         }
     }
 
+    /// CV-045/046: the grid switch and its two numbers, saved only on
+    /// change. The bounds are the dialog's own, applied HERE too so a
+    /// hand-edited ui.txt cannot rule a 0 mm grid.
+    pub fn note_grid(&mut self, on: bool, mm: f32, div: u32) {
+        let mm = if mm.is_finite() {
+            mm.clamp(GRID_MM_MIN, GRID_MM_MAX)
+        } else {
+            self.grid_mm
+        };
+        let div = div.clamp(1, GRID_DIV_MAX);
+        if self.grid_on != on || self.grid_mm != mm || self.grid_div != div {
+            self.grid_on = on;
+            self.grid_mm = mm;
+            self.grid_div = div;
+            self.dirty = true;
+        }
+    }
+
     /// The brush panel's test-stroke fold. Saved only on change, like the
     /// two switches above.
     pub fn note_test_stroke_hidden(&mut self, hidden: bool) {
@@ -471,7 +517,10 @@ impl UiLayout {
             "left_w={:.0}\nright_w={:.0}\nleft_collapsed={}\nright_collapsed={}\ndock_left={}\ndock_right={}\ndock_tree={}\nprop_hidden={}\nwin={}\n{}mono_preview={}\nrecent_fonts={}\nmaterial_folders={}\nmaterial_uses={}\nquick_pins={}\nworkspaces={}\nworkspace_current={}\ntouch_gestures={}\ncolor_history={}\nauto_swatch={}\nreader_page={}\nguides_hidden={}\ntest_stroke_hidden={}\ngradients={}\nsub_tool_size_px={}
 hidden_rows={}
 sub_tool_last={}
-references={}\n",
+references={}
+grid={}
+grid_mm={}
+grid_div={}\n",
             self.left_w,
             self.right_w,
             self.left_collapsed as u8,
@@ -511,6 +560,9 @@ references={}\n",
             serde_json::to_string(&self.hidden_rows).unwrap_or_default(),
             serde_json::to_string(&self.sub_tool_last).unwrap_or_default(),
             serde_json::to_string(&self.references).unwrap_or_default(),
+            self.grid_on as u8,
+            self.grid_mm,
+            self.grid_div,
         )
     }
 
@@ -559,6 +611,26 @@ references={}\n",
             // absent key all leave the guides SHOWN — the direction that
             // cannot lose a manga artist's crop marks.
             "guides_hidden" => self.guides_hidden = v.trim() == "1",
+            // CV-045/046, the same direction of failure: only `1` rules a
+            // grid, and a spacing that does not parse — or is zero, or
+            // negative, or NaN — leaves the shipped 10 mm / 4 alone rather
+            // than ruling nothing or ruling forever.
+            "grid" => self.grid_on = v.trim() == "1",
+            "grid_mm" => {
+                if let Ok(x) = v.trim().parse::<f32>()
+                    && x.is_finite()
+                    && (GRID_MM_MIN..=GRID_MM_MAX).contains(&x)
+                {
+                    self.grid_mm = x;
+                }
+            }
+            "grid_div" => {
+                if let Ok(n) = v.trim().parse::<u32>()
+                    && (1..=GRID_DIV_MAX).contains(&n)
+                {
+                    self.grid_div = n;
+                }
+            }
             // Same direction of failure: only `1` folds the test stroke away.
             "test_stroke_hidden" => self.test_stroke_hidden = v.trim() == "1",
             // `1` requests on, anything else off — the round-32 rule,

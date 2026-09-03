@@ -87,6 +87,20 @@ angle no matter where it was; <kbd>-</kbd> and <kbd>F9</kbd> step by the
 the status bar as −90°, because the view keeps its angle in the range
 −180°…180° — same page, same turn, shorter number.</div>
 
+<div class="quirk"><b>The grid is measured in millimetres, not pixels.</b>
+<b>View &#9656; Grid</b> rules the page from its top-left corner in cells of
+the size beside the checkbox (10&nbsp;mm shipped), each cut into the number
+of divisions beside that (4). Millimetres because a grid you rule a page by
+is a paper measurement: the same setting draws the same picture on a
+600&nbsp;dpi B4 and a 350&nbsp;dpi A4, which a pixel spacing would not.
+It is a guide only &mdash; it never snaps the pen, never enters the page and
+never exports &mdash; and like the crop-mark switch it is remembered between
+sessions.</div>
+<div class="quirk"><b>A grid too fine to read is not drawn at all.</b> If
+the divisions would land closer than six canvas pixels apart the grid is
+skipped and the status bar says so, rather than washing the artwork grey
+with lines you cannot count. Ask for bigger cells or fewer divisions.</div>
+
 <h2>Putting the view back</h2>
 <p>Three separate resets sit in the <b>View</b> menu, because “put the
 page back” means different things depending on what you touched:</p>

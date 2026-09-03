@@ -61,6 +61,52 @@ pub fn zoom_ladder_next(zoom: f32, up: bool) -> f32 {
     }
 }
 
+/// CV-046: one ruled line of the canvas grid — `horizontal` means a line of
+/// constant y, `pos` is its CANVAS coordinate, and `major` marks a full cell
+/// edge as against one of the subdivisions between them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GridLine {
+    pub horizontal: bool,
+    pub pos: f32,
+    pub major: bool,
+}
+
+/// The lines of a `mm`-spaced grid cut into `div` over a `size` page whose
+/// print resolution is `dpi`, from the page's top-left corner (CSP's own
+/// origin). Pure geometry: no viewport, no painter, so it is the piece a
+/// headless test can check exactly.
+///
+/// Returns NOTHING when the subdivisions would land closer than
+/// [`GRID_MIN_PX`] apart. That guard is the whole reason this is a function
+/// rather than two loops in the painter: a 1 mm grid on a 600 dpi page is
+/// 23.6 px a cell — fine — but cut into 10 it is 2.4 px, which is not a
+/// guide, it is a grey wash over the artwork.
+pub fn grid_lines(size: (u32, u32), dpi: u32, mm: f32, div: u32) -> Vec<GridLine> {
+    let div = div.max(1);
+    let cell = mm / 25.4 * dpi.max(1) as f32;
+    let step = cell / div as f32;
+    let (w, h) = (size.0 as f32, size.1 as f32);
+    if !step.is_finite() || step < GRID_MIN_PX || w <= 0.0 || h <= 0.0 {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for (horizontal, extent) in [(false, w), (true, h)] {
+        let n = (extent / step).floor() as i64;
+        for k in 0..=n {
+            out.push(GridLine {
+                horizontal,
+                pos: k as f32 * step,
+                major: k as u32 % div == 0,
+            });
+        }
+    }
+    out
+}
+
+/// The closest two grid lines may sit, in CANVAS pixels. Below this the
+/// grid is dropped rather than drawn — see [`grid_lines`].
+pub const GRID_MIN_PX: f32 = 6.0;
+
 fn view_key(vp: &Viewport) -> [u32; 5] {
     [
         vp.pan[0].to_bits(),

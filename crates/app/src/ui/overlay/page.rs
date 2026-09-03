@@ -55,6 +55,38 @@ pub(super) fn paint(
         egui::Stroke::new(1.0, egui::Color32::from_gray(70)),
     ));
 
+    // CV-046 the canvas grid, under everything else on the page so it never
+    // competes with the crop marks. Ruled through `to_pt` like the rest of
+    // the furniture, so it rides a rotated or mirrored view instead of
+    // staying stubbornly axis-aligned. Cell edges read at half the strength
+    // of a page outline; the subdivisions at half of that again — a grid you
+    // can count against but never mistake for ink.
+    if app.layout.grid_on {
+        let lines = crate::app::grid_lines(
+            app.doc.size,
+            app.page_dpi(),
+            app.layout.grid_mm,
+            app.layout.grid_div,
+        );
+        // Fixed greys, not theme colours: this is drawn ON the white page,
+        // beside the manuscript guides, which are fixed RGBA for the same
+        // reason. A chrome text colour would be a pale grey on a dark theme
+        // and vanish into the paper.
+        let major = egui::Color32::from_rgba_unmultiplied(70, 70, 70, 120);
+        let minor = egui::Color32::from_rgba_unmultiplied(70, 70, 70, 55);
+        for g in lines {
+            let (a, b) = if g.horizontal {
+                (to_pt(0.0, g.pos), to_pt(w as f32, g.pos))
+            } else {
+                (to_pt(g.pos, 0.0), to_pt(g.pos, h as f32))
+            };
+            painter.line_segment(
+                [a, b],
+                egui::Stroke::new(1.0, if g.major { major } else { minor }),
+            );
+        }
+    }
+
     // Symmetry axes (Krita mirror): the centre lines strokes reflect across.
     // Dashed by hand (egui has no dash offset), faint accent so they read as
     // guides, not ink.

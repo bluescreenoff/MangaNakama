@@ -71,7 +71,8 @@ mod view;
 mod workspaces;
 
 pub use adjust::AdjustPreview;
-pub use layout::{ScreenRect, UiLayout, WinGeom, peek_win};
+pub use layout::{GRID_DIV_MAX, GRID_MM_MAX, GRID_MM_MIN, ScreenRect, UiLayout, WinGeom, peek_win};
+pub use view::{GRID_MIN_PX, grid_lines};
 pub use prefs::Prefs;
 
 pub use crate::cmd::RulerKind;

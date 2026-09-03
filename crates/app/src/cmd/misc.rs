@@ -453,6 +453,36 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
             });
             app.mark_dirty();
         }
+        AppCmd::SetGrid { on, mm, div } => {
+            app.layout.note_grid(on, mm, div);
+            // The refusal has to speak, because the guard is invisible: a
+            // grid whose lines would land closer than GRID_MIN_PX apart is
+            // dropped, and a silent drop reads as "the grid is broken".
+            let ruled = !crate::app::grid_lines(
+                app.doc.size,
+                app.page_dpi(),
+                app.layout.grid_mm,
+                app.layout.grid_div,
+            )
+            .is_empty();
+            if !app.layout.grid_on {
+                app.set_status("grid off");
+            } else if ruled {
+                app.set_status(format!(
+                    "grid on — {} mm cells, {} divisions",
+                    app.layout.grid_mm, app.layout.grid_div
+                ));
+            } else {
+                app.set_error(format!(
+                    "{} mm cut into {} is under {} px on this page — nothing ruled; \
+                     use bigger cells or fewer divisions",
+                    app.layout.grid_mm,
+                    app.layout.grid_div,
+                    crate::app::GRID_MIN_PX
+                ));
+            }
+            app.mark_dirty();
+        }
         AppCmd::TransformReset => {
             if let Some(drag) = &mut app.transform_drag {
                 drag.reset();

@@ -1159,7 +1159,7 @@ pub enum AppCmd {
     /// Multiply zoom by the factor, anchored on the canvas-area centre.
     ZoomStep(f32),
     /// CV-032, CSP's View ▸ Zoom In / Zoom Out (`Ctrl` + NumPad `+` / `-`):
-    /// one rung along [`crate::app::ZOOM_LADDER`], not a wheel notch. The
+    /// one rung along [`app::view::ZOOM_LADDER`], not a wheel notch. The
     /// ladder is the difference — a keypress that moves 15 % is a keypress
     /// you press eight times, and CSP's own zoom keys land on round scales
     /// (25 / 33 / 50 / 66 / 100 / 200 %) that a page can be judged at.
@@ -1196,6 +1196,12 @@ pub enum AppCmd {
     /// them. Unlike the Tab hides this one persists (`guides_hidden=` in
     /// ui.txt) — it is a workspace preference, not a panic button.
     SetGuidesHidden(bool),
+    /// CV-045/CV-046, CSP's View ▸ Grid and its Grid/Ruler Bar Settings in
+    /// one command: rule the canvas grid (or stop), at `mm` millimetre cells
+    /// cut into `div`. Like [`AppCmd::SetGuidesHidden`] this is view state —
+    /// persisted (`grid=`, `grid_mm=`, `grid_div=` in ui.txt), no undo step,
+    /// and an export has never seen it.
+    SetGrid { on: bool, mm: f32, div: u32 },
     /// T-020: put the active transform back to the state it started from
     /// while STAYING in it — the identity params, so the float sits exactly
     /// where it was lifted. The reference point is a setting, not part of

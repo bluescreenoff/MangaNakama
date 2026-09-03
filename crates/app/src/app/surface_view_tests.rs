@@ -427,6 +427,127 @@ fn v10_the_csp_zoom_chords_are_bound() {
     }
 }
 
+// --- v11 the canvas grid (CV-045/046) -----------------------------------
+
+#[test]
+fn v11_the_grid_is_ruled_in_millimetres_and_persists() {
+    use super::view::{GRID_MIN_PX, grid_lines};
+
+    // 10 mm cells cut into 4, on a 254 dpi page: a cell is 100 px, a
+    // subdivision 25 px. A 900x700 page therefore gets 37 vertical lines
+    // (0..900 by 25) and 29 horizontal.
+    let g = grid_lines((900, 700), 254, 10.0, 4);
+    let vert: Vec<&super::view::GridLine> = g.iter().filter(|l| !l.horizontal).collect();
+    let horz: Vec<&super::view::GridLine> = g.iter().filter(|l| l.horizontal).collect();
+    assert_eq!(vert.len(), 37, "vertical lines");
+    assert_eq!(horz.len(), 29, "horizontal lines");
+    assert!((vert[1].pos - 25.0).abs() < 1e-3, "subdivision at 25 px");
+    assert!(vert[0].major && !vert[1].major && vert[4].major, "every 4th is a cell edge");
+
+    // The grid is a PAPER measurement: the same 10 mm at twice the dpi is
+    // twice as many pixels apart, so the ruled page looks the same.
+    let hi = grid_lines((1800, 1400), 508, 10.0, 4);
+    assert_eq!(
+        hi.iter().filter(|l| !l.horizontal).count(),
+        37,
+        "10 mm on a 508 dpi page rules the same picture"
+    );
+
+    // The guard: subdivisions closer than GRID_MIN_PX rule NOTHING rather
+    // than washing the page grey.
+    assert!(
+        grid_lines((900, 700), 254, 1.0, 10).is_empty(),
+        "1 mm cut into 10 is 1 px at 254 dpi — must not be ruled"
+    );
+    assert!(GRID_MIN_PX >= 4.0);
+
+    // The command, the status line it says, and the persistence.
+    let Some(mut app) = app() else { return };
+    assert!(!app.layout.grid_on, "the grid ships off");
+    run(
+        &mut app,
+        AppCmd::SetGrid {
+            on: true,
+            mm: 10.0,
+            div: 4,
+        },
+    );
+    assert!(app.layout.grid_on);
+    assert!(app.status.contains("10 mm"), "status: {}", app.status);
+
+    // LOOK at it: the overlay paints `grid_lines` through the same
+    // `viewport.to_screen` the page furniture uses, so stamping them onto a
+    // render of the live viewport is the picture the canvas would show.
+    app.page = None;
+    app.viewport.zoom = 1.0;
+    app.viewport.pan = [0.0, 0.0];
+    landmark(&mut app);
+    let mut img = render_win(&mut app, "v11-page");
+    for g in grid_lines(app.doc.size, app.page_dpi(), app.layout.grid_mm, 4) {
+        let (a, b) = if g.horizontal {
+            (
+                app.viewport.to_screen(0.0, g.pos),
+                app.viewport.to_screen(app.doc.size.0 as f32, g.pos),
+            )
+        } else {
+            (
+                app.viewport.to_screen(g.pos, 0.0),
+                app.viewport.to_screen(g.pos, app.doc.size.1 as f32),
+            )
+        };
+        // The overlay's own two greys (70) composited over white paper at
+        // alpha 120 and 55 — so the dump is the strength the canvas shows.
+        let shade = if g.major { 168u8 } else { 215 };
+        let steps = ((b.0 - a.0).abs().max((b.1 - a.1).abs())).ceil() as i32;
+        for i in 0..=steps.max(1) {
+            let t = i as f32 / steps.max(1) as f32;
+            let (x, y) = (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t);
+            if x >= 0.0 && y >= 0.0 && (x as u32) < img.width() && (y as u32) < img.height() {
+                img.put_pixel(x as u32, y as u32, image::Rgba([shade, shade, shade, 255]));
+            }
+        }
+    }
+    if let Ok(dir) = std::env::var("MN_SURFACE_OUT") {
+        img.save(format!("{dir}/v11-grid.png")).expect("png written");
+    }
+
+    // A spacing the page cannot show says so instead of drawing nothing.
+    run(
+        &mut app,
+        AppCmd::SetGrid {
+            on: true,
+            mm: 1.0,
+            div: 10,
+        },
+    );
+    assert!(
+        app.status.contains("nothing ruled"),
+        "an unshowable grid must speak: {}",
+        app.status
+    );
+
+    // ui.txt round trip, and the junk rule: only `1` rules a grid, and a
+    // spacing that does not parse leaves the shipped default alone.
+    let mut ui = super::layout::UiLayout::default();
+    ui.note_grid(true, 7.5, 3);
+    let body = ui.to_body();
+    assert!(body.contains("\ngrid=1\n"), "{body}");
+    let back = super::layout::UiLayout::from_body(&body);
+    assert!(back.grid_on && (back.grid_mm - 7.5).abs() < 1e-4 && back.grid_div == 3);
+    for line in ["grid=0", "grid=yes", "grid="] {
+        let junk = super::layout::UiLayout::from_body(line);
+        assert!(!junk.grid_on, "{line} must not rule a grid");
+    }
+    for line in ["grid_mm=0", "grid_mm=nan", "grid_mm=abc", "grid_div=0"] {
+        let junk = super::layout::UiLayout::from_body(line);
+        assert!(
+            (junk.grid_mm - super::layout::GRID_MM).abs() < 1e-4
+                && junk.grid_div == super::layout::GRID_DIV,
+            "{line} must leave the shipped spacing alone"
+        );
+    }
+}
+
 // --- v07 palettes + workspaces ------------------------------------------
 
 #[test]
