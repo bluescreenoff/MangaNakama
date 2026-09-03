@@ -254,6 +254,16 @@ reshaped to match one photo. Same for <code>Replace page with file</code>.
 A plain single-image document has no paper to inherit, so there an
 imported image still makes a page of its own size.</div>
 
+<div class="quirk"><b>An imported image that knows its own dpi arrives at
+its printed size.</b> A 300 dpi scan on a 600 dpi manuscript is not a
+small picture — it is a full-size one described in coarser pixels, so it
+comes in at twice its pixel count and the status bar says so. Only PNG
+(<code>pHYs</code>) and JPEG (JFIF density) carry a resolution; a
+screenshot, a GIF or a file that simply does not say lands 1:1 exactly as
+it always did, and so does anything imported into a document that has no
+resolution of its own. Either way the page still shrinks it to fit if it
+is too big.</div>
+
 <h2>Saving</h2>
 <div class="quirk"><b>Single images save as .ora; comics are work
 folders</b> (a <code>work.mnc</code> index plus one file per page).

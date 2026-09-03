@@ -66,5 +66,8 @@ windows-sys = { workspace = true, features = [
 # The palette docking system (drag/tab/split/float). `serde` persists the
 # two dock columns into ui.txt.
 egui_dock = { version = "0.21.1", features = ["serde"] }
+# I02: reading an imported PNG's `pHYs` resolution (and writing one in the
+# import tests). Already in the tree under `image`, so the pin follows it.
+png = "0.18"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

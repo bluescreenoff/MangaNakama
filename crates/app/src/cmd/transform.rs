@@ -305,7 +305,7 @@ pub(super) fn transform_strokes(
 }
 
 fn import_image_layer(app: &mut App, path: &std::path::Path, draft: bool) {
-    let img = match image::open(path) {
+    let mut img = match image::open(path) {
         Ok(i) => i.to_rgba8(),
         Err(e) => {
             app.set_error(format!("import failed: {e}"));
@@ -317,13 +317,20 @@ fn import_image_layer(app: &mut App, path: &std::path::Path, draft: bool) {
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "Imported".to_owned());
     let (iw, ih) = (img.width(), img.height());
+    // I02: an asset that declares its own resolution (PNG `pHYs`, JPEG
+    // JFIF density) keeps its PHYSICAL size here — a 350 dpi scan lands
+    // BIGGER on a 600 dpi page, not smaller, which is what CSP does and
+    // what the artist meant when they scanned at 350. Files that say
+    // nothing, and works with no dpi, are untouched.
+    let asset_dpi = app.scale_import_to_page_dpi(&mut img, path);
+    let (sw, sh) = (img.width(), img.height());
     let (pw, ph) = app.doc.size;
-    let fitted = if iw > pw || ih > ph {
-        let s = (pw as f32 / iw as f32).min(ph as f32 / ih as f32);
+    let fitted = if sw > pw || sh > ph {
+        let s = (pw as f32 / sw as f32).min(ph as f32 / sh as f32);
         image::imageops::resize(
             &img,
-            ((iw as f32 * s).round() as u32).max(1),
-            ((ih as f32 * s).round() as u32).max(1),
+            ((sw as f32 * s).round() as u32).max(1),
+            ((sh as f32 * s).round() as u32).max(1),
             image::imageops::FilterType::Lanczos3,
         )
     } else {
@@ -348,7 +355,13 @@ fn import_image_layer(app: &mut App, path: &std::path::Path, draft: bool) {
     } else {
         format!("imported {iw}x{ih} as a layer")
     };
-    if (fw, fh) != (iw, ih) {
+    if let Some(d) = asset_dpi.filter(|_| (sw, sh) != (iw, ih)) {
+        s.push_str(&format!(
+            " — the file says {d} dpi, so it came in at {sw}x{sh} for this {} dpi page",
+            app.work_dpi().unwrap_or_default()
+        ));
+    }
+    if (fw, fh) != (sw, sh) {
         s.push_str(&format!(" — scaled to {fw}x{fh} to fit the page"));
     }
     if draft {

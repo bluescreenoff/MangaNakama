@@ -580,6 +580,106 @@ fn f07_a_bare_ora_remembers_the_dpi_its_tones_were_screened_at() {
     assert_eq!(diff, 0, "the tone re-screened exactly as it was saved");
 }
 
+/// I02 fixture: a solid opaque PNG that declares `dpi` in its `pHYs`
+/// chunk — or, at `None`, one that says nothing at all.
+fn write_png_with_dpi(path: &std::path::Path, w: u32, h: u32, dpi: Option<u32>) {
+    let f = std::io::BufWriter::new(std::fs::File::create(path).expect("fixture"));
+    let mut enc = png::Encoder::new(f, w, h);
+    enc.set_color(png::ColorType::Rgba);
+    enc.set_depth(png::BitDepth::Eight);
+    if let Some(d) = dpi {
+        let ppu = (d as f32 / 0.0254).round() as u32;
+        enc.set_pixel_dims(Some(png::PixelDimensions {
+            xppu: ppu,
+            yppu: ppu,
+            unit: png::Unit::Meter,
+        }));
+    }
+    let data: Vec<u8> = (0..w * h).flat_map(|_| [0u8, 0, 0, 255]).collect();
+    enc.write_header()
+        .expect("png header")
+        .write_image_data(&data)
+        .expect("png data");
+}
+
+/// The same for JPEG: encode one, then write the density into the JFIF
+/// APP0 segment the encoder already emitted (units = 1, dots per inch).
+fn write_jpeg_with_dpi(path: &std::path::Path, w: u32, h: u32, dpi: u16) {
+    let img = image::RgbImage::from_pixel(w, h, image::Rgb([0, 0, 0]));
+    img.save(path).expect("jpeg fixture");
+    let mut b = std::fs::read(path).expect("read back");
+    assert_eq!(&b[..4], &[0xFF, 0xD8, 0xFF, 0xE0], "the encoder writes APP0");
+    assert_eq!(&b[6..11], b"JFIF\0", "and it is a JFIF one");
+    b[13] = 1;
+    b[14..16].copy_from_slice(&dpi.to_be_bytes());
+    b[16..18].copy_from_slice(&dpi.to_be_bytes());
+    std::fs::write(path, b).expect("rewrite");
+}
+
+/// F08 (ledger I02) — an imported asset that declares its own resolution
+/// lands at its PRINTED size, not at its pixel count.
+///
+/// A 300 dpi scan is not a small picture on a 600 dpi manuscript; it is a
+/// full-size one described in coarser pixels, and CSP places it by its
+/// printed size. Before this, every import was a 1:1 pixel dump, so a
+/// 350 dpi rough came in at little more than half the size it was drawn.
+/// Files that declare nothing must still land exactly as they always did.
+#[test]
+fn f08_an_imported_asset_lands_at_its_printed_size() {
+    let Some(mut app) = headless() else { return };
+    app.doc = mn_core::Document::new(900, 700);
+    let mut setup = mn_core::PageSetup::presets()[0].clone();
+    setup.dpi = 600;
+    setup.set_paper_px(900, 700);
+    app.page = Some(setup);
+
+    // The placed float's box is what the import armed for the drag, i.e.
+    // exactly the rectangle the asset occupies on the page.
+    let placed = |app: &App| -> (i32, i32) {
+        let b = app
+            .transform_drag
+            .as_ref()
+            .expect("the import arms the placement drag")
+            .bbox;
+        (
+            (b[1][0] - b[0][0]).round() as i32,
+            (b[3][1] - b[0][1]).round() as i32,
+        )
+    };
+
+    let dir = tmp("importdpi");
+    let plain = dir.join("plain.png");
+    write_png_with_dpi(&plain, 100, 80, None);
+    dispatch(&mut app, AppCmd::ImportImagePath(plain.clone()));
+    println!("[note] silent asset: {}", app.status);
+    assert_eq!(placed(&app), (100, 80), "a file that says nothing is a pixel dump");
+    dispatch(&mut app, AppCmd::TransformCancel);
+
+    let scan = dir.join("scan300.png");
+    write_png_with_dpi(&scan, 100, 80, Some(300));
+    dispatch(&mut app, AppCmd::ImportImagePath(scan.clone()));
+    println!("[note] 300 dpi png: {}", app.status);
+    assert_eq!(placed(&app), (200, 160), "300 dpi on a 600 dpi page = twice the pixels");
+    assert!(app.status.contains("300 dpi"), "{}", app.status);
+    dispatch(&mut app, AppCmd::TransformCancel);
+
+    let photo = dir.join("rough1200.jpg");
+    write_jpeg_with_dpi(&photo, 120, 90, 1200);
+    dispatch(&mut app, AppCmd::ImportImagePath(photo.clone()));
+    println!("[note] 1200 dpi jpeg: {}", app.status);
+    assert_eq!(placed(&app), (60, 45), "1200 dpi on a 600 dpi page = half the pixels");
+    dispatch(&mut app, AppCmd::TransformCancel);
+
+    // A work with no resolution of its own has nothing to be relative to,
+    // so the file's word is ignored rather than guessed against 600.
+    app.page = None;
+    dispatch(&mut app, AppCmd::ImportImagePath(scan.clone()));
+    println!("[note] 300 dpi png into a pixel canvas: {}", app.status);
+    assert_eq!(placed(&app), (100, 80), "a pixel canvas imports pixels");
+    dispatch(&mut app, AppCmd::TransformCancel);
+    shot(&mut app, "f08-imports");
+}
+
 /// F10 — templates, open-recent, close-with-unsaved, two works open.
 #[test]
 fn f10_template_recent_close_tabs() {

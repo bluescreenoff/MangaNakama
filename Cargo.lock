@@ -776,6 +776,7 @@ dependencies = [
  "mn-core",
  "mn-gpu",
  "mn-text",
+ "png",
  "rfd",
  "serde",
  "serde_json",

@@ -12,6 +12,92 @@ fn image_layer_name(path: &std::path::Path) -> String {
         .unwrap_or_else(|| "Imported".to_owned())
 }
 
+/// I02: the print resolution an image file DECLARES, in dpi.
+///
+/// PNG says it in `pHYs` (pixels per metre) and JPEG in the JFIF APP0
+/// segment (dots per inch or per cm). Neither chunk is required, so most
+/// screenshots and every GIF answer `None` — which is the honest answer,
+/// not a reason to guess 72 or 96. A pHYs in `Unspecified` units only
+/// states an aspect ratio and is `None` too.
+///
+/// Exif resolution tags (what a camera or a scanner driver often writes
+/// INSTEAD of JFIF) are not read: that needs a full TIFF-directory walk,
+/// and the file's own words are what this is for.
+fn image_file_dpi(path: &std::path::Path) -> Option<u32> {
+    let ext = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let dpi = match ext.as_str() {
+        "png" => {
+            let f = std::io::BufReader::new(std::fs::File::open(path).ok()?);
+            // `read_info`, not `read_header_info`: the latter stops at IHDR
+            // and `pHYs` comes after it, so the header-only read answers
+            // None for every file that HAS a resolution.
+            let reader = png::Decoder::new(f).read_info().ok()?;
+            let dims = reader.info().pixel_dims?;
+            if dims.unit != png::Unit::Meter || dims.xppu == 0 {
+                return None;
+            }
+            // pixels per metre -> pixels per inch
+            dims.xppu as f32 * 0.0254
+        }
+        "jpg" | "jpeg" => {
+            // JFIF puts APP0 immediately after SOI: FFD8 FFE0 <len:2>
+            // "JFIF\0" <ver:2> <units:1> <Xdensity:2> <Ydensity:2>.
+            let mut head = [0u8; 18];
+            {
+                use std::io::Read;
+                let mut f = std::fs::File::open(path).ok()?;
+                f.read_exact(&mut head).ok()?;
+            }
+            if head[..4] != [0xFF, 0xD8, 0xFF, 0xE0] || &head[6..11] != b"JFIF\0" {
+                return None;
+            }
+            let x = u16::from_be_bytes([head[14], head[15]]) as f32;
+            match head[13] {
+                1 => x,          // dots per inch
+                2 => x * 2.54,   // dots per cm
+                _ => return None, // 0 = aspect ratio only
+            }
+        }
+        _ => return None,
+    };
+    // A file may declare a nonsense resolution; anything outside the range
+    // a real scanner or screen uses is treated as no answer at all.
+    (dpi >= 1.0 && dpi <= 20_000.0).then(|| dpi.round() as u32)
+}
+
+impl App {
+    /// I02: resize an image being imported so it keeps its PHYSICAL size on
+    /// this work's paper, and return the resolution it declared.
+    ///
+    /// A 350 dpi scan dropped on a 600 dpi manuscript is not a small
+    /// picture — it is a full-size one described in coarser pixels, and CSP
+    /// places it at its printed size. `None` (and no resize) when the file
+    /// says nothing, when the work has no dpi of its own, or when the two
+    /// already agree. The caller still fits the result to the page, so this
+    /// can only ever ask for a size the page then honours or shrinks.
+    pub(crate) fn scale_import_to_page_dpi(
+        &self,
+        img: &mut image::RgbaImage,
+        path: &std::path::Path,
+    ) -> Option<u32> {
+        let page = self.work_dpi()?;
+        let asset = image_file_dpi(path)?;
+        let s = page as f32 / asset as f32;
+        let (w, h) = (
+            ((img.width() as f32 * s).round() as u32).max(1),
+            ((img.height() as f32 * s).round() as u32).max(1),
+        );
+        if (w, h) == (img.width(), img.height()) {
+            return Some(asset);
+        }
+        *img = image::imageops::resize(img, w, h, image::imageops::FilterType::Lanczos3);
+        Some(asset)
+    }
+}
+
 /// Scale `rgba` to sit inside a `pw × ph` page, plus the status note when
 /// the file did not sit squarely on the paper.
 ///
