@@ -1158,8 +1158,24 @@ pub enum AppCmd {
     Zoom100,
     /// Multiply zoom by the factor, anchored on the canvas-area centre.
     ZoomStep(f32),
+    /// CV-032, CSP's View ▸ Zoom In / Zoom Out (`Ctrl` + NumPad `+` / `-`):
+    /// one rung along [`crate::app::ZOOM_LADDER`], not a wheel notch. The
+    /// ladder is the difference — a keypress that moves 15 % is a keypress
+    /// you press eight times, and CSP's own zoom keys land on round scales
+    /// (25 / 33 / 50 / 66 / 100 / 200 %) that a page can be judged at.
+    ZoomIn,
+    ZoomOut,
+    /// Set the zoom outright (`1.0` = 100 %), anchored on the canvas-area
+    /// centre — the View menu's 200 % row, and the door a script uses.
+    ZoomTo(f32),
     /// Rotate the view by the delta (radians), anchored on the centre.
     RotateView(f32),
+    /// CV-033, CSP's View ▸ Rotate/Flip ▸ Rotate 90 / 180 / 270: put the
+    /// view at an ABSOLUTE angle (degrees, clockwise) instead of stepping.
+    /// Turning the page a quarter turn to ink a long horizontal line with a
+    /// vertical arm stroke is the reason it exists, and stepping there six
+    /// times at 15° is not the same feature.
+    RotateViewTo(f32),
     RotateReset,
     /// CV-035, the second of the three view resets: rotation AND mirror
     /// back to normal in one step, the view otherwise left alone (zoom and

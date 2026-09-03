@@ -61,6 +61,7 @@ equivalent.</span></div>
 <tr><td><kbd>Ctrl+Shift+D</kbd></td><td>Reselect (restore the last deselected selection)</td></tr>
 <tr><td><kbd>Ctrl+P</kbd></td><td>Print… (the size-policy dialog first, then the system print dialog)</td></tr>
 <tr><td><kbd>Ctrl+0</kbd> / <kbd>Ctrl+1</kbd></td><td>Fit / 100 %</td></tr>
+<tr><td><kbd>Ctrl</kbd>+numpad <kbd>+</kbd>/<kbd>−</kbd>, <kbd>Ctrl+=</kbd> / <kbd>Ctrl+-</kbd>, <kbd>PageUp</kbd> / <kbd>PageDown</kbd></td><td>Zoom in / out, one rung of the scale ladder</td></tr>
 <tr><td><kbd>Ctrl+9</kbd></td><td>Flip view horizontally (mirror, not the layer)</td></tr>
 <tr><td><kbd>Ctrl+Shift+9</kbd></td><td>Flip view vertically (the other half of the same check)</td></tr>
 <tr><td><kbd>Tab</kbd></td><td>Hide every palette — canvas and chrome only</td></tr>
@@ -70,6 +71,21 @@ equivalent.</span></div>
 <tr><td><kbd>Ctrl+PageUp/Down</kbd>, <kbd>Ctrl+Home/End</kbd></td><td>Previous / next page, first / last</td></tr>
 <tr><td><kbd>Enter</kbd> / <kbd>Esc</kbd> / <kbd>Backspace</kbd></td><td>During a magnetic-lasso trace: close the outline / throw it away / take the last anchor back (at the first anchor, cancel)</td></tr>
 </table>
+
+<div class="quirk"><b>Zoom in and zoom out land on round numbers.</b> The
+keys walk a fixed ladder — … 33, 50, 66, 100, 150, 200, 300, 400 % … —
+rather than multiplying by a wheel notch, so the same key always brings
+you back to the same scale, and the status line says which one you landed
+on. The mouse wheel is the continuum: it keeps its own factor in
+<b>Preferences ▸ Canvas &amp; view ▸ Wheel zoom step</b>. <kbd>PageUp</kbd>
+and <kbd>PageDown</kbd> walk the ladder too, so the two ways of saying
+“zoom in” cannot disagree.</div>
+<div class="quirk"><b>Rotate 90/180/270 are absolute, the arrow keys are
+relative.</b> <b>View ▸ Rotate 90°</b> puts the page at exactly that
+angle no matter where it was; <kbd>-</kbd> and <kbd>F9</kbd> step by the
+<b>View rotation step</b> preference (15° shipped). 270° reads back on
+the status bar as −90°, because the view keeps its angle in the range
+−180°…180° — same page, same turn, shorter number.</div>
 
 <h2>Putting the view back</h2>
 <p>Three separate resets sit in the <b>View</b> menu, because “put the

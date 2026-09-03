@@ -1732,6 +1732,12 @@ pub(crate) fn builtin_chords() -> Vec<((bool, bool, bool, u16), &'static str)> {
         c(0x30, "Zoom fit"),
         ((true, false, true, 0x30), "Zoom 100 %"),
         c(0x31, "Zoom 100 %"),
+        // CV-032: CSP's Ctrl + NumPad +/−, and the main-row twins for the
+        // laptops with no numpad.
+        c(0x6B, "Zoom in"),
+        c(0xBB, "Zoom in"),
+        c(0x6D, "Zoom out"),
+        c(0xBD, "Zoom out"),
         c(0x39, "Flip view horizontal"),
         ((true, true, false, 0x39), "Flip view vertical"),
         c(0x21, "Previous page"),
@@ -1879,6 +1885,12 @@ fn shortcut(app: &mut App, vk: u16, repeat: bool) -> bool {
         (true, 0x30) if alt => Some(AppCmd::Zoom100), // Ctrl+Alt+0 (CSP pixel size)
         (true, 0x30) => Some(AppCmd::ZoomFit), // Ctrl+0
         (true, 0x31) => Some(AppCmd::Zoom100), // Ctrl+1
+        // CV-032. CSP's zoom keys are Ctrl + NumPad +/− (VK_ADD /
+        // VK_SUBTRACT); the main-row `=` and `-` are here too because half
+        // the keyboards this ships to have no numpad at all, and Ctrl is
+        // what keeps the bare `-` free for its rotate-left binding.
+        (true, 0x6B) | (true, 0xBB) => Some(AppCmd::ZoomIn),
+        (true, 0x6D) | (true, 0xBD) => Some(AppCmd::ZoomOut),
         (true, 0x39) if shift => Some(AppCmd::FlipViewV), // Ctrl+Shift+9
         (true, 0x39) => Some(AppCmd::FlipView), // Ctrl+9 (owner's viewreversehorz)
         (true, 0x41) => Some(AppCmd::SelectAll), // Ctrl+A
@@ -1942,8 +1954,12 @@ fn shortcut(app: &mut App, vk: u16, repeat: bool) -> bool {
         // step is the `rotate_step_deg` preference (15° shipped).
         (false, 0xBD) => Some(AppCmd::RotateView(-app.prefs.rotate_step_deg.to_radians())),
         (false, 0x78) => Some(AppCmd::RotateView(app.prefs.rotate_step_deg.to_radians())),
-        (false, 0x21) => Some(AppCmd::ZoomStep(1.25)), // PageUp (CSP zoom in)
-        (false, 0x22) => Some(AppCmd::ZoomStep(1.0 / 1.25)), // PageDown
+        // PageUp/PageDown are CSP's zoom keys too, so they walk the same
+        // ladder as Ctrl + NumPad +/− rather than a private 1.25 factor —
+        // two keys that both say "zoom in" must not land on two different
+        // scales.
+        (false, 0x21) => Some(AppCmd::ZoomIn), // PageUp (CSP zoom in)
+        (false, 0x22) => Some(AppCmd::ZoomOut), // PageDown
         // Page navigation (PM-021): Ctrl-modified, so the bare zoom keys
         // keep the owner's CSP bindings. Ctrl+Home/End = first/last.
         (true, 0x21) => Some(AppCmd::PagePrev), // Ctrl+PageUp

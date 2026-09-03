@@ -371,9 +371,35 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
             app.viewport.zoom_around(c, f);
             app.mark_dirty();
         }
+        AppCmd::ZoomIn => {
+            app.zoom_ladder_step(true);
+            app.mark_dirty();
+        }
+        AppCmd::ZoomOut => {
+            app.zoom_ladder_step(false);
+            app.mark_dirty();
+        }
+        AppCmd::ZoomTo(z) => {
+            let c = app.canvas_center();
+            app.viewport.set_zoom_around(c, z);
+            app.set_status(format!("zoom {}%", (app.viewport.zoom * 100.0).round()));
+            app.mark_dirty();
+        }
         AppCmd::RotateView(d) => {
             let c = app.canvas_center();
             app.viewport.rotate_around(c, d);
+            app.mark_dirty();
+        }
+        AppCmd::RotateViewTo(deg) => {
+            let c = app.canvas_center();
+            app.viewport.set_rotation_around(c, deg.to_radians());
+            // Report the angle the VIEWPORT settled on, not the one asked
+            // for: it wraps to (-180, 180], so 270 reads back as -90 and
+            // the status line must not claim otherwise.
+            app.set_status(format!(
+                "view rotated {}°",
+                app.viewport.rotate_rad.to_degrees().round()
+            ));
             app.mark_dirty();
         }
         AppCmd::RotateReset => {

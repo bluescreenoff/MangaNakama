@@ -1057,6 +1057,20 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 app.push_cmd(AppCmd::Zoom100);
                 ui.close();
             }
+            // CV-032. A rung of the scale ladder, not a wheel notch: these
+            // are the keys that land you on 50 / 66 / 100 / 200 %.
+            if item(ui, "Zoom in", "Ctrl++ / PgUp") {
+                app.push_cmd(AppCmd::ZoomIn);
+                ui.close();
+            }
+            if item(ui, "Zoom out", "Ctrl+- / PgDn") {
+                app.push_cmd(AppCmd::ZoomOut);
+                ui.close();
+            }
+            if item(ui, "Zoom 200%", "") {
+                app.push_cmd(AppCmd::ZoomTo(2.0));
+                ui.close();
+            }
             // Workflow audit finding 8. Zoom 100% is one DOCUMENT pixel per
             // screen pixel, which on a 600 dpi page is nothing like the
             // printed size; this is one page millimetre per screen
@@ -1178,6 +1192,20 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
             if item(ui, "Rotate counter-clockwise", "-") {
                 app.push_cmd(AppCmd::RotateView(-step));
                 ui.close();
+            }
+            // CV-033: the fixed quarter turns. Stepping to 90° at 15° a
+            // press is six presses and lands wherever the step ladder
+            // happens to sit; a quarter turn is one command because
+            // turning the page to ink a long line is one decision.
+            for (label, deg) in [
+                ("Rotate 90°", 90.0),
+                ("Rotate 180°", 180.0),
+                ("Rotate 270°", 270.0),
+            ] {
+                if item(ui, label, "") {
+                    app.push_cmd(AppCmd::RotateViewTo(deg));
+                    ui.close();
+                }
             }
             // CV-035, the three resets. Rotation alone is the one you want
             // mid-drawing; the other two exist because "put the page back"

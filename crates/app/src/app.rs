@@ -5134,6 +5134,13 @@ mod surface_layers_tests;
 #[cfg(test)]
 mod surface_file_tests;
 
+/// Surface pass (2026-09-02, Phase 3), canvas/view + interface family:
+/// zoom, rotate, the mirror check, the three resets, the Navigator, the
+/// guide hides and the workspace layout — driven through the real view
+/// commands and judged on a render of the LIVE viewport.
+#[cfg(test)]
+mod surface_view_tests;
+
 /// Mangaka-basics QA (2026-09-02 round), selection + paneling family: the
 /// selection tools, the launcher's own commands, transform, and the frame
 /// folders a comic page is made of — every one judged on an EXPORT render.

@@ -26,6 +26,41 @@ fn pane_fit(doc_size: (u32, u32), size_px: (u32, u32), margin: f32) -> Viewport 
     }
 }
 
+/// CV-032: the zoom rungs the View menu's Zoom In / Zoom Out keys walk,
+/// as scale factors. CSP's own scale list, which is also what
+/// Preferences ▸ Canvas ▸ Scale edits there — round numbers a page can be
+/// judged at, close together where the work happens (50–200 %) and coarse
+/// at the ends where a step is a jump anyway.
+///
+/// The wheel deliberately does NOT use it: a wheel notch is a continuum
+/// (`Prefs::wheel_step`), a keypress is a rung.
+pub const ZOOM_LADDER: &[f32] = &[
+    0.02, 0.03, 0.04, 0.06, 0.08, 0.125, 0.16, 0.25, 0.33, 0.50, 0.66, 1.0, 1.5, 2.0, 3.0, 4.0,
+    6.0, 8.0, 12.0, 16.0, 24.0, 32.0, 64.0,
+];
+
+/// The next rung strictly above (`up`) or below the current zoom. The
+/// strictness is what makes a repeated press keep moving from a zoom that
+/// is already ON a rung; the small epsilon keeps a float-fuzzy 1.0 from
+/// counting as "below 1.0" and standing still.
+pub fn zoom_ladder_next(zoom: f32, up: bool) -> f32 {
+    let eps = 1.0e-3;
+    if up {
+        ZOOM_LADDER
+            .iter()
+            .copied()
+            .find(|z| *z > zoom * (1.0 + eps))
+            .unwrap_or_else(|| ZOOM_LADDER[ZOOM_LADDER.len() - 1])
+    } else {
+        ZOOM_LADDER
+            .iter()
+            .copied()
+            .rev()
+            .find(|z| *z < zoom * (1.0 - eps))
+            .unwrap_or(ZOOM_LADDER[0])
+    }
+}
+
 fn view_key(vp: &Viewport) -> [u32; 5] {
     [
         vp.pan[0].to_bits(),
@@ -161,6 +196,17 @@ impl App {
     pub fn nudge_pan(&mut self, dx: f32, dy: f32) {
         self.viewport.pan[0] += dx;
         self.viewport.pan[1] += dy;
+        self.needs_redraw = true;
+    }
+
+    /// CV-032: one rung along [`ZOOM_LADDER`], anchored on the canvas-area
+    /// centre, with the scale it landed on said out loud — the number is
+    /// the whole point of a ladder step.
+    pub fn zoom_ladder_step(&mut self, up: bool) {
+        let want = zoom_ladder_next(self.viewport.zoom, up);
+        let c = self.canvas_center();
+        self.viewport.set_zoom_around(c, want);
+        self.set_status(format!("zoom {}%", (self.viewport.zoom * 100.0).round()));
         self.needs_redraw = true;
     }
 
