@@ -410,7 +410,7 @@ impl App {
         self.mark_pages_dirty();
         self.mark_dirty();
         let mut s = format!(
-            "placement replayed onto {done} page(s) — {rw}×{rh} at {},{}; rotation is not              copied, and undo does not cover the other pages",
+            "placement replayed onto {done} page(s) — {rw}×{rh} at {},{}; rotation is not copied, and undo does not cover the other pages",
             rect[0], rect[1]
         );
         if failed > 0 {
