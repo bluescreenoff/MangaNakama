@@ -1653,6 +1653,50 @@ impl App {
         }
     }
 
+    /// Walk a figure path into evenly-spaced synthetic pen samples.
+    ///
+    /// The clock is the point of the extraction. Each sample used to be
+    /// stamped `t0 + (segment * 16 + step)`, which is not a clock at all: a
+    /// segment 200 px long is ~160 steps, so the NEXT segment restarted 16 ms
+    /// after the previous one began and time ran backwards by more than a
+    /// tenth of a second at every corner. libmypaint says so out loud
+    /// ("Time is running backwards!", once per corner) and then divides by
+    /// that dtime to get its speed inputs — `docs/ARCHITECTURE.md`'s stroke
+    /// rule is about exactly this. One monotonic counter fixes it, and a
+    /// figure is a constant-speed mark anyway.
+    pub(crate) fn figure_samples(path: &[[f32; 2]], close: bool, spacing: f32) -> Vec<PenSample> {
+        // ~1 ms per dab step: a plausible hand at this spacing, and above
+        // all monotonic.
+        const MS_PER_STEP: f64 = 1.0;
+        let mut samples: Vec<PenSample> = Vec::new();
+        let n = path.len();
+        let segs = if close { n } else { n - 1 };
+        let mut t = 0.0f64;
+        let mut push = |x: f32, y: f32, t: f64| {
+            samples.push(PenSample {
+                x,
+                y,
+                pressure: 1.0,
+                tilt_x: 0.0,
+                tilt_y: 0.0,
+                t_ms: t,
+            });
+        };
+        for i in 0..segs {
+            let p = path[i];
+            let q = path[(i + 1) % n];
+            let d = ((q[0] - p[0]).hypot(q[1] - p[1]) / spacing).ceil().max(1.0) as usize;
+            for k in 0..d {
+                let f = k as f32 / d as f32;
+                push(p[0] + (q[0] - p[0]) * f, p[1] + (q[1] - p[1]) * f, t);
+                t += MS_PER_STEP;
+            }
+        }
+        let last = *path.last().expect("path");
+        push(last[0], last[1], t + MS_PER_STEP);
+        samples
+    }
+
     /// Ink one figure path through the active brush (CSP figures stroke with
     /// the drawing brush), optionally filling it first — one undo step: the
     /// fill joins the stroke's open op, and the selection mask applies to
@@ -1661,47 +1705,35 @@ impl App {
         if path.len() < 2 {
             return;
         }
-        // Fill FIRST, inside the stroke's op bracket.
+        // Fill FIRST, so the outline inks over its own edge.
         let fill = close && self.figure_fill && path.len() >= 3;
+        // `fill_polygon` brackets its own undo op and `end_stroke` brackets
+        // the outline's, so a filled figure used to cost TWO undo presses:
+        // the first Ctrl+Z left the shape as a hollow outline, the second
+        // took the rest. CSP undoes a filled figure in one. The two steps
+        // are folded back together below rather than merged inside the
+        // bracket, because the fill has to close its op to run
+        // `mask_op_to_selection`/`mask_op_to_alpha` over its own pre-image.
+        let steps_before = self.doc.undo_len();
         if fill {
             let c = self.active_color();
             self.doc.fill_polygon(path, c, 1.0);
-            // fill_polygon brackets its own op — accept two steps for v1
-            // unless we inline it; CSP merges them, noted in RESUME.
         }
+        // CSP: "all figure shapes use a basic pen shape". The active brush's
+        // ENTRY TAPER (`core::taper`, 入り) is a HAND-stroke affordance — it
+        // ramps pressure up over the first `taper_px` of arc length so a
+        // drawn line starts thin. On a drafting mark that is simply a
+        // defect: with the owner's Real G-Pen a Shift-square inked with a
+        // faded top edge and a Shift-circle lost a quarter of its rim to a
+        // hairline (rendered proof, `g02-rect-shift.png` / `g03-circle.png`
+        // before this). It is not visible on a two-point Straight line only
+        // because `ink_figure` walks a closed 2-gon there and paints the
+        // line twice. Suppressed for the synthetic stroke, restored after.
+        let taper_px = std::mem::replace(&mut self.brush.inner_mut().length_px, 0.0);
         self.begin_stroke(PointerKind::Pen); // synthetic — no mouse floor
         let radius = self.brush_radius().max(0.5);
         let spacing = (radius * 0.25).max(1.0);
-        let now_ms = std::time::Instant::now();
-        let t0 = now_ms.elapsed().as_secs_f64() * 1000.0;
-        let mut samples: Vec<PenSample> = Vec::new();
-        let n = path.len();
-        let segs = if close { n } else { n - 1 };
-        for i in 0..segs {
-            let p = path[i];
-            let q = path[(i + 1) % n];
-            let d = ((q[0] - p[0]).hypot(q[1] - p[1]) / spacing).ceil().max(1.0) as usize;
-            for k in 0..d {
-                let t = k as f32 / d as f32;
-                samples.push(PenSample {
-                    x: p[0] + (q[0] - p[0]) * t,
-                    y: p[1] + (q[1] - p[1]) * t,
-                    pressure: 1.0,
-                    tilt_x: 0.0,
-                    tilt_y: 0.0,
-                    t_ms: t0 + (i * 16 + k) as f64,
-                });
-            }
-        }
-        let last = *path.last().expect("path");
-        samples.push(PenSample {
-            x: last[0],
-            y: last[1],
-            pressure: 1.0,
-            tilt_x: 0.0,
-            tilt_y: 0.0,
-            t_ms: t0 + samples.len() as f64 * 4.0 + 16.0,
-        });
+        let samples = Self::figure_samples(path, close, spacing);
         // `push_batch` takes CLIENT-space samples — it runs every one of
         // them through `viewport.to_canvas` itself, because that is the
         // space a tablet reports in. Every path that reaches here is in
@@ -1721,6 +1753,16 @@ impl App {
             .collect();
         self.push_batch(&samples);
         self.end_stroke();
+        self.brush.inner_mut().length_px = taper_px;
+        if fill {
+            let n = self.doc.undo_len().saturating_sub(steps_before);
+            if n > 1 {
+                // `wrap_recent` unwraps a single member, so a fill that
+                // touched nothing (fully outside the selection) still reads
+                // as one plain step.
+                self.doc.wrap_recent(self.figure_mode.undo_label(), n);
+            }
+        }
         self.set_status(match self.figure_mode {
             FigureMode::Line => "line inked",
             FigureMode::Rect => "rectangle inked",
@@ -3618,15 +3660,27 @@ impl App {
         }
         if let Some((a, cur)) = &mut self.figure_drag {
             *cur = (cx, cy);
-            // Shift constrains line/rect/ellipse to 45° steps (CSP).
+            // Shift: 45° steps on a LINE, a square/circle on the two
+            // dragged shapes — see `FigureMode::shift_keeps_aspect` for
+            // why one rule cannot serve both.
             let shift = self.shell.sync_modifiers().shift;
             if shift {
                 let dx = cx - a.0;
                 let dy = cy - a.1;
-                let ang = dy.atan2(dx);
-                let oct = (ang / std::f32::consts::FRAC_PI_4).round() * std::f32::consts::FRAC_PI_4;
-                let len = (dx * dx + dy * dy).sqrt();
-                *cur = (a.0 + oct.cos() * len, a.1 + oct.sin() * len);
+                if self.figure_mode.shift_keeps_aspect() {
+                    // The longer side wins (nothing the artist dragged is
+                    // thrown away) and each axis keeps the direction it was
+                    // dragged in, so the shape stays under the pointer's
+                    // quadrant instead of flipping across the anchor.
+                    let s = dx.abs().max(dy.abs());
+                    *cur = (a.0 + s.copysign(dx), a.1 + s.copysign(dy));
+                } else {
+                    let ang = dy.atan2(dx);
+                    let oct =
+                        (ang / std::f32::consts::FRAC_PI_4).round() * std::f32::consts::FRAC_PI_4;
+                    let len = (dx * dx + dy * dy).sqrt();
+                    *cur = (a.0 + oct.cos() * len, a.1 + oct.sin() * len);
+                }
             }
             self.needs_redraw = true;
             return;

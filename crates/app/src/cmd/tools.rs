@@ -190,6 +190,38 @@ impl FigureMode {
     pub fn can_adjust_angle(self) -> bool {
         matches!(self, FigureMode::Rect | FigureMode::Ellipse)
     }
+
+    /// What Shift means for this sub tool's drag. CSP splits it: on the
+    /// Straight line it "rotates in increments of 45 degrees", but on the
+    /// Rectangle it makes "a perfect square" and on the Ellipse "a perfect
+    /// circle" — a constraint on the two SIDES, not on the diagonal's
+    /// angle.
+    ///
+    /// They are not the same operation and swapping one for the other is
+    /// not a rounding difference: snapping a box's diagonal to the nearest
+    /// 45° octant collapses the box whenever the drag lies nearer an axis
+    /// than the diagonal. A 22° drag lands on 0°, and the "square" the
+    /// artist asked for inks as a zero-height LINE (rendered proof:
+    /// `g03-circle.png`, a flat bar where a circle was drawn).
+    pub fn shift_keeps_aspect(self) -> bool {
+        matches!(self, FigureMode::Rect | FigureMode::Ellipse)
+    }
+
+    /// What the History palette calls a FILLED figure — the one step the
+    /// fill and the outline are folded into.
+    pub fn undo_label(self) -> &'static str {
+        match self {
+            FigureMode::Line => "Line",
+            FigureMode::Rect => "Rectangle",
+            FigureMode::Ellipse => "Ellipse",
+            FigureMode::Polygon => "Polygon",
+            FigureMode::Curve | FigureMode::Arc => "Curve",
+            FigureMode::Smart => "Shape",
+            FigureMode::Stream => "Speed lines",
+            FigureMode::Focus => "Focus lines",
+            FigureMode::Urchin | FigureMode::SolidFlash => "Flash",
+        }
+    }
 }
 
 /// One placed point of an in-progress Polygon / Continuous-curve click list

@@ -58,6 +58,16 @@ palettes is a key you pressed.</div>
 <div class="quirk"><b>A canvas made from a pixel preset has no
 guides.</b> They are millimetre geometry at a dpi, so a canvas created
 in pixels has nothing to draw and the switch has nothing to do.</div>
+<div class="quirk"><b>To change the paper after the work exists, use
+Edit &#9656; Change work resolution&hellip; &mdash; not Work
+Settings.</b> Work Settings re-draws the guides and moves no pixels, so
+retyping the paper size there leaves every page the wrong size for its
+own paper. The resolution dialog has a <i>Paper</i> picker beside the
+dpi: pick a preset and every page is rescaled onto it in the same pass,
+with the trim, bleed and inner border coming along. The dpi field
+decides the resolution &mdash; picking &ldquo;A4 Color 350dpi&rdquo; as a
+<em>shape</em> does not drag its 350 in with it. Like any whole-work
+resample this cannot be undone, so it asks you to save first.</div>
 <div class="quirk"><b>The inner border and safety margins know which
 side of the book the page is.</b> In a right-bound work, odd pages sit
 left and even pages sit right (page 1 is a left page), so the binding
@@ -190,6 +200,22 @@ the layer is a normal generator afterwards: Object-tool handles and
 Layer ▸ Edit effect lines both adjust it. Count, width, jitter and the
 hollow centre live in Tool Property and apply to the <em>next</em>
 drag.</div>
+<div class="quirk"><b><kbd>Shift</kbd> means two different things in the
+Direct draw group.</b> On the straight line it snaps the drag to 45°
+steps, the way you rule a horizon. On the rectangle and the ellipse it
+does what Clip Studio's does instead — holds the two sides equal, so you
+get a true square or a true circle no matter which way the drag leans.
+<span class="why">One rule used to serve both, and it was the line's:
+holding <kbd>Shift</kbd> for a circle and dragging a wide, shallow box
+snapped the box's <em>diagonal</em> to the nearest 45°, which for
+anything flatter than 22° is 0° — and the circle inked as a flat
+bar.</span></div>
+<div class="quirk"><b>A figure is one weight from end to end, and one
+<kbd>Ctrl+Z</kbd>.</b> Figures ink with the brush you are holding, but
+not with its entry taper: a panel border that faded in at one corner is
+a defect, not a flourish. And a shape drawn with <i>Fill with drawing
+colour</i> on is a single history step — the first undo used to leave
+the hollow outline behind.</div>
 <div class="quirk warn"><b>Regenerating effect lines replaces the
 layer's pixels wholesale, including anything painted on top of them.</b>
 Layer ▸ Edit effect lines ▸ Apply re-runs the generator with the dialog's
