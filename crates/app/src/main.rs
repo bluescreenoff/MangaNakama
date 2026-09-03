@@ -1738,6 +1738,8 @@ pub(crate) fn builtin_chords() -> Vec<((bool, bool, bool, u16), &'static str)> {
         c(0xBB, "Zoom in"),
         c(0x6D, "Zoom out"),
         c(0xBD, "Zoom out"),
+        c(0x09, "Next canvas"),
+        ((true, true, false, 0x09), "Previous canvas"),
         c(0x39, "Flip view horizontal"),
         ((true, true, false, 0x39), "Flip view vertical"),
         c(0x21, "Previous page"),
@@ -1891,6 +1893,10 @@ fn shortcut(app: &mut App, vk: u16, repeat: bool) -> bool {
         // what keeps the bare `-` free for its rotate-left binding.
         (true, 0x6B) | (true, 0xBB) => Some(AppCmd::ZoomIn),
         (true, 0x6D) | (true, 0xBD) => Some(AppCmd::ZoomOut),
+        // CV-023: Ctrl+Tab walks the open works, Ctrl+Shift+Tab the other
+        // way — the chord every tabbed application has, which is why a tab
+        // strip you can only click reads as broken.
+        (true, 0x09) => Some(AppCmd::NextDoc(!shift)),
         (true, 0x39) if shift => Some(AppCmd::FlipViewV), // Ctrl+Shift+9
         (true, 0x39) => Some(AppCmd::FlipView), // Ctrl+9 (owner's viewreversehorz)
         (true, 0x41) => Some(AppCmd::SelectAll), // Ctrl+A

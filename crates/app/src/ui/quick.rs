@@ -451,6 +451,8 @@ pub fn command_index() -> Vec<(&'static str, &'static str, AppCmd)> {
             ViewReset,
         ),
         ("New view of this page", "View", OpenCanvasView),
+        ("Next work (canvas tab)", "Workspace (Ctrl+Tab)", NextDoc(true)),
+        ("Previous work (canvas tab)", "Workspace (Ctrl+Shift+Tab)", NextDoc(false)),
         ("Hide crop marks and margins", "View", SetGuidesHidden(true)),
         (
             "Show crop marks and margins",

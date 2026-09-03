@@ -1162,7 +1162,7 @@ pub enum AppCmd {
     /// Multiply zoom by the factor, anchored on the canvas-area centre.
     ZoomStep(f32),
     /// CV-032, CSP's View ▸ Zoom In / Zoom Out (`Ctrl` + NumPad `+` / `-`):
-    /// one rung along [`app::view::ZOOM_LADDER`], not a wheel notch. The
+    /// one rung along `app::view::ZOOM_LADDER`, not a wheel notch. The
     /// ladder is the difference — a keypress that moves 15 % is a keypress
     /// you press eight times, and CSP's own zoom keys land on round scales
     /// (25 / 33 / 50 / 66 / 100 / 200 %) that a page can be judged at.
@@ -1205,6 +1205,12 @@ pub enum AppCmd {
     /// persisted (`grid=`, `grid_mm=`, `grid_div=` in ui.txt), no undo step,
     /// and an export has never seen it.
     SetGrid { on: bool, mm: f32, div: u32 },
+    /// CV-023, CSP's Window ▸ Canvas ▸ Next canvas / Previous canvas: step
+    /// to the neighbouring open work, wrapping at the ends. Tabs were
+    /// click-only, which is fine with two works open and not fine with six.
+    /// Wrapping rather than stopping because with two tabs — the common case
+    /// — the same key then simply swaps between them.
+    NextDoc(bool),
     /// T-020: put the active transform back to the state it started from
     /// while STAYING in it — the identity params, so the float sits exactly
     /// where it was lifted. The reference point is a setting, not part of

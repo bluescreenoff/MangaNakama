@@ -453,6 +453,24 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
             });
             app.mark_dirty();
         }
+        AppCmd::NextDoc(forward) => {
+            // `docs` is dense (one slot per tab, `ensure_slots` keeps at
+            // least one), so the neighbour is arithmetic. One tab open is a
+            // no-op that SAYS so, rather than a key that looks broken.
+            let n = app.docs.len().max(1);
+            if n < 2 {
+                app.set_status("only one work is open");
+            } else {
+                let i = if forward {
+                    (app.active_doc + 1) % n
+                } else {
+                    (app.active_doc + n - 1) % n
+                };
+                if app.switch_doc(i) {
+                    app.set_status(format!("work {} of {n}", i + 1));
+                }
+            }
+        }
         AppCmd::SetGrid { on, mm, div } => {
             app.layout.note_grid(on, mm, div);
             // The refusal has to speak, because the guard is invisible: a

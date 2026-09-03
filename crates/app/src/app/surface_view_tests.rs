@@ -427,6 +427,56 @@ fn v10_the_csp_zoom_chords_are_bound() {
     }
 }
 
+// --- v12 next / previous canvas (CV-023) --------------------------------
+
+#[test]
+fn v12_ctrl_tab_walks_the_open_works_and_wraps() {
+    let Some(mut app) = app() else { return };
+
+    // One work open: the key must not look broken.
+    run(&mut app, AppCmd::NextDoc(true));
+    assert_eq!(app.active_doc, 0);
+    assert!(
+        app.status.contains("only one work"),
+        "a lone tab must say so: {}",
+        app.status
+    );
+
+    // Three works through the real door (a parked slot always holds a
+    // session — faking `docs` with empty slots breaks that invariant and
+    // `switch_doc` rightly refuses).
+    app.push_doc_slot();
+    app.push_doc_slot();
+    assert_eq!(app.docs.len(), 3);
+    assert!(app.switch_doc(0), "back to the first work");
+    for want in [1usize, 2, 0, 1] {
+        run(&mut app, AppCmd::NextDoc(true));
+        assert_eq!(app.active_doc, want, "forward walk");
+    }
+    for want in [0usize, 2, 1, 0] {
+        run(&mut app, AppCmd::NextDoc(false));
+        assert_eq!(app.active_doc, want, "backward walk");
+    }
+    assert!(app.status.contains("of 3"), "the step names the tab: {}", app.status);
+
+    // And the chord a hand reaches for is bound both ways.
+    // From the first of three works: forward lands on 2, backward wraps to 3.
+    for (shift, want) in [(false, 1usize), (true, 2)] {
+        assert!(app.switch_doc(0) || app.active_doc == 0);
+        app.shell.test_modifiers = Some(egui::Modifiers {
+            ctrl: true,
+            shift,
+            ..Default::default()
+        });
+        assert!(crate::shortcut(&mut app, 0x09, false), "Ctrl+Tab is bound");
+        app.shell.test_modifiers = None;
+        while let Some(c) = app.cmds.pop_front() {
+            dispatch(&mut app, c);
+        }
+        assert_eq!(app.active_doc, want, "shift={shift}");
+    }
+}
+
 // --- v11 the canvas grid (CV-045/046) -----------------------------------
 
 #[test]

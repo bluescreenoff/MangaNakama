@@ -889,6 +889,16 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 app.push_cmd(AppCmd::OpenCanvasView);
                 ui.close();
             }
+            // CV-023, CSP's Window ▸ Canvas ▸ Next / Previous canvas. The
+            // tab strip stays the pointer route; this is the hand route.
+            if item(ui, "Next work", "Ctrl+Tab") {
+                app.push_cmd(AppCmd::NextDoc(true));
+                ui.close();
+            }
+            if item(ui, "Previous work", "Ctrl+Shift+Tab") {
+                app.push_cmd(AppCmd::NextDoc(false));
+                ui.close();
+            }
             ui.separator();
             ui.weak("closed palettes reopen beside Layers");
             for p in crate::ui::dock::ALL {
