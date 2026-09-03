@@ -993,12 +993,57 @@ fn export_stage(app: &mut App) {
         .expect("the sheet")
         .to_rgba8();
     keep(&sheet, "10-contact-sheet");
-    let cell = mn_core::export::contact_cell(&image::RgbaImage::new(w, h), 400);
+    // Ledger E-05: a proof-sheet cell is the page cropped to its TRIM box —
+    // no トンボ, no bleed, no paper margin. The trim rect here is the same
+    // one the marks were placed against, and the marks all lie OUTSIDE it.
+    let out_trim = mn_core::export::trim_rect_out_px(Some(&setup), [0, 0, w, h], 1.0, (w, h))
+        .expect("the work has a real trim to crop to");
+    let cell = mn_core::export::contact_cell(&image::RgbaImage::new(w, h), Some(out_trim), 400);
     assert_eq!(
         sheet.dimensions(),
         (4 * cell.width() + 5 * 12, cell.height() + 2 * 12),
         "four across, one row"
     );
+    // The cell's shape IS the trim's shape — the paper's is wider/taller.
+    let cell_aspect = cell.width() as f32 / cell.height() as f32;
+    let trim_aspect =
+        (out_trim[2] - out_trim[0]) as f32 / (out_trim[3] - out_trim[1]) as f32;
+    let paper_aspect = w as f32 / h as f32;
+    println!(
+        "[note] cell aspect {cell_aspect:.4} vs trim {trim_aspect:.4} vs paper {paper_aspect:.4}"
+    );
+    assert!(
+        (cell_aspect - trim_aspect).abs() < 0.01,
+        "the cell is the trim box, not the paper"
+    );
+    // The 角トンボ sat in the four corners of the paper. Crop to the trim
+    // and that band is not in the picture at all: every cell corner is
+    // clean paper. 6% of the cell on each side, which on this page is well
+    // outside the 内枠 the panels are cut inside.
+    let (bw, bh) = (
+        (cell.width() as f32 * 0.06).ceil() as u32,
+        (cell.height() as f32 * 0.06).ceil() as u32,
+    );
+    for c in 0..4u32 {
+        let x0 = 12 + c * (cell.width() + 12);
+        for (dx, dy) in [
+            (0, 0),
+            (cell.width() - bw, 0),
+            (0, cell.height() - bh),
+            (cell.width() - bw, cell.height() - bh),
+        ] {
+            let mut n = 0;
+            for y in 12 + dy..12 + dy + bh {
+                for x in x0 + dx..x0 + dx + bw {
+                    if inked(&sheet, x, y) {
+                        n += 1;
+                    }
+                }
+            }
+            println!("[note] cell {c} corner ({dx},{dy}): {n} inked px in a {bw}x{bh} band");
+            assert_eq!(n, 0, "a register mark survived into cell {c}'s corner");
+        }
+    }
     let col_ink = |c: u32| -> u32 {
         let x0 = 12 + c * (cell.width() + 12);
         let mut n = 0;

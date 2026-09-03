@@ -933,11 +933,10 @@ fn f11_export_all_writes_a_contact_sheet_in_reading_order() {
 
     let sheet = image::open(&sheet_path).expect("the sheet decodes").to_rgba8();
     save(&sheet, "f11-contact");
-    // Four across, one row for three pages, cells sized off the page.
-    let cell = mn_core::export::contact_cell(
-        &image::RgbaImage::new(w, h),
-        400,
-    );
+    // Four across, one row for three pages, cells sized off the page's
+    // TRIM box (E-05 — a cell is the page a reader gets, not the plate).
+    let trim = mn_core::export::trim_rect_out_px(app.page.as_ref(), [0, 0, w, h], 1.0, (w, h));
+    let cell = mn_core::export::contact_cell(&image::RgbaImage::new(w, h), trim, 400);
     assert_eq!(
         sheet.dimensions(),
         (4 * cell.width() + 5 * 12, cell.height() + 2 * 12),

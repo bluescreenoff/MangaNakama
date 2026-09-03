@@ -815,10 +815,32 @@ pub fn contact_sheet(
     Some(sheet)
 }
 
-/// The cell for a contact sheet: `img` scaled so its long edge is `long` px.
+/// The cell for a contact sheet: `img` cropped to `trim` and then scaled so
+/// its long edge is `long` px.
+///
+/// `E-05` — a proof sheet is read as PAGES, so a cell is the page a reader
+/// gets: cropped to the TRIM box, with no トンボ and no bleed. The register
+/// marks live outside the trim by construction ([`crop_marks`]), so the
+/// crop is what removes them; eight of them in a 400 px cell is dirt, not
+/// information. Pass `trim` from [`trim_rect_out_px`] — `None` (a pixel
+/// canvas, a degenerate trim, an export already cut inside the trim) keeps
+/// the whole image, which is the old behaviour byte for byte.
+///
 /// Nearest-neighbour would alias a screentone into a moiré that says nothing
 /// about the page, so this uses the same quality kernel the exports do.
-pub fn contact_cell(img: &image::RgbaImage, long: u32) -> image::RgbaImage {
+pub fn contact_cell(
+    img: &image::RgbaImage,
+    trim: Option<[u32; 4]>,
+    long: u32,
+) -> image::RgbaImage {
+    let cropped;
+    let img = match trim {
+        Some([x0, y0, x1, y1]) if x1 > x0 && y1 > y0 && x1 <= img.width() && y1 <= img.height() => {
+            cropped = image::imageops::crop_imm(img, x0, y0, x1 - x0, y1 - y0).to_image();
+            &cropped
+        }
+        _ => img,
+    };
     let s = (long as f32 / img.width().max(img.height()).max(1) as f32).min(1.0);
     let (w, h) = (
         ((img.width() as f32 * s).round() as u32).max(1),
@@ -1452,6 +1474,53 @@ pub const CROP_MARK_FALLBACK_BLEED_MM: f32 = 3.0;
 /// paper (`ExportCrop::TrimBleed`/`Trim` cut the margin the marks live
 /// in). An empty result is the honest answer, not a failure — a file
 /// already cropped to the bleed has nothing left to mark.
+/// The TRIM box in OUTPUT pixels, `[x0, y0, x1, y1]`, possibly off the
+/// image — the inner line of the 角トンボ, before any clipping.
+///
+/// Work px → output px is the same mapping the margin stamp uses: subtract
+/// the crop's origin, then scale.
+fn trim_out_rect(s: &crate::page::PageSetup, crop: [u32; 4], eff_scale: f32) -> [i64; 4] {
+    let trim = s.trim_rect_px();
+    let px = |v: f32, origin: u32| ((v - origin as f32) * eff_scale).round() as i64;
+    [
+        px(trim[0], crop[0]),
+        px(trim[1], crop[1]),
+        px(trim[2], crop[0]),
+        px(trim[3], crop[1]),
+    ]
+}
+
+/// `E-05` — the TRIM box of a finished export, in that image's own pixels,
+/// clipped to it. `None` when the page has no trim worth cropping to (no
+/// setup, a pixel canvas, a degenerate trim) or when the finish already cut
+/// inside it.
+///
+/// This is the SAME rectangle [`crop_marks`] draws the inner 角トンボ line
+/// on — one derivation, so "cropped to the trim" and "marked at the trim"
+/// can never disagree by a pixel. Its one consumer is the contact sheet,
+/// whose cells are trimmed page crops without register marks.
+pub fn trim_rect_out_px(
+    setup: Option<&crate::page::PageSetup>,
+    crop: [u32; 4],
+    eff_scale: f32,
+    out_px: (u32, u32),
+) -> Option<[u32; 4]> {
+    let s = setup.filter(|s| s.dpi > 0)?;
+    let t = s.trim_rect_px();
+    if !(t[2] > t[0] && t[3] > t[1]) {
+        return None;
+    }
+    let [x0, y0, x1, y1] = trim_out_rect(s, crop, eff_scale);
+    let (ow, oh) = (out_px.0 as i64, out_px.1 as i64);
+    let r = [
+        x0.clamp(0, ow) as u32,
+        y0.clamp(0, oh) as u32,
+        x1.clamp(0, ow) as u32,
+        y1.clamp(0, oh) as u32,
+    ];
+    (r[2] > r[0] && r[3] > r[1]).then_some(r)
+}
+
 pub fn crop_marks(
     setup: Option<&crate::page::PageSetup>,
     crop: [u32; 4],
@@ -1475,10 +1544,7 @@ pub fn crop_marks(
     })
     .round() as i64;
     let wt = (mm(CROP_MARK_WEIGHT_MM).round() as i64).max(1);
-    // Work px → output px: the same mapping the margin stamp uses.
-    let px = |v: f32, origin: u32| ((v - origin as f32) * eff_scale).round() as i64;
-    let (x0, y0) = (px(trim[0], crop[0]), px(trim[1], crop[1]));
-    let (x1, y1) = (px(trim[2], crop[0]), px(trim[3], crop[1]));
+    let [x0, y0, x1, y1] = trim_out_rect(s, crop, eff_scale);
     let (ow, oh) = (out_px.0 as i64, out_px.1 as i64);
     // The arm is 10 mm where the margin allows it and the margin where it
     // does not — a paper only a little bigger than the bleed still gets

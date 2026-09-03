@@ -774,7 +774,13 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                 let stamp_engine = app.text_engine.as_ref();
                 let stamp_font = app.text_font.clone();
                 let stamp_story = app.story.clone();
-                let finish = |img: image::RgbaImage, number: &str| -> image::RgbaImage {
+                // Returns the finished image and, beside it, its TRIM box in
+                // that image's own pixels (E-05): the proof sheet's cells are
+                // trimmed page crops, and this is the one place that knows the
+                // geometry the finish actually applied.
+                let finish = |img: image::RgbaImage,
+                              number: &str|
+                 -> (image::RgbaImage, Option<[u32; 4]>) {
                     let in_px = (img.width(), img.height());
                     let full = [0, 0, img.width(), img.height()];
                     let r = match &setup {
@@ -807,15 +813,20 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                     }
                     // トンボ, placed through the SAME geometry the finish
                     // applied — a crop that ate the margin leaves the
-                    // marks with nowhere to go and draws none.
+                    // marks with nowhere to go and draws none. The trim box
+                    // the cells crop to comes out of that same geometry, so
+                    // "cut at the trim" and "marked at the trim" are one
+                    // derivation and cannot drift apart.
+                    let (out_px, eff, applied) =
+                        mn_core::export::finish_geometry(in_px, r, scale, px_h);
                     if marks_on {
-                        let (out_px, eff, applied) =
-                            mn_core::export::finish_geometry(in_px, r, scale, px_h);
                         let marks =
                             mn_core::export::crop_marks(setup.as_ref(), applied, eff, out_px);
                         mn_core::export::apply_crop_marks(&mut out, &marks);
                     }
-                    out
+                    let trim =
+                        mn_core::export::trim_rect_out_px(setup.as_ref(), applied, eff, out_px);
+                    (out, trim)
                 };
                 let write = |img: &image::RgbaImage, path: &std::path::Path| {
                     mn_core::export::save_finished(img, path, format, quality, colour).is_ok()
@@ -859,7 +870,7 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                                 // the RIGHT one in a right-bound work.
                                 let (h1, h2) = if rtl { (right, left) } else { (left, right) };
                                 for (tag, half) in [("a", &h1), ("b", &h2)] {
-                                    let img = finish(
+                                    let (img, trim) = finish(
                                         mn_core::export::composite_for_export(
                                             half,
                                             d.paper_export_background(),
@@ -871,7 +882,7 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                                     if write(&img, &path) {
                                         files += 1;
                                         if want_contact {
-                                            cells.push(mn_core::export::contact_cell(&img, 400));
+                                            cells.push(mn_core::export::contact_cell(&img, trim, 400));
                                         }
                                     }
                                 }
@@ -879,7 +890,7 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                                 exported.push(i);
                             }
                             None => {
-                                let img = finish(
+                                let (img, trim) = finish(
                                     mn_core::export::composite_for_export(
                                         &d,
                                         d.paper_export_background(),
@@ -892,7 +903,7 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                                     files += 1;
                                     exported.push(i);
                                     if want_contact {
-                                        cells.push(mn_core::export::contact_cell(&img, 400));
+                                        cells.push(mn_core::export::contact_cell(&img, trim, 400));
                                     }
                                 }
                             }
