@@ -531,5 +531,150 @@ fn m03_register_layer_as_material_honours_the_selection() {
         "a material was registered: status {}",
         app.status
     );
+    // CSP: a selection scopes the material. The saved PNG must be the
+    // selected third, not the whole 320 px band.
+    let made = app
+        .materials
+        .iter()
+        .find(|m| m.path.starts_with(&dir))
+        .expect("the new material is in the scratch folder")
+        .path
+        .clone();
+    let img = image::open(&made).expect("it is a readable image").to_rgba8();
+    assert!(
+        img.width() <= 120,
+        "the selection scoped it: {}x{}",
+        img.width(),
+        img.height()
+    );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// m04 The owner's tiling ask: one paste covers the page in copies as a
+/// SINGLE float, so it can be drawn through like a mask.
+#[test]
+fn m04_a_tiled_paste_covers_the_page_as_one_float() {
+    let Some(mut app) = bank_app() else {
+        return;
+    };
+    let Some(m) = app
+        .materials
+        .iter()
+        .find(|m| matches!(m.kind, MaterialKind::Image))
+        .cloned()
+    else {
+        return;
+    };
+    let before = app.doc.layers.len();
+    dispatch(
+        &mut app,
+        AppCmd::PasteMaterial {
+            path: m.path.clone(),
+            tile: true,
+        },
+    );
+    drain(&mut app);
+    assert!(
+        app.transform_drag.is_some() || app.doc.layers.len() > before,
+        "the tiling landed: status {}",
+        app.status
+    );
+    // The float is overlay state, not document pixels — bake it before
+    // rendering, or the page is still blank paper.
+    app.commit_open_float();
+    drain(&mut app);
+    let img = shot(&mut app, "m04-tiled", (200.0, 200.0), 400);
+    let painted = img.pixels().filter(|p| p[3] > 0 && p[0] < 250).count();
+    assert!(
+        painted > 4000,
+        "the tiling covers the page, not one stamp: {painted} px"
+    );
+}
+
+/// m05 CSP "Material filters … or use the search bar at the top": ONE box
+/// searches names AND tags (MT-012).
+#[test]
+fn m05_the_search_box_reads_names_and_tags() {
+    use super::materials::material_matches;
+    let Some(app) = bank_app() else {
+        return;
+    };
+    let all = app.materials.len();
+    let hits = app
+        .materials
+        .iter()
+        .filter(|m| material_matches(m, "tone"))
+        .count();
+    assert!(hits > 0 && hits < all, "'tone' narrows the bank: {hits}/{all}");
+    let none = app
+        .materials
+        .iter()
+        .filter(|m| material_matches(m, "zzzznotamaterial"))
+        .count();
+    assert_eq!(none, 0, "a miss is a miss");
+}
+
+/// m06 CSP "Displays tags assigned to materials as a list of buttons …
+/// tap a button to filter": ours are the type chips + the tag chips, and a
+/// type chip is a live filter.
+#[test]
+fn m06_a_type_chip_filters_the_grid() {
+    use super::materials::{MaterialFilter, MaterialType};
+    let Some(app) = bank_app() else {
+        return;
+    };
+    let f = MaterialFilter::Type(MaterialType::Tone);
+    let shown = app.materials.iter().filter(|m| f.accepts(m)).count();
+    let tones = app
+        .materials
+        .iter()
+        .filter(|m| m.material_type == MaterialType::Tone)
+        .count();
+    assert_eq!(shown, tones, "the Tones chip shows exactly the tones");
+    assert!(tones > 0 && tones < app.materials.len(), "and it narrows");
+}
+
+/// m07 CSP "Double tap a thumbnail … to edit the name and tags of the
+/// material": ours writes the folder's `tags.txt` sidecar and refreshes the
+/// bank in place — no rescan, no restart.
+#[test]
+fn m07_setting_tags_lands_without_a_rescan() {
+    let Some(mut app) = bank_app() else {
+        return;
+    };
+    let Some(m) = app.materials.first().cloned() else {
+        return;
+    };
+    let was = m.tags.clone();
+    dispatch(
+        &mut app,
+        AppCmd::MaterialSetTags {
+            path: m.path.clone(),
+            tags: "f6probe, rain".into(),
+        },
+    );
+    let now = app
+        .materials
+        .iter()
+        .find(|x| x.path == m.path)
+        .expect("still in the bank")
+        .tags
+        .clone();
+    assert!(now.contains("f6probe"), "the tag stuck in place: {now:?}");
+    // …and the search box sees it immediately.
+    use super::materials::material_matches;
+    let hit = app
+        .materials
+        .iter()
+        .filter(|x| material_matches(x, "f6probe"))
+        .count();
+    assert_eq!(hit, 1, "searchable at once");
+    // Put the bank back the way it was — this writes a real sidecar.
+    dispatch(
+        &mut app,
+        AppCmd::MaterialSetTags {
+            path: m.path.clone(),
+            tags: was,
+        },
+    );
 }
