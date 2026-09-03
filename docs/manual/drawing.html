@@ -574,6 +574,16 @@ you get a new gradient layer above it and a status line saying so.
 <span class="why">A tone you spent time tuning is not something a drag
 should overwrite; CSP never converts the layer you are standing on
 either.</span></div>
+<div class="quirk"><b>The Gradient tool&rsquo;s &ldquo;Create live
+layer&rdquo; is its OWN switch, and it starts ON.</b> The paint bucket has
+a switch by the same name in its own Tool Property, and the two are no
+longer one setting: turn the bucket back to painting pixels (its default)
+and your gradients still land as editable gradient layers. A drag
+therefore makes a live gradient layer unless you clear the box first.
+<span class="why">A bucket click is normally paint you never think about
+again, while a gradient is the thing you come back to and re-aim &mdash;
+opposite defaults, so they cannot share one flag. Both are per session:
+they reset when the program restarts.</span></div>
 <div class="quirk"><b>Brightness only exists in Perceptual mixing.</b> The
 slider disappears in the other modes rather than sitting there dead. It
 lifts the middle of a ramp between two saturated colours back toward the

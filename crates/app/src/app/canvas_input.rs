@@ -2490,7 +2490,7 @@ impl App {
             // than a panic.
             GradMode::Freeform => ([fg[0], fg[1], fg[2], 1.0], [bg[0], bg[1], bg[2], 1.0]),
         };
-        if self.fill_live {
+        if self.gradient_live {
             // I-016 / NL-006's live switch (TRIAGE 137): the drag defines the
             // ramp, the colours the endpoints — as parameters, not pixels.
             // The authored stops and options ride along, so a gradient LAYER
@@ -2682,12 +2682,12 @@ impl App {
         });
         if painted {
             self.mark_dirty();
-            // `fill_live` is a LINEAR-ramp switch: `FillKind::Gradient` is
+            // `gradient_live` is a LINEAR-ramp switch: `FillKind::Gradient` is
             // two endpoints, and there is nowhere in it to put drawn
             // polylines. Freeform always bakes, and says so rather than
             // silently ignoring the toggle.
             let n = guides.len();
-            self.set_status(if self.fill_live {
+            self.set_status(if self.gradient_live {
                 "freeform gradient painted — baked, live gradient layers are straight-line only"
                     .to_string()
             } else if n > 2 {

@@ -906,6 +906,9 @@ pub fn paneresize_e2e(cfg: GpuConfig) -> Result<(), String> {
         let after_fig = tile_sig(&app);
         dispatch(&mut app, AppCmd::SetTool(Tool::Gradient));
         app.grad_mode = GradMode::FgToBg;
+        // This claim is about ramp PIXELS on the active layer, so it drags
+        // with the live-layer switch off (it ships on).
+        app.gradient_live = false;
         app.finish_gradient((100.0, 100.0), (300.0, 100.0));
         let after_grad = tile_sig(&app);
         // And one undo returns to the pre-gradient state (each op is a step).

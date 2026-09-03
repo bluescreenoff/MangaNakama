@@ -588,6 +588,9 @@ fn gradient_tool_paints_the_authored_ramp() {
     };
     let mut app = App::new(renderer, (600, 400), 1.0);
     crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::SetTool(Tool::Gradient));
+    // The destructive ramp painter: this test is about the PIXELS, so it
+    // turns the Gradient tool's live-layer switch (on by default) off.
+    app.gradient_live = false;
     let alpha = |app: &App, x: i32, y: i32| -> u16 {
         let ti = TileIdx::of_pixel(x, y);
         app.doc.layers[app.doc.active]

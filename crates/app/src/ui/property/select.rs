@@ -332,6 +332,8 @@ pub(crate) fn sec_fill(ui: &mut egui::Ui, app: &mut App) {
     // NL-006's switch (TRIAGE 137): fill a LIVE layer instead of painting.
     // Enclose-and-fill paints pockets, not a window — the live model has no
     // shape for it, so the switch stays with the click sub tool.
+    // This is the BUCKET's switch alone (default off); the Gradient tool
+    // carries its own `gradient_live`, which ships on.
     if app.fill_mode == crate::cmd::FillMode::Click {
         ui.checkbox(&mut app.fill_live, "Create live layer");
     }

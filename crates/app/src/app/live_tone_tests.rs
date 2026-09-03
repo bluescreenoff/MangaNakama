@@ -135,7 +135,7 @@ fn a_live_gradient_lands_above_a_tone_layer_instead_of_eating_it() {
     };
     page(&mut app);
     let li = tone_layer(&mut app);
-    app.fill_live = true;
+    app.gradient_live = true;
 
     app.finish_gradient((20.0, 20.0), (200.0, 20.0));
     drain(&mut app);
@@ -206,5 +206,50 @@ fn the_raster_tone_effect_still_screens_painted_ink() {
             .display_tile(TileIdx::new(0, 0))
             .is_some(),
         "and the screen is derived from the ink"
+    );
+}
+
+/// The Gradient tool's live-layer switch is its OWN. It used to be the
+/// bucket's `fill_live`, so a mangaka who turned the bucket destructive
+/// (the normal way to use a bucket) silently lost editable gradients too,
+/// and there was no way to have one without the other. It also ships ON:
+/// a gradient is an object you re-drag a day later, not paint.
+#[test]
+fn the_gradient_tool_has_its_own_live_switch_and_it_ships_on() {
+    let Some(mut app) = super::new_document_tests::headless() else {
+        println!("[test] SKIP: no usable adapter");
+        return;
+    };
+    page(&mut app);
+    assert!(app.gradient_live, "a gradient drag ships LIVE");
+    assert!(!app.fill_live, "…while the bucket still ships destructive");
+
+    // Untouched defaults: one drag, one live gradient layer.
+    let raster = app.doc.active;
+    let before = app.doc.layers.len();
+    app.finish_gradient((20.0, 20.0), (200.0, 20.0));
+    drain(&mut app);
+    assert_eq!(app.doc.layers.len(), before + 1, "the drag made a layer");
+    assert!(
+        matches!(
+            app.doc.layers[app.doc.active].kind,
+            LayerKind::Fill(FillKind::Gradient { .. })
+        ),
+        "…a LIVE gradient layer: {:?}",
+        app.doc.layers[app.doc.active].kind
+    );
+
+    // Now the entanglement itself: the bucket's switch ON, the gradient's
+    // OFF. The old shared flag read this as "live" and made a second layer.
+    app.doc.active = raster;
+    app.fill_live = true;
+    app.gradient_live = false;
+    let before = app.doc.layers.len();
+    app.finish_gradient((20.0, 60.0), (200.0, 60.0));
+    drain(&mut app);
+    assert_eq!(app.doc.layers.len(), before, "no layer: the gradient baked");
+    assert!(
+        shows_ink(&app, raster),
+        "…the ramp landed as pixels on the raster layer"
     );
 }

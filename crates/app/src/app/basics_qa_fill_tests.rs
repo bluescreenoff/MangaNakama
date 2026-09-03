@@ -573,7 +573,7 @@ fn qa_the_raster_tone_effect_screens_painted_ink_on_export() {
 fn qa_a_gradient_layer_ramps_across_the_page_and_undoes() {
     let Some(mut app) = headless() else { return };
     page(&mut app);
-    app.fill_live = true;
+    app.gradient_live = true;
     let before = app.doc.layers.len();
     dispatch(&mut app, AppCmd::SetTool(Tool::Gradient));
     dispatch(&mut app, AppCmd::SetSlotColor([0.0, 0.0, 0.0]));
@@ -720,7 +720,7 @@ fn qa_a_live_tone_is_still_editable_after_a_save_and_load() {
 fn qa_layer_property_shows_a_gradient_layers_rows() {
     let Some(mut app) = headless() else { return };
     page(&mut app);
-    app.fill_live = true;
+    app.gradient_live = true;
     dispatch(&mut app, AppCmd::SetTool(Tool::Gradient));
     let (dx, dy) = s(&app, 24.0, 128.0);
     app.canvas_down(dx, dy, PointerKind::Mouse, &[]);

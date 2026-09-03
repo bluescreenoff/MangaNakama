@@ -1178,10 +1178,17 @@ pub struct App {
     /// has highlighted. Persisted through `ui.txt`'s `gradients=` line.
     pub grad_set: mn_core::GradientSet,
     pub grad_set_sel: usize,
-    /// NL-006's switch (TRIAGE 137): Fill/Gradient create or retarget a
+    /// NL-006's switch (TRIAGE 137): the FILL tool creates or retargets a
     /// LIVE layer instead of painting. Session-only v1 (not persisted per
     /// sub tool yet — recorded in DECISIONS 8.50).
     pub fill_live: bool,
+    /// The Gradient tool's own copy of that switch. Separate because the
+    /// two tools want opposite defaults: a bucket click is normally paint,
+    /// while a gradient is normally an OBJECT you re-drag a day later (CSP
+    /// keeps a gradient layer editable the same way), so this one ships ON.
+    /// One shared flag meant turning the bucket destructive also took the
+    /// gradient's live layer away. Session-only, same as `fill_live`.
+    pub gradient_live: bool,
     /// In-progress gradient ramp drag, canvas coords `[start, end]`. The
     /// three ONE-DRAG modes only; `FI-050`'s freeform uses `grad_free`.
     pub grad_drag: Option<((f32, f32), (f32, f32))>,
@@ -1981,6 +1988,7 @@ impl App {
             },
             grad_set_sel: 0,
             fill_live: false,
+            gradient_live: true,
             grad_drag: None,
             grad_free: None,
             balloon_drag: None,

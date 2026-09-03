@@ -350,11 +350,12 @@ pub(crate) fn sec_gradient_info(ui: &mut egui::Ui, app: &mut App) {
     app.grad_mid = mid;
     app.grad_stop_sel = sel;
     app.grad_stop_drag = dragging;
-    // I-016 (CSP "Where to create") / NL-006's live switch: bake the ramp
-    // into the layer's pixels, or spawn a gradient LAYER whose parameters
-    // stay editable.
-    ui.checkbox(&mut app.fill_live, "Create live layer")
-        .on_hover_text("off: paint pixels · on: a gradient layer you can re-drag later");
+    // I-016 (CSP "Where to create") / NL-006's live switch — the GRADIENT
+    // tool's own copy of it, defaulting ON: spawn a gradient LAYER whose
+    // parameters stay editable, or turn it off to bake the ramp into the
+    // layer's pixels. The bucket keeps a separate switch of its own.
+    ui.checkbox(&mut app.gradient_live, "Create live layer")
+        .on_hover_text("on: a gradient layer you can re-drag later · off: paint pixels");
 }
 
 pub(crate) fn sec_gradient_opts(ui: &mut egui::Ui, app: &mut App) {
