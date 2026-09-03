@@ -991,6 +991,45 @@ fn f11_export_all_writes_a_contact_sheet_in_reading_order() {
     );
 }
 
+/// F12 (ledger K01) — a fresh clone carries a key seed, and it still
+/// says something this build understands.
+///
+/// The bindings a CSP user reaches for on day one lived only in the
+/// owner's gitignored install, so anyone cloning the repo started with
+/// none of them and no example to copy. `keys.example.json` is that file,
+/// tracked — and tracked means it can rot: a renamed command turns a line
+/// into a startup complaint nobody reads. This parses it through the real
+/// loader, which reports exactly those complaints.
+#[test]
+fn f12_the_tracked_key_seed_still_binds_cleanly() {
+    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("keys.example.json");
+    let text = std::fs::read_to_string(&p)
+        .unwrap_or_else(|e| panic!("a fresh clone must carry {}: {e}", p.display()));
+    let map = crate::keymap::Keymap::parse(&text);
+    assert!(
+        map.problems.is_empty(),
+        "the seed has rotted — the app would say this at startup: {:?}",
+        map.problems
+    );
+    // An empty (or all-comment) file would pass the check above, so the
+    // seed has to be worth copying as well as valid.
+    let bound = |ctrl: bool, shift: bool, alt: bool, vk: u16| {
+        map.lookup(ctrl, shift, alt, vk).is_some()
+    };
+    assert!(bound(true, false, false, 0x31), "ctrl+1 — snap to rulers");
+    assert!(bound(false, false, false, 0x71), "f2 — cut");
+    assert!(bound(true, true, false, 0x54), "ctrl+shift+t — transform");
+    let lines = text
+        .lines()
+        .filter(|l| l.trim_start().starts_with('"') && !l.trim_start().starts_with("\"_"))
+        .count();
+    println!("[note] keys.example.json binds {lines} chords");
+    assert!(lines >= 10, "the seed is the CSP set, not a token line or two");
+}
+
 /// F10 — templates, open-recent, close-with-unsaved, two works open.
 #[test]
 fn f10_template_recent_close_tabs() {

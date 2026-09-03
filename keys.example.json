@@ -1,0 +1,18 @@
+{
+  "_comment": "COPY ME. Rename this file to keys.json and put it beside manganakama.exe (the same folder as prefs.txt and recent.txt) and these bindings load at startup. Nothing here is required — with no keys.json the built-in keys are all there is — and every line is an override you can delete.",
+  "_comment2": "The set below is a CSP user's muscle memory: the shortcuts a mangaka coming from Clip Studio reaches for on day one and finds missing. Settings > Shortcuts edits the same file from inside the app, so you can start here and change it there.",
+  "_comment3": "Spelling: \"chord\": \"command\". Modifiers in the order ctrl+shift+alt, then the key (a-z, 0-9, f1-f12, space, tab, enter, ...). The command must be a name the palette (Ctrl+K) knows; an unknown one is reported on the status line at startup instead of failing silently. A key beginning with _ is a comment lane, because JSON has none. A chord can also aim at a tool: see the manual's keys page for the \"tool: ...\" form and cycling arrays.",
+  "ctrl+1": "Snap to rulers",
+  "ctrl+2": "Snap to special rulers (parallel, guide, symmetry)",
+  "ctrl+u": "Hue/Saturation/Luminosity",
+  "ctrl+i": "Reverse gradient (invert colours)",
+  "ctrl+b": "Layer colour on/off",
+  "ctrl+alt+g": "Clip to layer below",
+  "shift+alt+e": "Merge selected layers (combine the palette selection)",
+  "ctrl+shift+g": "Release folder (ungroup, children step out)",
+  "f2": "Cut",
+  "f3": "Copy",
+  "f4": "Paste",
+  "shift+f7": "Invert selected area",
+  "ctrl+shift+t": "Transform"
+}
