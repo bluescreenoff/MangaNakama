@@ -5200,6 +5200,13 @@ mod material_tone_tests;
 #[cfg(test)]
 mod gen_lines_object_tests;
 
+/// Surface pass (2026-09-02, Phase 3), figure + materials family: the
+/// Direct draw shapes, the speed/focus line generators and the material
+/// bank, each driven through the real pointer entry points and judged on a
+/// 1:1 render window.
+#[cfg(test)]
+mod surface_figure_tests;
+
 /// Row 157: the Figure tool's mid-draw gesture grammar — the two-stage
 /// curve, "Adjust angle after fixed", and Backspace walking a multi-point
 /// figure back one point at a time.
