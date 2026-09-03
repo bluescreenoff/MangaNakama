@@ -1681,6 +1681,14 @@ pub struct Document {
     /// app-level undo species running beside it would let a Ctrl+Z mean two
     /// different things depending on what you touched last.
     pub rulers: crate::ruler::Rulers,
+    /// S03: the print resolution this canvas was drawn at, when it has one.
+    /// A page inside a work reads its dpi from the work's `PageSetup`, but a
+    /// BARE `.ora` has no page setup at all — and without a dpi every live
+    /// tone re-screens at the 600 dpi default on reopen, which visibly
+    /// changes a saved page. Persisted as `mnc-dpi` on the ORA image
+    /// element; `None` = a pixel canvas that never had one, which is what
+    /// every file written before this attribute says.
+    pub dpi: Option<u32>,
 }
 
 /// PA-001: the opaque base underneath the whole stack — exactly one per
@@ -1875,6 +1883,7 @@ impl Document {
             text_styles: crate::text::TextStyle::defaults(),
             paper: Paper::default(),
             rulers: crate::ruler::Rulers::default(),
+            dpi: None,
         }
     }
 

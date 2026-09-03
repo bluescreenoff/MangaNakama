@@ -2611,7 +2611,21 @@ impl App {
             .as_ref()
             .map(|p| p.dpi)
             .filter(|d| *d > 0)
+            // S03: a BARE `.ora` has no page setup, but it can still carry
+            // the dpi it was drawn at (`mnc-dpi`). Without this fallback a
+            // page saved as `.ora` re-screens every live tone at 600 on
+            // reopen — a silent change to a finished page.
+            .or(self.doc.dpi.filter(|d| *d > 0))
             .unwrap_or(600)
+    }
+
+    /// S03: stamp the work's print resolution onto the DOCUMENT, so the
+    /// two doors that write a bare `.ora` (Save As, Save Duplicate) put it
+    /// in the file. A work with no page setup keeps whatever dpi the
+    /// document already carried — re-saving an imported `.ora` must not
+    /// throw its dpi away.
+    pub(crate) fn stamp_doc_dpi(&mut self) {
+        self.doc.dpi = self.work_dpi().or(self.doc.dpi);
     }
 
     /// The work's OWN print resolution, or `None` for a pixel canvas.

@@ -305,6 +305,9 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                         }
                     }
                 } else {
+                    // S03: a bare `.ora` has no page setup to reopen with,
+                    // so the dpi rides the image element instead.
+                    app.stamp_doc_dpi();
                     match mn_core::ora::save(&app.doc, &p) {
                         Ok(()) => {
                             app.set_doc_path(Some(p.clone()));

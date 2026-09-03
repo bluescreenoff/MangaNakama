@@ -338,6 +338,7 @@ pub fn save_to_with<W: Write + Seek>(
             &doc.comps,
             &doc.text_styles,
             doc.paper,
+            doc.dpi,
         )
         .as_bytes(),
     )?;
@@ -507,6 +508,7 @@ fn stack_xml(
     comps: &[crate::doc::LayerComp],
     styles: &[crate::text::TextStyle],
     paper: crate::doc::Paper,
+    dpi: Option<u32>,
 ) -> String {
     let mut s = String::with_capacity(256 + entries.len() * 160);
     s.push_str("<?xml version='1.0' encoding='UTF-8'?>\n");
@@ -527,6 +529,14 @@ fn stack_xml(
     // (opaque white), so a file whose paper was never touched is written
     // exactly as it was before PA-001 and reads back the same in any other
     // ORA reader.
+    // S03: the canvas's print resolution rides the image element too. A
+    // bare `.ora` has no page setup, so without this every live tone on a
+    // reopened page re-screens at the 600 dpi default — visibly changing a
+    // saved page. Omitted for a dpi-less pixel canvas, so those files keep
+    // the bytes they always had.
+    if let Some(d) = dpi.filter(|d| *d > 0) {
+        s.push_str(&format!(" mnc-dpi=\"{d}\""));
+    }
     if paper.colour != Paper::default().colour {
         let [r, g, b] = paper.colour;
         s.push_str(&format!(" mnc-paper=\"#{r:02x}{g:02x}{b:02x}\""));
@@ -754,10 +764,11 @@ pub fn load_from<R: Read + Seek>(source: R) -> Result<Document, OraError> {
         f.read_to_string(&mut s)?;
         s
     };
-    let (w, h, parsed, comps, styles, paper) = parse_stack_xml(&xml)?;
+    let (w, h, parsed, comps, styles, paper, dpi) = parse_stack_xml(&xml)?;
 
     let mut doc = Document::new(w.max(1), h.max(1));
     doc.paper = paper;
+    doc.dpi = dpi;
     // TX-styles: absent attr = a pre-styles file, seed the defaults
     // (Document::new already did); present = the file's word, even empty.
     if let Some(s) = styles {
@@ -1206,6 +1217,8 @@ type ParsedStack = (
     // loader seeds the defaults; `Some(vec![])` = deliberately emptied.
     Option<Vec<crate::text::TextStyle>>,
     Paper,
+    // S03: `mnc-dpi`; absent = a canvas with no print resolution.
+    Option<u32>,
 );
 
 fn parse_stack_xml(xml: &str) -> Result<ParsedStack, OraError> {
@@ -1220,6 +1233,7 @@ fn parse_stack_xml(xml: &str) -> Result<ParsedStack, OraError> {
     // PA-001: absent attrs mean the default paper, which is what every file
     // written before PA-001 says.
     let mut paper = Paper::default();
+    let mut dpi: Option<u32> = None;
     let mut layers = Vec::new();
     // <stack> nesting level: 0 outside, 1 in the root stack, 2+ in folders.
     let mut stack_level: u8 = 0;
@@ -1283,6 +1297,10 @@ fn parse_stack_xml(xml: &str) -> Result<ParsedStack, OraError> {
                     paper.colour = c;
                 }
                 paper.visible = get("mnc-paper-hidden").is_none();
+                // S03: the print resolution, when the writer had one.
+                dpi = get("mnc-dpi")
+                    .and_then(|v| v.parse().ok())
+                    .filter(|d| *d > 0);
                 w = get("w").and_then(|v| v.parse().ok()).unwrap_or(0);
                 h = get("h").and_then(|v| v.parse().ok()).unwrap_or(0);
             }
@@ -1404,7 +1422,7 @@ fn parse_stack_xml(xml: &str) -> Result<ParsedStack, OraError> {
     if w == 0 || h == 0 {
         return Err(OraError("stack.xml has no image size".into()));
     }
-    Ok((w, h, layers, comps, styles, paper))
+    Ok((w, h, layers, comps, styles, paper, dpi))
 }
 
 #[cfg(test)]
@@ -2255,7 +2273,7 @@ mod tests {
     <layer name="odd &amp; quoted" src="data/b.png" composite-op="svg:plus-lighter" visibility="hidden"></layer>
   </stack>
 </image>"#;
-        let (w, h, layers, _comps, _styles, paper) = parse_stack_xml(xml).unwrap();
+        let (w, h, layers, _comps, _styles, paper, _dpi) = parse_stack_xml(xml).unwrap();
         assert_eq!((w, h), (100, 50));
         assert_eq!(
             paper,
@@ -2814,7 +2832,7 @@ mod tests {
              </stack>\n\
              </stack>\n\
              </image>\n";
-        let (_, _, parsed, _, _, _) = parse_stack_xml(xml).unwrap();
+        let (_, _, parsed, _, _, _, _) = parse_stack_xml(xml).unwrap();
         let folder = parsed.iter().find(|p| p.folder).expect("the folder");
         assert_eq!(folder.blend_if, None, "a folder's gate never parses in");
     }

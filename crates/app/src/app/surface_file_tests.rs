@@ -530,6 +530,56 @@ fn f06_autosave_and_recovery() {
     assert!(!sib.exists());
 }
 
+/// F07 (ledger S03) — a bare `.ora` remembers the dpi its tones were
+/// screened at.
+///
+/// A page inside a work reads its dpi from the work's page setup. A bare
+/// `.ora` has no page setup at all, so before the `mnc-dpi` attribute every
+/// live tone on a reopened page re-screened at the 600 dpi default: the
+/// same file, a different page. The reopened work still has no page setup
+/// (guides stay off rather than being invented) — only the dpi travels.
+#[test]
+fn f07_a_bare_ora_remembers_the_dpi_its_tones_were_screened_at() {
+    let Some(mut app) = headless() else { return };
+    let (w, h) = (200u32, 260u32);
+    app.doc = mn_core::Document::new(w, h);
+    let mut setup = mn_core::PageSetup::presets()[0].clone();
+    setup.dpi = 150;
+    setup.set_paper_px(w, h);
+    app.page = Some(setup);
+    assert_eq!(app.tone_dpi(), 150, "the work screens at its own dpi");
+    app.doc.add_fill_layer(
+        mn_core::FillKind::Tone {
+            tone: mn_core::tone::ToneParams::default(),
+            density: 0.5,
+        },
+        false,
+    );
+    app.refresh_tones();
+    let before = cpu(&app);
+    let dir = tmp("oradpi");
+    let ora = dir.join("page.ora");
+    dispatch(&mut app, AppCmd::SaveOraPath(ora.clone()));
+    assert!(ora.exists(), "{}", app.status);
+    // a different document in between, so the reopen is a real decode
+    scribble(&mut app);
+    dispatch(&mut app, AppCmd::OpenOraPath(ora.clone()));
+    app.refresh_tones();
+    assert!(
+        app.page.is_none(),
+        "a bare ora still brings no page setup: {}",
+        app.status
+    );
+    println!("[note] tone dpi after reopen: {}", app.tone_dpi());
+    assert_eq!(app.tone_dpi(), 150, "the file's own dpi came back");
+    let after = cpu(&app);
+    assert_eq!(before.len(), after.len());
+    let diff = before.iter().zip(&after).filter(|(a, b)| a != b).count();
+    println!("[note] composite bytes the round trip changed: {diff}");
+    shot(&mut app, "f07-after-ora");
+    assert_eq!(diff, 0, "the tone re-screened exactly as it was saved");
+}
+
 /// F10 — templates, open-recent, close-with-unsaved, two works open.
 #[test]
 fn f10_template_recent_close_tabs() {

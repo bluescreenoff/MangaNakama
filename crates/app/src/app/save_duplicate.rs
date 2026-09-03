@@ -53,6 +53,7 @@ impl App {
         // Bare ORA: the current page only, exactly as Save As to an .ora
         // does — said out loud in the status so a comic's author is not
         // surprised by a one-page copy.
+        self.stamp_doc_dpi();
         mn_core::ora::save(&self.doc, p).map_err(|e| e.to_string())?;
         Ok(if self.is_comic() {
             format!(
