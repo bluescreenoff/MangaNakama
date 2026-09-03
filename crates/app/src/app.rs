@@ -5139,6 +5139,15 @@ mod surface_layers_tests;
 #[cfg(test)]
 mod surface_file_tests;
 
+/// Surface pass (2026-09-02, Phase 3), END TO END: one short manga walked
+/// through the whole production sequence — new comic, rough on a draft
+/// layer, panels, ink on rulers, beta, tone, lettering, and the finished
+/// export with register marks and a proof sheet. Every stage renders a
+/// page and asserts on it, and the right-to-left reading order is checked
+/// three ways (panel order, lettering order, contact sheet).
+#[cfg(test)]
+mod surface_e2e_tests;
+
 /// Surface pass (2026-09-02, Phase 3), canvas/view + interface family:
 /// zoom, rotate, the mirror check, the three resets, the Navigator, the
 /// guide hides and the workspace layout — driven through the real view
