@@ -293,11 +293,12 @@ fn rect_tiles(r: [f32; 4], size: (u32, u32)) -> HashSet<TileIdx> {
 /// Every visible tone carrier on the page, bottom of the stack first.
 ///
 /// `Noise` drops out here: it is an FM screen with no lattice, so it has
-/// nothing to interfere with and nothing a grey edge can degrade.
-fn tone_carriers<'a>(setup: &PageSetup, doc: &'a Document) -> Vec<ToneCarrier<'a>> {
+/// nothing to interfere with and nothing a grey edge can degrade. Drafts
+/// drop out for the reason given on [`run_page`]'s `drafts`.
+fn tone_carriers<'a>(setup: &PageSetup, doc: &'a Document, drafts: &[bool]) -> Vec<ToneCarrier<'a>> {
     let mut out: Vec<ToneCarrier<'a>> = Vec::new();
-    for layer in &doc.layers {
-        if !layer.visible {
+    for (i, layer) in doc.layers.iter().enumerate() {
+        if !layer.visible || drafts[i] {
             continue;
         }
         if let Some(t) = &layer.tone {
@@ -403,9 +404,18 @@ pub fn run_page(
     let mut out = Vec::new();
     let trim = setup.trim_rect_px();
     let safe_px = TEXT_SAFE_MM / 25.4 * setup.dpi as f32;
+    // A 下書き layer is not on the printed page — the export composite
+    // drops it — and preflight is a report about the print, so no check
+    // below may accuse one. Read through `effective_drafts` for the same
+    // reason export does: a draft FOLDER drafts everything inside it, and
+    // a rough usually lives in one folder rather than one layer.
+    let drafts = doc.effective_drafts();
     // The trim rect can sit outside the canvas or touch it; text boxes
     // compare in the same px space `TextItem.pos` uses (canvas px).
-    for layer in &doc.layers {
+    for (i, layer) in doc.layers.iter().enumerate() {
+        if drafts[i] {
+            continue;
+        }
         let Some(ts) = layer.texts() else { continue };
         for t in &ts.texts {
             let b = text_aabb(t);
@@ -437,12 +447,12 @@ pub fn run_page(
         }
     }
     if meta.expression == crate::project::Expression::Mono {
-        for layer in &doc.layers {
+        for (i, layer) in doc.layers.iter().enumerate() {
             // A 下書き layer never reaches the printer, so its colour
             // cannot land on a mono page. Roughing in blue is universal,
             // so without this the check fires on every page of every
             // chapter and teaches the artist to ignore preflight.
-            if !layer.visible || layer.is_vector() || layer.draft {
+            if !layer.visible || layer.is_vector() || drafts[i] {
                 continue;
             }
             'tiles: for (_, tile) in layer.tiles() {
@@ -464,7 +474,7 @@ pub fn run_page(
             }
         }
     }
-    let carriers = tone_carriers(setup, doc);
+    let carriers = tone_carriers(setup, doc, &drafts);
     for (i, upper) in carriers.iter().enumerate() {
         // Bottom-first collection, so everything before `i` is underneath.
         for lower in &carriers[..i] {
@@ -901,5 +911,165 @@ mod tests {
         m.expression = Expression::Colour;
         let f = run_page(&s, &m, 0, &doc);
         assert!(f.iter().all(|x| x.check != "expression.colour_on_mono"));
+    }
+
+    /// PF-02, the other half of d2b879a: a 下書き layer is not on the
+    /// printed page, so NO page check may accuse it. Lettering roughed in
+    /// over the trim is how a name is laid out before it is set properly.
+    #[test]
+    fn draft_text_is_never_measured_against_the_trim() {
+        let s = good_setup();
+        let m = meta(Some(s.clone()));
+        let mut doc = Document::new(s.paper_px().0, s.paper_px().1);
+        let trim = s.trim_rect_px();
+        let mut t = crate::text::TextItem::new([0.0, 0.0], String::new(), 12.0, [0, 0, 0], false);
+        t.pos = [trim[0] - 5.0, trim[1] + 5.0];
+        t.size = [40.0, 10.0];
+        let li = doc.add_text_layer("rough letters", crate::text::TextSet { texts: vec![t] });
+        // Not a draft: it hangs out of the trim and preflight says so.
+        assert!(
+            run_page(&s, &m, 0, &doc)
+                .iter()
+                .any(|x| x.check == "text.outside_trim"),
+            "the control case must flag, or this test proves nothing"
+        );
+        doc.set_layer_draft(li, true);
+        let f = run_page(&s, &m, 0, &doc);
+        assert!(
+            f.iter().all(|x| !x.check.starts_with("text.")),
+            "a draft never prints, so it cannot leave the trim: {f:?}"
+        );
+    }
+
+    /// The cascade the export composite already honours
+    /// ([`Document::effective_drafts`]): a folder marked draft drafts
+    /// everything inside it, and the whole ネーム usually lives in one.
+    #[test]
+    fn a_draft_folder_drafts_the_page_content_inside_it() {
+        let s = good_setup();
+        let m = meta(Some(s.clone()));
+        let mut doc = Document::new(s.paper_px().0, s.paper_px().1);
+        let trim = s.trim_rect_px();
+        // A blue rough, and lettering laid out over the trim beside it.
+        let blue = doc.add_layer("blue pencil");
+        doc.layers[blue]
+            .tile_mut(TileIdx::new(0, 0))
+            .set_pixel(5, 5, [491, 491, 20000, 32767]);
+        let mut t = crate::text::TextItem::new([0.0, 0.0], String::new(), 12.0, [0, 0, 0], false);
+        t.pos = [trim[0] - 5.0, trim[1] + 5.0];
+        t.size = [40.0, 10.0];
+        let li = doc.add_text_layer("rough letters", crate::text::TextSet { texts: vec![t] });
+        // [base, children (depth 1)…, folder header] — a folder owns the run
+        // of deeper layers directly BELOW it.
+        doc.layers[blue].depth = 1;
+        doc.layers[li].depth = 1;
+        let mut folder = crate::doc::Layer::new("rough");
+        folder.folder = true;
+        doc.layers.push(folder);
+        let fi = doc.layers.len() - 1;
+        let ids = |f: &[PreflightFinding]| -> Vec<&'static str> {
+            f.iter().map(|x| x.check).collect()
+        };
+        let before = run_page(&s, &m, 0, &doc);
+        assert!(
+            ids(&before).contains(&"text.outside_trim")
+                && ids(&before).contains(&"expression.colour_on_mono"),
+            "the control case must flag both: {:?}",
+            ids(&before)
+        );
+        doc.set_layer_draft(fi, true);
+        let f = run_page(&s, &m, 0, &doc);
+        assert!(
+            f.is_empty(),
+            "a draft FOLDER drafts its children, same as export: {f:?}"
+        );
+    }
+
+    /// A screen on a draft layer prints nothing, so it cannot ring against
+    /// anything and its soft edges cannot degrade.
+    #[test]
+    fn a_draft_tone_layer_is_no_screen_at_all() {
+        let s = good_setup();
+        let m = meta(Some(s.clone()));
+        let mut doc = Document::new(256, 256);
+        tone_layer(&mut doc, "cloud", 55.0, &[(0, 0), (1, 0)]);
+        let sky = tone_layer(&mut doc, "sky", 60.0, &[(1, 0)]);
+        // Give the draft-to-be soft edges as well, so one flip covers both
+        // tone checks.
+        for x in 0..20 {
+            doc.layers[sky]
+                .tile_mut(TileIdx::new(1, 0))
+                .set_pixel(x, 3, [8000, 8000, 8000, 16000]);
+        }
+        let before = run_page(&s, &m, 0, &doc);
+        assert!(
+            clash_of(&before).is_some() && before.iter().any(|x| x.check == "tone.grey_edge"),
+            "the control case must flag both: {before:?}"
+        );
+        doc.set_layer_draft(sky, true);
+        let f = run_page(&s, &m, 0, &doc);
+        assert!(
+            clash_of(&f).is_none(),
+            "a draft screen never meets the other one in print: {f:?}"
+        );
+        assert!(
+            !f.iter()
+                .any(|x| x.check == "tone.grey_edge" && x.message.contains("sky")),
+            "and its grey edges are nobody's problem: {f:?}"
+        );
+    }
+
+    /// The other two tone carriers: a live `FillKind::Tone` layer and a
+    /// toned balloon. Both are set from the same ungated row menu.
+    #[test]
+    fn a_draft_fill_tone_layer_and_a_draft_balloon_carry_no_screen() {
+        let s = good_setup();
+        let m = meta(Some(s.clone()));
+        let build = |draft: bool| {
+            let mut doc = Document::new(256, 256);
+            tone_layer(&mut doc, "sky", 55.0, &[(0, 0)]);
+            let fi = doc.add_layer("flat tone");
+            doc.layers[fi].kind = crate::doc::LayerKind::Fill(FillKind::Tone {
+                tone: crate::tone::ToneParams {
+                    lpi: 65.0,
+                    ..Default::default()
+                },
+                density: 0.5,
+            });
+            let bi = doc.add_balloon_layer(
+                "bubbles",
+                crate::balloon::BalloonSet {
+                    balloons: vec![crate::balloon::Balloon {
+                        shape: crate::balloon::BalloonShape::Ellipse {
+                            center: [32.0, 32.0],
+                            radii: [20.0, 20.0],
+                        },
+                        tails: Vec::new(),
+                        fill_tone: Some(crate::balloon::BalloonTone {
+                            cell_px: s.dpi as f32 / 70.0,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }],
+                    border_px: 2.0,
+                    pressure_width: false,
+                },
+            );
+            if draft {
+                doc.set_layer_draft(fi, true);
+                doc.set_layer_draft(bi, true);
+            }
+            doc
+        };
+        let before = run_page(&s, &m, 0, &build(false));
+        assert!(
+            before.iter().filter(|x| x.check == "tone.clash").count() >= 2,
+            "the control case must flag both carriers: {before:?}"
+        );
+        let f = run_page(&s, &m, 0, &build(true));
+        assert!(
+            clash_of(&f).is_none(),
+            "neither draft carrier prints, so neither clashes: {f:?}"
+        );
     }
 }
