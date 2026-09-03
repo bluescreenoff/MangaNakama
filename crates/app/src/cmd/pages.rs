@@ -710,6 +710,7 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                 };
                 let split = app.export_all_split;
                 let want_text = app.export_all_text;
+                let want_contact = app.export_all_contact;
                 let rtl = app.binding_right;
                 // What a NORMAL page is, for the spread test: the work's
                 // own paper when it has a page setup, else the narrowest
@@ -816,6 +817,12 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                 };
                 let mut ok = 0usize;
                 let mut files = 0usize;
+                // S07: one small copy of each page the run writes, kept for
+                // the contact sheet. Built from the FINISHED image, so the
+                // proof shows what the files show — crop, stamp and トンボ
+                // included. A cell is ~400 px on its long edge, which is a
+                // few MB for a whole chapter.
+                let mut cells: Vec<image::RgbaImage> = Vec::new();
                 // Which pages this run actually wrote — the export
                 // reminder's ledger. Collected rather than recorded in
                 // place because the loop holds `app.pages` by reference,
@@ -858,6 +865,9 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                                         dir.join(format!("{prefix}-p{:03}{tag}.{ext}", i + 1));
                                     if write(&img, &path) {
                                         files += 1;
+                                        if want_contact {
+                                            cells.push(mn_core::export::contact_cell(&img, 400));
+                                        }
                                     }
                                 }
                                 ok += 1;
@@ -876,6 +886,9 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                                     ok += 1;
                                     files += 1;
                                     exported.push(i);
+                                    if want_contact {
+                                        cells.push(mn_core::export::contact_cell(&img, 400));
+                                    }
                                 }
                             }
                         }
@@ -918,6 +931,22 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                         " — {warns} preflight warning{}",
                         if warns > 1 { "s" } else { "" }
                     ));
+                }
+                // S07: the proof sheet, last, so it can only ever describe
+                // files that were actually written. Right-bound work = right
+                // to left, the order the chapter is read in.
+                if want_contact {
+                    match mn_core::export::contact_sheet(&cells, 4, rtl, 12, [255, 255, 255, 255]) {
+                        Some(sheet) => {
+                            let p = dir.join(format!("{prefix}-contact.{ext}"));
+                            extra.push_str(if write(&sheet, &p) {
+                                " + contact sheet"
+                            } else {
+                                " (contact sheet FAILED)"
+                            });
+                        }
+                        None => extra.push_str(" (no pages for a contact sheet)"),
+                    }
                 }
                 if want_text {
                     let body = app.script_dump();

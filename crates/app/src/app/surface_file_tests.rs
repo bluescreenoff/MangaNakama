@@ -884,6 +884,113 @@ fn f09_a_work_moves_to_a_new_paper_pixels_and_guides_together() {
     shot(&mut app, "f09-after-b5");
 }
 
+/// F11 (ledger S07) — Export All can leave a contact sheet, and it reads
+/// the way the book does.
+///
+/// The proof sheet (校正紙) is how a chapter's flow is checked: every page
+/// of the run on one image, small, in order. Which order is the whole
+/// point — a right-bound work reads right to left, so page 1 belongs top
+/// RIGHT. Laid out the Western way the sheet stops being a story and puts
+/// every answer before its question.
+#[test]
+fn f11_export_all_writes_a_contact_sheet_in_reading_order() {
+    let Some(mut app) = headless() else { return };
+    // No frame folder: its gutter raster would ink every page, and this
+    // flow reads the sheet by asking which cells are dark.
+    small_draft(&mut app, 3, "Proof");
+    app.new_doc_draft.frame_folder = false;
+    dispatch(&mut app, AppCmd::NewComicCreate);
+    assert!(app.binding_right, "a JP work is right-bound");
+    let (w, h) = app.doc.size;
+
+    // Page 1 is inked black edge to edge; pages 2 and 3 get a single dot,
+    // which is only there so the page has bytes to export at all.
+    for p in 0..3 {
+        dispatch(&mut app, AppCmd::SelectPage(p));
+        if p == 0 {
+            paint(&mut app, 0, BLACK, |_, _| true);
+        } else {
+            paint(&mut app, 0, BLACK, |x, y| x < 4 && y < 4);
+        }
+    }
+    dispatch(&mut app, AppCmd::SelectPage(0));
+
+    let dir = tmp("contact");
+    app.export_all_contact = true;
+    dispatch(&mut app, AppCmd::ExportAllPagesPath(dir.clone()));
+    println!("[note] {}", app.status);
+    let sheet_path = dir.join("Proof-contact.png");
+    assert!(
+        sheet_path.exists(),
+        "no contact sheet: {} — wrote {:?}",
+        app.status,
+        std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect::<Vec<_>>()
+    );
+    assert!(app.status.contains("contact sheet"), "{}", app.status);
+
+    let sheet = image::open(&sheet_path).expect("the sheet decodes").to_rgba8();
+    save(&sheet, "f11-contact");
+    // Four across, one row for three pages, cells sized off the page.
+    let cell = mn_core::export::contact_cell(
+        &image::RgbaImage::new(w, h),
+        400,
+    );
+    assert_eq!(
+        sheet.dimensions(),
+        (4 * cell.width() + 5 * 12, cell.height() + 2 * 12),
+        "four across, one row, 12 px of paper between"
+    );
+
+    // Mean luminance of each of the four cell columns. The inked page is
+    // the dark one, and in a right-bound work it is the RIGHTMOST cell.
+    let col_mean = |c: u32| -> f32 {
+        let x0 = 12 + c * (cell.width() + 12);
+        let mut sum = 0.0f32;
+        let mut n = 0.0f32;
+        for y in 12..12 + cell.height() {
+            for x in x0..x0 + cell.width() {
+                sum += sheet.get_pixel(x, y)[0] as f32;
+                n += 1.0;
+            }
+        }
+        sum / n.max(1.0)
+    };
+    let means: Vec<f32> = (0..4).map(col_mean).collect();
+    println!("[note] contact sheet column means (left to right): {means:?}");
+    assert!(means[3] < 40.0, "page 1 sits top RIGHT in a right-bound work");
+    assert!(means[0] > 200.0, "the empty fourth cell is paper");
+    assert!(means[1] > 200.0 && means[2] > 200.0, "pages 2 and 3 are blank");
+
+    // The other binding is the mirror, checked on the layout function
+    // itself so it costs no second export.
+    let dark = image::RgbaImage::from_pixel(10, 10, image::Rgba([0, 0, 0, 255]));
+    let pale = image::RgbaImage::from_pixel(10, 10, image::Rgba([255, 255, 255, 255]));
+    let ltr = mn_core::export::contact_sheet(
+        &[dark.clone(), pale.clone()],
+        2,
+        false,
+        0,
+        [255, 255, 255, 255],
+    )
+    .expect("a sheet");
+    assert_eq!(ltr.get_pixel(0, 0)[0], 0, "left-bound: the first page is top LEFT");
+    let rtl_sheet =
+        mn_core::export::contact_sheet(&[dark, pale], 2, true, 0, [255, 255, 255, 255])
+            .expect("a sheet");
+    assert_eq!(
+        rtl_sheet.get_pixel(19, 0)[0],
+        0,
+        "right-bound: the first page is top RIGHT"
+    );
+    assert!(
+        mn_core::export::contact_sheet(&[], 4, true, 0, [255, 255, 255, 255]).is_none(),
+        "no pages, no sheet"
+    );
+}
+
 /// F10 — templates, open-recent, close-with-unsaved, two works open.
 #[test]
 fn f10_template_recent_close_tabs() {

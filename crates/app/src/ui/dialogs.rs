@@ -2156,6 +2156,13 @@ pub(super) fn export_all_window(ctx: &egui::Context, app: &mut App) {
                         .on_hover_text("the whole chapter's dialogue, in reading order, as a .txt");
                     ui.end_row();
 
+                    ui.label("Contact sheet");
+                    ui.checkbox(&mut app.export_all_contact, "").on_hover_text(
+                        "one extra image with every exported page on it, four across, \
+                         in reading order — the proof sheet you check a chapter's flow on",
+                    );
+                    ui.end_row();
+
                     ui.label("Output");
                     ui.horizontal(|ui| {
                         ui.add(

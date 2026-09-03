@@ -773,6 +773,60 @@ impl ToneScale {
 /// the cell back at its work-pixel size. Both clamp to a sane dpi: a scale
 /// of 0 or a missing work dpi means "no reduction is happening", and the
 /// tone dpi is then just the tone dpi.
+/// S07 — the N-up contact sheet (proof sheet, 校正紙) an Export All run can
+/// leave beside the pages: every page of the run on one image, small, in
+/// reading order.
+///
+/// `cells` are page images ALREADY scaled down by the caller; the sheet is a
+/// grid `cols` wide whose cell is the largest of them, each image centred in
+/// its cell with `pad` px of paper around. A short last row is left as paper
+/// rather than stretched.
+///
+/// `rtl` puts the first page top RIGHT and runs right to left, because that
+/// is the order a Japanese book is read in and a proof sheet laid out the
+/// other way stops being a story — it puts the answer before the question on
+/// every row. A left-bound work reads the Western way.
+pub fn contact_sheet(
+    cells: &[image::RgbaImage],
+    cols: u32,
+    rtl: bool,
+    pad: u32,
+    bg: [u8; 4],
+) -> Option<image::RgbaImage> {
+    if cells.is_empty() || cols == 0 {
+        return None;
+    }
+    let cw = cells.iter().map(|c| c.width()).max()?.max(1);
+    let ch = cells.iter().map(|c| c.height()).max()?.max(1);
+    let rows = (cells.len() as u32).div_ceil(cols);
+    let mut sheet = image::RgbaImage::from_pixel(
+        cols * cw + (cols + 1) * pad,
+        rows * ch + (rows + 1) * pad,
+        image::Rgba(bg),
+    );
+    for (i, c) in cells.iter().enumerate() {
+        let i = i as u32;
+        let row = i / cols;
+        let col = if rtl { cols - 1 - i % cols } else { i % cols };
+        let x = pad + col * (cw + pad) + (cw - c.width()) / 2;
+        let y = pad + row * (ch + pad) + (ch - c.height()) / 2;
+        image::imageops::overlay(&mut sheet, c, x as i64, y as i64);
+    }
+    Some(sheet)
+}
+
+/// The cell for a contact sheet: `img` scaled so its long edge is `long` px.
+/// Nearest-neighbour would alias a screentone into a moiré that says nothing
+/// about the page, so this uses the same quality kernel the exports do.
+pub fn contact_cell(img: &image::RgbaImage, long: u32) -> image::RgbaImage {
+    let s = (long as f32 / img.width().max(img.height()).max(1) as f32).min(1.0);
+    let (w, h) = (
+        ((img.width() as f32 * s).round() as u32).max(1),
+        ((img.height() as f32 * s).round() as u32).max(1),
+    );
+    image::imageops::resize(img, w, h, image::imageops::FilterType::Lanczos3)
+}
+
 pub fn tone_export_dpi(tone_dpi: u32, scale: f32, mode: ToneScale) -> u32 {
     if mode == ToneScale::Frequency || !(scale > 0.0) || scale >= 1.0 {
         return tone_dpi;

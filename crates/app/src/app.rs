@@ -432,6 +432,9 @@ pub struct App {
     pub export_all_split: bool,
     /// PM-053: also write the script dump beside the images.
     pub export_all_text: bool,
+    /// S07: also write an N-up contact sheet (proof sheet) of the run --
+    /// every exported page on one image, in reading order.
+    pub export_all_contact: bool,
     /// Print finishing: output resolution, `0` = the work's own (no
     /// resample). Session-only, like every other field of this window.
     pub export_all_dpi: u32,
@@ -1695,6 +1698,7 @@ impl App {
             export_all_to: 1,
             export_all_split: false,
             export_all_text: false,
+            export_all_contact: false,
             export_all_dpi: 0,
             export_all_colour: mn_core::LayerExpression::Colour,
             export_all_crop: mn_core::export::ExportCrop::Paper,

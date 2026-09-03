@@ -286,6 +286,15 @@ work exports as <code>page-p001.png</code>. Clearing the file prefix
 does not produce files called <code>-p001.png</code> — an empty prefix
 falls back to the work name.</div>
 
+<div class="quirk"><b>Contact sheet writes one extra image with the
+whole run on it</b> &mdash; <code>&lt;prefix&gt;-contact</code>, four
+pages across, in the order the book is read: in a right-bound work page
+one is top <em>right</em> and each row runs right to left. It is built
+from the finished files, so whatever the crop, the folio stamp and the
+&#12488;&#12531;&#12508; did to the pages is what you see on the proof.
+A split spread contributes both halves as their own cells. Off by
+default; it is a check, not an output.</div>
+
 <div class="quirk"><b>A page range does not renumber.</b> Exporting
 pages 5 to 8 writes <code>p005</code> to <code>p008</code>. The number
 in the filename is always the page's own number, so a partial re-export
