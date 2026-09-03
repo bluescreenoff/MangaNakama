@@ -1296,10 +1296,12 @@ mod tests {
         assert!(wher.contains("Ctrl+Shift+E"), "the chord rides along ({wher})");
         assert!(matches!(cmd, AppCmd::StampVisible), "{cmd:?}");
         let entries = all_entries();
-        for q in ["flatten", "merge visible"] {
-            let hits = labels(&entries, &palette_filter(&entries, q, &[], 5));
-            assert_eq!(hits.first().map(String::as_str), Some(label), "{q}: {hits:?}");
-        }
+        let hits = labels(&entries, &palette_filter(&entries, "merge visible", &[], 5));
+        assert_eq!(hits.first().map(String::as_str), Some(label), "merge visible: {hits:?}");
+        // "flatten" is shared with Layer > Flatten image now; both rows sit
+        // at the top, whichever order the scorer picks.
+        let hits = labels(&entries, &palette_filter(&entries, "flatten", &[], 5));
+        assert!(hits.iter().take(2).any(|h| h == label), "flatten: {hits:?}");
     }
 
     /// Two fake presets, enough to prove the brush half without an App.

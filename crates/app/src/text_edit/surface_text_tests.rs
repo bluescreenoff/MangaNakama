@@ -101,6 +101,16 @@ fn ink_bbox(img: &image::RgbaImage) -> Option<[u32; 4]> {
     bb
 }
 
+/// A 1:1 offscreen render of a `side`-px square window centred on `at`
+/// (canvas px). Print-res pages must not be rendered whole in a test: the
+/// full-page texture ran the CI runner's software GPU out of memory.
+fn render_window(app: &mut App, at: (f32, f32), side: u32) -> image::RgbaImage {
+    let x0 = (at.0 - side as f32 * 0.5).max(0.0).floor();
+    let y0 = (at.1 - side as f32 * 0.5).max(0.0).floor();
+    let vp = mn_gpu::Viewport { pan: [-x0, -y0], zoom: 1.0, ..Default::default() };
+    app.renderer.render_offscreen_vp(&app.doc, &vp, side, side)
+}
+
 fn ink_in(img: &image::RgbaImage, r: [u32; 4]) -> usize {
     let mut n = 0;
     for y in r[1]..r[3].min(img.height()) {
@@ -713,15 +723,17 @@ fn default_text_on_a_600dpi_comic_page_is_dialogue_sized() {
         "default dialogue em should print 3–6.5 mm, got {em_mm:.2} mm ({} pt)",
         t.size_pt
     );
-    // Render a crop around the text at 1:1 for the eye.
-    let img = app.renderer.render_offscreen(&app.doc, w, h);
+    // Render a 1:1 window around the click for the eye — never the whole
+    // print-res page: that texture is what ran the CI runner's software GPU
+    // out of memory.
+    let img = render_window(&mut app, at, 1200);
     let bb = ink_bbox(&img).expect("inked");
     let crop = image::imageops::crop_imm(
         &img,
         bb[0].saturating_sub(40),
         bb[1].saturating_sub(40),
-        (bb[2] - bb[0] + 80).min(w),
-        (bb[3] - bb[1] + 80).min(h),
+        (bb[2] - bb[0] + 80).min(img.width()),
+        (bb[3] - bb[1] + 80).min(img.height()),
     )
     .to_image();
     if let Ok(dir) = std::env::var("MN_SURFACE_OUT") {
@@ -874,10 +886,9 @@ fn a_thought_tail_at_print_dpi_reads_as_puffs() {
     assert_eq!(b.tails.len(), 1);
     let width_mm = b.tails[0].width / dpi as f32 * 25.4;
     println!("[surface] thought tail width {:.0} px = {width_mm:.1} mm at {dpi} dpi", b.tails[0].width);
-    let img = app.renderer.render_offscreen(&app.doc, w, h);
-    let x0 = (cx - r * 2.0).max(0.0) as u32;
-    let y0 = (cy - r * 1.5).max(0.0) as u32;
-    let crop = image::imageops::crop_imm(&img, x0, y0, (r * 4.0) as u32, (r * 4.5) as u32).to_image();
+    // A 1:1 window around the bubble, not the whole print-res page (see
+    // the dialogue-size test above).
+    let crop = render_window(&mut app, (cx, cy + r * 0.5), (r * 5.0) as u32);
     if let Ok(dir) = std::env::var("MN_SURFACE_OUT") {
         let _ = std::fs::create_dir_all(&dir);
         crop.save(format!("{dir}/t18_thought_tail_600dpi_crop.png")).unwrap();
