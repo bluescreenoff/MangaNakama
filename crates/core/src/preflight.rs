@@ -293,12 +293,12 @@ fn rect_tiles(r: [f32; 4], size: (u32, u32)) -> HashSet<TileIdx> {
 /// Every visible tone carrier on the page, bottom of the stack first.
 ///
 /// `Noise` drops out here: it is an FM screen with no lattice, so it has
-/// nothing to interfere with and nothing a grey edge can degrade. Drafts
-/// drop out for the reason given on [`run_page`]'s `drafts`.
-fn tone_carriers<'a>(setup: &PageSetup, doc: &'a Document, drafts: &[bool]) -> Vec<ToneCarrier<'a>> {
+/// nothing to interfere with and nothing a grey edge can degrade. Layers that
+/// do not print drop out for the reason given on [`run_page`]'s `printed`.
+fn tone_carriers<'a>(setup: &PageSetup, doc: &'a Document, printed: &[bool]) -> Vec<ToneCarrier<'a>> {
     let mut out: Vec<ToneCarrier<'a>> = Vec::new();
     for (i, layer) in doc.layers.iter().enumerate() {
-        if !layer.visible || drafts[i] {
+        if !printed[i] {
             continue;
         }
         if let Some(t) = &layer.tone {
@@ -404,16 +404,24 @@ pub fn run_page(
     let mut out = Vec::new();
     let trim = setup.trim_rect_px();
     let safe_px = TEXT_SAFE_MM / 25.4 * setup.dpi as f32;
-    // A 下書き layer is not on the printed page — the export composite
-    // drops it — and preflight is a report about the print, so no check
-    // below may accuse one. Read through `effective_drafts` for the same
-    // reason export does: a draft FOLDER drafts everything inside it, and
-    // a rough usually lives in one folder rather than one layer.
+    // Which layers are actually ON the printed page. Folded exactly the
+    // way the export composite folds them (`composite_size` in `export.rs`:
+    // `effective_visibility`, then drafts knocked out of it), because
+    // preflight is a report about the print and a layer that will not be
+    // printed cannot be a finding. Both cascade through folders: hiding or
+    // drafting a folder takes everything inside it with it, and a rough
+    // normally lives in one folder rather than one layer.
+    let mut printed = doc.effective_visibility();
     let drafts = doc.effective_drafts();
+    for (p, d) in printed.iter_mut().zip(&drafts) {
+        if *d {
+            *p = false;
+        }
+    }
     // The trim rect can sit outside the canvas or touch it; text boxes
     // compare in the same px space `TextItem.pos` uses (canvas px).
     for (i, layer) in doc.layers.iter().enumerate() {
-        if drafts[i] {
+        if !printed[i] {
             continue;
         }
         let Some(ts) = layer.texts() else { continue };
@@ -452,7 +460,7 @@ pub fn run_page(
             // cannot land on a mono page. Roughing in blue is universal,
             // so without this the check fires on every page of every
             // chapter and teaches the artist to ignore preflight.
-            if !layer.visible || layer.is_vector() || drafts[i] {
+            if !printed[i] || layer.is_vector() {
                 continue;
             }
             'tiles: for (_, tile) in layer.tiles() {
@@ -474,7 +482,7 @@ pub fn run_page(
             }
         }
     }
-    let carriers = tone_carriers(setup, doc, &drafts);
+    let carriers = tone_carriers(setup, doc, &printed);
     for (i, upper) in carriers.iter().enumerate() {
         // Bottom-first collection, so everything before `i` is underneath.
         for lower in &carriers[..i] {
@@ -1070,6 +1078,53 @@ mod tests {
         assert!(
             clash_of(&f).is_none(),
             "neither draft carrier prints, so neither clashes: {f:?}"
+        );
+    }
+
+    /// PF-02's other half: a hidden FOLDER takes its children off the
+    /// printed page, and the export composite already reads it that way
+    /// (`effective_visibility`). Preflight reads the raw per-layer flag in
+    /// two places and not at all in the text check, so lettering and a
+    /// screen inside a folder the artist switched off still reported.
+    #[test]
+    fn a_hidden_folder_takes_its_content_off_the_page() {
+        let s = good_setup();
+        let m = meta(Some(s.clone()));
+        let mut doc = Document::new(s.paper_px().0, s.paper_px().1);
+        let trim = s.trim_rect_px();
+        // The partner screen, OUTSIDE the folder: it stays on the page and
+        // is what the folder's screen clashes with.
+        tone_layer(&mut doc, "cloud", 55.0, &[(0, 0), (1, 0)]);
+        // Two children: a clashing screen and lettering over the trim.
+        let sky = tone_layer(&mut doc, "sky", 60.0, &[(1, 0)]);
+        let mut t = crate::text::TextItem::new([0.0, 0.0], String::new(), 12.0, [0, 0, 0], false);
+        t.pos = [trim[0] - 5.0, trim[1] + 5.0];
+        t.size = [40.0, 10.0];
+        let li = doc.add_text_layer("rough letters", crate::text::TextSet { texts: vec![t] });
+        // [base, cloud, children (depth 1)…, folder header].
+        doc.layers[sky].depth = 1;
+        doc.layers[li].depth = 1;
+        let mut folder = crate::doc::Layer::new("inserts");
+        folder.folder = true;
+        doc.layers.push(folder);
+        let fi = doc.layers.len() - 1;
+
+        let before = run_page(&s, &m, 0, &doc);
+        let ids: Vec<_> = before.iter().map(|x| x.check).collect();
+        assert!(
+            ids.contains(&"text.outside_trim") && ids.contains(&"tone.clash"),
+            "the control case must flag both: {ids:?}"
+        );
+        // Hide the FOLDER, not the layers: the children keep `visible`.
+        doc.set_layer_visible(fi, false);
+        assert!(
+            doc.layers[sky].visible && doc.layers[li].visible,
+            "the test must exercise the cascade, not a hidden layer"
+        );
+        let f = run_page(&s, &m, 0, &doc);
+        assert!(
+            f.is_empty(),
+            "nothing inside a hidden folder reaches the printer: {f:?}"
         );
     }
 }
