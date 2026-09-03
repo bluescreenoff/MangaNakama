@@ -290,6 +290,12 @@ paper, trim, bleed and inner border do not travel, so guides stay off
 until you open the work itself again.</div>
 
 <h2>Exporting every page</h2>
+<div class="quirk"><b>The check that runs before an export ignores draft
+layers.</b> A mono work warns you about colour it cannot print, but a
+draft layer is not printed at all, so a rough in blue pencil is not a
+finding. Without this every page of every chapter carried a warning
+about its own rough, and a check that always complains is a check
+nobody reads.</div>
 <div class="quirk"><b>File ▸ Export All Pages… asks for its options
 first, then for a folder.</b> Leave the options alone and you get what
 you always got: <code>&lt;work name&gt;-p001.png</code>,

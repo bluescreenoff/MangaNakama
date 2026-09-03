@@ -438,7 +438,11 @@ pub fn run_page(
     }
     if meta.expression == crate::project::Expression::Mono {
         for layer in &doc.layers {
-            if !layer.visible || layer.is_vector() {
+            // A 下書き layer never reaches the printer, so its colour
+            // cannot land on a mono page. Roughing in blue is universal,
+            // so without this the check fires on every page of every
+            // chapter and teaches the artist to ignore preflight.
+            if !layer.visible || layer.is_vector() || layer.draft {
                 continue;
             }
             'tiles: for (_, tile) in layer.tiles() {
