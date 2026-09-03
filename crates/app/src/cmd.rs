@@ -328,6 +328,9 @@ pub enum AppCmd {
     BatchImportPagesPicked(Vec<PathBuf>),
     /// Run the Batch Import dialog's draft.
     BatchImportApply,
+    /// I03: stamp the OPEN page's underlay placement onto the other pages
+    /// the last batch import wrote.
+    BatchImportReplay,
     /// Workflow audit §11, first half: open the "New work from this work…"
     /// dialog (the ネーム promotion's target dpi).
     PromoteNewWork,

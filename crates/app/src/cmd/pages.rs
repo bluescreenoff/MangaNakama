@@ -407,6 +407,11 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
             app.set_status(s);
             app.mark_dirty();
         }
+        AppCmd::BatchImportReplay => {
+            let s = app.batch_import_replay();
+            app.set_status(s);
+            app.mark_dirty();
+        }
         // Workflow audit §11 — the ネーム promotion path.
         AppCmd::PromoteNewWork => {
             app.promote_open = true;

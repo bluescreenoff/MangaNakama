@@ -250,6 +250,11 @@ pub struct BatchImportDraft {
     pub files: Vec<std::path::PathBuf>,
     /// 1-based page slot the FIRST file lands on (defaults to the open page).
     pub start: usize,
+    /// I03: what the last run actually wrote -- (page index, source file)
+    /// for every underlay it placed. `App::batch_import_replay` re-reads
+    /// these files, which is what lets one hand-made placement on the open
+    /// page be stamped onto the rest of the chapter.
+    pub placed: Vec<(std::path::PathBuf, usize)>,
 }
 
 /// The Change Canvas Size dialog's working state (CSP 基準位置 anchor).

@@ -3484,9 +3484,27 @@ impl Document {
         name: impl Into<String>,
         img: &image::RgbaImage,
     ) -> usize {
+        let size = self.size;
+        let ox = (size.0 as i64 - img.width() as i64) / 2;
+        let oy = (size.1 as i64 - img.height() as i64) / 2;
+        self.add_layer_from_image_at(name, img, ox, oy)
+    }
+
+    /// The same, with the image's top-left corner named in canvas pixels
+    /// instead of centred. I03's batch-placement replay needs it: a
+    /// placement the artist made by hand on one page is a RECTANGLE, and
+    /// centring is only the special case where that rectangle happens to
+    /// sit in the middle.
+    pub fn add_layer_from_image_at(
+        &mut self,
+        name: impl Into<String>,
+        img: &image::RgbaImage,
+        ox: i64,
+        oy: i64,
+    ) -> usize {
         let at = self.add_layer(name);
         let size = self.size;
-        fill_layer_from_image(&mut self.layers[at], size, img);
+        fill_layer_from_image_at(&mut self.layers[at], size, img, ox, oy);
         self.touch();
         at
     }
@@ -6122,10 +6140,23 @@ impl Layer {
 /// of `size` (oversized images are clipped; fully transparent pixels leave
 /// no tile behind). The one image→tiles door, shared by import, stamp,
 /// flatten and folder merge.
+/// Paint `img` into `layer`, CENTRED on a `size` canvas — the shape every
+/// caller but I03's placement replay wants (a whole-canvas composite
+/// centres at 0,0 anyway).
 fn fill_layer_from_image(layer: &mut Layer, size: (u32, u32), img: &image::RgbaImage) {
+    let ox = (size.0 as i64 - img.width() as i64) / 2;
+    let oy = (size.1 as i64 - img.height() as i64) / 2;
+    fill_layer_from_image_at(layer, size, img, ox, oy);
+}
+
+fn fill_layer_from_image_at(
+    layer: &mut Layer,
+    size: (u32, u32),
+    img: &image::RgbaImage,
+    ox: i64,
+    oy: i64,
+) {
     let (w, h) = (size.0 as i64, size.1 as i64);
-    let ox = (w - img.width() as i64) / 2;
-    let oy = (h - img.height() as i64) / 2;
     for (px, py, p) in img.enumerate_pixels() {
         if p.0[3] == 0 {
             continue;

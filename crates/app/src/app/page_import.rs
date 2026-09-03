@@ -174,6 +174,21 @@ fn underlay_slot(doc: &Document) -> (usize, u8) {
     }
 }
 
+/// I03 — which layer of `doc` is the imported 下書き underlay: the
+/// BOTTOM-most draft layer at the stack's root, which is exactly what
+/// [`place_draft_underlay`] makes and where it puts it. `None` when the
+/// page has none (the artist deleted it, or the page never got one).
+///
+/// Identified by shape rather than by a remembered index because the
+/// artist owns the stack between the import and the replay — a layer
+/// added, or the underlay dragged, must not make the replay hit the
+/// wrong row.
+fn underlay_index(doc: &Document) -> Option<usize> {
+    doc.layers
+        .iter()
+        .position(|l| l.draft && !l.folder && l.depth == 0)
+}
+
 /// Put `img` into `doc` as a 下書き draft underlay at [`underlay_slot`].
 /// Returns the index it landed at.
 ///
@@ -190,9 +205,24 @@ pub(super) fn place_draft_underlay(
     name: String,
     img: &image::RgbaImage,
 ) -> usize {
+    let ox = (doc.size.0 as i64 - img.width() as i64) / 2;
+    let oy = (doc.size.1 as i64 - img.height() as i64) / 2;
+    place_draft_underlay_at(doc, name, img, ox, oy)
+}
+
+/// The same, with the image's corner named in canvas pixels. I03's replay
+/// stamps a rectangle the artist placed by hand, and a rectangle is not
+/// centred except by accident.
+pub(super) fn place_draft_underlay_at(
+    doc: &mut Document,
+    name: String,
+    img: &image::RgbaImage,
+    ox: i64,
+    oy: i64,
+) -> usize {
     let (slot, depth) = underlay_slot(doc);
     let mut scratch = Document::new(doc.size.0, doc.size.1);
-    let at = scratch.add_layer_from_image(name, img);
+    let at = scratch.add_layer_from_image_at(name, img, ox, oy);
     let mut layer = scratch.layers.remove(at);
     layer.depth = depth;
     layer.draft = true;
@@ -288,8 +318,112 @@ impl App {
     /// The deferred half of the audit's row: CSP places the rectangle once
     /// with handles on page 1 and reuses it. That needs a cross-page
     /// placement gesture we do not have; every image is scale-to-fit here.
+    /// I03 (workflow audit §4's deferred half) — take the placement the
+    /// artist made on the OPEN page and stamp it onto every other page the
+    /// last batch import wrote.
+    ///
+    /// CSP places the rectangle once, with handles, on the first page and
+    /// reuses it. We have no cross-page placement gesture, so this is the
+    /// same bargain in two steps the app already has: batch import, then
+    /// move/scale the open page's underlay with the ordinary Transform
+    /// box, then this. The rectangle is read back off the placed layer's
+    /// ink, so ANY way of moving it counts — transform, a nudge, a crop.
+    ///
+    /// **Rotation is lost.** The rectangle is the underlay's bounding box,
+    /// and a rotated photo's bounding box is not the photo — replaying it
+    /// would silently un-rotate every other page. Said in the status line
+    /// rather than guessed at, because a rotated 下書き is rare and a
+    /// silently squashed chapter is not something you notice until later.
+    ///
+    /// Each page is re-read from its SOURCE FILE, not resampled from the
+    /// page it landed on: the open page's copy has already been through
+    /// one fit and one hand placement, and resampling that would compound
+    /// both. The old underlay is removed and a fresh one takes its slot.
+    pub fn batch_import_replay(&mut self) -> String {
+        let placed = self.batch_import.placed.clone();
+        if placed.is_empty() {
+            return "nothing to replay — run File ▸ Batch import pages… first".into();
+        }
+        let Some(li) = underlay_index(&self.doc) else {
+            return "the open page has no imported 下書き to copy a placement from".into();
+        };
+        let Some(rect) = self.doc.layers[li].ink_bounds() else {
+            return "the open page's 下書き is empty — nothing to copy".into();
+        };
+        let (rw, rh) = ((rect[2] - rect[0]).max(1) as u32, (rect[3] - rect[1]).max(1) as u32);
+        if let Err(e) = self.stash_current_page() {
+            return format!("replay: {e}");
+        }
+        let (mut done, mut failed) = (0usize, 0usize);
+        for (path, target) in placed {
+            if target == self.page_index || target >= self.pages.len() {
+                continue;
+            }
+            let Some(b) = self.pages[target].bytes.as_deref() else {
+                failed += 1;
+                continue;
+            };
+            let Ok(mut doc) = mn_core::project::bytes_to_doc(b) else {
+                failed += 1;
+                continue;
+            };
+            let Some(u) = underlay_index(&doc) else {
+                failed += 1;
+                continue;
+            };
+            let Ok(src) = image::open(&path).map(|i| i.to_rgba8()) else {
+                failed += 1;
+                continue;
+            };
+            let name = doc.layers[u].name.clone();
+            doc.layers.remove(u);
+            if doc.active > u {
+                doc.active -= 1;
+            } else if doc.active == u {
+                doc.active = 0;
+            }
+            let img = image::imageops::resize(
+                &src,
+                rw,
+                rh,
+                image::imageops::FilterType::Lanczos3,
+            );
+            place_draft_underlay_at(&mut doc, name, &img, rect[0] as i64, rect[1] as i64);
+            let Ok(nb) = mn_core::project::doc_to_bytes(&doc) else {
+                failed += 1;
+                continue;
+            };
+            let rev = self.page_rev_next();
+            let e = &mut self.pages[target];
+            e.bytes = Some(nb);
+            e.blank = None;
+            e.rev = rev;
+            e.doc_rev = 0;
+            e.thumb = None;
+            e.preview_img = None;
+            e.prev_tex = None;
+            e.pane_tex = None;
+            done += 1;
+        }
+        // Restore the active-page invariant (bytes live in `doc`).
+        self.pages[self.page_index].bytes = None;
+        self.mark_pages_dirty();
+        self.mark_dirty();
+        let mut s = format!(
+            "placement replayed onto {done} page(s) — {rw}×{rh} at {},{}; rotation is not              copied, and undo does not cover the other pages",
+            rect[0], rect[1]
+        );
+        if failed > 0 {
+            s.push_str(&format!(" ({failed} could not be re-read)"));
+        }
+        s
+    }
+
     pub fn batch_import_pages(&mut self) -> String {
         let files = std::mem::take(&mut self.batch_import.files);
+        // I03: a fresh run replaces the last one's ledger, so a replay can
+        // never stamp a placement onto pages a different run wrote.
+        self.batch_import.placed.clear();
         if files.is_empty() {
             return "batch import: no files were picked".into();
         }
@@ -318,6 +452,7 @@ impl App {
                     Ok((bytes, n)) => {
                         note = note.or(n);
                         let e = self.fresh_page(Some(bytes), None);
+                        self.batch_import.placed.push((path.clone(), self.pages.len()));
                         self.pages.push(e);
                         added += 1;
                     }
@@ -350,6 +485,7 @@ impl App {
                 place_draft_underlay(&mut self.doc, name, &fitted);
                 self.renderer.invalidate();
                 self.layer_thumbs.clear();
+                self.batch_import.placed.push((path.clone(), target));
                 written += 1;
                 continue;
             }
@@ -388,6 +524,7 @@ impl App {
             e.rev = rev;
             e.doc_rev = 0;
             e.thumb = None;
+            self.batch_import.placed.push((path.clone(), target));
             written += 1;
         }
         // Restore the active-page invariant (bytes live in `doc`).

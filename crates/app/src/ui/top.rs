@@ -1030,6 +1030,20 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 app.push_cmd(AppCmd::BatchImportPages);
                 ui.close();
             }
+            // I03: the second half of that import — place the rough on THIS
+            // page by hand, then give every other page of the run the same
+            // rectangle. Only offered when there is a run to replay.
+            if ui
+                .add_enabled(
+                    !app.batch_import.placed.is_empty(),
+                    egui::Button::new("Replay this page's rough placement on the rest"),
+                )
+                .on_disabled_hover_text("batch import some roughs first")
+                .clicked()
+            {
+                app.push_cmd(AppCmd::BatchImportReplay);
+                ui.close();
+            }
             // Workflow audit §11, second half. The digital twin of the
             // batch import above: instead of N photographed roughs, the
             // pages of a ネーム WORK — matched to the pages they were

@@ -1030,6 +1030,95 @@ fn f12_the_tracked_key_seed_still_binds_cleanly() {
     assert!(lines >= 10, "the seed is the CSP set, not a token line or two");
 }
 
+/// F13 (ledger I03) — a rough placed by hand on one page can be stamped
+/// onto the whole chapter.
+///
+/// Batch import fits every photographed rough to the paper and no further,
+/// so a chapter shot at a slight angle or with a margin of desk around it
+/// had to be nudged into place twenty times. CSP places the rectangle once
+/// with handles and reuses it; this is the same bargain in two steps —
+/// import, place the open page's rough however you like, then replay that
+/// rectangle onto the rest.
+#[test]
+fn f13_a_rough_placed_by_hand_replays_onto_the_other_pages() {
+    let Some(mut app) = headless() else { return };
+    small_draft(&mut app, 3, "Roughs");
+    app.new_doc_draft.frame_folder = false;
+    dispatch(&mut app, AppCmd::NewComicCreate);
+    let (pw, ph) = app.doc.size;
+
+    let dir = tmp("replay");
+    let files: Vec<std::path::PathBuf> = (0..3)
+        .map(|i| {
+            let p = dir.join(format!("rough{i}.png"));
+            write_png_with_dpi(&p, 120, 160, None);
+            p
+        })
+        .collect();
+    app.batch_import.files = files.clone();
+    app.batch_import.start = 1;
+    dispatch(&mut app, AppCmd::BatchImportApply);
+    println!("[note] import: {}", app.status);
+    assert_eq!(app.batch_import.placed.len(), 3, "the run remembers what it wrote");
+
+    // The underlay is the bottom draft layer; batch import fits it to the
+    // paper and centres it.
+    let under = |app: &App| -> usize {
+        app.doc
+            .layers
+            .iter()
+            .position(|l| l.draft && !l.folder && l.depth == 0)
+            .expect("an imported underlay")
+    };
+    let li = under(&app);
+    let fitted = app.doc.layers[li].ink_bounds().expect("ink");
+    println!("[note] batch placement on page 1: {fitted:?} (page {pw}x{ph})");
+
+    // The artist moves it: here, straight onto the layer, because the
+    // replay's contract is "wherever the rough's ink ended up" and not
+    // "whatever the transform tool did".
+    app.doc.layers[li].replace_tiles(Default::default());
+    let (x0, y0, rw, rh) = (37i32, 61i32, 120i32, 90i32);
+    paint(&mut app, li, BLACK, move |x, y| {
+        x >= x0 && x < x0 + rw && y >= y0 && y < y0 + rh
+    });
+    assert_eq!(
+        app.doc.layers[li].ink_bounds(),
+        Some([x0, y0, x0 + rw, y0 + rh])
+    );
+
+    dispatch(&mut app, AppCmd::BatchImportReplay);
+    println!("[note] replay: {}", app.status);
+    assert!(app.status.contains("2 page(s)"), "{}", app.status);
+    assert!(app.status.contains("rotation"), "the lost rotation is said out loud");
+
+    // Every OTHER page now carries the same rectangle. The open page is
+    // untouched — it is the one that was placed by hand.
+    for p in 1..3 {
+        dispatch(&mut app, AppCmd::SelectPage(p));
+        let l = under(&app);
+        assert_eq!(
+            app.doc.layers[l].ink_bounds(),
+            Some([x0, y0, x0 + rw, y0 + rh]),
+            "page {} took the placement",
+            p + 1
+        );
+        assert!(app.doc.layers[l].draft, "and it is still a draft layer");
+        // The export renderer drops drafts, which is the whole point of an
+        // underlay — so for the LOOK, un-draft it for one frame.
+        app.doc.layers[l].draft = false;
+        shot(&mut app, &format!("f13-page{}", p + 1));
+        app.doc.layers[l].draft = true;
+    }
+    dispatch(&mut app, AppCmd::SelectPage(0));
+    assert_eq!(
+        app.doc.layers[under(&app)].ink_bounds(),
+        Some([x0, y0, x0 + rw, y0 + rh]),
+        "the page it was copied FROM is untouched"
+    );
+    assert_ne!(fitted, [x0, y0, x0 + rw, y0 + rh], "the replay really moved something");
+}
+
 /// F10 — templates, open-recent, close-with-unsaved, two works open.
 #[test]
 fn f10_template_recent_close_tabs() {
