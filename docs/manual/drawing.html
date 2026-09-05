@@ -67,6 +67,17 @@ released: no held space, no half-finished stroke, no live brush-size
 drag. The status bar says <code>input released</code> when there was
 something to release.</div>
 
+<h2>Two-finger rotate</h2>
+<div class="quirk"><b>A two-finger gesture only starts rotating the
+canvas once the twist is both past 12° and clearly bigger than the
+pinch.</b> Pan and zoom track from the first moment as always; rotation
+waits, and when it does start, the whole turn you have made so far is
+applied at once, so nothing is lost. <span class="why">A zoom is never
+angle-perfect — spreading two fingers drags the page round a few
+degrees on the way. The old 4° trigger was inside that noise, so
+zooming kept tipping the page over. Turning clearly, rather than
+spreading, still rotates immediately.</span></div>
+
 <h2>Wash mode</h2>
 <div class="quirk"><b>One wash stroke can never exceed its opacity,
 however much it overlaps itself.</b> In wash mode the dabs accumulate

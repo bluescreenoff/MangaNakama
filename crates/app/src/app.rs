@@ -1415,8 +1415,15 @@ struct TouchTwist {
     /// Raw (unsnapped) rotation accumulated since the pair formed.
     raw: f32,
     /// Rotation is inert until the cumulative twist passes
-    /// [`TOUCH_TWIST_THRESHOLD`], then live for the rest of the gesture.
+    /// [`TOUCH_TWIST_THRESHOLD`] *and* out-argues [`TouchTwist::pinch`],
+    /// then live for the rest of the gesture.
     live: bool,
+    /// How much PINCH this gesture has spent: the running sum of
+    /// |ln(distance ratio)| over every event since the pair formed. A zoom
+    /// piles this up fast, a pure twist barely moves it — which is exactly
+    /// the difference the second activation gate reads (see
+    /// [`TOUCH_TWIST_DOMINANCE`]).
+    pinch: f32,
     /// The quarter the snap currently holds (None = free rotation).
     holding: Option<f32>,
 }
@@ -1433,7 +1440,23 @@ impl TouchTwist {
 /// Cumulative twist that flips rotation live for the gesture — pinch
 /// noise stays under it (the OpenLayers PinchRotate pattern, tuned for a
 /// canvas rather than a map's conservative 17°).
-const TOUCH_TWIST_THRESHOLD: f32 = 4.0f32.to_radians();
+///
+/// Raised 4° → 12° on 2026-09-05 (item I): "two-finger rotate is too
+/// sensitive: my zoom gesture's imperfection is read as a rotate." Four
+/// degrees is inside a normal pinch's wobble, so a plain zoom kept tipping
+/// the page over.
+const TOUCH_TWIST_THRESHOLD: f32 = 12.0f32.to_radians();
+/// The second activation gate (item I): the twist must DOMINATE the pinch.
+/// Rotation needs this much accumulated twist per unit of accumulated
+/// |ln(scale)| — 40° of turning per e-fold of zoom. So:
+///   * a pure twist (< 5 % scale drift) only ever needs the 12° above;
+///   * a ±25 % pinch demands ~9° before it may rotate at all, and a 2×
+///     zoom demands ~28° — more than a hand wobbles while spreading two
+///     fingers, so a sloppy zoom stays a zoom.
+/// Both gates must pass; once latched, the gesture behaves exactly as
+/// before and the twist accumulated while inert is applied, so nothing the
+/// fingers did is thrown away.
+const TOUCH_TWIST_DOMINANCE: f32 = 40.0f32.to_radians();
 /// The displayed angle snaps to a quarter within [`SNAP_ENGAGE`] of it
 /// and holds until the raw angle passes [`SNAP_RELEASE`] — hysteresis, so
 /// the boundary never dithers and leaving the magnet is always possible
@@ -4213,7 +4236,8 @@ impl App {
                 let d1 = ((x - bx).powi(2) + (y - by).powi(2)).sqrt().max(1.0);
                 let m0 = [(ox0 + bx) * 0.5, (oy0 + by) * 0.5];
                 let m1 = [(x + bx) * 0.5, (y + by) * 0.5];
-                self.viewport.zoom_around(m0, (d1 / d0).clamp(0.5, 2.0));
+                let ratio = (d1 / d0).clamp(0.5, 2.0);
+                self.viewport.zoom_around(m0, ratio);
                 // Two-finger ROTATE rides the same pair (pinch-twist is ONE
                 // gesture — Procreate/CSP/Qt never gate rotate against
                 // zoom). The interleaved half-updates compose exactly (each
@@ -4244,7 +4268,16 @@ impl App {
                 }
                 let g = &mut self.touch_twist;
                 g.raw += delta;
-                if !g.live && g.raw.abs() > TOUCH_TWIST_THRESHOLD {
+                g.pinch += ratio.ln().abs();
+                // Item I (2026-09-05): TWO gates, both required. The first
+                // is the old cumulative-twist latch, now at 12°. The second
+                // asks whether this gesture is a twist at all: a zoom spends
+                // its motion on distance, a rotate on angle, so compare the
+                // two accumulators before letting the page turn.
+                if !g.live
+                    && g.raw.abs() >= TOUCH_TWIST_THRESHOLD
+                    && g.raw.abs() >= TOUCH_TWIST_DOMINANCE * g.pinch
+                {
                     g.live = true;
                 }
                 if g.live {

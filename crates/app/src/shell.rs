@@ -54,6 +54,11 @@ pub struct Shell {
 
 impl Shell {
     pub fn new(renderer: &Renderer, ppp: f32) -> Self {
+        // Item H (2026-09-05): this is the window thread — it pumps
+        // WM_POINTER and paints. One notch above a background cargo build
+        // (see priority.rs for why ABOVE_NORMAL and not HIGH).
+        crate::priority::raise_for_interactive();
+
         let ctx = egui::Context::default();
         crate::ui::theme::apply(&ctx);
 

@@ -22,6 +22,7 @@ mod gesture;
 mod input;
 mod input_path;
 mod keymap;
+mod priority;
 mod recovery;
 mod remote;
 mod screenshot;
