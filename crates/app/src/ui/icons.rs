@@ -9,6 +9,60 @@ use super::theme::{self, Theme};
 use egui::{Color32, Painter, Pos2, Rect, Shape, Stroke, Vec2};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+pub mod svg;
+use svg::Accent;
+
+/// How a Lucide-backed icon is drawn: one bundled glyph (with which of its
+/// elements take the accent), or a subject glyph wearing a plus badge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Lucide {
+    Glyph(&'static str, Accent),
+    Badged(&'static str),
+}
+
+/// The icons that come from the Lucide pack (`assets/icons/lucide/`, ISC —
+/// see `assets/icons/ATTRIBUTION.md`). Everything not listed keeps its
+/// hand-drawn arm in [`paint_role`]. The set is the Layers palette: row
+/// kinds, row flags, and the palette's own buttons — the icons the owner
+/// pointed at (2026-09-05). Tool-strip icons are deliberately NOT here so
+/// the strip stays one family until it is redone as a whole.
+pub fn lucide_for(icon: Icon) -> Option<Lucide> {
+    use Lucide::*;
+    Some(match icon {
+        // Row kinds.
+        Icon::Text => Glyph("type", Accent::None),
+        Icon::Balloon => Glyph("message-circle", Accent::None),
+        Icon::FrameFolder => Glyph("layout-template", Accent::None),
+        Icon::Folder => Glyph("folder", Accent::None),
+        Icon::FolderOpen => Glyph("folder-open", Accent::None),
+        Icon::Paper => Glyph("file", Accent::None),
+        // The two control points are the accent: geometry beside the pixels.
+        Icon::Vector => Glyph("spline", Accent::Head(2)),
+        Icon::Tone => Glyph("grip", Accent::None),
+        // The picture inside the sheet is what arrives from outside.
+        Icon::FileObject => Glyph("file-image", Accent::Tail(2)),
+        // Row flags.
+        Icon::Reference => Glyph("pin", Accent::None),
+        Icon::Draft => Glyph("pencil-line", Accent::None),
+        Icon::Eye => Glyph("eye", Accent::Tail(1)),
+        Icon::EyeOff => Glyph("eye-off", Accent::Tail(1)),
+        Icon::Lock => Glyph("lock", Accent::None),
+        Icon::LockAlpha => Glyph("lock-keyhole", Accent::Head(1)),
+        Icon::Clip => Glyph("corner-down-left", Accent::Tail(1)),
+        Icon::Label => Glyph("tag", Accent::Tail(1)),
+        // Palette buttons: the "make one" family wears the plus.
+        Icon::NewLayer => Glyph("file-plus", Accent::Tail(2)),
+        Icon::NewVector => Badged("spline"),
+        Icon::NewFolder => Glyph("folder-plus", Accent::Head(2)),
+        Icon::NewFrameFolder => Badged("layout-template"),
+        Icon::Duplicate => Glyph("copy", Accent::None),
+        Icon::MergeDown => Glyph("arrow-down-to-line", Accent::Tail(1)),
+        Icon::Trash => Glyph("trash-2", Accent::None),
+        Icon::Funnel => Glyph("funnel", Accent::None),
+        _ => return None,
+    })
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Icon {
     Pen,
@@ -365,6 +419,20 @@ pub fn paint(p: &Painter, r: Rect, icon: Icon, color: Color32) {
 /// dashed marquee, a halftone patch); each match arm below decides for
 /// itself. `accent: None` is exactly today's monochrome paint.
 pub fn paint_role(p: &Painter, r: Rect, icon: Icon, base: Color32, accent: Option<Color32>) {
+    // Lucide-backed glyphs (owner 2026-09-05, "better icons"): the layer
+    // palette's kinds, flags and buttons. The hand-drawn arms below stay for
+    // everything else (the tool strip keeps its own family).
+    match lucide_for(icon) {
+        Some(Lucide::Glyph(name, which)) => {
+            svg::paint(p, r, name, base, accent, which);
+            return;
+        }
+        Some(Lucide::Badged(name)) => {
+            svg::paint_badged(p, r, name, base, accent);
+            return;
+        }
+        None => {}
+    }
     let color = base;
     let w = r.width().min(r.height());
     let line = Stroke::new((w * 0.11).clamp(1.0, 2.2), color);
@@ -1542,5 +1610,43 @@ mod tests {
         set_accents(false);
         assert!(!accents_on());
         set_accents(true);
+    }
+}
+
+#[cfg(test)]
+mod lucide_tests {
+    use super::*;
+
+    /// Every Lucide-backed icon names a glyph that is actually bundled, and
+    /// its accent selector fits the glyph's element count — a typo here would
+    /// otherwise paint nothing, silently.
+    #[test]
+    fn every_lucide_mapping_names_a_bundled_glyph() {
+        let all = [
+            Icon::Text, Icon::Balloon, Icon::FrameFolder, Icon::Folder, Icon::FolderOpen,
+            Icon::Paper, Icon::Vector, Icon::Tone, Icon::FileObject, Icon::Reference,
+            Icon::Draft, Icon::Eye, Icon::EyeOff, Icon::Lock, Icon::LockAlpha, Icon::Clip,
+            Icon::Label, Icon::NewLayer, Icon::NewVector, Icon::NewFolder, Icon::NewFrameFolder,
+            Icon::Duplicate, Icon::MergeDown, Icon::Trash, Icon::Funnel,
+        ];
+        for icon in all {
+            let Some(l) = lucide_for(icon) else {
+                panic!("{icon:?} lost its Lucide mapping");
+            };
+            let (name, which) = match l {
+                Lucide::Glyph(n, w) => (n, w),
+                Lucide::Badged(n) => (n, Accent::None),
+            };
+            let els = svg::glyph(name).unwrap_or_else(|| panic!("{icon:?}: {name} not bundled"));
+            let n = els.len();
+            match which {
+                Accent::None => {}
+                Accent::Head(k) | Accent::Tail(k) => {
+                    assert!(k <= n, "{icon:?}: accent {k} of {n} elements");
+                }
+            }
+        }
+        assert!(svg::glyph("plus").is_some(), "the badge glyph");
+        assert!(lucide_for(Icon::Pen).is_none(), "the tool strip keeps its own family");
     }
 }
