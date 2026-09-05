@@ -55,6 +55,31 @@ Text tool hands the selection to the balloon containing that text —
 the bubble's vertices and handles, ready to drag. If no balloon
 contains it, the text stays selected.</div>
 
+<h2>The balloon pen: pressure, corners, two kinds of grip</h2>
+<div class="quirk"><b>The drawn bubble's outline follows your pen.</b> Press
+harder and the line is thicker, exactly like the G-pen. How thin it goes where
+you barely touched is <code>Min size</code> in Tool Property, as a percentage
+of the line width &mdash; 100&nbsp;% is the old flat outline, low numbers give
+a long taper. The toggle above it, <b>Line follows pen pressure</b>, turns the
+whole thing off for a bubble that wants one even weight. New balloon layers
+start with it on; a file saved before this existed opens exactly as it was
+saved.</div>
+<div class="quirk"><b>While you draw, the trail on screen is the outline you
+are about to get</b> &mdash; the real width, the real taper, the real ink
+colour, not a hairline. A thin accent line runs down the middle of it so the
+trail is still findable over black art.</div>
+<div class="quirk"><b>Spikes stay sharp.</b> Turn the pen hard enough
+(past about 55&deg; over a few pixels) and that point is recorded as a
+<em>corner</em>: the curve arrives and leaves it without rounding, so a shout
+bubble's spikes come out as spikes. Gentle bends stay smooth curves.</div>
+<div class="quirk"><b>Square grip = corner, round grip = curve.</b> Pick the
+bubble with the Object tool and its anchors show which is which, the same way
+Clip Studio does (&#35282;&#12354;&#12426; / &#35282;&#12394;&#12375;).
+<kbd>Alt</kbd>+click an anchor switches it between the two &mdash; one undo
+step &mdash; which is how you sharpen a corner the pen read as a curve, or
+soften one it read as a spike. <kbd>Ctrl</kbd>+click still deletes an anchor,
+and <kbd>Ctrl</kbd>+click on the outline between two of them adds one.</div>
+
 <h2>Turning a balloon turns its lettering</h2>
 <div class="quirk"><b>Rotate a drawn bubble and the text inside it comes
 with it &mdash; still text.</b> Every text box whose centre sat inside the

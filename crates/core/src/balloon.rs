@@ -219,6 +219,19 @@ pub struct Balloon {
     /// `C-04x` screened fill. `None` = the flat fill every old file has.
     #[serde(default)]
     pub fill_tone: Option<BalloonTone>,
+    /// CSP's **Min size** for the balloon pen, 0..=1: the fraction of the
+    /// outline width a ZERO-pressure anchor keeps. 1.0 = no taper at all,
+    /// 0.0 = the line vanishes where the pen was weightless. Only read when
+    /// the layer's `pressure_width` is on.
+    ///
+    /// Two different defaults, on purpose. A balloon drawn in this build
+    /// starts at [`MIN_WIDTH_DEFAULT`] (a taper you can actually see, which
+    /// is what the owner asked for). A balloon loaded from a file written
+    /// before this field existed gets [`legacy_min_width`] — the 0.35 that
+    /// was hardcoded in the rasterizer — so nothing already on disk changes
+    /// shape when it is reopened.
+    #[serde(default = "legacy_min_width")]
+    pub min_width: f32,
 }
 
 impl Default for Balloon {
@@ -236,8 +249,22 @@ impl Default for Balloon {
             line_opacity: 1.0,
             fill_opacity: 1.0,
             fill_tone: None,
+            min_width: MIN_WIDTH_DEFAULT,
         }
     }
+}
+
+/// A newly drawn balloon's Min size: the outline runs from 12 % of its width
+/// at no pressure to 100 % at full. CSP's balloon pen tapers over the whole
+/// brush-size range, and the 0.35 this replaces was a 3x range that read as
+/// uniform on the page (owner, 2026-09-05: "the balloon pen seems
+/// uni-thickness which is no fun").
+pub const MIN_WIDTH_DEFAULT: f32 = 0.12;
+
+/// What the rasterizer hardcoded before Min size was a field. Files written
+/// then reload with exactly the outline they were saved with.
+fn legacy_min_width() -> f32 {
+    0.35
 }
 
 fn default_width_scale() -> f32 {
@@ -1303,6 +1330,160 @@ pub fn simplify_anchors(
     (out_p, out_w)
 }
 
+/// A hand-drawn direction change this sharp is a CORNER, not a curve.
+///
+/// Measured between the chord arriving at a sample and the chord leaving it,
+/// each [`CORNER_CHORD_PX`] long: 0° is straight on, 180° is a full reversal.
+/// 55° is well above the wobble of a hand drawing a smooth arc and well below
+/// the ~90°+ of a deliberate spike — the owner's screenshot was a spike whose
+/// tip turned far past 90° and still came out as a rounded bump, because
+/// nothing was looking for corners at all.
+pub const CORNER_TURN_DEG: f32 = 55.0;
+
+/// How far either side of a sample the turn is measured over. Two adjacent
+/// pen samples can be a fraction of a pixel apart, and the angle between two
+/// sub-pixel chords is noise; ~6 px is a short enough window to catch a real
+/// spike and long enough to ignore the hand.
+pub const CORNER_CHORD_PX: f32 = 6.0;
+
+/// Indices of the RAW samples that are corners: sharp turns, one per turn.
+///
+/// On the raw trail, before any simplification — a spike is exactly the kind
+/// of feature Douglas-Peucker keeps as a vertex but says nothing about, and
+/// by the time the anchors exist the evidence (how fast the direction turned)
+/// is gone.
+///
+/// The trail is treated as CLOSED, because the only caller draws closed
+/// bubbles: the window wraps at the seam, so a spike the artist happened to
+/// start drawing ON is found like any other.
+fn raw_corners(raw: &[[f32; 2]]) -> Vec<usize> {
+    let n = raw.len();
+    if n < 5 {
+        return Vec::new();
+    }
+    let cos_max = (CORNER_TURN_DEG.to_radians()).cos();
+    // Walk out from i, wrapping, until the chord is long enough. `None` when
+    // the whole trail is shorter than one chord.
+    let reach = |i: usize, dir: isize| -> Option<usize> {
+        let mut j = i;
+        for _ in 0..n {
+            j = ((j as isize + dir).rem_euclid(n as isize)) as usize;
+            if j == i {
+                return None;
+            }
+            if len(sub(raw[j], raw[i])) >= CORNER_CHORD_PX {
+                return Some(j);
+            }
+        }
+        None
+    };
+    let mut turn = vec![0.0f32; n];
+    for i in 0..n {
+        let (Some(a), Some(b)) = (reach(i, -1), reach(i, 1)) else {
+            continue;
+        };
+        let (u, v) = (sub(raw[i], raw[a]), sub(raw[b], raw[i]));
+        let (lu, lv) = (len(u), len(v));
+        if lu < 1e-3 || lv < 1e-3 {
+            continue;
+        }
+        let cos = ((u[0] * v[0] + u[1] * v[1]) / (lu * lv)).clamp(-1.0, 1.0);
+        if cos < cos_max {
+            // Sharper than the threshold. Store the turn so the ridge can be
+            // reduced to its peak below.
+            turn[i] = 1.0 - cos;
+        }
+    }
+    // One corner per turn: a spike tip spreads its sharpness over several
+    // samples, and marking all of them would put three anchors on one point.
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < n {
+        if turn[i] <= 0.0 {
+            i += 1;
+            continue;
+        }
+        let mut j = i;
+        let mut best = i;
+        // The run of sharp samples, plus anything within a chord of it.
+        while j + 1 < n && (turn[j + 1] > 0.0 || len(sub(raw[j + 1], raw[j])) < CORNER_CHORD_PX) {
+            j += 1;
+            if turn[j] > turn[best] {
+                best = j;
+            }
+            if turn[j] <= 0.0 && len(sub(raw[j], raw[best])) >= CORNER_CHORD_PX {
+                break;
+            }
+        }
+        out.push(best);
+        i = j + 1;
+    }
+    out
+}
+
+/// Anchors, per-anchor pen pressure, and CORNER FLAGS for a hand-drawn trail.
+///
+/// [`simplify_anchors`] plus [`raw_corners`], joined the only way that keeps
+/// a spike sharp: the trail is CUT at each corner and each run is simplified
+/// on its own, so a corner sample is a run endpoint and Douglas-Peucker can
+/// never drop it or move it. The flag then rides to
+/// [`tessellate_closed`], which zeroes the spline's tangents there — the
+/// curve arrives and leaves without direction, which is what a kink is.
+pub fn drawn_anchors(
+    raw: &[[f32; 2]],
+    pressures: &[f32],
+    epsilon: f32,
+) -> (Vec<[f32; 2]>, Vec<f32>, Vec<bool>) {
+    if raw.len() < 3 {
+        let (p, w) = simplify_anchors(raw, pressures, epsilon);
+        let n = p.len();
+        return (p, w, vec![false; n]);
+    }
+    let corners = raw_corners(raw);
+    if corners.is_empty() {
+        let (p, w) = simplify_anchors(raw, pressures, epsilon);
+        let n = p.len();
+        return (p, w, vec![false; n]);
+    }
+    let last = raw.len() - 1;
+    // A corner AT the seam cannot be a cut (the runs already start and end
+    // there); it is a flag on the first anchor instead.
+    let seam = corners.iter().any(|&i| i == 0 || i == last);
+    let mut cuts: Vec<usize> = std::iter::once(0)
+        .chain(corners.iter().copied().filter(|&i| i > 0 && i < last))
+        .chain(std::iter::once(last))
+        .collect();
+    cuts.dedup();
+
+    let (mut pts, mut ws, mut cs): (Vec<[f32; 2]>, Vec<f32>, Vec<bool>) =
+        (Vec::new(), Vec::new(), Vec::new());
+    for w in cuts.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        let (p, q) = simplify_anchors(&raw[a..=b], &pressures[a..=b], epsilon);
+        let skip = usize::from(!pts.is_empty());
+        for (pp, qq) in p.iter().zip(&q).skip(skip) {
+            pts.push(*pp);
+            ws.push(*qq);
+            cs.push(false);
+        }
+        // The run ended ON the corner, so the anchor that carries the flag is
+        // the one just pushed — unless this run ended at the trail's end.
+        if b != last && !cs.is_empty() {
+            let k = cs.len() - 1;
+            cs[k] = true;
+        }
+    }
+    if seam && !cs.is_empty() {
+        cs[0] = true;
+        let k = cs.len() - 1;
+        // The closing duplicate, if the caller has not dropped it yet.
+        if k > 0 && len(sub(pts[k], pts[0])) < 1e-3 {
+            cs[k] = true;
+        }
+    }
+    (pts, ws, cs)
+}
+
 impl BalloonSet {
     /// Current index of the balloon with stable id `id`.
     pub fn index_of_id(&self, id: u64) -> Option<usize> {
@@ -1324,11 +1505,44 @@ impl BalloonSet {
         }
     }
 
+    /// A fresh balloon layer. **Pressure is ON**: this is the constructor the
+    /// balloon pen reaches through (`cmd/text.rs`'s `BalloonAdd`, when the
+    /// page has no balloon layer to join), and a drawn bubble whose line does
+    /// not answer the pen is the complaint this default exists to answer.
+    /// Loading a file still honours what the file says — `pressure_width` is
+    /// `#[serde(default)]`, i.e. off, for everything written before it existed.
+    /// The outline width in canvas px this set inks balloon `i` with at pen
+    /// pressure `pr`.
+    ///
+    /// **The one place that answers "how thick".** The rasterizer uses it, and
+    /// so does the Balloon tool's live trail
+    /// (`app/ui/overlay/frames.rs::balloon`) — the owner asked to see the
+    /// final thickness while drawing, and two copies of this formula would be
+    /// two answers to that question. Pinned by
+    /// `the_balloon_pen_preview_matches_its_commit`.
+    pub fn border_at(&self, i: usize, pr: f32) -> f32 {
+        let scale = self
+            .balloons
+            .get(i)
+            .map_or(1.0, |b| b.width_scale.max(0.0));
+        let base = if self.pressure_width {
+            let m = self
+                .balloons
+                .get(i)
+                .map_or(MIN_WIDTH_DEFAULT, |b| b.min_width)
+                .clamp(0.0, 1.0);
+            self.border_px * (m + (1.0 - m) * pr.clamp(0.0, 1.0))
+        } else {
+            self.border_px
+        };
+        base * scale
+    }
+
     pub fn new(border_px: f32) -> Self {
         Self {
             balloons: Vec::new(),
             border_px,
-            pressure_width: false,
+            pressure_width: true,
         }
     }
 
@@ -1356,18 +1570,12 @@ impl BalloonSet {
         let reach = self.border_px * 0.5 * max_width_scale(self) + 1.0;
         let tile_r = (TILE_SIZE as f32) * 0.5 * std::f32::consts::SQRT_2;
         // Drawn balloons ink their outline thinner where the pen was light
-        // (`pressure_width`): border 35% of nominal at zero pressure, 100% at
-        // full pressure. The per-balloon `width_scale` multiplies the whole
-        // thing at RENDER time — the stored pressure widths are data, never
-        // edited by the correct-width UI.
-        let border_of = |i: usize, pr: f32| {
-            let base = if self.pressure_width {
-                self.border_px * (0.35 + 0.65 * pr)
-            } else {
-                self.border_px
-            };
-            base * self.balloons[i].width_scale.max(0.0)
-        };
+        // (`pressure_width`). The floor is the balloon's own Min size — CSP's
+        // 最小値 — so the taper spans the whole width instead of the fixed 35 %
+        // this used to have. The per-balloon `width_scale` multiplies the
+        // whole thing at RENDER time; the stored pressure widths are data,
+        // never edited by the correct-width UI.
+        let border_of = |i: usize, pr: f32| self.border_at(i, pr);
 
         // Tessellate drawn bodies ONCE (the per-pixel loop must not rebuild
         // splines). `None` = analytic body.
@@ -3827,5 +4035,215 @@ mod tests {
         let p = quad_through([10.0, 10.0], [10.0, 10.0], [10.0, 10.0]);
         assert!(p.len() >= 2, "at least a segment: {}", p.len());
         assert!(p.iter().all(|q| q[0].is_finite() && q[1].is_finite()));
+    }
+
+    // --- item O: the balloon pen's line follows the pen -------------------
+
+    /// A square drawn bubble whose four anchors carry pressure `p`.
+    fn pressure_square(p: f32, pressure_width: bool, min_width: f32) -> BalloonSet {
+        let mut set = BalloonSet::new(6.0);
+        set.pressure_width = pressure_width;
+        set.balloons.push(Balloon {
+            shape: BalloonShape::Polygon {
+                points: vec![
+                    [40.0, 40.0],
+                    [180.0, 40.0],
+                    [180.0, 180.0],
+                    [40.0, 180.0],
+                ],
+                widths: vec![p; 4],
+                corners: vec![true; 4],
+            },
+            min_width,
+            ..Default::default()
+        });
+        set
+    }
+
+    /// Total outline ink, as a stand-in for "how thick did it come out".
+    /// Counts only the pixels the OUTLINE colour reached — the fill is flat
+    /// and would drown the difference.
+    fn outline_ink(set: &BalloonSet) -> u64 {
+        set.rasterize((256, 256))
+            .values()
+            .flat_map(|t| {
+                let d = t.data();
+                (0..d.len() / 4).map(move |i| {
+                    // near-black with alpha = the line, not the white fill
+                    let (r, a) = (d[i * 4], d[i * 4 + 3]);
+                    if a > 0 && r < a / 2 { a as u64 } else { 0 }
+                })
+            })
+            .sum()
+    }
+
+    /// The owner's complaint, pinned: a light hand has to ink a visibly
+    /// thinner outline than a heavy one.
+    #[test]
+    fn the_balloon_outline_follows_pen_pressure() {
+        let heavy = outline_ink(&pressure_square(1.0, true, MIN_WIDTH_DEFAULT));
+        let light = outline_ink(&pressure_square(0.1, true, MIN_WIDTH_DEFAULT));
+        println!("[O] outline ink: full pressure {heavy}, light {light}");
+        assert!(heavy > 0 && light > 0, "both inked something");
+        assert!(
+            (light as f64) < (heavy as f64) * 0.5,
+            "a light hand must be far thinner: light {light} vs heavy {heavy}"
+        );
+
+        // And with the toggle off it is uniform, exactly as before.
+        let heavy_off = outline_ink(&pressure_square(1.0, false, MIN_WIDTH_DEFAULT));
+        let light_off = outline_ink(&pressure_square(0.1, false, MIN_WIDTH_DEFAULT));
+        assert_eq!(
+            heavy_off, light_off,
+            "pressure_width off is the old uniform line"
+        );
+    }
+
+    /// Min size is the floor, and it is the thing that decides how far the
+    /// taper reaches: a high floor gives back a near-uniform line.
+    #[test]
+    fn min_size_sets_how_far_the_taper_goes() {
+        let low = outline_ink(&pressure_square(0.0, true, 0.05));
+        let high = outline_ink(&pressure_square(0.0, true, 0.9));
+        println!("[O] zero-pressure ink: min size 5% {low}, 90% {high}");
+        assert!(
+            low < high,
+            "a lower Min size inks less at zero pressure: {low} vs {high}"
+        );
+    }
+
+    /// The default that makes the balloon pen feel like a pen at all. A file
+    /// written before the toggle existed still loads with it OFF — that is
+    /// `#[serde(default)]` on the field, not this constructor.
+    #[test]
+    fn a_fresh_balloon_layer_follows_the_pen() {
+        assert!(BalloonSet::new(4.0).pressure_width);
+        assert_eq!(Balloon::default().min_width, MIN_WIDTH_DEFAULT);
+    }
+
+    /// A balloon saved before Min size existed reloads with the outline it
+    /// was saved with — the 0.35 the rasterizer used to hardcode.
+    #[test]
+    fn an_old_balloon_keeps_its_old_min_size() {
+        let json = r#"{"shape":{"Ellipse":{"center":[10.0,10.0],"radii":[5.0,5.0]}}}"#;
+        let b: Balloon = serde_json::from_str(json).expect("an old balloon");
+        assert_eq!(b.min_width, 0.35);
+    }
+
+    // --- item M: hand-drawn spikes come out sharp -------------------------
+
+    /// A ten-spiked star, sampled the way a pen would: dense points along
+    /// every edge, no vertex duplicated.
+    fn star_trail(spikes: usize, inner: f32, outer: f32) -> (Vec<[f32; 2]>, Vec<[f32; 2]>) {
+        let c = [128.0f32, 128.0];
+        let mut verts = Vec::new();
+        let mut tips = Vec::new();
+        for k in 0..spikes * 2 {
+            let a = k as f32 / (spikes * 2) as f32 * std::f32::consts::TAU;
+            let r = if k % 2 == 0 { outer } else { inner };
+            let v = [c[0] + r * a.cos(), c[1] + r * a.sin()];
+            if k % 2 == 0 {
+                tips.push(v);
+            }
+            verts.push(v);
+        }
+        let mut raw = Vec::new();
+        for i in 0..verts.len() {
+            let (a, b) = (verts[i], verts[(i + 1) % verts.len()]);
+            let steps = (len(sub(b, a)) / 1.5).ceil().max(2.0) as usize;
+            for t in 0..steps {
+                let f = t as f32 / steps as f32;
+                raw.push([a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f]);
+            }
+        }
+        (raw, tips)
+    }
+
+    /// The owner's complaint, pinned: a drawn spike stays a spike. Every tip
+    /// survives as an anchor MARKED as a corner, and the tessellated outline
+    /// still passes through it — a rounded bump would cut the corner and miss
+    /// by far more than half a pixel.
+    #[test]
+    fn a_drawn_star_keeps_all_ten_of_its_spikes() {
+        let (raw, tips) = star_trail(10, 55.0, 110.0);
+        let prs = vec![0.8f32; raw.len()];
+        let (pts, widths, corners) = drawn_anchors(&raw, &prs, 1.0);
+        assert_eq!(pts.len(), widths.len());
+        assert_eq!(pts.len(), corners.len());
+        let flagged = corners.iter().filter(|c| **c).count();
+        println!("[M] {} anchors, {flagged} of them corners", pts.len());
+
+        for tip in &tips {
+            let hit = pts
+                .iter()
+                .zip(&corners)
+                .filter(|(_, c)| **c)
+                .any(|(p, _)| len(sub(*p, *tip)) < 0.5);
+            assert!(hit, "spike tip {tip:?} is a corner anchor");
+        }
+
+        // And the curve honours it: the dense outline passes through the tip.
+        let (dense, _) = tessellate_closed(&pts, &corners, &widths);
+        for tip in &tips {
+            let near = dense
+                .iter()
+                .map(|p| len(sub(*p, *tip)))
+                .fold(f32::MAX, f32::min);
+            assert!(
+                near < 0.5,
+                "the outline rounds the spike at {tip:?}: nearest point is {near:.2} px away"
+            );
+        }
+    }
+
+    /// The other half: a smooth loop must NOT sprout corners, or every drawn
+    /// bubble turns into a polygon.
+    #[test]
+    fn a_smooth_loop_gets_no_corners() {
+        let c = [128.0f32, 128.0];
+        let raw: Vec<[f32; 2]> = (0..400)
+            .map(|i| {
+                let a = i as f32 / 400.0 * std::f32::consts::TAU;
+                [c[0] + 90.0 * a.cos(), c[1] + 90.0 * a.sin()]
+            })
+            .collect();
+        let prs = vec![0.7f32; raw.len()];
+        let (_, _, corners) = drawn_anchors(&raw, &prs, 1.0);
+        let flagged = corners.iter().filter(|c| **c).count();
+        println!("[M] smooth circle: {flagged} corners");
+        assert_eq!(flagged, 0, "a round bubble is round");
+    }
+
+    /// The threshold is a documented constant, not a magic number buried in
+    /// a loop, and this is the line it draws. A regular n-gon turns
+    /// `360 / n` degrees at every vertex, so the shape itself names the
+    /// angle: an octagon turns 45° and stays smooth, a hexagon turns 60° and
+    /// kinks — with [`CORNER_TURN_DEG`] = 55 sitting between them.
+    #[test]
+    fn the_corner_threshold_is_the_line_between_smooth_and_kinked() {
+        let ngon = |n: usize| {
+            let mut verts = Vec::new();
+            for k in 0..n {
+                let a = k as f32 / n as f32 * std::f32::consts::TAU;
+                verts.push([128.0 + 110.0 * a.cos(), 128.0 + 110.0 * a.sin()]);
+            }
+            let mut raw: Vec<[f32; 2]> = Vec::new();
+            for i in 0..n {
+                let (a, b) = (verts[i], verts[(i + 1) % n]);
+                let steps = (len(sub(b, a)) / 1.5).ceil().max(2.0) as usize;
+                for t in 0..steps {
+                    let f = t as f32 / steps as f32;
+                    raw.push([a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f]);
+                }
+            }
+            let prs = vec![0.6f32; raw.len()];
+            let (_, _, corners) = drawn_anchors(&raw, &prs, 1.0);
+            corners.iter().filter(|c| **c).count()
+        };
+        assert!(CORNER_TURN_DEG > 45.0 && CORNER_TURN_DEG < 60.0);
+        let (eight, six) = (ngon(8), ngon(6));
+        println!("[M] octagon (45° turns): {eight} corners; hexagon (60°): {six}");
+        assert_eq!(eight, 0, "45° a vertex is a smooth polygon, not a kink");
+        assert!(six >= 6, "60° a vertex is a corner at every one of them");
     }
 }

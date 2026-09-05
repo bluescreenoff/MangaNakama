@@ -24,27 +24,41 @@ impl App {
     /// for the atomicity story). Refuses to touch a folder that already holds
     /// work files that are not ours.
     pub fn save_work_folder(&mut self, index: &std::path::Path) -> Result<String, String> {
-        self.save_work_folder_via(index, |wf, dir, managed| {
+        self.save_work_folder_via(index, |mut wf, encodes, dir, managed| {
+            for (i, page) in encodes {
+                wf.pages[i].bytes = page.encode()?;
+            }
             mn_core::project::save_folder(&wf, dir, managed).map_err(|e| e.to_string())
         })
     }
 
-    /// [`Self::save_work_folder`] with the WRITE injected (item K,
-    /// 2026-09-05). Everything this method does — the foreign-file refusal,
-    /// stashing the live page, encoding every dirty page to `.ora` bytes —
-    /// reads the live document and must stay on the UI thread. The last step,
-    /// putting those bytes on disk, does not, and that is the step that used
-    /// to hold the Windows message pump long enough for "not responding".
+    /// [`Self::save_work_folder`] with the WRITE injected (item K).
     ///
-    /// `write` is handed the finished `WorkFolder` BY VALUE (it holds every
-    /// page's bytes; cloning it to hand it to a thread would double the
-    /// biggest allocation in the app) and answers with the page ids and the
-    /// number of files rewritten, exactly like `project::save_folder`.
+    /// What stays on the UI thread is only what has to: the foreign-file
+    /// refusal, landing the live stroke, the GPU-rendered page preview, and
+    /// the page bookkeeping. BOTH slow halves — encoding a page to `.ora`
+    /// bytes and putting those bytes on disk — go to `write`, which the app
+    /// points at the background writer (`cmd/save_bg.rs`). Measured: the
+    /// encode is ~4.8 s a page against 1 ms for the disk write, so moving
+    /// only the write (round 1) moved nothing the artist could feel.
+    ///
+    /// `write` gets the `WorkFolder` BY VALUE (it holds every page's bytes;
+    /// cloning it would double the biggest allocation in the app) plus the
+    /// pages that arrive as DOCUMENT SNAPSHOTS rather than bytes, and answers
+    /// with the page ids and the number of files rewritten, exactly like
+    /// `project::save_folder`.
+    ///
+    /// A page already safe on disk at its current revision is handed over as
+    /// EMPTY bytes with no snapshot: `save_folder` skips writing it, and now
+    /// nothing copies or encodes it either. That skip is the exact negation
+    /// of `save_folder`'s write condition — keep the two in step, or a page
+    /// gets written empty.
     pub fn save_work_folder_via(
         &mut self,
         index: &std::path::Path,
         write: impl FnOnce(
             mn_core::project::WorkFolder,
+            Vec<(usize, crate::cmd::save_bg::PageEncode)>,
             &std::path::Path,
             &[String],
         ) -> Result<(Vec<u32>, usize), String>,
@@ -65,7 +79,11 @@ impl App {
                 }
             }
         }
-        self.stash_current_page()?;
+        let mut encodes = Vec::new();
+        if let Some(page) = self.snapshot_active_page()? {
+            encodes.push((self.page_index, page));
+        }
+        let bytes = self.page_bytes_for_folder_save(&dir, false, &mut encodes);
         let wf = mn_core::project::WorkFolder {
             story: self.story.clone(),
             binding_right: self.binding_right,
@@ -81,27 +99,18 @@ impl App {
             pages: self
                 .pages
                 .iter()
-                .map(|e| mn_core::project::FolderPage {
+                .zip(bytes)
+                .map(|(e, bytes)| mn_core::project::FolderPage {
                     id: e.id,
                     rev: e.rev,
                     saved_rev: e.saved_rev,
                     exported_rev: e.exported_rev,
                     uid: e.uid,
-                    // A still-blank template page materializes HERE — the
-                    // one place bytes are truly required (the save). This
-                    // is the lazy-blank design's single deliberate cost.
-                    bytes: match (&e.bytes, e.blank) {
-                        (Some(b), _) => b.clone(),
-                        (None, Some((bw, bh, n))) => {
-                            let doc = self.blank_page_doc_at(bw, bh, n);
-                            mn_core::project::doc_to_bytes(&doc).unwrap_or_default()
-                        }
-                        (None, None) => Vec::new(),
-                    },
+                    bytes,
                 })
                 .collect(),
         };
-        let (ids, written) = write(wf, &dir, &self.folder_managed)?;
+        let (ids, written) = write(wf, encodes, &dir, &self.folder_managed)?;
         for (e, &id) in self.pages.iter_mut().zip(&ids) {
             e.id = id;
             e.saved_rev = e.rev.max(1);
@@ -147,6 +156,7 @@ impl App {
         index: &std::path::Path,
         write: impl FnOnce(
             mn_core::project::WorkFolder,
+            Vec<(usize, crate::cmd::save_bg::PageEncode)>,
             &std::path::Path,
         ) -> Result<(Vec<u32>, usize), String>,
     ) -> Result<String, String> {
@@ -155,7 +165,11 @@ impl App {
             .ok_or_else(|| "autosave folder path has no parent".to_owned())?
             .to_path_buf();
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        self.stash_current_page()?;
+        let mut encodes = Vec::new();
+        if let Some(page) = self.snapshot_active_page()? {
+            encodes.push((self.page_index, page));
+        }
+        let bytes = self.page_bytes_for_folder_save(&dir, true, &mut encodes);
         let wf = mn_core::project::WorkFolder {
             story: self.story.clone(),
             binding_right: self.binding_right,
@@ -171,7 +185,8 @@ impl App {
             pages: self
                 .pages
                 .iter()
-                .map(|e| mn_core::project::FolderPage {
+                .zip(bytes)
+                .map(|(e, bytes)| mn_core::project::FolderPage {
                     id: e.id,
                     rev: e.rev,
                     // THE TRAP THIS WHOLE METHOD EXISTS FOR: the temp
@@ -180,11 +195,11 @@ impl App {
                     saved_rev: e.autosaved_rev,
                     exported_rev: e.exported_rev,
                     uid: e.uid,
-                    bytes: e.bytes.clone().unwrap_or_default(),
+                    bytes,
                 })
                 .collect(),
         };
-        let (ids, written) = write(wf, &dir)?;
+        let (ids, written) = write(wf, encodes, &dir)?;
         for (e, &id) in self.pages.iter_mut().zip(&ids) {
             e.id = id;
             e.autosaved_rev = e.rev.max(1);
@@ -194,5 +209,120 @@ impl App {
         let max_id = self.pages.iter().map(|e| e.id).max().unwrap_or(0);
         self.folder_next_id = self.folder_next_id.max(max_id + 1);
         Ok(format!("{} page(s) -> {}", written, dir.display()))
+    }
+
+    /// The active page's content for a SAVE, without encoding it — the encode
+    /// is what the writer thread is for (item K round 2).
+    ///
+    /// Everything [`Self::stash_current_page`] does except `doc_to_bytes`:
+    /// land the stroke and the text edit, refresh the palette thumbnail,
+    /// render the sharp page preview (GPU, so it cannot leave this thread),
+    /// and advance the page's revision bookkeeping. What it hands back is a
+    /// `Document` snapshot — pointer copies, measured under a millisecond,
+    /// against ~4.8 s for the encode it defers.
+    ///
+    /// `None` = the page's stashed bytes are already current, the same skip
+    /// `stash_current_page` makes.
+    ///
+    /// The page's own `bytes` are CLEARED rather than replaced: they are
+    /// stale the moment the document moves past them, the fresh ones are
+    /// being built on another thread, and every caller of this method already
+    /// ended by clearing them ("the active page keeps living in `doc`").
+    fn snapshot_active_page(&mut self) -> Result<Option<crate::cmd::save_bg::PageEncode>, String> {
+        self.end_stroke();
+        self.commit_text_edit();
+        let i = self.page_index;
+        let changed = self.pages[i].doc_rev != self.doc.revision;
+        // A lazy-blank page that was never touched stashes to NOTHING: its
+        // template marker still describes it exactly.
+        if !changed && (self.pages[i].bytes.is_some() || self.pages[i].blank.is_some()) {
+            return Ok(None);
+        }
+        // A preview failure never blocks the save — the page simply rides
+        // without the sharp preview, exactly as pre-preview files do.
+        let preview_png = self.render_page_preview_png().ok();
+        let thumb = self.thumb_of_current();
+        let rev = if changed { self.page_rev_next() } else { 0 };
+        let doc = Box::new(self.doc.clone());
+        let e = &mut self.pages[i];
+        e.thumb = Some(thumb);
+        e.blank = None;
+        e.bytes = None;
+        if changed {
+            e.rev = rev;
+            e.doc_rev = self.doc.revision;
+        }
+        Ok(Some(crate::cmd::save_bg::PageEncode { doc, preview_png }))
+    }
+
+    /// One `bytes` entry per page for a work-folder write, plus any extra
+    /// encode jobs appended to `encodes`.
+    ///
+    /// A page already on disk at its current revision contributes EMPTY bytes
+    /// and no job: `save_folder` skips writing it, and this is what stops the
+    /// caller from cloning (or re-encoding) megabytes for it first. The skip
+    /// test is the exact negation of `save_folder`'s write test —
+    /// `rev > saved_rev || !path.exists()` — so a page it decides to write
+    /// always has real bytes or a job. The `temp` flag picks the watermark:
+    /// the autosave folder skips on `autosaved_rev`, the real save on
+    /// `saved_rev`.
+    fn page_bytes_for_folder_save(
+        &mut self,
+        dir: &std::path::Path,
+        temp: bool,
+        encodes: &mut Vec<(usize, crate::cmd::save_bg::PageEncode)>,
+    ) -> Vec<Vec<u8>> {
+        let mut out: Vec<Vec<u8>> = Vec::with_capacity(self.pages.len());
+        for i in 0..self.pages.len() {
+            let e = &self.pages[i];
+            let watermark = if temp { e.autosaved_rev } else { e.saved_rev };
+            let on_disk = e.rev <= watermark
+                && dir.join(mn_core::project::page_file_name(e.id)).exists();
+            if on_disk || encodes.iter().any(|(j, _)| *j == i) {
+                out.push(Vec::new());
+                continue;
+            }
+            if e.bytes.is_some() {
+                out.push(self.pages[i].bytes.clone().unwrap_or_default());
+                continue;
+            }
+            // A still-blank template page materializes HERE — the one place
+            // bytes are truly required (the save). The autosave folder does
+            // not materialize blanks; a blank page has nothing to lose in a
+            // crash. It is now the writer thread that pays for it.
+            match (temp, e.blank) {
+                (false, Some((bw, bh, n))) => {
+                    let doc = Box::new(self.blank_page_doc_at(bw, bh, n));
+                    encodes.push((
+                        i,
+                        crate::cmd::save_bg::PageEncode {
+                            doc,
+                            preview_png: None,
+                        },
+                    ));
+                    out.push(Vec::new());
+                }
+                _ => out.push(Vec::new()),
+            }
+        }
+        out
+    }
+
+    /// The page bytes for a single-file `.mnc` (save or export), plus the
+    /// encode jobs for the pages that are not bytes yet — today only the live
+    /// page, which is handed over as a snapshot instead of being encoded here.
+    pub fn project_pages_for_save(
+        &mut self,
+    ) -> Result<(Vec<Vec<u8>>, Vec<(usize, crate::cmd::save_bg::PageEncode)>), String> {
+        let mut encodes = Vec::new();
+        if let Some(page) = self.snapshot_active_page()? {
+            encodes.push((self.page_index, page));
+        }
+        let bytes = self
+            .pages
+            .iter()
+            .map(|e| e.bytes.clone().unwrap_or_default())
+            .collect();
+        Ok((bytes, encodes))
     }
 }

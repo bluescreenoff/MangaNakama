@@ -55,6 +55,28 @@ which holds the palette layout and is the file to delete when a
 palette has ended up somewhere unusable; wiping your window layout was
 never meant to also wipe your settings, so the two are apart.</div>
 
+<h2>Saving does not stop you drawing</h2>
+<div class="quirk"><b>A save runs in the background, and a
+<em>Saving&hellip;</em> pill appears at the top right of the canvas while it
+does.</b> The page is snapshotted the instant you press
+<kbd>Ctrl</kbd>+<kbd>S</kbd> &mdash; what lands on disk is the drawing as it
+was at that moment, whatever you do next &mdash; and the packing and writing
+happen on another thread, so the window keeps repainting and the pen keeps
+inking. This is what stops Windows greying the title bar out with <i>not
+responding</i> on a big page.</div>
+<div class="quirk"><b>Two saves never overlap.</b> Ask for a second one while
+the first is still going and it queues behind it; the pill counts what is
+waiting. Autosave simply skips its turn while a save is in flight and catches
+the work on the next tick.</div>
+<div class="quirk warn"><b>If a write fails, the document goes back to
+unsaved.</b> The status line says why, in the warning colour, and the dot
+returns to the tab &mdash; the app never leaves you believing work is on disk
+when it is not. Closing the window waits for a queued save to land.</div>
+<div class="quirk"><b>Re-saving a work folder that has not changed does
+nothing at all</b> &mdash; no page is repacked and no file is touched, so
+<kbd>Ctrl</kbd>+<kbd>S</kbd> out of habit is free. Within a page, only the
+layers you actually painted on are repacked.</div>
+
 <h2>Reading a crash</h2>
 <div class="quirk warn"><b>A clean session ends with
 <code>=== exited cleanly ===</code>.</b> A block that ends any other

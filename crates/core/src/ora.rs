@@ -189,7 +189,7 @@ pub fn save_to_with<W: Write + Seek>(
             None => (image::RgbaImage::new(1, 1), 0, 0),
         };
         zw.start_file(&src, deflated)?;
-        zw.write_all(&encode_png(&img)?)?;
+        zw.write_all(&layer_png(layer, &img)?)?;
         // TRIAGE 138 p2: the layer mask as its own PNG (alpha = coverage,
         // RGB mirrors it for foreign readers' eyes). H2/M1: the image is
         // bbox-cropped, so its pixel origin and the exact tile set ride as
@@ -357,7 +357,12 @@ pub fn save_to_with<W: Write + Seek>(
         ((mw as f32 * scale).round() as u32).max(1),
         ((mh as f32 * scale).round() as u32).max(1),
     );
-    let thumb = image::imageops::resize(&merged, tw, th, image::imageops::FilterType::Triangle);
+    // `imageops::thumbnail` and not `resize(.., Triangle)`: for a 2048x2880
+    // page down to 256 px, Triangle walks a filter window per output pixel
+    // over the full source and measured 1.3 s, against ~30 ms for the box
+    // sampler `thumbnail` exists for. At 256 px nobody can tell them apart —
+    // and this ran on every single save.
+    let thumb = image::imageops::thumbnail(&merged, tw, th);
     zw.start_file("Thumbnails/thumbnail.png", deflated)?;
     zw.write_all(&encode_png(&thumb)?)?;
 
@@ -465,8 +470,94 @@ struct LayerEntry {
 
 fn encode_png(img: &image::RgbaImage) -> Result<Vec<u8>, OraError> {
     let mut buf = Vec::new();
+    // `image`'s PNG default is already `CompressionType::Fast` with adaptive
+    // filtering, and both halves of that were measured before being left
+    // alone: dropping the per-row filter search made the encode SLOWER
+    // (1.45 s against 0.21 s for a full page) and the file 73x bigger,
+    // because an unfiltered page of white is exactly what deflate is worst
+    // at. Storing PNGs uncompressed is 0.06 s but 23 MB a layer, which is a
+    // bad trade on a drive with 7 GB free.
     img.write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Png)?;
     Ok(buf)
+}
+
+/// How many layer PNGs THIS THREAD has actually encoded — cache misses, in
+/// other words. Read by tests to pin "an untouched layer is not re-encoded".
+///
+/// Per thread rather than global on purpose: cargo runs tests in parallel in
+/// one process, and a global counter would make every such test read every
+/// other test's saves.
+pub fn layer_png_encodes() -> u64 {
+    LAYER_PNG_ENCODES.with(|c| c.get())
+}
+
+thread_local! {
+    static LAYER_PNG_ENCODES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn note_encode() {
+    LAYER_PNG_ENCODES.with(|c| c.set(c.get() + 1));
+}
+
+/// Cache: layer identity + pixel state -> its encoded PNG.
+///
+/// A save re-deflates every layer on the page even when the artist touched
+/// one of them, and PNG is the second-biggest cost in the encode. The key is
+/// the layer's stable id plus the state of its pixels: the highest tile
+/// revision it holds, how many tiles it holds, and the bbox those tiles span.
+///
+/// Why that key cannot go stale. Tile revisions come from one process-wide
+/// monotonic counter, stamped on every write, so ANY paint into the layer
+/// raises `max_revision`. Removing tiles cannot leave the maximum unchanged
+/// AND the count unchanged. And the id keeps two different layers apart even
+/// when one is a duplicate of the other sharing its `Arc` tiles — where a
+/// collision would be harmless anyway, the pixels being identical.
+static LAYER_PNG_CACHE: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<LayerPngKey, std::sync::Arc<Vec<u8>>>>,
+> = std::sync::LazyLock::new(Default::default);
+
+#[derive(PartialEq, Eq, Hash, Clone, Copy)]
+struct LayerPngKey {
+    id: u64,
+    revision: u64,
+    tiles: usize,
+    size: (u32, u32),
+}
+
+/// The layer's PNG bytes, encoded or remembered. `img` is the already-built
+/// image, so a miss costs exactly what it used to.
+fn layer_png(
+    layer: &crate::doc::Layer,
+    img: &image::RgbaImage,
+) -> Result<std::sync::Arc<Vec<u8>>, OraError> {
+    let key = LayerPngKey {
+        id: layer.id(),
+        revision: layer.max_revision(),
+        tiles: layer.tiles().count(),
+        size: (img.width(), img.height()),
+    };
+    // A layer with no id has nothing stable to key on. An EMPTY layer does:
+    // its id, revision 0 and no tiles, whose PNG is always the same 1x1.
+    if key.id == 0 {
+        note_encode();
+        return Ok(std::sync::Arc::new(encode_png(img)?));
+    }
+    if let Ok(c) = LAYER_PNG_CACHE.lock()
+        && let Some(hit) = c.get(&key)
+    {
+        return Ok(hit.clone());
+    }
+    note_encode();
+    let bytes = std::sync::Arc::new(encode_png(img)?);
+    if let Ok(mut c) = LAYER_PNG_CACHE.lock() {
+        // A crude bound rather than an LRU: these are a page's worth of
+        // compressed layers, and dropping the lot costs one save.
+        if c.len() >= 128 {
+            c.clear();
+        }
+        c.insert(key, bytes.clone());
+    }
+    Ok(bytes)
 }
 
 /// Canvas size from ORA bytes WITHOUT decoding pixels: the `<image>` root's

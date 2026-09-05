@@ -22,16 +22,56 @@ use crate::app::App;
 
 /// One unit of work for the writer thread.
 pub(crate) enum Write {
-    /// A finished file: `.ora`, `.mnc`, `.psd`, `.png`, a script dump.
+    /// A finished file: `.png`, a script dump — anything already encoded.
     File { path: PathBuf, bytes: Vec<u8> },
-    /// A work FOLDER. `mn_core::project::save_folder` is already pure IO over
-    /// per-page bytes (its caller does the encoding), so the whole call moves
-    /// across unchanged.
+    /// A single page as `.ora`. Round 2: the ENCODE runs on the writer thread
+    /// too. Measured, a `Document::clone` costs under a millisecond because
+    /// tiles are `Arc`, and the encode it defers costs seconds.
+    Ora { path: PathBuf, page: PageEncode },
+    /// A layered `.psd`. Same story as `Ora`.
+    Psd {
+        path: PathBuf,
+        doc: Box<mn_core::Document>,
+    },
+    /// A single-file `.mnc`. `encodes` are the pages whose bytes are not in
+    /// `proj` yet — the live page, and any still-blank template page.
+    Project {
+        path: PathBuf,
+        proj: Box<mn_core::Project>,
+        encodes: Vec<(usize, PageEncode)>,
+    },
+    /// A work FOLDER. `mn_core::project::save_folder` is pure IO over
+    /// per-page bytes; `encodes` fills in the pages that arrive as documents.
     Folder {
         wf: Box<mn_core::project::WorkFolder>,
+        encodes: Vec<(usize, PageEncode)>,
         dir: PathBuf,
         managed: Vec<String>,
     },
+}
+
+/// A page handed over as a DOCUMENT rather than as bytes: the writer thread
+/// encodes it.
+///
+/// The snapshot is a plain `Document::clone`. That is cheap — every tile is an
+/// `Arc<Tile>`, so the clone copies pointers, not pixels; measured under a
+/// millisecond for a 2048x2880 page against ~4.8 s for the encode it defers.
+/// It is also a TRUE snapshot: the UI thread may keep drawing on the live
+/// document, and a stroke replaces tiles rather than mutating the `Arc`s this
+/// clone is holding.
+pub(crate) struct PageEncode {
+    pub doc: Box<mn_core::Document>,
+    /// The sharp page preview (`mnc/preview.png`), rendered on the UI thread
+    /// because it needs the GPU renderer. `None` = the pre-preview shape.
+    pub preview_png: Option<Vec<u8>>,
+}
+
+impl PageEncode {
+    /// Encode this page to `.ora` bytes. Runs on the writer thread.
+    pub(crate) fn encode(&self) -> Result<Vec<u8>, String> {
+        mn_core::project::doc_to_bytes_with(&self.doc, self.preview_png.as_deref())
+            .map_err(|e| e.to_string())
+    }
 }
 
 /// A finished write, waiting for the UI thread to say so.
@@ -110,7 +150,57 @@ fn perform(job: Write) -> Result<String, String> {
             write_atomic(&path, &bytes)?;
             Ok(format!("saved {} ({kb} KB)", path.display()))
         }
-        Write::Folder { wf, dir, managed } => {
+        Write::Ora { path, page } => {
+            let bytes = page.encode()?;
+            let kb = bytes.len() / 1024;
+            write_atomic(&path, &bytes)?;
+            Ok(format!("saved {} ({kb} KB)", path.display()))
+        }
+        Write::Psd { path, doc } => {
+            let mut buf = std::io::Cursor::new(Vec::new());
+            mn_core::psd::save_psd(&doc, &mut buf).map_err(|e| e.to_string())?;
+            let bytes = buf.into_inner();
+            let kb = bytes.len() / 1024;
+            write_atomic(&path, &bytes)?;
+            Ok(format!(
+                "exported layered PSD ({} layers, {kb} KB) -> {}",
+                doc.layers.len(),
+                path.display()
+            ))
+        }
+        Write::Project {
+            path,
+            mut proj,
+            encodes,
+        } => {
+            for (i, page) in encodes {
+                let bytes = page.encode()?;
+                match proj.pages.get_mut(i) {
+                    Some(slot) => *slot = bytes,
+                    None => return Err(format!("page {i} left the work while it was saving")),
+                }
+            }
+            let n = proj.pages.len();
+            let mut buf = std::io::Cursor::new(Vec::new());
+            mn_core::project::save_to(&proj, &mut buf).map_err(|e| e.to_string())?;
+            let bytes = buf.into_inner();
+            let kb = bytes.len() / 1024;
+            write_atomic(&path, &bytes)?;
+            Ok(format!("saved {} ({n} pages, {kb} KB)", path.display()))
+        }
+        Write::Folder {
+            mut wf,
+            encodes,
+            dir,
+            managed,
+        } => {
+            for (i, page) in encodes {
+                let bytes = page.encode()?;
+                match wf.pages.get_mut(i) {
+                    Some(slot) => slot.bytes = bytes,
+                    None => return Err(format!("page {i} left the work while it was saving")),
+                }
+            }
             let pages = wf.pages.len();
             match mn_core::project::save_folder(&wf, &dir, &managed) {
                 Ok((_, written)) => Ok(format!(
@@ -252,14 +342,42 @@ fn now_ms() -> u64 {
 /// Is there a UI frame loop behind this call — i.e. will anybody poll the
 /// result of a background write? See the long comment in [`submit`].
 fn frames_are_running() -> bool {
-    // Unit tests share one process and run in parallel, so a timing window
-    // would make one test's frame make another test's save asynchronous.
-    // Tests are always synchronous, full stop.
-    if cfg!(test) {
-        return false;
+    // Unit tests share one process and run in parallel, so a real timing
+    // window would let one test's frame make another test's save
+    // asynchronous. Tests are synchronous unless one deliberately asks not to
+    // be, and the one that does holds [`test_lock`] while it asks.
+    #[cfg(test)]
+    {
+        return PRETEND_FRAMES.load(std::sync::atomic::Ordering::Relaxed);
     }
-    let last = LAST_FRAME_MS.load(std::sync::atomic::Ordering::Relaxed);
-    last != 0 && now_ms().saturating_sub(last) < 500
+    #[cfg(not(test))]
+    {
+        let last = LAST_FRAME_MS.load(std::sync::atomic::Ordering::Relaxed);
+        last != 0 && now_ms().saturating_sub(last) < 500
+    }
+}
+
+/// The board is one process-wide static and cargo runs tests in parallel, so
+/// any test that touches it — or that turns the background on with
+/// [`pretend_frames_are_running`] — holds this lock first.
+#[cfg(test)]
+pub(crate) static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
+pub(crate) fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+    TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+#[cfg(test)]
+static PRETEND_FRAMES: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Let a test measure what the UI thread actually pays: with this on,
+/// [`submit`] hands the job over and returns instead of waiting, exactly as
+/// it does in the running app. Hold [`test_lock`] across it.
+#[cfg(test)]
+pub(crate) fn pretend_frames_are_running(on: bool) {
+    PRETEND_FRAMES.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// The label of the write in flight — `None` when the disk is idle. This is
@@ -374,13 +492,7 @@ pub(crate) fn saving_pill(ui: &egui::Ui, canvas: egui::Rect) {
 mod tests {
     use super::*;
 
-    /// The board is one process-wide static and cargo runs tests in
-    /// parallel, so every test here holds this lock: without it one test's
-    /// `pending.clear()` lands in the middle of another's assertion.
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
-    fn serial() -> std::sync::MutexGuard<'static, ()> {
-        TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
-    }
+    use super::test_lock as serial;
 
     /// Take just the results of MY writes off the shared board. Cargo runs
     /// these tests in parallel in one process, and the board is one board:

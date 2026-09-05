@@ -451,10 +451,30 @@ pub(super) fn object(app: &App, painter: &egui::Painter, to_pt: &dyn Fn(f32, f32
                         egui::Stroke::new(1.5, theme::c().accent),
                     ));
                 }
+                // CSP's two kinds of control point (制御点), and they are not
+                // decoration: a SQUARE is a corner anchor (角あり), a CIRCLE is
+                // a smooth one (角なし). Verified in both languages before
+                // being copied — see the lane report for the two sources.
+                // Alt+click flips one, which is CSP's Figure/Bezier spelling
+                // of 「角の切り替え」 and what this app already binds.
+                //
+                // Ellipse and rounded-rect grips are RESIZE handles, not
+                // anchors — nothing to switch — so they keep the square every
+                // other transform handle in the app wears. Tail handles stay
+                // round, as they were.
+                let anchor_is_corner = |i: usize| match &b.shape {
+                    mn_core::BalloonShape::Polygon { corners, .. } => {
+                        corners.get(i).copied().unwrap_or(false)
+                    }
+                    _ => true,
+                };
                 for (pos, h) in b.handles() {
                     let c = to_pt(pos[0], pos[1]);
-                    // Tail handles are round so they read differently.
-                    if matches!(h, mn_core::BalloonHandle::Shape(_)) {
+                    let square = match h {
+                        mn_core::BalloonHandle::Shape(i) => anchor_is_corner(i),
+                        _ => false,
+                    };
+                    if square {
                         let hrect = egui::Rect::from_center_size(c, egui::vec2(7.0, 7.0));
                         painter.rect_filled(hrect, 1.0, egui::Color32::WHITE);
                         painter.rect_stroke(
@@ -529,8 +549,36 @@ pub(super) fn balloon(app: &App, painter: &egui::Painter, to_pt: &dyn Fn(f32, f3
         let col = theme::c().accent;
         match app.balloon_mode {
             BalloonMode::Draw => {
-                let line: Vec<egui::Pos2> = pts.iter().map(|p| to_pt(p[0], p[1])).collect();
-                painter.add(egui::Shape::line(line, egui::Stroke::new(1.5, col)));
+                // Item L: the trail is drawn as the OUTLINE the release will
+                // ink — real width, real pressure taper, real colour — not a
+                // hairline that says nothing about the mark being made.
+                let probe = balloon_probe(app);
+                // Canvas px -> screen points, read off the same mapping the
+                // rest of this band uses, so no zoom argument has to be
+                // threaded down here.
+                let per_px = (to_pt(1.0, 0.0).x - to_pt(0.0, 0.0).x).abs();
+                let ink = egui::Color32::from_rgba_unmultiplied(
+                    probe.balloons[0].line_color[0],
+                    probe.balloons[0].line_color[1],
+                    probe.balloons[0].line_color[2],
+                    (probe.balloons[0].line_opacity.clamp(0.0, 1.0) * 255.0).round() as u8,
+                );
+                let path: Vec<(egui::Pos2, f32)> = pts
+                    .iter()
+                    .map(|p| {
+                        // Half-width in screen points: the outline is centred
+                        // on the boundary, exactly as the rasterizer lays it.
+                        (
+                            to_pt(p[0], p[1]),
+                            (probe.border_at(0, p[2]) * per_px * 0.5).max(0.35),
+                        )
+                    })
+                    .collect();
+                ribbon(painter, &path, ink);
+                // A hairline in the accent colour down the middle, so the
+                // trail is still findable over black ink or a dark panel.
+                let line: Vec<egui::Pos2> = path.iter().map(|(p, _)| *p).collect();
+                painter.add(egui::Shape::line(line, egui::Stroke::new(1.0, col)));
             }
             BalloonMode::Tail => {
                 if let (Some(a), Some(b)) = (pts.first(), pts.last()) {
@@ -571,6 +619,72 @@ pub(super) fn balloon(app: &App, painter: &egui::Painter, to_pt: &dyn Fn(f32, f3
                 }
             }
         }
+    }
+}
+
+/// The balloon set a release would land in — the SAME choice
+/// `cmd/text.rs`'s `BalloonAdd` makes (active balloon layer, else the topmost
+/// visible unlocked one, else a fresh layer at the Tool Property width), with
+/// one balloon carrying the tool's current ink. Built so the live trail can
+/// ask `BalloonSet::border_at` the very question the rasterizer will ask.
+///
+/// A wrong guess here only mis-draws a preview, never a pixel — but keep it in
+/// step with `BalloonAdd` anyway, because a preview that lies about thickness
+/// is the bug this whole item exists to fix.
+fn balloon_probe(app: &App) -> mn_core::BalloonSet {
+    let target = app
+        .doc
+        .active_layer()
+        .balloons()
+        .cloned()
+        .or_else(|| {
+            app.doc
+                .layers
+                .iter()
+                .rev()
+                .find(|l| l.is_balloon() && l.visible && !l.lock)
+                .and_then(|l| l.balloons())
+                .cloned()
+        })
+        .unwrap_or_else(|| mn_core::BalloonSet::new(app.mm_to_px(app.balloon_border_mm).max(2.0)));
+    let mut probe = mn_core::BalloonSet {
+        balloons: Vec::new(),
+        ..target
+    };
+    let mut b = mn_core::Balloon::default();
+    b.set_ink(app.balloon_ink);
+    probe.balloons.push(b);
+    probe
+}
+
+/// A variable-width stroke as ONE mesh: a quad per segment, widths lerped
+/// along it. One shape rather than a line per segment, so the joins do not
+/// flicker as the trail grows and the whole trail costs one draw call.
+fn ribbon(painter: &egui::Painter, path: &[(egui::Pos2, f32)], col: egui::Color32) {
+    if path.len() < 2 {
+        return;
+    }
+    let mut mesh = egui::Mesh::default();
+    for w in path.windows(2) {
+        let (a, wa) = w[0];
+        let (b, wb) = w[1];
+        let d = b - a;
+        let len = d.length();
+        if len < 1e-3 {
+            continue;
+        }
+        // Left normal of the segment, scaled to each end's half width.
+        let n = egui::vec2(-d.y / len, d.x / len);
+        let base = mesh.vertices.len() as u32;
+        mesh.colored_vertex(a + n * wa, col);
+        mesh.colored_vertex(a - n * wa, col);
+        mesh.colored_vertex(b + n * wb, col);
+        mesh.colored_vertex(b - n * wb, col);
+        mesh.add_triangle(base, base + 1, base + 2);
+        mesh.add_triangle(base + 1, base + 3, base + 2);
+    }
+    if !mesh.is_empty() {
+        painter.add(egui::Shape::mesh(mesh));
     }
 }
 
@@ -940,5 +1054,178 @@ mod tests {
             (3, true),
             "third panel stays the third, and keeps its own flag"
         );
+    }
+}
+
+#[cfg(test)]
+mod balloon_preview_tests {
+    use super::*;
+    use crate::app::PointerKind;
+    use mn_core::PenSample;
+    use crate::cmd::dispatch;
+
+    /// Item L, the anti-drift pin. The Balloon pen's live trail asks
+    /// [`balloon_probe`] how thick the mark will be; the release asks the
+    /// balloon it actually made. Those two have to agree at every anchor, or
+    /// the preview is a lie — which is the whole complaint this item answers.
+    #[test]
+    fn the_balloon_pen_preview_matches_its_commit() {
+        let Some(mut app) = crate::app::headless_renderer()
+            .map(|r| crate::app::App::new(r, (1280, 860), 1.0))
+        else {
+            return;
+        };
+        app.tool = Tool::Balloon;
+        app.balloon_mode = BalloonMode::Draw;
+
+        // A wobbly loop with the pressure sweeping the full 0..1 range, so a
+        // width formula that ignored pressure could not pass by accident.
+        let n = 40usize;
+        let at = |i: usize| {
+            let a = i as f32 / n as f32 * std::f32::consts::TAU;
+            (620.0 + 110.0 * a.cos(), 430.0 + 110.0 * a.sin())
+        };
+        let sample = |i: usize| {
+            let (x, y) = at(i);
+            [PenSample {
+                x,
+                y,
+                pressure: i as f32 / (n - 1) as f32,
+                tilt_x: 0.0,
+                tilt_y: 0.0,
+                t_ms: i as f64 * 8.0,
+            }]
+        };
+        let (x0, y0) = at(0);
+        app.canvas_down(x0, y0, PointerKind::Pen, &sample(0));
+        for i in 1..n {
+            let (x, y) = at(i);
+            app.canvas_move(x, y, &sample(i));
+        }
+
+        // MID-DRAG: exactly what the overlay is drawing right now.
+        let probe = balloon_probe(&app);
+        assert!(app.balloon_drag.is_some(), "the drag is live");
+
+        app.canvas_up(x0, y0, &sample(n - 1));
+        while let Some(c) = app.cmds.pop_front() {
+            dispatch(&mut app, c);
+        }
+
+        let (li, bi) = app.balloon_sel.expect("the drawn bubble is selected");
+        let set = app.doc.layers[li]
+            .balloons()
+            .expect("a balloon layer")
+            .clone();
+        let mn_core::BalloonShape::Polygon { widths, .. } = &set.balloons[bi].shape else {
+            panic!("the balloon pen makes a drawn body");
+        };
+        assert!(!widths.is_empty(), "the anchors carry pressure");
+        for w in widths {
+            let shown = probe.border_at(0, *w);
+            let inked = set.border_at(bi, *w);
+            assert!(
+                (shown - inked).abs() < 1e-4,
+                "preview said {shown} px at pressure {w}, the commit inks {inked} px"
+            );
+        }
+        // And the taper is real: the lightest anchor is thinner than the
+        // heaviest one, which is what the artist is being shown.
+        let thin = widths.iter().cloned().fold(f32::MAX, f32::min);
+        let thick = widths.iter().cloned().fold(f32::MIN, f32::max);
+        println!(
+            "[L] preview widths: {:.2} px at pressure {thin:.2}, {:.2} px at {thick:.2}",
+            probe.border_at(0, thin),
+            probe.border_at(0, thick)
+        );
+        assert!(
+            probe.border_at(0, thin) < probe.border_at(0, thick),
+            "the trail has to show the taper, not one width"
+        );
+    }
+
+    /// Item N: Alt+click an anchor with the Object tool switches it between
+    /// corner and smooth — CSP's 「角の切り替え」 — and it is one undo step.
+    /// The handle overlay reads the same flag to decide square or circle, so
+    /// this pins what the artist sees as well as what the file holds.
+    #[test]
+    fn alt_click_switches_an_anchor_between_corner_and_smooth() {
+        let Some(mut app) = crate::app::headless_renderer()
+            .map(|r| crate::app::App::new(r, (1280, 860), 1.0))
+        else {
+            return;
+        };
+        app.tool = Tool::Balloon;
+        app.balloon_mode = BalloonMode::Draw;
+        // A round bubble: every anchor starts SMOOTH, so a flip is visible.
+        let n = 40usize;
+        let at = |i: usize| {
+            let a = i as f32 / n as f32 * std::f32::consts::TAU;
+            (620.0 + 110.0 * a.cos(), 430.0 + 110.0 * a.sin())
+        };
+        let sample = |i: usize| {
+            let (x, y) = at(i);
+            [PenSample {
+                x,
+                y,
+                pressure: 0.7,
+                tilt_x: 0.0,
+                tilt_y: 0.0,
+                t_ms: i as f64 * 8.0,
+            }]
+        };
+        let (x0, y0) = at(0);
+        app.canvas_down(x0, y0, PointerKind::Pen, &sample(0));
+        for i in 1..n {
+            let (x, y) = at(i);
+            app.canvas_move(x, y, &sample(i));
+        }
+        app.canvas_up(x0, y0, &sample(n - 1));
+        while let Some(c) = app.cmds.pop_front() {
+            crate::cmd::dispatch(&mut app, c);
+        }
+
+        let (li, bi) = app.balloon_sel.expect("the drawn bubble is selected");
+        let flags = |app: &crate::app::App| -> Vec<bool> {
+            match &app.doc.layers[li].balloons().unwrap().balloons[bi].shape {
+                mn_core::BalloonShape::Polygon { corners, points, .. } => {
+                    let mut c = corners.clone();
+                    c.resize(points.len(), false);
+                    c
+                }
+                _ => panic!("the balloon pen makes a drawn body"),
+            }
+        };
+        let before = flags(&app);
+        println!("[N] {} anchors, {} corners before", before.len(), before.iter().filter(|c| **c).count());
+        assert!(
+            before.iter().any(|c| !*c),
+            "a round bubble has smooth anchors to switch"
+        );
+        let target = before.iter().position(|c| !*c).unwrap();
+        let anchor = match &app.doc.layers[li].balloons().unwrap().balloons[bi].shape {
+            mn_core::BalloonShape::Polygon { points, .. } => points[target],
+            _ => unreachable!(),
+        };
+
+        // Alt+click ON the anchor — the door the Object tool reaches through.
+        assert!(
+            app.balloon_anchor_edit(anchor[0], anchor[1], false, true),
+            "the press was consumed by the anchor editor"
+        );
+        while let Some(c) = app.cmds.pop_front() {
+            crate::cmd::dispatch(&mut app, c);
+        }
+        let after = flags(&app);
+        assert!(after[target], "the anchor is a corner now");
+        assert_eq!(
+            after.iter().filter(|c| **c).count(),
+            before.iter().filter(|c| **c).count() + 1,
+            "exactly one anchor changed"
+        );
+
+        // One undo step, and the bubble is back to what it was.
+        crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::Undo);
+        assert_eq!(flags(&app), before, "undo puts the anchor back");
     }
 }

@@ -198,6 +198,33 @@ pub(crate) fn sec_obj_balloon(ui: &mut egui::Ui, app: &mut App) {
         });
     }
 
+    // CSP's 最小値: how thin the outline gets where the pen was weightless,
+    // as a percentage of the line width. Only means anything with the
+    // pressure toggle on, so it only appears there.
+    if bs.pressure_width && bi < bs.balloons.len() {
+        // The in-progress drag value lives in egui's own scratch memory
+        // rather than on `App`: one undo step per drag, and no third
+        // `*_edit` field on the app for a bar that exists in one panel.
+        let key = egui::Id::new(("mn.balloon.min-size", li, bi));
+        let held: Option<f32> = ui.data(|d| d.get_temp(key));
+        let mut pct = held.unwrap_or(bs.balloons[bi].min_width * 100.0);
+        let resp = ValueBar::new("Min size", 0.0, 100.0)
+            .suffix(" %")
+            .show(ui, &mut pct);
+        if resp.changed() {
+            ui.data_mut(|d| d.insert_temp(key, pct));
+        }
+        if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
+            ui.data_mut(|d| d.remove::<f32>(key));
+            let mut bs2 = bs.clone();
+            bs2.balloons[bi].min_width = (pct / 100.0).clamp(0.0, 1.0);
+            app.push_cmd(AppCmd::BalloonCommit {
+                layer: li,
+                balloons: bs2,
+            });
+        }
+    }
+
     // Drawn balloons: CSP's "correct line width" — a render-time multiplier
     // on the outline (Balloon::width_scale, applied at rasterize). The
     // recorded per-anchor pressure widths are DATA: the old implementation

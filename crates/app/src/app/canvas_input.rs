@@ -1332,7 +1332,13 @@ impl App {
                 let eps = (2.0 / self.viewport.zoom.max(0.01)).max(1.0);
                 let raw: Vec<[f32; 2]> = pts.iter().map(|p| [p[0], p[1]]).collect();
                 let prs: Vec<f32> = pts.iter().map(|p| p[2]).collect();
-                let (mut simple, mut widths) = mn_core::balloon::simplify_anchors(&raw, &prs, eps);
+                // Corners are decided on the RAW trail, before simplification
+                // — a spike's sharpness is how fast the direction turned, and
+                // the anchors no longer know that. Without this the flags
+                // were left empty and every hand-drawn spike came back as a
+                // rounded bump (owner, 2026-09-05).
+                let (mut simple, mut widths, mut corners) =
+                    mn_core::balloon::drawn_anchors(&raw, &prs, eps);
                 // Drawn shape closes itself: drop a last point that landed on
                 // top of the first.
                 if simple.len() >= 2 {
@@ -1340,13 +1346,14 @@ impl App {
                     if (f[0] - l[0]).abs() + (f[1] - l[1]).abs() < eps * 2.0 {
                         simple.pop();
                         widths.truncate(simple.len());
+                        corners.truncate(simple.len());
                     }
                 }
                 let mut balloon = Balloon {
                     shape: BalloonShape::Polygon {
                         points: simple,
                         widths,
-                        corners: Vec::new(),
+                        corners,
                     },
                     tails: Vec::new(),
 
