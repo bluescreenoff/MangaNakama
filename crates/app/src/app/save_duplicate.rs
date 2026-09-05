@@ -24,10 +24,28 @@
 //! too. Both halves are silent. So the duplicate save runs with the
 //! bookkeeping zeroed (write everything) and the original's restored
 //! afterwards, whether it succeeded or not.
+//!
+//! ## The freeze (2026-09-06)
+//!
+//! Every branch here used to ENCODE and WRITE on the window thread, which
+//! measured 4.3 s for a three-page work — the last of the file commands that
+//! could still make Windows paint "not responding" over the window. They go
+//! through `cmd::save_bg` now, the same way `SaveOraPath` does: the snapshot
+//! (a `Document::clone`, pointer copies) is taken here, the encode and the
+//! write happen on the writer thread, and the "Saving…" pill covers the
+//! wait. The three functions therefore return the line that says the copy is
+//! *being* written; the line that says it landed arrives from
+//! `save_bg::poll_saves`.
+//!
+//! Nothing in the ledger dance below changed shape: the borrow and the
+//! give-back still happen on this thread, before the write runs, because
+//! `save_bg::folder_page_ids` answers the one question the write used to
+//! answer (which id each page got).
 
 use std::path::Path;
 
 use super::App;
+use crate::cmd::save_bg::{self, PageEncode, Write};
 
 /// The incremental-save bookkeeping a duplicate must borrow and give back.
 struct Ledger {
@@ -54,23 +72,37 @@ impl App {
         // does — said out loud in the status so a comic's author is not
         // surprised by a one-page copy.
         self.stamp_doc_dpi();
-        mn_core::ora::save(&self.doc, p).map_err(|e| e.to_string())?;
+        save_bg::submit(
+            p.display().to_string(),
+            // NOT a save: a duplicate that fails leaves the work exactly as
+            // dirty (or as clean) as it already was, so `poll_saves` must
+            // not re-dirty anything on its behalf.
+            false,
+            Write::Ora {
+                path: p.to_path_buf(),
+                page: PageEncode {
+                    doc: Box::new(self.doc.clone()),
+                    preview_png: None,
+                },
+            },
+        );
         Ok(if self.is_comic() {
             format!(
-                "duplicate written: CURRENT PAGE ONLY to {} — pick .mnc or a folder for the whole comic",
+                "writing duplicate: CURRENT PAGE ONLY to {} — pick .mnc or a folder for the whole comic",
                 p.display()
             )
         } else {
-            format!("duplicate written to {}", p.display())
+            format!("writing duplicate to {}…", p.display())
         })
     }
 
     /// Single-file `.mnc`: `Project::save` writes every page unconditionally,
     /// so there is no watermark to protect — the only mutation is the
-    /// current page's stash, which is the ordinary round trip.
+    /// current page's snapshot, which is the ordinary round trip.
     fn duplicate_single_file(&mut self, p: &Path) -> Result<String, String> {
-        self.stash_current_page()?;
-        let mut proj = mn_core::Project::new(self.story.clone(), self.page.clone(), self.binding_right);
+        let (page_bytes, encodes) = self.project_pages_for_save()?;
+        let mut proj =
+            mn_core::Project::new(self.story.clone(), self.page.clone(), self.binding_right);
         proj.meta.expression = self.expression;
         proj.meta.spine_mm = self.spine_mm;
         proj.meta.cover = self.cover;
@@ -79,16 +111,21 @@ impl App {
         proj.meta.print_crop_marks = self.print_crop_marks;
         proj.meta.profile = self.profile.clone();
         proj.meta.page_uids = self.page_uids();
-        proj.pages = self
-            .pages
-            .iter()
-            .map(|e| e.bytes.clone().unwrap_or_default())
-            .collect();
-        // The active page keeps living in `doc`, not in bytes.
-        self.pages[self.page_index].bytes = None;
+        proj.pages = page_bytes;
         let n = proj.pages.len();
-        mn_core::project::save(&proj, p).map_err(|e| format!("duplicate failed: {e}"))?;
-        Ok(format!("duplicate written to {} ({n} pages)", p.display()))
+        save_bg::submit(
+            p.display().to_string(),
+            false,
+            Write::Project {
+                path: p.to_path_buf(),
+                proj: Box::new(proj),
+                encodes,
+            },
+        );
+        Ok(format!(
+            "writing duplicate to {} ({n} pages)…",
+            p.display()
+        ))
     }
 
     /// Work folder: see the module note. Zero the watermark so every page is
@@ -108,7 +145,22 @@ impl App {
         for e in &mut self.pages {
             e.saved_rev = 0;
         }
-        let out = self.save_work_folder(index);
+        let label = index.display().to_string();
+        let out = self.save_work_folder_via(index, |wf, encodes, dir, managed| {
+            let ids = save_bg::folder_page_ids(&wf);
+            save_bg::submit(
+                label,
+                false,
+                Write::Folder {
+                    wf: Box::new(wf),
+                    encodes,
+                    dir: dir.to_path_buf(),
+                    managed: managed.to_vec(),
+                    verb: "duplicate written to",
+                },
+            );
+            Ok((ids, 0))
+        });
         for (e, (&id, &saved)) in self
             .pages
             .iter_mut()
@@ -119,7 +171,7 @@ impl App {
         }
         self.folder_managed = before.managed;
         self.folder_next_id = before.next_id;
-        out.map(|msg| msg.replacen("saved work folder", "duplicate written to", 1))
+        out.map(|msg| msg.replacen("saved work folder", "writing duplicate to", 1))
             .map_err(|e| format!("duplicate failed: {e}"))
     }
 }

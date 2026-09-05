@@ -617,6 +617,12 @@ pub enum AppCmd {
     /// multiplier — same shape of number, different meaning, so the old name
     /// had to go rather than silently read 2× as 2 px.
     SetBrushSizePx(f32),
+    /// One rung of the `[` / `]` size ladder, `true` = bigger. The ladder is
+    /// CSP's gradiated one (`App::step_brush_size`), so a shortcut may not
+    /// carry a baked pixel value — it has to ask the ladder where it is.
+    StepBrushSize(bool),
+    /// One 5 % step of brush opacity, `true` = more (CSP toolopacity±).
+    StepBrushOpacity(bool),
     /// CSP Stroke ▸ Interval (S-028): the gap between dabs, either as a
     /// percent of tip diameter or as a literal pixel distance.
     SetInterval(Interval),
@@ -733,6 +739,11 @@ pub enum AppCmd {
     /// the kept half, on purpose, which is the only way swatches grow.
     AddHistoryToSwatches,
     SetSlot(Slot),
+    /// CSP `C`: the transparent slot ON, or back to Main if it is already
+    /// on. A TOGGLE rather than `SetSlot(Transparent)` because that is what
+    /// the key does, and a shortcut row that only half-matched its default
+    /// would change behaviour the moment somebody rebound it (2026-09-06).
+    ToggleTransparentSlot,
     /// Append a colour to the Color Set (persisted beside the exe).
     AddSwatch([f32; 3]),
     DeleteSwatch(usize),
@@ -753,6 +764,13 @@ pub enum AppCmd {
     /// Pick a tool AND the sub tool inside it (the Ctrl+K palette's Sub Tool
     /// rows; see [`SubTool`]).
     SetSubTool(SubTool),
+    /// The `,` / `.` walk through the tool in hand's sub tools, `true` =
+    /// forward (`App::step_subtool`). State, not a value: which row is next
+    /// depends on which one you are standing on.
+    StepSubTool(bool),
+    /// Ctrl+W — close, through the same save prompt the window's X uses.
+    /// It only ARMS `close_requested`; the message loop runs the prompt.
+    CloseWindow,
     /// Reopen a closed palette (Workspace menu / the command palette).
     PaletteOpen(crate::ui::dock::Palette),
     /// Owner item 2026-08-19: in the Object tool, pressing its key AGAIN
@@ -846,6 +864,12 @@ pub enum AppCmd {
     /// Move the active-layer cursor up/down the stack (Alt+] / Alt+[).
     LayerAbove,
     LayerBelow,
+    /// The Del key's whole answer, as one command: in the Object tool with
+    /// something picked it deletes THAT (text, balloon, panel, vector, or
+    /// the multi-selection); otherwise it clears the layer. One command so
+    /// the shortcut row "Delete / clear layer" rebinds to the behaviour it
+    /// names — `ClearLayer` alone would silently drop the object half.
+    DeleteOrClear,
     // --- frames (koma) ------------------------------------------------------
     /// New frame layer from the page's default/inner border.
     NewFrameLayer,
@@ -1176,6 +1200,11 @@ pub enum AppCmd {
     ZoomTo(f32),
     /// Rotate the view by the delta (radians), anchored on the centre.
     RotateView(f32),
+    /// One step of the view rotation, `true` = clockwise. The STEP is the
+    /// `rotate_step_deg` preference, which is why this is not a
+    /// `RotateView(0.2618)` row: a shortcut carrying a baked 15° would stop
+    /// obeying the preference the day it was rebound (2026-09-06).
+    RotateViewStep(bool),
     /// CV-033, CSP's View ▸ Rotate/Flip ▸ Rotate 90 / 180 / 270: put the
     /// view at an ABSOLUTE angle (degrees, clockwise) instead of stepping.
     /// Turning the page a quarter turn to ink a long horizontal line with a

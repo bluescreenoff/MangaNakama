@@ -773,15 +773,22 @@ impl App {
         for p in 0..self.pages.len() {
             lines.push(format!("== Page {} ==", p + 1));
             // The ACTIVE page reads from the live document (unsaved
-            // typing included); the rest decode their stashed bytes, the
-            // same way `run_preflight` reaches them.
+            // typing included); the rest decode their stashed bytes.
+            //
+            // METADATA ONLY, and that is the whole cost of this export: a
+            // script dump asks each page for its text items and its panel
+            // rectangles, both of which ride `stack.xml`. Reading them
+            // through the full `bytes_to_doc` decoded a PNG per layer,
+            // re-derived every frame raster and re-rasterized every balloon
+            // — 2.8 s of frozen window for a plain text file on a three-page
+            // work (2026-09-06), all of it thrown away a moment later.
             let decoded = if p == self.page_index {
                 None
             } else {
                 self.pages[p]
                     .bytes
                     .as_ref()
-                    .and_then(|b| mn_core::project::bytes_to_doc(b).ok())
+                    .and_then(|b| mn_core::project::bytes_to_doc_meta(b).ok())
             };
             let doc = if p == self.page_index {
                 Some(&self.doc)

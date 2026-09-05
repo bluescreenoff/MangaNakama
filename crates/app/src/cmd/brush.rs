@@ -105,6 +105,15 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
             app.engine_mut().set_size_px(px);
             app.mark_dirty();
         }
+        // The `[` / `]` and Ctrl+`[` / Ctrl+`]` steps as commands: a
+        // shortcut row cannot carry "one rung bigger" as a number, and the
+        // ladder is the only thing that knows where the next rung is.
+        AppCmd::StepBrushSize(up) => app.step_brush_size(up),
+        AppCmd::StepBrushOpacity(up) => {
+            let d = if up { 0.05 } else { -0.05 };
+            let v = (app.props_current.opacity + d).clamp(0.0, 1.0);
+            dispatch(app, AppCmd::SetOpacity(v));
+        }
         AppCmd::SetInterval(iv) => {
             app.props_current.interval = iv;
             // Fixed remembers its gap across a trip through the relative

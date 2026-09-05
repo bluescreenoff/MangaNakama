@@ -886,7 +886,11 @@ mod tests {
         let note = conflict_note((true, false, false, 0x5A), &st.rows).unwrap();
         assert!(note.contains("built-in: Undo"), "{note}");
         let note = conflict_note((false, false, false, 0x55), &st.rows).unwrap();
-        assert!(note.contains("built-in: Frame border"), "{note}");
+        // U's built-in is a CYCLE (Figure → Frame border → Ruler), and the
+        // note names the whole of it — that is what "picking adds to it"
+        // means.
+        assert!(note.contains("built-in: "), "{note}");
+        assert!(note.contains("Frame border"), "{note}");
         // Q is bound by nothing, in either table.
         assert!(conflict_note((false, false, false, 0x51), &st.rows).is_none());
     }
@@ -1021,19 +1025,30 @@ mod tests {
         let row = |st: &State| -> Vec<String> {
             chips_of(st.rows.iter().find(|r| r.key == "u").expect("a U row")).unwrap()
         };
-        assert_eq!(row(&st), ["tool: Frame border"], "the built-in, listed");
+        // U's built-in is itself a cycle since 2026-09-05 (Figure → Frame
+        // border → Ruler), so the default is READ rather than spelled: this
+        // test is about APPENDING, and hard-coding the table's current
+        // contents here is what made it fail the day the table grew.
+        let default = row(&st);
+        assert!(
+            default.contains(&"tool: Frame border".to_owned()),
+            "U's built-in, listed: {default:?}"
+        );
+        let n = default.len();
 
-        add_to_chord(&mut st, u, "tool: Figure");
-        assert_eq!(row(&st), ["tool: Frame border", "tool: Figure"]);
-        assert!(st.status.contains("cycles 2"), "{}", st.status);
+        add_to_chord(&mut st, u, "tool: Text");
+        assert_eq!(row(&st).len(), n + 1);
+        assert_eq!(row(&st)[..n], default[..], "the default rides in front");
+        assert_eq!(row(&st)[n], "tool: Text");
+        assert!(st.status.contains(&format!("cycles {}", n + 1)), "{}", st.status);
         add_to_chord(&mut st, u, "Straight line ruler");
-        assert_eq!(row(&st).len(), 3, "a command joins the cycle too");
-        assert!(st.status.contains("cycles 3"), "{}", st.status);
+        assert_eq!(row(&st).len(), n + 2, "a command joins the cycle too");
+        assert!(st.status.contains(&format!("cycles {}", n + 2)), "{}", st.status);
 
         // The row is the user's now, and remembers what it shadows.
         let r = st.rows.iter().find(|r| r.key == "u").unwrap();
         assert_eq!(r.source, Source::File);
-        assert_eq!(r.shadows.as_deref(), Some(&["tool: Frame border".to_owned()][..]));
+        assert_eq!(r.shadows.as_deref(), Some(&default[..]));
         // And it survives the save as the cycle the loader reads.
         let (saved, notes) = st.serialize();
         assert!(notes.is_empty(), "{notes:?}");
@@ -1042,7 +1057,7 @@ mod tests {
         assert_eq!(
             m.lookup(false, false, false, 0x55)
                 .map(|b| b.steps().len()),
-            Some(3)
+            Some(n + 2)
         );
 
         // A free chord still starts a row of its own.
@@ -1072,7 +1087,9 @@ mod tests {
         restore_default(&mut st, i);
         let r = st.rows.iter().find(|r| r.key == "u").expect("still listed");
         assert_eq!(r.source, Source::Default, "the built-in is back");
-        assert_eq!(r.text, "tool: Frame border");
+        // Whatever U's built-in cycle holds today, ↺ puts THAT back — the
+        // point is that the file row is gone, not what the table says.
+        assert!(r.text.contains("tool: Frame border"), "{}", r.text);
         assert!(r.shadows.is_none());
         let (saved, _) = st.serialize();
         assert!(!saved.contains("Figure"), "the file row is gone: {saved}");

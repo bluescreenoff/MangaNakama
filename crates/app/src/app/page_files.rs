@@ -23,16 +23,12 @@ impl App {
     /// only pages whose revision advanced (see `mn_core::project::save_folder`
     /// for the atomicity story). Refuses to touch a folder that already holds
     /// work files that are not ours.
-    pub fn save_work_folder(&mut self, index: &std::path::Path) -> Result<String, String> {
-        self.save_work_folder_via(index, |mut wf, encodes, dir, managed| {
-            for (i, page) in encodes {
-                wf.pages[i].bytes = page.encode()?;
-            }
-            mn_core::project::save_folder(&wf, dir, managed).map_err(|e| e.to_string())
-        })
-    }
-
-    /// [`Self::save_work_folder`] with the WRITE injected (item K).
+    ///
+    /// The WRITE is injected (item K). There is no synchronous twin any
+    /// more: Save, Autosave and Save Duplicate all point this at
+    /// `cmd::save_bg`, and a second entry point that encoded on the window
+    /// thread is exactly how Save Duplicate stayed a 4.3 s freeze eight
+    /// months after the others stopped being one.
     ///
     /// What stays on the UI thread is only what has to: the foreign-file
     /// refusal, landing the live stroke, the GPU-rendered page preview, and

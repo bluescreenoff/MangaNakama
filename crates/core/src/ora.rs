@@ -845,6 +845,30 @@ pub fn load(path: &Path) -> Result<Document, OraError> {
 
 /// Read an `.ora` from any seekable source.
 pub fn load_from<R: Read + Seek>(source: R) -> Result<Document, OraError> {
+    load_inner(source, true)
+}
+
+/// The same document WITHOUT its pixels: the layer tree, every flag, and the
+/// vector sets that ride `stack.xml` (frames, balloons, texts, fill and
+/// correction params). Every layer comes back with no tiles, no mask and no
+/// stroke record.
+///
+/// It exists because reading a page's TEXT used to cost a full decode. The
+/// script export walks every page of a work for its text items and its panel
+/// rectangles — both of which live in `stack.xml` — and reached them through
+/// [`load_from`], which decodes a PNG per layer, re-derives every frame
+/// raster and re-rasterizes every balloon. Measured on a three-page work that
+/// was 2.8 s of frozen window for a plain text file (2026-09-06); this is
+/// ~1 % of it, because it reads exactly one zip entry.
+///
+/// Use it for anything that asks a page a QUESTION. Never for anything that
+/// will be edited, drawn or saved: a document loaded this way would write
+/// itself back to disk blank.
+pub fn load_meta_from<R: Read + Seek>(source: R) -> Result<Document, OraError> {
+    load_inner(source, false)
+}
+
+fn load_inner<R: Read + Seek>(source: R, pixels: bool) -> Result<Document, OraError> {
     let mut zip = zip::ZipArchive::new(source)?;
 
     let xml = {
@@ -921,15 +945,19 @@ pub fn load_from<R: Read + Seek>(source: R) -> Result<Document, OraError> {
             // vectors instead of decoding the fallback PNG (folders get
             // border + coverage mask, flat layers the gutter raster).
             layer.kind = LayerKind::Frame(fs.clone());
-            Document::derive_frame_raster(&mut layer, (w.max(1), h.max(1)));
+            if pixels {
+                Document::derive_frame_raster(&mut layer, (w.max(1), h.max(1)));
+            }
         } else if let Some(bs) = &e.balloons {
-            layer.replace_tiles(bs.rasterize((w.max(1), h.max(1))));
+            if pixels {
+                layer.replace_tiles(bs.rasterize((w.max(1), h.max(1))));
+            }
             layer.kind = LayerKind::Balloon(bs.clone());
         } else if let Some(ts) = &e.texts {
             // Text layer: shaping needs DirectWrite, which core cannot call —
             // keep the PNG raster (it *is* the exact saved pixels) and leave
             // sprite caches empty; the app warms them before the first edit.
-            if let Some(bytes) = read_entry(&mut zip, &e.src) {
+            if pixels && let Some(bytes) = read_entry(&mut zip, &e.src) {
                 let img = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)?
                     .to_rgba8();
                 paint_into_layer(&mut layer, &img, e.x, e.y);
@@ -943,7 +971,9 @@ pub fn load_from<R: Read + Seek>(source: R) -> Result<Document, OraError> {
             // Correction layer (row 105): same deal — the corrected page
             // re-derives from the params + the layers below on load.
             layer.kind = LayerKind::Correction(*a);
-        } else if let Some(bytes) = read_entry(&mut zip, &e.src) {
+        } else if pixels
+            && let Some(bytes) = read_entry(&mut zip, &e.src)
+        {
             let img =
                 image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)?.to_rgba8();
             paint_into_layer(&mut layer, &img, e.x, e.y);
@@ -971,7 +1001,7 @@ pub fn load_from<R: Read + Seek>(source: R) -> Result<Document, OraError> {
         // Vector inking: reattach the stroke record. An unreadable sidecar
         // degrades to an EMPTY-but-present set (the raster is intact; the
         // record is gone) — never a load failure.
-        if let Some(ss) = &e.strokes_src {
+        if pixels && let Some(ss) = &e.strokes_src {
             let set = read_entry(&mut zip, ss)
                 .map(|b| crate::stroke_set::StrokeSet::from_json(&String::from_utf8_lossy(&b)))
                 .unwrap_or_default();
@@ -979,7 +1009,8 @@ pub fn load_from<R: Read + Seek>(source: R) -> Result<Document, OraError> {
         }
         // TRIAGE 138 p2: restore the mask (alpha = coverage). Absent attr
         // or unreadable entry = unmasked (old files load unchanged).
-        if let Some(ms) = &e.mask_src
+        if pixels
+            && let Some(ms) = &e.mask_src
             && let Some(bytes) = read_entry(&mut zip, ms)
             && let Ok(img) = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)
         {
@@ -2130,6 +2161,87 @@ mod tests {
             back.effective_drafts().iter().filter(|d| **d).count(),
             doc.effective_drafts().iter().filter(|d| **d).count(),
             "draft flags (folder included) survived"
+        );
+    }
+
+    /// The metadata-only read (2026-09-06): everything a pass can ASK a page
+    /// comes back, and not one pixel does. Both halves are the point — the
+    /// script export needs the texts and the panels, and it needs them
+    /// without paying for a PNG per layer.
+    #[test]
+    fn a_meta_load_brings_the_vectors_and_no_pixels() {
+        let mut doc = Document::new(128, 128);
+        // Ink on a plain raster layer, so there is something to lose.
+        doc.add_layer("Ink");
+        let li = doc.layers.len() - 1;
+        {
+            let t = doc.layers[li].tile_mut(TileIdx::new(0, 0));
+            for y in 0..8 {
+                for x in 0..8 {
+                    t.set_pixel(x, y, [32767, 0, 0, 32767]);
+                }
+            }
+        }
+        doc.add_text_layer(
+            "Dialogue",
+            crate::text::TextSet {
+                texts: vec![crate::text::TextItem::new(
+                    [10.0, 10.0],
+                    "Gothic".into(),
+                    12.0,
+                    [0, 0, 0],
+                    true,
+                )],
+            },
+        );
+        doc.add_frame_folder(
+            "Frame 1",
+            crate::FrameSet {
+                frames: vec![crate::Frame::rect(4.0, 4.0, 124.0, 60.0)],
+                border_px: 2.0,
+                border_ruler: false,
+                color: [0, 0, 0],
+                slot: None,
+                reading_pin: None,
+            },
+        );
+        let bytes = to_bytes(&doc);
+
+        let full = load_from(Cursor::new(bytes.clone())).expect("the ordinary load");
+        let meta = load_meta_from(Cursor::new(bytes)).expect("the metadata load");
+
+        assert_eq!(
+            meta.layers.len(),
+            full.layers.len(),
+            "the same layer tree, folder header and all"
+        );
+        for (m, f) in meta.layers.iter().zip(&full.layers) {
+            assert_eq!(m.name, f.name);
+            assert_eq!(m.visible, f.visible);
+            assert_eq!(m.folder, f.folder);
+            assert_eq!(m.depth, f.depth);
+        }
+        // The two things a script dump actually reads.
+        assert!(
+            meta.layers.iter().any(|l| l.texts().is_some()),
+            "the text set came back"
+        );
+        assert!(
+            meta.layers.iter().any(|l| l.frames().is_some()),
+            "and so did the panel rectangles"
+        );
+        // …and nothing else did.
+        let ink: u64 = full
+            .layers
+            .iter()
+            .flat_map(|l| l.tiles())
+            .map(|(_, t)| t.alpha_sum())
+            .sum();
+        assert!(ink > 0, "the ordinary load has the pixels");
+        assert_eq!(
+            meta.layers.iter().flat_map(|l| l.tiles()).count(),
+            0,
+            "the metadata load decodes, derives and rasterizes nothing"
         );
     }
 

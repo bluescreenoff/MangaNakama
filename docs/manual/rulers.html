@@ -10,9 +10,40 @@
 <nav class="top"><a href="index.html">← manual</a></nav>
 <h1>Rulers &amp; perspective</h1>
 
-<p>Every ruler lives in <b>Layer ▸ Ruler</b>. Picking one <em>arms</em> a
-gesture rather than creating anything: the status bar tells you what to
-drag, and the next drag on the canvas is the ruler.</p>
+<p><b>Ruler is a tool.</b> It is in the tool strip, last of the tools that
+build something on the page, just before Move view. Pick it and its Sub
+Tool list shows <b>Create ruler</b> — twelve rows, one per kind of ruler.
+Click a row, then drag on the canvas: that drag is the ruler. The tool
+stays in your hand, so the next drag is the next ruler.</p>
+
+<h2>The Ruler tool</h2>
+<div class="quirk"><b>The twelve sub tools, in list order:</b> Straight
+line, Curve, Parallel line, Radial line, Concentric circle, Vanishing
+point, Perspective 1-point, Perspective 2-point, Perspective 3-point,
+Symmetrical, Guide horizontal, Guide vertical. Hovering a row says what
+its gesture is; the status bar says the same thing when you pick it.</div>
+<div class="quirk"><b><b>U</b> cycles Figure → Frame border → Ruler.</b>
+CSP's own U, and the third press lands on the ruler row you were last on.
+Every row can also have a key of its own: in Preferences ▸ Shortcuts, or
+by hand in <code>keys.json</code>, the target is
+<code>tool: Ruler / Create ruler / Curve</code> (and
+<code>tool: Ruler / Create ruler</code> for the tab,
+<code>tool: Ruler</code> for the tool). <b>,</b> and <b>.</b> step
+through the twelve rows like any other tool's sub tools.</div>
+<div class="quirk"><b>The per-kind numbers live in Tool Property.</b>
+Hold the Ruler tool and the palette shows what the row in hand needs and
+nothing else: the symmetry line count for Symmetrical, the ring spacing
+for Concentric circle, a 1/2/3-point picker for the perspective rows.
+Snapping and special-ruler snapping are there too, with a count of how
+many rulers this page carries.</div>
+<div class="quirk"><b><b>Layer ▸ Ruler</b> still works, and it is the same
+twelve rows in the same order.</b> A menu pick now selects the Ruler tool
+with that row lit, so the menu is a shortcut into the tool rather than a
+second way of doing the same thing. The difference: a menu pick arms
+<em>one</em> gesture even if you then switch tools, while holding the tool
+arms every gesture until you put it down. The menu also keeps the two
+ladders that act on rulers ALREADY on the page — <i>Ring spacing
+(cycle)</i> and <i>Symmetry lines (cycle)</i>.</div>
 
 <h2>The creation drags</h2>
 <div class="quirk"><b>A perspective set is made by dragging its EYE LEVEL
@@ -37,9 +68,10 @@ opinion. It is an anchor, so the Object tool drags it where the shot
 actually wants it.</div>
 <div class="quirk"><b>A short drag creates nothing and says so.</b> Under
 about 32 px a perspective drag is refused with the instruction in the
-status bar rather than dropping a degenerate set on the page. The arming
-is spent either way, so a refused drag means going back to the menu — the
-message tells you what the drag should have been.</div>
+status bar rather than dropping a degenerate set on the page. With the
+Ruler TOOL in hand you simply drag again — the message tells you what the
+drag should have been. A refused drag made from the MENU spends its one
+arming, so that one means picking the row again.</div>
 <div class="quirk"><b>Perspective sets do not snap to a nearest line —
 they bind.</b> There is no discrete family of rulings to land on: a stroke
 picks one family from its early direction (rays through either VP, or the

@@ -509,6 +509,35 @@ The recurring failure shapes, in order of how often they have shipped:
   from the top every press) and the ui.txt memory (the group stops being
   written down). `subtools::tests::the_registry_holds_every_row_once` catches
   the first, nothing catches the second but review.
+- **The Ruler tool's twelve rows are the worked example** (2026-09-05,
+  `Tool::Ruler` / `SubTool::Ruler(RulerKind)` / `group::CREATE_RULER`). Two
+  things about them are not like the other rows:
+  - `RulerKind::ALL` in `cmd/tools.rs` is the canonical ORDER and the
+    canonical LABELS (`RulerKind::label`), and three places walk it: the
+    `SubTool::ALL` block (spelled out by hand — a `const` cannot map a
+    slice), the Sub Tool palette, and the Layer ▸ Ruler menu. The pin that
+    stops those drifting is inside
+    `subtools::tests::the_registry_holds_every_row_once`, which asserts the
+    Create ruler tab IS `RulerKind::ALL`. Add a ruler kind and you add an
+    `ALL` entry, a `label` arm, a `hint` arm and a `SubTool::ALL` line.
+  - `is_current(SubTool::Ruler(k))` is the ONE row that also asks which tool
+    is in hand (`app.tool == Tool::Ruler && app.ruler_mode == k`). Every
+    other row is deliberately tool-blind, because a mode is a setting you
+    carry around; a ruler row is an ARMED GESTURE — `ruler_mode` decides
+    what the next canvas drag BUILDS, and only while the tool holds the
+    canvas. The ui.txt memory survives that because `note_memory` snapshots
+    every frame and MERGES: the row is written down while the tool is in
+    hand and stays written after you put it down.
+- **`ruler_pending` is the one-shot half, `ruler_mode` is the tool's.**
+  `App::ruler_arm()` (`app/canvas_input.rs`) is the ONLY reading of "a ruler
+  is armed": `Some(ruler_mode)` while `Tool::Ruler` is in hand, else
+  `ruler_pending`. `AppCmd::RulerArm(k)` — pushed by the Ruler menu, the
+  Ctrl+K palette and any `keys.json` COMMAND binding — selects the tool with
+  row `k` AND sets `ruler_pending`, so a menu pick still arms exactly one
+  gesture after you switch tools, and `main.rs::run_seq`'s
+  `step_is_current` predicate (`app.ruler_pending == Some(*k)`) keeps
+  working unchanged. The release clears `ruler_pending` but never the tool:
+  that is the whole difference between a menu pick and a tool in your hand.
 - The shortcut MEMORY (`sub_tool_last=` in ui.txt) is a SNAPSHOT of live
   state taken beside the save (`subtools::note_memory`, called from
   `ui::build` and `WM_DESTROY`), never a hook on the switch. That is

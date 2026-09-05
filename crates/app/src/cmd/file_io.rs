@@ -279,6 +279,7 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                             encodes,
                             dir: dir.to_path_buf(),
                             managed: managed.to_vec(),
+                            verb: "saved work folder",
                         },
                     );
                     Ok((ids, 0))
@@ -423,6 +424,10 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
             // `set_doc_path`, no `mark_saved`, no `note_recent`, and no
             // autosave clearing. You are still in the original, still
             // dirty if you were, still crash-netted.
+            //
+            // The copy is encoded and written on the writer thread like
+            // every other save (2026-09-06); `save_duplicate` returns the
+            // "writing…" line and `save_bg::poll_saves` says when it landed.
             let dirty = app.dirty();
             let path = app.doc_path.clone();
             match app.save_duplicate(&p) {
@@ -562,6 +567,7 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                                 encodes,
                                 dir: dir.to_path_buf(),
                                 managed: managed.to_vec(),
+                                verb: "autosaved work folder",
                             },
                         );
                         Ok((ids, 0))
@@ -625,6 +631,7 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                                 encodes,
                                 dir: dir.to_path_buf(),
                                 managed: Vec::new(),
+                                verb: "autosaved work folder",
                             },
                         );
                         Ok((ids, 0))

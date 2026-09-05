@@ -92,6 +92,14 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
             app.apply_draw_state();
             app.mark_dirty();
         }
+        AppCmd::ToggleTransparentSlot => {
+            let next = if app.slot == Slot::Transparent {
+                Slot::Main
+            } else {
+                Slot::Transparent
+            };
+            dispatch(app, AppCmd::SetSlot(next));
+        }
         AppCmd::AddSwatch(rgb) => {
             app.swatches.push(mn_core::palette::Swatch::new(rgb));
             crate::app::save_swatches(&app.swatches);
@@ -334,6 +342,11 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
             crate::subtools::apply_state(app, s);
             app.mark_dirty();
         }
+        // `,` / `.` as a command, so the two default chords are rebindable
+        // and the walk is reachable from Ctrl+K. `step_subtool` queues its
+        // own command, which `run_cmd_tail` drains like any other.
+        AppCmd::StepSubTool(fwd) => app.step_subtool(fwd),
+        AppCmd::CloseWindow => app.close_requested = true,
         AppCmd::PaletteOpen(p) => {
             // Reopening an open palette moves nothing, which from the
             // command palette looks like the press was swallowed — say so.
@@ -389,6 +402,10 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
             let c = app.canvas_center();
             app.viewport.rotate_around(c, d);
             app.mark_dirty();
+        }
+        AppCmd::RotateViewStep(cw) => {
+            let step = app.prefs.rotate_step_deg.to_radians();
+            dispatch(app, AppCmd::RotateView(if cw { step } else { -step }));
         }
         AppCmd::RotateViewTo(deg) => {
             let c = app.canvas_center();

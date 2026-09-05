@@ -24,10 +24,29 @@ use crate::cmd::{AppCmd, SubTool, Tool};
 /// window renders, so neither can drift.
 const PREF_SECTIONS: [&str; 8] = super::prefs_dialog::TABS;
 
+/// The `keys.json` COMMAND NAMESPACE: every label a shortcut may name, which
+/// is the palette's own rows plus the alias rows below.
+///
+/// Two callers, two different needs. `keymap::parse` and the Shortcuts tab
+/// need every spelling to resolve — including the names the built-in chord
+/// table displays, which are not always the palette's ("Zoom 100 %" against
+/// "Pixel size (100%)"). The two SEARCH UIs need one row per thing, or the
+/// list reads as noise. So the aliases live here and not in
+/// [`palette_commands`], and the search boxes call that one.
+///
+/// A label in either list is a PROMISE: it is what a user's `keys.json` says.
+/// Renaming one silently unbinds whatever key was on it, which is why the
+/// aliases were added beside the palette rows rather than replacing them.
+pub fn command_index() -> Vec<(&'static str, &'static str, AppCmd)> {
+    let mut out = palette_commands();
+    out.extend(shortcut_aliases());
+    out
+}
+
 /// One searchable entry: what it is called, where it lives (the parenthetical
 /// UI-052 shows), and what it runs. Curated — payload commands are named,
 /// the rest are the enum's own units.
-pub fn command_index() -> Vec<(&'static str, &'static str, AppCmd)> {
+pub fn palette_commands() -> Vec<(&'static str, &'static str, AppCmd)> {
     use AppCmd::*;
     vec![
         ("Pen", "Tools (P)", SetTool(Tool::Pen)),
@@ -462,6 +481,79 @@ pub fn command_index() -> Vec<(&'static str, &'static str, AppCmd)> {
         ("Reset transformation", "Transform", TransformReset),
         ("Lock tool settings", "Tool Property", SetToolLock(true)),
         ("Unlock tool settings", "Tool Property", SetToolLock(false)),
+        // --- the default chords that had no command at all ----------------
+        // Owner ask 2026-09-05: "all keys you can press should be in the
+        // shortcuts list and modifiable." Lane 1 made every default a ROW;
+        // these are the rows that could not be re-aimed, because the thing
+        // the chord does was not a command anybody could name. Each label
+        // here is EXACTLY the one `main::builtin_chords` displays —
+        // `builtin_chord_tests::every_builtin_chord_label_resolves_through_the_palette`
+        // is the pin. They are also a win on their own: all of them are
+        // reachable from Ctrl+K now.
+        ("Reselect", "Select (Ctrl+Shift+D)", Reselect),
+        ("Paste in place", "Edit (Ctrl+Shift+V)", PasteInPlace),
+        ("Merge down", "Layer (Ctrl+E)", MergeDown),
+        ("Layer above", "Layer (Alt+])", LayerAbove),
+        ("Layer below", "Layer (Alt+[)", LayerBelow),
+        ("Close document", "File (Ctrl+W)", CloseWindow),
+        ("Swap colours", "Color (X)", SwapColors),
+        ("Reset colours", "Color (F8)", ResetColors),
+        (
+            "Transparent colour slot",
+            "Color (C)",
+            ToggleTransparentSlot,
+        ),
+        ("Rotate view left", "View (−)", RotateViewStep(false)),
+        ("Rotate view right", "View (F9)", RotateViewStep(true)),
+        ("Brush size down", "Brush ([)", StepBrushSize(false)),
+        ("Brush size up", "Brush (])", StepBrushSize(true)),
+        (
+            "Brush opacity down",
+            "Brush (Ctrl+[)",
+            StepBrushOpacity(false),
+        ),
+        ("Brush opacity up", "Brush (Ctrl+])", StepBrushOpacity(true)),
+        ("Previous sub tool", "Sub Tool (,)", StepSubTool(false)),
+        ("Next sub tool", "Sub Tool (.)", StepSubTool(true)),
+        // Beside "Clear", not instead of it: this is what the Del KEY does
+        // (the picked object in the Object tool, else the layer), and the
+        // plain "Clear" row above always clears.
+        ("Delete / clear layer", "Edit (Del)", DeleteOrClear),
+    ]
+}
+
+/// Second names for commands the palette already lists, so the built-in
+/// chord table's own labels resolve in `keys.json` too.
+///
+/// They are NOT in the palette's search: "Save As…" and "Save As" are one
+/// thing, and a list that shows both twice is the list the owner would ask
+/// us to clean up. They ARE in the namespace, so the Shortcuts tab can turn
+/// a default row into a file row by copying the label it is showing —
+/// which is the whole point of the exercise.
+///
+/// Fuzzy matching was the alternative and was rejected: "Open" → "Open…" is
+/// a guess, and a wrong guess silently binds a key to the wrong command.
+fn shortcut_aliases() -> Vec<(&'static str, &'static str, AppCmd)> {
+    use AppCmd::*;
+    vec![
+        ("Save As", "File (Ctrl+Shift+S)", SaveOraAs),
+        ("New document", "File (Ctrl+N)", NewDoc),
+        ("Open", "File (Ctrl+O)", OpenOra),
+        ("Print", "File (Ctrl+P)", Print),
+        ("Invert selection", "Select (Ctrl+Shift+I)", SelectInvert),
+        ("Stamp visible", "Layer (Ctrl+Shift+E)", StampVisible),
+        ("Add folder", "Layer (Ctrl+G)", AddFolder),
+        ("Zoom 100 %", "View (Ctrl+1)", Zoom100),
+        ("Next canvas", "Workspace (Ctrl+Tab)", NextDoc(true)),
+        (
+            "Previous canvas",
+            "Workspace (Ctrl+Shift+Tab)",
+            NextDoc(false),
+        ),
+        ("Flip view horizontal", "View (Ctrl+9)", FlipView),
+        ("Flip view vertical", "View (Ctrl+Shift+9)", FlipViewV),
+        ("Fill selection", "Edit (Alt+Del)", FillSelection),
+        ("Clear outside", "Edit (Shift+Del)", ClearOutside),
     ]
 }
 
@@ -506,7 +598,7 @@ pub fn quick_palette(ui: &mut egui::Ui, app: &mut App) {
     let hits: Vec<(usize, &'static str, &'static str)> = if q.is_empty() {
         Vec::new()
     } else {
-        command_index()
+        palette_commands()
             .into_iter()
             .enumerate()
             .filter(|(_, (label, wher, _))| {
@@ -533,7 +625,7 @@ pub fn quick_palette(ui: &mut egui::Ui, app: &mut App) {
                     .on_hover_text(wher)
                     .clicked()
                 {
-                    let (_, _, cmd) = command_index()[i].clone();
+                    let (_, _, cmd) = palette_commands()[i].clone();
                     app.push_cmd(cmd);
                 }
                 ui.weak(format!("({wher})"));
@@ -670,7 +762,10 @@ pub fn palette_entries(input: &PaletteInput) -> Vec<Entry> {
     let cmd_row = |label: &str, path: &'static str, cmd: AppCmd| {
         Entry::new(label.to_owned(), path, Kind::Command, cmd)
     };
-    command_index()
+    // `palette_commands`, not `command_index`: the alias rows exist so a
+    // built-in chord's own label resolves in keys.json, and listing a
+    // command twice in the search is not what they are for.
+    palette_commands()
         .into_iter()
         .map(|(label, path, cmd)| cmd_row(label, path, cmd))
         .chain(
@@ -1778,5 +1873,117 @@ mod tests {
             recents,
             "a field holding only spaces is still the empty query"
         );
+    }
+}
+
+#[cfg(test)]
+mod builtin_chord_tests {
+    use super::*;
+
+    /// **Every default chord must be spellable in `keys.json`** (owner ask
+    /// 2026-09-05: "all keys you can press should be in the shortcuts list
+    /// and modifiable").
+    ///
+    /// The Shortcuts tab turns a default row into a file row by copying its
+    /// LABEL, and `keymap::parse` resolves a label through this index. So a
+    /// `builtin_chords()` label with no exact row here is a chord the user
+    /// can see, can shadow, but cannot re-aim — which is the half of the ask
+    /// that was still missing when Lane 1 stopped. The tool letters are
+    /// exempt: they come from `builtin_target_rows()` and spell themselves
+    /// as `tool: …` targets.
+    #[test]
+    fn every_builtin_chord_label_resolves_through_the_palette() {
+        let index = command_index();
+        let targets: Vec<_> = crate::builtin_target_rows()
+            .into_iter()
+            .map(|(c, _)| c)
+            .collect();
+        let missing: Vec<&str> = crate::builtin_chords()
+            .into_iter()
+            .filter(|(chord, _)| !targets.contains(chord))
+            .map(|(_, label)| label)
+            .filter(|label| !index.iter().any(|(l, _, _)| l.eq_ignore_ascii_case(label)))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "these default chords cannot be spelled in keys.json — \
+             add a command_index row whose label is EXACTLY the \
+             builtin_chords label: {missing:#?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod new_command_tests {
+    use crate::cmd::{AppCmd, Slot, dispatch};
+
+    /// `cmd::misc`'s chain ends in `unreachable!("AppCmd claimed by no cmd
+    /// module")`, so a new variant with no arm compiles fine and PANICS the
+    /// first time anybody runs it. These six were added on 2026-09-06 to make
+    /// the last default chords rebindable; this is the test that they are
+    /// claimed, and that each does what its label promises.
+    #[test]
+    fn the_new_shortcut_commands_are_claimed_and_do_their_job() {
+        let Some(renderer) = crate::app::headless_renderer() else {
+            return;
+        };
+        let mut app = crate::app::App::new(renderer, (600, 400), 1.0);
+
+        // The steppers QUEUE their pick (that is how `,`/`.` and `[`/`]`
+        // have always worked), so a test has to run the queue like a frame.
+        let pump = |app: &mut crate::app::App| {
+            while let Some(c) = app.cmds.pop_front() {
+                dispatch(app, c);
+            }
+        };
+
+        // Brush size: one rung of the ladder, not a fixed number. Start well
+        // inside it — the ladder clamps at both ends, and the default sits
+        // near the top.
+        dispatch(&mut app, AppCmd::SetBrushSizePx(20.0));
+        let before = app.props_current.size_px;
+        dispatch(&mut app, AppCmd::StepBrushSize(true));
+        pump(&mut app);
+        let bigger = app.props_current.size_px;
+        assert!(bigger > before, "{before} -> {bigger}");
+        dispatch(&mut app, AppCmd::StepBrushSize(false));
+        pump(&mut app);
+        assert!(app.props_current.size_px < bigger);
+
+        // Brush opacity: 5 % a press, clamped.
+        app.props_current.opacity = 0.5;
+        dispatch(&mut app, AppCmd::StepBrushOpacity(true));
+        assert!((app.props_current.opacity - 0.55).abs() < 1e-4);
+        dispatch(&mut app, AppCmd::StepBrushOpacity(false));
+        assert!((app.props_current.opacity - 0.50).abs() < 1e-4);
+
+        // The transparent slot TOGGLES, which is the whole reason it is not
+        // a `SetSlot(Transparent)` row.
+        dispatch(&mut app, AppCmd::ToggleTransparentSlot);
+        assert_eq!(app.slot, Slot::Transparent);
+        dispatch(&mut app, AppCmd::ToggleTransparentSlot);
+        assert_eq!(app.slot, Slot::Main);
+
+        // View rotation steps by the PREFERENCE, both ways.
+        app.prefs.rotate_step_deg = 30.0;
+        let rot = app.viewport.rotate_rad;
+        dispatch(&mut app, AppCmd::RotateViewStep(true));
+        let turned = app.viewport.rotate_rad - rot;
+        assert!(
+            (turned - 30f32.to_radians()).abs() < 1e-3,
+            "turned {turned} rad"
+        );
+        dispatch(&mut app, AppCmd::RotateViewStep(false));
+        assert!((app.viewport.rotate_rad - rot).abs() < 1e-3, "and back");
+
+        // The sub tool walk queues the same thing `.` does.
+        app.cmds.clear();
+        dispatch(&mut app, AppCmd::StepSubTool(true));
+        assert!(!app.cmds.is_empty(), "the walk queued a pick");
+
+        // Close arms the prompt the window's X uses; it does not close here.
+        assert!(!app.close_requested);
+        dispatch(&mut app, AppCmd::CloseWindow);
+        assert!(app.close_requested);
     }
 }

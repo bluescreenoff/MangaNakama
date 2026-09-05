@@ -47,6 +47,12 @@ pub(crate) enum Write {
         encodes: Vec<(usize, PageEncode)>,
         dir: PathBuf,
         managed: Vec<String>,
+        /// What the finished line calls this write: three different things
+        /// submit an identical folder job, and only the caller knows which
+        /// ("saved work folder", "autosaved work folder", "duplicate written
+        /// to"). Saying "saved" after a Save Duplicate is the one that
+        /// actually misleads — it reads as though the work moved.
+        verb: &'static str,
     },
 }
 
@@ -193,6 +199,7 @@ fn perform(job: Write) -> Result<String, String> {
             encodes,
             dir,
             managed,
+            verb,
         } => {
             for (i, page) in encodes {
                 let bytes = page.encode()?;
@@ -204,7 +211,7 @@ fn perform(job: Write) -> Result<String, String> {
             let pages = wf.pages.len();
             match mn_core::project::save_folder(&wf, &dir, &managed) {
                 Ok((_, written)) => Ok(format!(
-                    "saved work folder {} ({pages} pages, {written} rewritten)",
+                    "{verb} {} ({pages} pages, {written} rewritten)",
                     dir.display()
                 )),
                 Err(e) => Err(e.to_string()),

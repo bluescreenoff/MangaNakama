@@ -186,6 +186,15 @@ pub fn bytes_to_doc(bytes: &[u8]) -> Result<Document, OraError> {
     ora::load_from(Cursor::new(bytes))
 }
 
+/// A stashed page read for its METADATA only — the layer tree, the frames,
+/// the balloons, the texts — with no pixels decoded at all. See
+/// [`ora::load_meta_from`]: this is what to reach for when a pass wants to
+/// ASK a page something (what text is on it, where its panels are) rather
+/// than show or edit it. Never save a document that came back from here.
+pub fn bytes_to_doc_meta(bytes: &[u8]) -> Result<Document, OraError> {
+    ora::load_meta_from(Cursor::new(bytes))
+}
+
 /// Pull the embedded thumbnail out of a page's ORA bytes without decoding the
 /// whole document (ORA ships `Thumbnails/thumbnail.png`, ≤256px).
 pub fn page_thumb(bytes: &[u8]) -> Option<image::RgbaImage> {

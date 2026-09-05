@@ -751,7 +751,14 @@ mod tests {
         let u = row("u");
         assert_eq!(u.source, Source::File);
         assert_eq!(u.entries, ["tool: Figure"]);
-        assert_eq!(u.shadows.as_deref(), Some(&["tool: Frame border".to_owned()][..]));
+        // What U's default holds is `builtin_targets`' business (a cycle,
+        // since 2026-09-05); what THIS test pins is that the file row keeps
+        // it as the hint the ↺ button restores.
+        let shadowed = u.shadows.as_deref().expect("it knows what it hid");
+        assert!(
+            shadowed.contains(&"tool: Frame border".to_owned()),
+            "{shadowed:?}"
+        );
         assert_eq!(table.iter().filter(|b| b.key == "u").count(), 1, "one row");
         // Keys that are not chords at all are the caller's to keep.
         assert!(!table.iter().any(|b| b.key == "_c" || b.key == "hyper+9"));

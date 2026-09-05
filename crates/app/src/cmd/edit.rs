@@ -472,8 +472,43 @@ pub(super) fn auto_note(opts: &mn_core::FillOpts, auto: Option<mn_core::AutoFill
     }
 }
 
+/// What the Del key means right now. In the Object tool with something
+/// picked it is that object's Delete; everywhere else it is Clear.
+///
+/// It lives here, as a function, because the same question is asked in two
+/// places: this command (so the shortcut row "Delete / clear layer" can be
+/// rebound to the behaviour it names) and `main::shortcut`'s own Del arm.
+/// `cmd::edit::delete_key_tests::the_delete_command_is_the_del_key_verbatim`
+/// pins the two together; when `main.rs` is next opened, point its arm at
+/// `AppCmd::DeleteOrClear` and delete the twin.
+pub(crate) fn delete_or_clear_target(app: &App) -> AppCmd {
+    use crate::cmd::Tool;
+    if app.tool != Tool::Object {
+        return AppCmd::ClearLayer;
+    }
+    if !app.object_multi.is_empty() {
+        return AppCmd::ObjectMultiDelete;
+    }
+    app.text_sel
+        .map(|(layer, text)| AppCmd::TextDelete { layer, text })
+        .or_else(|| {
+            app.balloon_sel
+                .map(|(layer, balloon)| AppCmd::BalloonDelete { layer, balloon })
+        })
+        .or_else(|| {
+            app.object_sel
+                .map(|(layer, frame)| AppCmd::FrameDelete { layer, frame })
+        })
+        .or_else(|| app.vector_sel.map(|stroke| AppCmd::VectorDelete { stroke }))
+        .unwrap_or(AppCmd::ClearLayer)
+}
+
 pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
     match cmd {
+        AppCmd::DeleteOrClear => {
+            let c = delete_or_clear_target(app);
+            dispatch(app, c);
+        }
         AppCmd::ClearLayer => {
             app.doc.set_op_label("Clear");
             let l = app.doc.active_layer();
@@ -1076,4 +1111,74 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
         other => return transform::run(app, other, cmd_tail),
     }
     run_cmd_tail(app, cmd_tail);
+}
+
+#[cfg(test)]
+mod delete_key_tests {
+    use super::*;
+    use crate::cmd::Tool;
+
+    /// The pin named in [`delete_or_clear_target`]'s doc comment: the
+    /// command and the Del KEY must answer the same thing in every state.
+    ///
+    /// They are two copies of one decision right now — `main::shortcut` has
+    /// the chain inline and this file has the function — because the command
+    /// was added (2026-09-06) to make the "Delete / clear layer" shortcut row
+    /// rebindable without editing `main.rs`. This test is what makes the
+    /// duplication safe until the two are joined.
+    #[test]
+    fn the_delete_command_is_the_del_key_verbatim() {
+        let Some(renderer) = crate::app::headless_renderer() else {
+            return;
+        };
+        let mut app = App::new(renderer, (600, 400), 1.0);
+        // A user's own keys.json would shadow Del before the built-in table
+        // is ever reached, and the test exe reads the machine's real file.
+        app.keymap = crate::keymap::Keymap::default();
+        app.shell.test_modifiers = Some(egui::Modifiers::default());
+        app.doc.add_text_layer(
+            "Dialogue",
+            mn_core::TextSet {
+                texts: vec![mn_core::text::TextItem::new(
+                    [10.0, 10.0],
+                    "Gothic".into(),
+                    12.0,
+                    [0, 0, 0],
+                    true,
+                )],
+            },
+        );
+        let li = app.doc.layers.len() - 1;
+
+        let key_says = |app: &mut App| -> String {
+            app.cmds.clear();
+            assert!(crate::shortcut(app, 0x2E, false), "Del is consumed");
+            format!("{:?}", app.cmds.back().expect("Del queued a command"))
+        };
+
+        // 1. Any tool but Object: the layer.
+        app.tool = Tool::Pen;
+        assert_eq!(key_says(&mut app), "ClearLayer");
+        assert_eq!(
+            format!("{:?}", delete_or_clear_target(&app)),
+            key_says(&mut app)
+        );
+
+        // 2. The Object tool with a text picked: that text.
+        app.tool = Tool::Object;
+        app.text_sel = Some((li, 0));
+        assert!(key_says(&mut app).starts_with("TextDelete"));
+        assert_eq!(
+            format!("{:?}", delete_or_clear_target(&app)),
+            key_says(&mut app)
+        );
+
+        // 3. The Object tool with nothing picked: the layer again.
+        app.text_sel = None;
+        assert_eq!(key_says(&mut app), "ClearLayer");
+        assert_eq!(
+            format!("{:?}", delete_or_clear_target(&app)),
+            key_says(&mut app)
+        );
+    }
 }
