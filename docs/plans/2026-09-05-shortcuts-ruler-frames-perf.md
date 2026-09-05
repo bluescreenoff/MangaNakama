@@ -1,6 +1,6 @@
 # Plan 2026-09-05: one shortcut system, Ruler as a tool, frame-folder fixes, lag, touch rotate
 
-> **STATE 2026-09-06.** Pushed through `b3d24e3`: Lanes 1–5 DONE (save encode off-thread, balloon pen O/L/M/N, Ruler docs, SaveDuplicate + ExportText off-thread, all default chords rebindable). Still synchronous: OpenOra (shape in lane-2 report, low value). Lane 6 (balloon joins the text layer) RUNNING as the only agent, report `2026-09-05-lane-6-REPORT.md`. Owner rule this session: one agent at a time.
+> **STATE 2026-09-06, ALL LANES DONE, pushed through `07832a5`.** Only OpenOra is still synchronous (shape in the lane-2 report). Owner eye tests owed: see the session summary. Known test-env flake: wide parallel `cargo test` filters hit GPU device-lost OOM on the UHD 620; run suites one at a time or with RUST_TEST_THREADS=2.
 
 Written by Fable (main chat) for Opus implementation lanes. Owner asks from the 2026-09-05 session,
 in his words where it matters. Each item: what the owner saw, the cause on the page, the exact change,
