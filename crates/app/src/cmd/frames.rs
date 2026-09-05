@@ -60,6 +60,34 @@ fn frame_target(app: &App) -> Option<usize> {
     }
 }
 
+/// Which of two panel groups a reader reaches first — rows top to bottom,
+/// and RIGHT to left inside a row for a manga (RTL) binding. The same
+/// priority `core::frame_order`'s XY cut uses, cut down to the two halves of
+/// ONE divide: the axis the cut actually separated them on is the axis their
+/// centres are furthest apart on.
+///
+/// Owner 2026-09-05: the list order and the badge numbers disagreed because
+/// the new folder always landed on one fixed side. This is what decides the
+/// side now.
+fn reads_earlier(a: [f32; 4], b: [f32; 4], rtl: bool) -> bool {
+    let (acx, acy) = ((a[0] + a[2]) * 0.5, (a[1] + a[3]) * 0.5);
+    let (bcx, bcy) = ((b[0] + b[2]) * 0.5, (b[1] + b[3]) * 0.5);
+    if (acy - bcy).abs() >= (acx - bcx).abs() {
+        acy < bcy
+    } else if rtl {
+        acx > bcx
+    } else {
+        acx < bcx
+    }
+}
+
+fn union_bbox(u: &mut Option<[f32; 4]>, b: [f32; 4]) {
+    *u = Some(match *u {
+        None => b,
+        Some(p) => [p[0].min(b[0]), p[1].min(b[1]), p[2].max(b[2]), p[3].max(b[3])],
+    });
+}
+
 fn slot_for(frames: &[mn_core::Frame], cut: Option<[f32; 4]>) -> Option<[f32; 4]> {
     let c = cut?;
     const TOL: f32 = 2.0;
@@ -160,19 +188,16 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
             // union of the CUT panels is the slot both halves order
             // inside — division siblings can never scatter.
             let mut cut_union: Option<[f32; 4]> = None;
+            // The two halves' own boxes, kept apart from `cut_union` (which
+            // spans both): item E asks which HALF a reader reaches first, and
+            // `keep` also carries the panels the drag never touched.
+            let (mut kept_union, mut off_union) = (None, None);
             for f in fs.frames.drain(..) {
                 if f.segment_touches([a.0, a.1], [b.0, b.1]) {
-                    let bb = f.bbox();
-                    cut_union = Some(match cut_union {
-                        None => bb,
-                        Some(u) => [
-                            u[0].min(bb[0]),
-                            u[1].min(bb[1]),
-                            u[2].max(bb[2]),
-                            u[3].max(bb[3]),
-                        ],
-                    });
+                    union_bbox(&mut cut_union, f.bbox());
                     if let Some((p, q)) = f.split([a.0, a.1], [b.0, b.1], gutter) {
+                        union_bbox(&mut kept_union, p.bbox());
+                        union_bbox(&mut off_union, q.bbox());
                         keep.push(p);
                         if as_folder {
                             split_off.push(q);
@@ -194,10 +219,16 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                 new_fs.frames = split_off;
                 new_fs.slot = cut_union;
                 let dup = app.frame_divide_contents == DivideContents::Duplicate;
+                // Item E: the folder a reader reaches FIRST sits HIGHER in
+                // the list, so the row order agrees with the badges.
+                let above = match (off_union, kept_union) {
+                    (Some(o), Some(k)) => reads_earlier(o, k, app.binding_right),
+                    _ => false,
+                };
                 let done = if dup {
-                    app.doc.divide_frame_folder_dup(li, fs, new_fs)
+                    app.doc.divide_frame_folder_dup(li, fs, new_fs, above)
                 } else {
-                    app.doc.divide_frame_folder(li, fs, new_fs)
+                    app.doc.divide_frame_folder(li, fs, new_fs, above)
                 };
                 if done.is_some() {
                     app.renderer.invalidate();

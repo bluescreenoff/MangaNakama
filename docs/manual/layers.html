@@ -29,7 +29,9 @@ preference (Preferences ▸ Canvas &amp; view ▸ "Layers palette icons").</div>
 <h2>Selecting more than one row</h2>
 <div class="quirk"><b><kbd>Ctrl</kbd>+click a row adds or removes it;
 <kbd>Shift</kbd>+click takes the range from the active row.</b> A plain
-click on another row collapses the selection back to that one row.
+click on any row collapses the selection back to that one row —
+including the row that already holds the pen, which used to be the one
+click that left the extra rows lit.
 Selected rows share the highlight, but the <b>pen mark</b> still sits on
 exactly one of them — that is the row your brush writes to, and the row a
 command means when it says "the active layer". <kbd>Ctrl</kbd>+clicking
@@ -428,6 +430,22 @@ ACTIVE layer</b> — the whole block, header and children, found by
 walking up from wherever the active layer sits. With the active layer in
 no frame folder at all the filter matches nothing, and the count row
 says so rather than leaving you with a blank palette.</div>
+<div class="quirk"><b>The blue veil follows the folder, not the header
+row.</b> The translucent blue over everything outside a panel used to
+appear only while the frame folder's own header row was selected. It now
+shows for <i>any</i> layer inside that folder — pick "Layer 1" inside
+Frame 1 and the page outside Frame 1's panel is still veiled, so you can
+see what you are drawing into. Pick a layer that is in no frame folder
+and the veil lifts. (It is also drawn as one shape now instead of one
+per screen row, which is what made dividing a panel stutter.)</div>
+<div class="quirk"><b>Dividing a panel puts the panel you read FIRST on
+the higher row.</b> Cut a koma across the middle and the top half's
+folder sits above the bottom half's in the list; cut it down the middle
+and the RIGHT half sits above the left, because a manga page reads right
+to left. The list order and the numbered badges used to disagree
+whenever the half that split off was the one you read first. Only new
+divides are placed this way — nothing reshuffles folders you already
+have.</div>
 <h2>Palette colours</h2>
 <div class="quirk"><b>A folder wears the topmost palette colour from
 inside it.</b> A folder with no colour of its own shows the colour of

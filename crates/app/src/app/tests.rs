@@ -7018,15 +7018,17 @@ fn two_finger_pinch_noise_does_not_rotate() {
     let a0 = at(0.0, r0);
     app.touch_down(1, a0.0, a0.1);
     app.touch_down(2, anti(a0).0, anti(a0).1);
-    // A monotone pinch-out (+1% radius per step) with ±0.2° of pair
-    // wobble — real digitizers are no cleaner than this. (Zoom is a
-    // RATIO: App::new fits the viewport, zoom never starts at 1.)
+    // A pinch-out to 1.5× whose grip SLIPS ±25 % on the way, with ±3° of
+    // pair wobble — the 2026-09-05 strengthening (item I). The old ±0.2°
+    // was far cleaner than a real hand on a real digitizer, which is why
+    // the owner's zooms kept turning into rotates. (Zoom is a RATIO:
+    // App::new fits the viewport, zoom never starts at 1.)
     let zoom0 = app.viewport.zoom;
-    let mut r = r0;
-    for i in 0..40 {
-        r *= 1.01;
-        let wob = if i % 2 == 0 { 0.2 } else { -0.2 };
-        let a = at(wob, r);
+    for step in 1..=40 {
+        let t = step as f32 / 40.0;
+        let slip = if step % 2 == 0 { 1.25 } else { 0.8 };
+        let wob = if step % 2 == 0 { 3.0 } else { -3.0 };
+        let a = at(wob, r0 * (1.0 + 0.5 * t) * slip);
         app.touch_move(1, a.0, a.1);
         app.touch_move(2, anti(a).0, anti(a).1);
     }
@@ -7040,6 +7042,56 @@ fn two_finger_pinch_noise_does_not_rotate() {
     assert!(
         app.viewport.zoom / zoom0 > 1.2,
         "the zoom still tracks the pinch, got {}x",
+        app.viewport.zoom / zoom0
+    );
+}
+
+/// Item I (2026-09-05) — THE OWNER REPRO: "my zoom gesture's
+/// imperfection is read as a rotate." A real two-finger zoom is not
+/// angle-clean: the pair spreads to 2× while the whole hand drifts a
+/// dozen degrees and wobbles on top of that. The old 4° latch fired
+/// somewhere in the first fifth of this and tipped the page over.
+///
+/// Self-discriminating: the drift here (12° + 3° wobble) EXCEEDS the
+/// old 4° threshold and reaches 15°, above the new 12° one too — only
+/// the dominance gate (twist vs pinch) keeps the view straight. Yet the
+/// zoom must still track the whole way.
+#[test]
+fn a_wobbly_zoom_never_starts_a_rotate() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    let (mx, my, r0) = (300.0f32, 200.0f32, 80.0f32);
+    let at = |deg: f32, r: f32| {
+        (
+            mx + r * deg.to_radians().cos(),
+            my + r * deg.to_radians().sin(),
+        )
+    };
+    let anti = |a: (f32, f32)| (2.0 * mx - a.0, 2.0 * my - a.1);
+    let a0 = at(0.0, r0);
+    app.touch_down(1, a0.0, a0.1);
+    app.touch_down(2, anti(a0).0, anti(a0).1);
+    let zoom0 = app.viewport.zoom;
+    for step in 1..=40 {
+        let t = step as f32 / 40.0;
+        // Spread to 2×, hand drifting 12° over the gesture, ±3° wobble.
+        let wob = if step % 2 == 0 { 3.0 } else { -3.0 };
+        let a = at(12.0 * t + wob, r0 * (1.0 + t));
+        app.touch_move(1, a.0, a.1);
+        app.touch_move(2, anti(a).0, anti(a).1);
+    }
+    app.touch_up(1);
+    app.touch_up(2);
+    assert!(
+        app.viewport.rotate_rad.abs() < 1e-4,
+        "a drifting zoom is still a zoom, got {}",
+        app.viewport.rotate_rad.to_degrees()
+    );
+    assert!(
+        app.viewport.zoom / zoom0 > 1.8,
+        "and it zoomed the whole way, got {}x",
         app.viewport.zoom / zoom0
     );
 }
@@ -11291,4 +11343,192 @@ fn the_size_box_is_the_inked_diameter_for_every_csp_ink_preset() {
             path.display()
         );
     }
+}
+
+// --- Lane 3, 2026-09-05: frame folders — list order and the plain click ----
+
+/// Owner 2026-09-05: "Frame 2 (the bottom one) is on the layer list higher
+/// than frame 1, which is counterintuitive." `divide_frame_folder` always
+/// dropped the new block on ONE fixed side of the original's, while the
+/// badges are numbered by READING order (`app/frames.rs::frame_pos`) — so the
+/// list and the numbers disagreed every time the split-off half read first.
+/// The rule now: the folder a reader reaches FIRST sits HIGHER in the list.
+/// Rows top to bottom; right to left inside a row, because this is a manga.
+#[test]
+fn a_divide_lists_the_earlier_reading_panel_higher() {
+    use crate::cmd::{AppCmd, DivideContents, FrameMode};
+
+    // The header indices of every frame folder, bottom of the stack first.
+    fn headers(app: &App) -> Vec<usize> {
+        app.doc
+            .layers
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.folder && l.is_frame())
+            .map(|(i, _)| i)
+            .collect()
+    }
+    // That folder's panels' bounding box.
+    fn bbox(app: &App, i: usize) -> [f32; 4] {
+        app.doc.layers[i]
+            .frames()
+            .unwrap()
+            .frames
+            .iter()
+            .map(|f| f.bbox())
+            .reduce(|u, b| {
+                [
+                    u[0].min(b[0]),
+                    u[1].min(b[1]),
+                    u[2].max(b[2]),
+                    u[3].max(b[3]),
+                ]
+            })
+            .unwrap()
+    }
+    fn one_panel_page(contents: DivideContents) -> Option<App> {
+        let mut app = App::new(headless_renderer()?, (600, 400), 1.0);
+        let hi = app.doc.add_frame_folder(
+            "Frame 1",
+            mn_core::FrameSet::single_rect([20.0, 20.0, 580.0, 380.0], 4.0),
+        );
+        app.doc.set_active(hi);
+        app.frame_mode = FrameMode::DivideFolder;
+        app.frame_divide_contents = contents;
+        app.renumber_frames();
+        Some(app)
+    }
+
+    // A LEVEL cut: two panels, one above the other. The top one reads
+    // first, so its folder is the higher row. (CreateEmpty exercises
+    // `divide_frame_folder`.)
+    let Some(mut app) = one_panel_page(DivideContents::CreateEmpty) else {
+        println!("[test] SKIP: no usable adapter");
+        return;
+    };
+    let before: Vec<(String, u8, bool)> = app
+        .doc
+        .layers
+        .iter()
+        .map(|l| (l.name.clone(), l.depth, l.folder))
+        .collect();
+    crate::cmd::dispatch(
+        &mut app,
+        AppCmd::FrameDivide {
+            a: (-20.0, 200.0),
+            b: (620.0, 200.0),
+        },
+    );
+    app.ensure_frame_order();
+    let h = headers(&app);
+    assert_eq!(h.len(), 2, "the cut split off a second frame folder");
+    let (upper, lower) = if bbox(&app, h[0])[1] < bbox(&app, h[1])[1] {
+        (h[0], h[1])
+    } else {
+        (h[1], h[0])
+    };
+    assert_eq!(
+        app.frame_pos(upper).map(|p| p.0),
+        Some(1),
+        "the TOP panel reads first"
+    );
+    assert!(
+        upper > lower,
+        "and its folder is the higher row (indices {upper} vs {lower})"
+    );
+
+    // Undo puts the exact pre-divide stack back.
+    crate::cmd::dispatch(&mut app, AppCmd::Undo);
+    let after: Vec<(String, u8, bool)> = app
+        .doc
+        .layers
+        .iter()
+        .map(|l| (l.name.clone(), l.depth, l.folder))
+        .collect();
+    assert_eq!(after, before, "undo restores the pre-divide stack");
+
+    // A VERTICAL cut: two panels side by side. RTL — the RIGHT one reads
+    // first, so its folder is the higher row. (Duplicate is the default
+    // contents choice and exercises `divide_frame_folder_dup`.)
+    let Some(mut app) = one_panel_page(DivideContents::Duplicate) else {
+        return;
+    };
+    assert!(app.binding_right, "a manga page: right-bound, read RTL");
+    crate::cmd::dispatch(
+        &mut app,
+        AppCmd::FrameDivide {
+            a: (300.0, -20.0),
+            b: (300.0, 420.0),
+        },
+    );
+    app.ensure_frame_order();
+    let h = headers(&app);
+    assert_eq!(h.len(), 2);
+    let (right, left) = if bbox(&app, h[0])[2] > bbox(&app, h[1])[2] {
+        (h[0], h[1])
+    } else {
+        (h[1], h[0])
+    };
+    assert_eq!(
+        app.frame_pos(right).map(|p| p.0),
+        Some(1),
+        "RTL: the RIGHT panel reads first"
+    );
+    assert!(
+        right > left,
+        "and its folder is the higher row (indices {right} vs {left})"
+    );
+}
+
+/// Owner 2026-09-05: "if I have multiple layers selected and single click one
+/// of them, it should reselect just that one." `Document::set_active` has
+/// always cleared `layer_multi`; the plain-click arm in `ui/layers/rows.rs`
+/// pushed `SelectLayer` only when the row was NOT already the active one, so
+/// clicking the target row of a Ctrl-built selection pushed no command and
+/// nothing collapsed. This pins the command's half of the rule.
+#[test]
+fn a_plain_click_collapses_a_multi_selection() {
+    use crate::cmd::AppCmd;
+    let Some(renderer) = headless_renderer() else {
+        println!("[test] SKIP: no usable adapter");
+        return;
+    };
+    let mut app = App::new(renderer, (64, 64), 1.0);
+    crate::cmd::dispatch(&mut app, AppCmd::AddLayer);
+    crate::cmd::dispatch(&mut app, AppCmd::AddLayer);
+    assert!(app.doc.layers.len() >= 3);
+
+    crate::cmd::dispatch(&mut app, AppCmd::SelectLayer(0));
+    crate::cmd::dispatch(&mut app, AppCmd::ToggleLayerMulti(1));
+    crate::cmd::dispatch(&mut app, AppCmd::ToggleLayerMulti(2));
+    assert_eq!(
+        app.doc.layer_multi.len(),
+        2,
+        "three rows lit: the target plus two"
+    );
+
+    // The case that used to do nothing: a plain click on the row that is
+    // ALREADY the editing target.
+    let one = app.doc.active;
+    crate::cmd::dispatch(&mut app, AppCmd::SelectLayer(one));
+    assert!(
+        app.doc.layer_multi.is_empty(),
+        "only the clicked row stays selected, got {:?}",
+        app.doc.layer_multi
+    );
+    assert_eq!(app.doc.active, one);
+
+    // And a plain click on a row of the selection that is NOT the target
+    // collapses onto THAT row.
+    crate::cmd::dispatch(&mut app, AppCmd::SelectLayer(1));
+    crate::cmd::dispatch(&mut app, AppCmd::ToggleLayerMulti(0));
+    crate::cmd::dispatch(&mut app, AppCmd::ToggleLayerMulti(2));
+    assert_eq!(
+        (app.doc.active, app.doc.layer_multi.as_slice()),
+        (2, [0, 1].as_slice()),
+        "rows 0, 1 and 2 lit, row 2 holds the pen"
+    );
+    crate::cmd::dispatch(&mut app, AppCmd::SelectLayer(0));
+    assert!(app.doc.layer_multi.is_empty());
+    assert_eq!(app.doc.active, 0);
 }

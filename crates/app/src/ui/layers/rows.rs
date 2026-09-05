@@ -1515,7 +1515,13 @@ pub(crate) fn layer_section(ui: &mut egui::Ui, app: &mut App) {
             // row that is ALREADY active pushes no command — so clear it
             // here too, or the paper stays lit beside the active layer.
             app.paper_selected = false;
-            if !selected {
+            // Owner 2026-09-05: "if I have multiple layers selected and single
+            // click one of them, it should reselect just that one". A plain
+            // click on the row that is ALREADY the target used to push
+            // nothing, so a Ctrl-built multi-selection survived it —
+            // `SelectLayer` collapses it (`Document::set_active` clears
+            // `layer_multi`).
+            if !selected || !app.doc.layer_multi.is_empty() {
                 app.push_cmd(AppCmd::SelectLayer(i));
             }
         }

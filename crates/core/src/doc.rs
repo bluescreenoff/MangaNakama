@@ -3143,15 +3143,24 @@ impl Document {
 
     /// CSP "Divide frame folder": the folder at `index` keeps `keep` as its
     /// vectors, and a **new sibling frame folder** (with its own White + draw
-    /// layer, like [`Self::add_frame_folder`]) is inserted directly below the
+    /// layer, like [`Self::add_frame_folder`]) is inserted beside the
     /// original's block carrying `split_off`. Both rasters re-derive. Clears
     /// the undo history (structural). Returns the new header's index, with the
     /// new folder's draw layer active.
+    ///
+    /// `above` puts the new block ABOVE the original's instead of below it.
+    /// Owner 2026-09-05: "Frame 2 (the bottom one) is on the layer list higher
+    /// than frame 1, which is counterintuitive" — the block always landed on
+    /// one fixed side while the badges are numbered by READING order, so the
+    /// two disagreed whenever the split-off half read first. Reading order is
+    /// the app's (it needs the binding side), so the caller decides and this
+    /// only places the block.
     pub fn divide_frame_folder(
         &mut self,
         index: usize,
         keep: FrameSet,
         split_off: FrameSet,
+        above: bool,
     ) -> Option<usize> {
         let size = self.size;
         let (before, active_before) = (self.stack_snapshot(), self.active);
@@ -3167,7 +3176,14 @@ impl Document {
         Self::derive_frame_raster(l, size);
 
         let n = self.layers.iter().filter(|x| x.is_frame()).count() + 1;
-        let at = self.children_range(index).start;
+        // Children sit BELOW their header, so the original's block is
+        // `children_range(index).start ..= index`: below it is that start,
+        // above it is one past the header.
+        let at = if above {
+            index + 1
+        } else {
+            self.children_range(index).start
+        };
         let mut white = Layer::new("White");
         white.depth = depth + 1;
         white.fill_white(size);
@@ -3199,11 +3215,13 @@ impl Document {
     /// Both halves then mask the same art to their own shape, which is the
     /// point: the artist cuts a drawn panel and keeps the drawing in both.
     /// Returns the new header's index; the copy's topmost child is active.
+    /// `above` places the new block exactly as in [`Self::divide_frame_folder`].
     pub fn divide_frame_folder_dup(
         &mut self,
         index: usize,
         keep: FrameSet,
         split_off: FrameSet,
+        above: bool,
     ) -> Option<usize> {
         let size = self.size;
         let l = self.layers.get(index)?;
@@ -3216,7 +3234,7 @@ impl Document {
         if block.is_empty() {
             // Nothing to duplicate — the empty-folder answer IS the answer
             // (and it records its own structural undo step).
-            return self.divide_frame_folder(index, keep, split_off);
+            return self.divide_frame_folder(index, keep, split_off, above);
         }
         let (before, active_before) = (self.stack_snapshot(), self.active);
         for c in &mut block {
@@ -3233,7 +3251,11 @@ impl Document {
         Self::derive_frame_raster(l, size);
 
         let n = self.layers.iter().filter(|x| x.is_frame()).count() + 1;
-        let at = self.children_range(index).start;
+        let at = if above {
+            index + 1
+        } else {
+            self.children_range(index).start
+        };
         let mut header = Layer::new(format!("Frame {n}"));
         header.kind = LayerKind::Frame(split_off);
         header.folder = true;
@@ -7891,8 +7913,11 @@ mod tests {    use super::*;
         // Split the panel in half by hand and hand the pieces over.
         let keep = FrameSet::single_rect([32.0, 32.0, 224.0, 120.0], 4.0);
         let off = FrameSet::single_rect([32.0, 136.0, 224.0, 224.0], 4.0);
+        // `above = false`: the split-off half is the LOWER panel, so it reads
+        // second and belongs below the original's block. (Which half reads
+        // first is the app's call — `cmd::frames::reads_earlier`.)
         let new_hi = doc
-            .divide_frame_folder(hi, keep.clone(), off.clone())
+            .divide_frame_folder(hi, keep.clone(), off.clone(), false)
             .unwrap();
 
         // Stack bottom→top: Layer 1, [White, Layer 1, Frame 2], [White, Layer 1, Frame 1].
@@ -7923,7 +7948,8 @@ mod tests {    use super::*;
             flat.divide_frame_folder(
                 fi,
                 FrameSet::single_rect([8.0, 8.0, 56.0, 30.0], 2.0),
-                FrameSet::single_rect([8.0, 34.0, 56.0, 56.0], 2.0)
+                FrameSet::single_rect([8.0, 34.0, 56.0, 56.0], 2.0),
+                false
             )
             .is_none()
         );

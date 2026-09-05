@@ -5,6 +5,115 @@
 use super::super::theme;
 use crate::app::App;
 
+/// The frame folder the focus veil belongs to: the active layer when it IS
+/// a frame folder, else the frame folder ENCLOSING it (owner 2026-09-05 —
+/// "the blue overlay should apply whenever I'm on any layer in the frame
+/// folder", not only on the header row). Same walk as
+/// `ui::layers::rows::active_frame_folder`; both are private to their
+/// module, so this is six lines rather than a visibility change.
+fn veil_folder(doc: &mn_core::Document, active: usize) -> Option<usize> {
+    let mut i = active;
+    loop {
+        if doc.layers.get(i).is_some_and(|l| l.folder && l.is_frame()) {
+            return Some(i);
+        }
+        // `enclosing_folder` only ever looks upward (i+1..), so this ends.
+        i = doc.enclosing_folder(i)?;
+    }
+}
+
+/// The frame-focus veil as ONE mesh (owner 2026-09-05: "MangaNakama froze
+/// for a bit and almost crashed just from dividing a panel").
+///
+/// It used to be a scanline even-odd fill — one `rect_filled` PER SCREEN
+/// ROW, so a full-height canvas cost ~1000–3000 egui shapes EVERY frame for
+/// as long as a frame folder was the active layer. That is the whole lag.
+///
+/// Same even-odd semantics (concave panels still work), a different
+/// decomposition: cut the visible area into horizontal bands at every
+/// polygon vertex's `y`. Inside a band no vertex exists, so every edge that
+/// crosses it is one straight segment and the even-odd spans at the band's
+/// top and bottom pair up into trapezoids. Cost is O(vertices × panels),
+/// not O(rows).
+fn veil_mesh(polys: &[Vec<egui::Pos2>], area: egui::Rect, tint: egui::Color32) -> egui::Mesh {
+    let mut mesh = egui::Mesh::default();
+    if !(area.width() > 0.0 && area.height() > 0.0) {
+        return mesh;
+    }
+    let (l, r) = (area.left(), area.right());
+
+    let mut ys: Vec<f32> = Vec::with_capacity(polys.iter().map(|p| p.len()).sum::<usize>() + 2);
+    ys.push(area.top());
+    ys.push(area.bottom());
+    for poly in polys {
+        for p in poly {
+            if p.y > area.top() && p.y < area.bottom() {
+                ys.push(p.y);
+            }
+        }
+    }
+    ys.sort_by(f32::total_cmp);
+    ys.dedup_by(|a, b| (*a - *b).abs() < 1e-4);
+
+    // (x where the edge sits at the band's top, x at its bottom).
+    let mut tops: Vec<f32> = Vec::new();
+    let mut bots: Vec<f32> = Vec::new();
+    for w in ys.windows(2) {
+        let (y0, y1) = (w[0], w[1]);
+        let ym = 0.5 * (y0 + y1);
+        tops.clear();
+        bots.clear();
+        for poly in polys {
+            let n = poly.len();
+            for i in 0..n {
+                let (a, b) = (poly[i], poly[(i + 1) % n]);
+                // The scanline rule, sampled at the band's MIDLINE: an edge
+                // that crosses there spans the whole band.
+                if (a.y <= ym) != (b.y <= ym) {
+                    let at = |y: f32| a.x + (y - a.y) / (b.y - a.y) * (b.x - a.x);
+                    tops.push(at(y0));
+                    bots.push(at(y1));
+                }
+            }
+        }
+        // Sorting the two ends independently is the same pairing as
+        // following each edge (panels do not overlap, so the order at the
+        // band's top and bottom is the same) and degrades gracefully if two
+        // edges ever do cross inside a band.
+        tops.sort_by(f32::total_cmp);
+        bots.sort_by(f32::total_cmp);
+
+        let mut quad = |xt0: f32, xt1: f32, xb0: f32, xb1: f32| {
+            let (t0, b0) = (xt0.clamp(l, r), xb0.clamp(l, r));
+            let (t1, b1) = (xt1.clamp(l, r).max(t0), xb1.clamp(l, r).max(b0));
+            if t1 - t0 <= 0.0 && b1 - b0 <= 0.0 {
+                return;
+            }
+            let i0 = mesh.vertices.len() as u32;
+            mesh.colored_vertex(egui::pos2(t0, y0), tint);
+            mesh.colored_vertex(egui::pos2(t1, y0), tint);
+            mesh.colored_vertex(egui::pos2(b1, y1), tint);
+            mesh.colored_vertex(egui::pos2(b0, y1), tint);
+            mesh.add_triangle(i0, i0 + 1, i0 + 2);
+            mesh.add_triangle(i0, i0 + 2, i0 + 3);
+        };
+
+        // Even-odd: crossings pair up into the panels' INTERIOR; the veil is
+        // everything between those pairs, plus the two ends of the band.
+        let n = tops.len().min(bots.len()) & !1;
+        let (mut xt, mut xb) = (l, l);
+        let mut k = 0;
+        while k < n {
+            quad(xt, tops[k], xb, bots[k]);
+            xt = tops[k + 1].max(xt);
+            xb = bots[k + 1].max(xb);
+            k += 2;
+        }
+        quad(xt, r, xb, r);
+    }
+    mesh
+}
+
 // --- canvas overlay: page shadow + manuscript guides --------------------
 
 /// The page drop shadow's two strips (right edge, bottom edge), `d` px deep,
@@ -114,70 +223,24 @@ pub(super) fn paint(
         }
     }
 
-    // Frame focus (CSP): with a frame layer active, a translucent blue veil
-    // covers the page OUTSIDE its panels — picking a draw layer inside lifts
-    // it. Scanline even-odd in screen space: per row, subtract the panels'
-    // spans from the page span. Handles concave panels for free.
-    if app.doc.active_layer().is_frame() {
-        if let Some(fs) = app.doc.active_layer().frames() {
-            let polys: Vec<Vec<egui::Pos2>> = fs
-                .frames
-                .iter()
-                .map(|f| f.points.iter().map(|p| to_pt(p[0], p[1])).collect())
-                .collect();
-            let page_r = egui::Rect::from_min_max(to_pt(0.0, 0.0), to_pt(w as f32, h as f32));
-            let area = canvas_pts.intersect(page_r);
-            let tint = egui::Color32::from_rgba_unmultiplied(96, 132, 255, 42);
-            let mut crossings: Vec<f32> = Vec::new();
-            let mut y = area.top().ceil();
-            while y < area.bottom() {
-                crossings.clear();
-                for poly in &polys {
-                    let n = poly.len();
-                    for i in 0..n {
-                        let (a, b) = (poly[i], poly[(i + 1) % n]);
-                        if (a.y <= y) != (b.y <= y) {
-                            crossings.push(a.x + (y - a.y) / (b.y - a.y) * (b.x - a.x));
-                        }
-                    }
-                }
-                let mut x = area.left();
-                if crossings.is_empty() {
-                    painter.rect_filled(
-                        egui::Rect::from_min_max(
-                            egui::pos2(x, y),
-                            egui::pos2(area.right(), y + 1.0),
-                        ),
-                        0.0,
-                        tint,
-                    );
-                } else {
-                    crossings.sort_by(f32::total_cmp);
-                    for pair in crossings.chunks_exact(2) {
-                        let s = pair[0].clamp(area.left(), area.right());
-                        let e = pair[1].clamp(area.left(), area.right());
-                        if s > x {
-                            painter.rect_filled(
-                                egui::Rect::from_min_max(egui::pos2(x, y), egui::pos2(s, y + 1.0)),
-                                0.0,
-                                tint,
-                            );
-                        }
-                        x = x.max(e);
-                    }
-                    if x < area.right() {
-                        painter.rect_filled(
-                            egui::Rect::from_min_max(
-                                egui::pos2(x, y),
-                                egui::pos2(area.right(), y + 1.0),
-                            ),
-                            0.0,
-                            tint,
-                        );
-                    }
-                }
-                y += 1.0;
-            }
+    // Frame focus (CSP): with a frame folder in play, a translucent blue veil
+    // covers the page OUTSIDE its panels — picking a layer that is not in any
+    // frame folder lifts it. Even-odd in screen space, banded into ONE mesh
+    // (`veil_mesh`). Handles concave panels for free.
+    if let Some(fi) = veil_folder(&app.doc, app.doc.active)
+        && let Some(fs) = app.doc.layers[fi].frames()
+    {
+        let polys: Vec<Vec<egui::Pos2>> = fs
+            .frames
+            .iter()
+            .map(|f| f.points.iter().map(|p| to_pt(p[0], p[1])).collect())
+            .collect();
+        let page_r = egui::Rect::from_min_max(to_pt(0.0, 0.0), to_pt(w as f32, h as f32));
+        let area = canvas_pts.intersect(page_r);
+        let tint = egui::Color32::from_rgba_unmultiplied(96, 132, 255, 42);
+        let mesh = veil_mesh(&polys, area, tint);
+        if !mesh.is_empty() {
+            painter.add(egui::Shape::mesh(mesh));
         }
     }
 
@@ -268,6 +331,185 @@ mod tests {
 
     fn p(x: f32, y: f32) -> egui::Pos2 {
         egui::pos2(x, y)
+    }
+
+    /// The veil the owner was looking at: a 600×400 page, two panels, one
+    /// SLANTED cut between them (a straight cut would let the old scanline
+    /// off easy — every row identical).
+    fn two_panels_slant_cut() -> (Vec<Vec<egui::Pos2>>, egui::Rect) {
+        let panels = vec![
+            vec![p(20.0, 20.0), p(580.0, 20.0), p(580.0, 170.0), p(20.0, 230.0)],
+            vec![
+                p(20.0, 250.0),
+                p(580.0, 190.0),
+                p(580.0, 380.0),
+                p(20.0, 380.0),
+            ],
+        ];
+        (panels, egui::Rect::from_min_max(p(0.0, 0.0), p(600.0, 400.0)))
+    }
+
+    /// The old drawing: one `rect_filled` per screen row. Kept as a
+    /// COUNTER only, so the pin below states the real before/after numbers
+    /// instead of a remembered one.
+    fn scanline_shape_count(polys: &[Vec<egui::Pos2>], area: egui::Rect) -> usize {
+        let mut shapes = 0;
+        let mut crossings: Vec<f32> = Vec::new();
+        let mut y = area.top().ceil();
+        while y < area.bottom() {
+            crossings.clear();
+            for poly in polys {
+                let n = poly.len();
+                for i in 0..n {
+                    let (a, b) = (poly[i], poly[(i + 1) % n]);
+                    if (a.y <= y) != (b.y <= y) {
+                        crossings.push(a.x + (y - a.y) / (b.y - a.y) * (b.x - a.x));
+                    }
+                }
+            }
+            let mut x = area.left();
+            if crossings.is_empty() {
+                shapes += 1;
+            } else {
+                crossings.sort_by(f32::total_cmp);
+                for pair in crossings.chunks_exact(2) {
+                    let s = pair[0].clamp(area.left(), area.right());
+                    let e = pair[1].clamp(area.left(), area.right());
+                    if s > x {
+                        shapes += 1;
+                    }
+                    x = x.max(e);
+                }
+                if x < area.right() {
+                    shapes += 1;
+                }
+            }
+            y += 1.0;
+        }
+        shapes
+    }
+
+    /// Owner 2026-09-05: "MangaNakama froze for a bit and almost crashed
+    /// just from dividing a panel" / "dragging one frame folder lagged".
+    /// The veil was redrawn EVERY frame, as one egui shape per screen row,
+    /// for as long as a frame folder was in play — and item F makes that
+    /// state far more common. One mesh instead.
+    #[test]
+    fn the_frame_veil_is_one_mesh_not_a_rect_per_row() {
+        let (panels, area) = two_panels_slant_cut();
+        let before = scanline_shape_count(&panels, area);
+        let mesh = veil_mesh(
+            &panels,
+            area,
+            egui::Color32::from_rgba_unmultiplied(96, 132, 255, 42),
+        );
+        println!("[veil] before: {before} shapes; after: 1 shape ({} tris)", mesh.indices.len() / 3);
+        // 400 visible rows × the two gaps beside the panels = 800 shapes,
+        // every frame, for a canvas only 400 pt tall. The owner's window is
+        // ~1000 pt, and item F puts the veil on far more often.
+        assert!(
+            before >= 2 * area.height() as usize,
+            "the scanline fill really was per-row ({before})"
+        );
+        // ONE shape reaches the painter, and its triangle budget is set by
+        // the panels' vertices, not by the canvas height.
+        assert!(
+            mesh.indices.len() / 3 < 64,
+            "{} triangles for two panels",
+            mesh.indices.len() / 3
+        );
+        assert!(!mesh.is_empty());
+    }
+
+    /// The rewrite is a different DECOMPOSITION, not a different picture:
+    /// every sampled point is covered by the mesh exactly when it is
+    /// outside the panels by the even-odd rule (which is what makes a
+    /// concave panel work).
+    #[test]
+    fn the_mesh_veil_covers_exactly_what_the_scanlines_did() {
+        // A CONCAVE panel (an L) beside a plain one — the case even-odd
+        // exists for.
+        let panels = vec![
+            vec![
+                p(40.0, 40.0),
+                p(260.0, 40.0),
+                p(260.0, 300.0),
+                p(160.0, 300.0),
+                p(160.0, 150.0),
+                p(40.0, 150.0),
+            ],
+            vec![p(320.0, 60.0), p(560.0, 60.0), p(560.0, 340.0), p(320.0, 340.0)],
+        ];
+        let area = egui::Rect::from_min_max(p(0.0, 0.0), p(600.0, 400.0));
+        let mesh = veil_mesh(&panels, area, egui::Color32::WHITE);
+
+        let inside_even_odd = |q: egui::Pos2| {
+            let mut c = 0;
+            for poly in &panels {
+                let n = poly.len();
+                for i in 0..n {
+                    let (a, b) = (poly[i], poly[(i + 1) % n]);
+                    if (a.y <= q.y) != (b.y <= q.y)
+                        && a.x + (q.y - a.y) / (b.y - a.y) * (b.x - a.x) < q.x
+                    {
+                        c += 1;
+                    }
+                }
+            }
+            c % 2 == 1
+        };
+        let covered = |q: egui::Pos2| {
+            mesh.indices.chunks_exact(3).any(|t| {
+                let (a, b, c) = (
+                    mesh.vertices[t[0] as usize].pos,
+                    mesh.vertices[t[1] as usize].pos,
+                    mesh.vertices[t[2] as usize].pos,
+                );
+                let s = |u: egui::Pos2, v: egui::Pos2| (v.x - u.x) * (q.y - u.y) - (v.y - u.y) * (q.x - u.x);
+                let (d0, d1, d2) = (s(a, b), s(b, c), s(c, a));
+                (d0 >= 0.0 && d1 >= 0.0 && d2 >= 0.0) || (d0 <= 0.0 && d1 <= 0.0 && d2 <= 0.0)
+            })
+        };
+        // Off the band boundaries and the panel edges on purpose: a sample
+        // ON a shared edge is covered by both answers and proves nothing.
+        for gy in 0..40 {
+            for gx in 0..60 {
+                let q = p(gx as f32 * 10.0 + 5.3, gy as f32 * 10.0 + 5.7);
+                assert_eq!(
+                    covered(q),
+                    !inside_even_odd(q),
+                    "{q:?}: mesh says {}, even-odd says outside = {}",
+                    covered(q),
+                    !inside_even_odd(q)
+                );
+            }
+        }
+    }
+
+    /// Owner 2026-09-05: "the blue overlay only hits when I click on the
+    /// frame folder; it should apply whenever I'm on any layer in the
+    /// frame folder". The veil resolves the folder by walking OUT of the
+    /// active layer, and stays off for layers outside every frame folder.
+    #[test]
+    fn the_veil_shows_for_a_layer_inside_the_frame_folder() {
+        let mut doc = mn_core::Document::new(600, 400);
+        let outside = doc.active;
+        let hi = doc.add_frame_folder(
+            "Frame 1",
+            mn_core::FrameSet::single_rect([40.0, 40.0, 560.0, 360.0], 2.0),
+        );
+        let draw = doc.active; // the folder's own draw layer
+        assert!(draw != hi && doc.children_range(hi).contains(&draw));
+
+        assert_eq!(veil_folder(&doc, hi), Some(hi), "the header itself");
+        assert_eq!(veil_folder(&doc, draw), Some(hi), "a layer INSIDE it");
+        // A layer added deep inside still belongs to the panel — and the
+        // insert shifts the header's index, so re-find it by name (the
+        // CODE-MAP warning about holding raw layer indices).
+        let sub = doc.add_layer_in_folder(hi, "Tone").unwrap();
+        let hi = doc.layers.iter().position(|l| l.name == "Frame 1").unwrap();
+        assert_eq!(veil_folder(&doc, sub), Some(hi));
+        assert_eq!(veil_folder(&doc, outside), None, "outside every panel");
     }
 
     /// Issue #6: the shadow strips came straight off `to_pt(0,0)` and
