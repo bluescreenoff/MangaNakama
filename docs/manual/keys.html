@@ -242,6 +242,28 @@ required, and with no <code>keys.json</code> at all the built-in keys are
 all there is. Settings &#9656; Shortcuts edits the same file from inside
 the app, so you can start from the example and change it there.</div>
 
+<h3>Settings &#9656; Shortcuts: the built-in keys are in the list too</h3>
+<p>The list shows <em>every</em> chord the app answers to, not just the
+ones in your file. The built-ins are the grey rows, tagged
+<b>default</b> &mdash; <kbd>U</kbd> is there as <i>Frame border</i>,
+<kbd>Ctrl+Z</kbd> as <i>Undo</i>. Change a grey row and it stops being
+grey: it becomes a line in <em>your</em> <code>keys.json</code> that
+shadows the built-in, and the row keeps a &ldquo;default: …&rdquo; note
+plus a <b>&#8634;</b> button that deletes your line and gives the
+built-in back.</p>
+<p>A row&rsquo;s value is a strip of <b>chips</b>, one per step of the
+cycle. <b>&times;</b> drops a chip, <b>&#8249; &#8250;</b> move it along.
+Pick a chord in the <b>Add</b> box and then click something in the
+search results and it is <em>appended</em> to that chord &mdash; press
+<kbd>U</kbd>, pick <i>tool: Figure</i>, pick <i>Straight line ruler</i>,
+and <kbd>U</kbd> now walks all three. (It used to overwrite; to re-aim a
+key now, drop its chip first.) The <b>as text</b> checkbox swaps every
+value cell for the raw JSON, which is what the file holds either way
+&mdash; the tab is only ever an editor for <code>keys.json</code>.</p>
+<p>A few built-ins are listed but greyed out and not editable: their arm
+has no palette command to name it, so no line in the file can spell it.
+You can still bind that chord to something else, which shadows it.</p>
+
 <h3>Aiming a key at a tool, a tab, or one sub tool</h3>
 <p>Instead of a command, the right-hand side can name a place in the Sub
 Tool list. Write <code>tool:</code> and then the tool, optionally the
@@ -264,6 +286,16 @@ where you actually are and moves on from there, so clicking a tool in the
 palette between presses never leaves the key out of step. Our own
 <kbd>T</kbd> (Text ⇄ Balloon) and <kbd>E</kbd> (Eraser ⇄ Pen) are exactly
 this, written in the built-in table.</p>
+<p>A list can <b>mix</b> tools and commands, so a key is not stuck in one
+world:</p>
+<pre>{
+  "u": ["tool: Frame border", "tool: Figure", "Straight line ruler"]
+}</pre>
+<p>Same walk, same no-memory rule. A command that leaves something
+switched on &mdash; arming a ruler, say &mdash; counts as &ldquo;where
+you are&rdquo;; a command that just <em>does</em> a thing (Undo, Save)
+never does, so the walk simply runs it and carries on from the step
+before it.</p>
 <p>The tool a key lands on is remembered per group and per tool in
 <code>ui.txt</code>, so it survives closing the app: leave Figure in
 Saturated line on Dark burst, and that is where <kbd>F</kbd> puts you

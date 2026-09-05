@@ -1694,6 +1694,26 @@ fn builtin_targets(vk: u16, shift: bool) -> Option<&'static [Target]> {
     })
 }
 
+/// The same table as [`builtin_targets`], as DATA — one row per chord, so
+/// the Shortcuts tab can LIST the built-in tool keys instead of hiding them
+/// (owner 2026-09-05: "all keys you can press should be in the shortcuts
+/// list and modifiable"). The match above stays the one place the values
+/// live; this only says which chords to ask it about, and the pin test
+/// `keymap::tests::every_builtin_target_row_is_the_match` fails the moment
+/// the match answers a chord this list forgot.
+pub(crate) fn builtin_target_rows() -> Vec<((bool, bool, bool, u16), &'static [Target])> {
+    // The tool letters, in the match's own order. Shift-free: the match
+    // ignores Shift except on R, where the shifted chord is somebody
+    // else's, so the bare row is the one a user can read and rebind.
+    const KEYS: &[u16] = &[
+        0x50, 0x42, 0x47, 0x4D, 0x57, 0x4F, 0x46, 0x56, 0x55, 0x54, 0x49, 0x48, 0x52, 0x45, 0x4A,
+        0x44,
+    ];
+    KEYS.iter()
+        .filter_map(|&vk| builtin_targets(vk, false).map(|t| ((false, false, false, vk), t)))
+        .collect()
+}
+
 /// The STATIC built-in chords as a queryable list — the Shortcut
 /// settings tab's "this chord already does …" lookup. Only arms that
 /// hold on a fresh app are listed; state-gated arms (the reader's keys,
@@ -1784,6 +1804,70 @@ pub(crate) fn builtin_chords() -> Vec<((bool, bool, bool, u16), &'static str)> {
     ]
 }
 
+/// One press of a chord bound in `keys.json`, whatever it holds.
+///
+/// A key carrying ONE command keeps the repeat family it always had — a
+/// held Ctrl+Z undoes again. Everything else is a cycle and never advances
+/// on auto-repeat, exactly like the built-in tool keys below.
+///
+/// The cycle is STATELESS, the same rule `subtools::press` has always used:
+/// run the step AFTER whichever one the app is standing on, or step 0 when
+/// it is standing on none, so a palette click between two presses re-aims
+/// the key instead of leaving a stale index behind. An all-target sequence
+/// goes through `subtools::press` itself, so a key that only names tools
+/// behaves exactly as it did before mixed cycles existed.
+fn run_seq(app: &mut App, steps: &[crate::keymap::Step], repeat: bool) {
+    use crate::keymap::Step;
+    if let [Step::Cmd(c)] = steps {
+        if !repeat
+            || matches!(
+                c,
+                AppCmd::Undo | AppCmd::Redo | AppCmd::LayerAbove | AppCmd::LayerBelow
+            )
+        {
+            app.push_cmd(c.clone());
+        }
+        return;
+    }
+    if repeat {
+        return;
+    }
+    let targets: Option<Vec<Target>> = steps
+        .iter()
+        .map(|s| match s {
+            Step::Target(t) => Some(*t),
+            Step::Cmd(_) => None,
+        })
+        .collect();
+    if let Some(targets) = targets {
+        crate::subtools::press(app, &targets);
+        return;
+    }
+    // Several steps can be current at once — arming a ruler does not take
+    // the tool out of your hand, so the tool step under it still matches.
+    // The LAST match wins: the steps are written in the order they happen,
+    // so the later one is the one you reached more recently.
+    let at = steps.iter().rposition(|s| step_is_current(app, s));
+    let next = at.map_or(0, |i| (i + 1) % steps.len());
+    match &steps[next] {
+        Step::Cmd(c) => app.push_cmd(c.clone()),
+        Step::Target(t) => crate::subtools::press(app, std::slice::from_ref(t)),
+    }
+}
+
+/// Is the app standing on this step? A target answers through the sub tool
+/// registry; an armed ruler answers `ruler_pending`. Every other command is
+/// a verb with no state of its own — it is never "current", so a cycle just
+/// walks past it, which is the honest answer for "Save" or "Undo".
+fn step_is_current(app: &App, s: &crate::keymap::Step) -> bool {
+    use crate::keymap::Step;
+    match s {
+        Step::Target(t) => t.matches(app),
+        Step::Cmd(AppCmd::RulerArm(k)) => app.ruler_pending == Some(*k),
+        Step::Cmd(_) => false,
+    }
+}
+
 /// Keyboard shortcuts that belong to the app, not to egui. Returns true when
 /// the key was consumed.
 ///
@@ -1851,25 +1935,8 @@ fn shortcut(app: &mut App, vk: u16, repeat: bool) -> bool {
     // modifier match — a bare-key binding does not fire shifted. Repeat
     // gating mirrors the table below: only the walk/undo family repeats.
     if let Some(b) = app.keymap.lookup(ctrl, shift, alt, vk) {
-        match b.clone() {
-            crate::keymap::Bind::Cmd(c) => {
-                if !repeat
-                    || matches!(
-                        c,
-                        AppCmd::Undo | AppCmd::Redo | AppCmd::LayerAbove | AppCmd::LayerBelow
-                    )
-                {
-                    app.push_cmd(c);
-                }
-            }
-            // A bound target list is a tool key like any other: it cycles on
-            // repeat PRESS, never on auto-repeat.
-            crate::keymap::Bind::Targets(t) => {
-                if !repeat {
-                    crate::subtools::press(app, &t);
-                }
-            }
-        }
+        let steps = b.steps().to_vec();
+        run_seq(app, &steps, repeat);
         return true;
     }
 

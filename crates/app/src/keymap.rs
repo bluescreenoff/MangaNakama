@@ -32,9 +32,29 @@
 //!
 //! The `tool:` prefix is what tells a target from a command label (a
 //! palette command is free to be called anything). Names are the ones the
-//! Sub Tool list shows, case-insensitively; a LIST binds several targets to
+//! Sub Tool list shows, case-insensitively; a LIST binds several things to
 //! one key and repeat-press cycles them in written order, which is how CSP
 //! puts three tools on `U`. `crate::subtools` owns the model.
+//!
+//! A cycle may MIX the two kinds (owner ask 2026-09-05) — his `U` wants
+//! Frame border, then Figure, then the straight-line ruler, and arming a
+//! ruler is a command, not a tool:
+//!
+//! ```json
+//! { "u": ["tool: Frame border", "tool: Figure", "Straight line ruler"] }
+//! ```
+//!
+//! Which step a press runs is decided by looking at the app, never by a
+//! stored index — see `main.rs::run_seq`.
+//!
+//! # Every key in one list
+//!
+//! The Shortcuts tab used to list keys.json rows only, so the built-in
+//! keys (`U` = Frame border, `Ctrl+Z` = Undo) were invisible and looked
+//! unbindable. [`effective_table`] merges the two hardcoded tables in
+//! `main.rs` with the file into one list of [`Binding`]s, marked
+//! [`Source::Default`] or [`Source::File`]; a file row replaces the
+//! default of its chord and remembers what it shadowed.
 //!
 //! Commands that need a live layer index used to be unbindable — the door
 //! is `AppCmd::ActiveLayer` now (layer colour, clip to below), which
@@ -52,14 +72,36 @@ use crate::cmd::AppCmd;
 use crate::subtools::{Target, parse_target};
 
 /// (ctrl, shift, alt, vk) — the exact shape `main.rs::shortcut` matches on.
-type Chord = (bool, bool, bool, u16);
+pub(crate) type Chord = (bool, bool, bool, u16);
 
-/// What a chord does: run one command, or aim at one or more tool targets
-/// (several = a repeat-press cycle, `subtools::press`).
+/// One thing a key press can do: run a palette command, or aim at a place
+/// in the Sub Tool tree.
+///
+/// The two used to live in different worlds — a chord bound EITHER a
+/// command OR a list of targets — which meant a cycle could hold tools
+/// only, and the owner's `U` could not reach the straight-line ruler
+/// because arming a ruler is a command (2026-09-05). Now a cycle is a list
+/// of steps and the kinds mix freely.
+#[derive(Clone, Debug)]
+pub enum Step {
+    Cmd(AppCmd),
+    Target(Target),
+}
+
+/// What a chord does: its steps, in written order. ONE step and the press
+/// simply runs it; SEVERAL and the press runs the step after whichever one
+/// the app is standing on — `main.rs::run_seq` owns that rule, and for an
+/// all-target sequence it is exactly `subtools::press`.
 #[derive(Clone, Debug)]
 pub enum Bind {
-    Cmd(AppCmd),
-    Targets(Vec<Target>),
+    Seq(Vec<Step>),
+}
+
+impl Bind {
+    pub fn steps(&self) -> &[Step] {
+        let Bind::Seq(s) = self;
+        s
+    }
 }
 
 #[derive(Default)]
@@ -113,61 +155,41 @@ impl Keymap {
                 map.problems.push(format!("keys.json: unknown key \"{chord_s}\""));
                 continue;
             };
-            // A LIST is a cycle: every entry must be a target, since
-            // cycling needs to know which one you are standing on and only
-            // a target can answer that.
-            if let Some(list) = cmd_v.as_array() {
-                let mut targets = Vec::new();
-                let mut bad = None;
-                for item in list {
-                    match item.as_str().map(parse_target) {
-                        Some(Ok(t)) => targets.push(t),
-                        Some(Err(e)) => bad = Some(e),
-                        None => bad = Some("a cycle entry must be a string".to_owned()),
-                    }
+            // A LIST is a cycle, and its entries may be of either kind
+            // (2026-09-05). A single value is a one-step cycle.
+            let items: Vec<&serde_json::Value> = match cmd_v.as_array() {
+                Some(a) if a.is_empty() => {
+                    map.problems
+                        .push(format!("keys.json: \"{chord_s}\" — an empty cycle"));
+                    continue;
                 }
-                match (bad, targets.is_empty()) {
-                    (Some(e), _) => map
-                        .problems
-                        .push(format!("keys.json: \"{chord_s}\" — {e}")),
-                    (None, true) => map
-                        .problems
-                        .push(format!("keys.json: \"{chord_s}\" — an empty cycle")),
-                    (None, false) => {
-                        map.binds.insert(chord, Bind::Targets(targets));
-                    }
-                }
-                continue;
-            }
-            let Some(want) = cmd_v.as_str() else {
-                map.problems
-                    .push(format!("keys.json: \"{chord_s}\" must name a command"));
-                continue;
+                Some(a) => a.iter().collect(),
+                None => vec![cmd_v],
             };
-            // `tool:` says "a place in the Sub Tool tree", which is a
-            // namespace of its own — a palette command may be called
-            // anything, so the two cannot be told apart by content.
-            if want.trim_start().to_ascii_lowercase().starts_with("tool:") {
-                match parse_target(want) {
-                    Ok(t) => {
-                        map.binds.insert(chord, Bind::Targets(vec![t]));
-                    }
-                    Err(e) => map
-                        .problems
-                        .push(format!("keys.json: \"{chord_s}\" — {e}")),
+            // One bad entry costs the whole chord ONE complaint, and the
+            // chord stays unbound: a cycle with a hole in it would walk
+            // somewhere its owner never wrote.
+            let mut steps = Vec::with_capacity(items.len());
+            let mut bad = None;
+            for item in items {
+                match item.as_str() {
+                    Some(s) => match parse_step(s, &index) {
+                        Ok(step) => steps.push(step),
+                        Err(e) => bad = Some(e),
+                    },
+                    None => bad = Some("must name a command or a tool: target".to_owned()),
                 }
-                continue;
+                if bad.is_some() {
+                    break;
+                }
             }
-            let found = index
-                .iter()
-                .find(|(label, _, _)| label.eq_ignore_ascii_case(want));
-            match found {
-                Some((_, _, cmd)) => {
-                    map.binds.insert(chord, Bind::Cmd(cmd.clone()));
+            match bad {
+                Some(e) => map
+                    .problems
+                    .push(format!("keys.json: \"{chord_s}\" — {e}")),
+                None => {
+                    map.binds.insert(chord, Bind::Seq(steps));
                 }
-                None => map.problems.push(format!(
-                    "keys.json: no command called \"{want}\" — the palette (Ctrl+K) knows the names"
-                )),
             }
         }
         map
@@ -175,6 +197,174 @@ impl Keymap {
 
     pub fn lookup(&self, ctrl: bool, shift: bool, alt: bool, vk: u16) -> Option<&Bind> {
         self.binds.get(&(ctrl, shift, alt, vk))
+    }
+}
+
+/// One entry of a chord's right-hand side → one step.
+///
+/// `tool:` says "a place in the Sub Tool tree", which is a namespace of its
+/// own — a palette command is free to be called anything, so the two cannot
+/// be told apart by content. The `Err` is what the user reads in the status
+/// bar, so it names the thing it could not find.
+fn parse_step(want: &str, index: &[(&'static str, &'static str, AppCmd)]) -> Result<Step, String> {
+    if want.trim_start().to_ascii_lowercase().starts_with("tool:") {
+        return parse_target(want).map(Step::Target);
+    }
+    index
+        .iter()
+        .find(|(label, _, _)| label.eq_ignore_ascii_case(want))
+        .map(|(_, _, cmd)| Step::Cmd(cmd.clone()))
+        .ok_or_else(|| {
+            format!("no command called \"{want}\" — the palette (Ctrl+K) knows the names")
+        })
+}
+
+// --- the merged table: the defaults and the file in ONE list -------------
+
+/// Where a row of the merged table comes from.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Source {
+    /// One of the two hardcoded tables in `main.rs` — the app's own keys.
+    Default,
+    /// A `keys.json` row. It REPLACES the default row of that chord.
+    File,
+}
+
+/// One chord and everything it runs, whichever table it came from — the
+/// model behind the Shortcuts tab's list.
+///
+/// The owner's complaint (2026-09-05) was that `U` opens the Frame tool and
+/// yet is nowhere in the Shortcuts list: the built-ins were invisible, so
+/// "modifiable" was not even a question you could ask. Every chord the app
+/// answers is a row here now, and a row is a CYCLE — the value is a list of
+/// steps, drawn as chips.
+pub(crate) struct Binding {
+    pub chord: Chord,
+    /// The chord as text: a File row keeps the file's own spelling, a
+    /// default row gets [`chord_text`]'s canonical one.
+    pub key: String,
+    /// One string per step, each spelled the way keys.json spells it
+    /// (`"tool: Frame border"`, `"Undo"`). Empty when `raw` is set.
+    pub entries: Vec<String>,
+    pub source: Source,
+    /// Can `entries` go into keys.json as they are? A few default rows are
+    /// display labels for arms that are not palette commands at all
+    /// ("Text / Balloon", "Hand (move)"): they are LISTED — that was the
+    /// ask — but the tab cannot turn them into a file row by copying the
+    /// label, so it does not offer to.
+    pub spellable: bool,
+    /// A File row's shadowed default, for the "default: …" hint and the ↺
+    /// button that puts it back.
+    pub shadows: Option<Vec<String>>,
+    /// A file value the tab cannot show as chips (`42`, a nested array):
+    /// kept VERBATIM and edited as raw JSON, exactly as before.
+    pub raw: Option<serde_json::Value>,
+}
+
+/// Every binding the app answers to, defaults and file merged, sorted the
+/// way the tab lists them.
+///
+/// `file` is the keys.json entries as the tab currently holds them (not
+/// what is on disk — the tab's unsaved edits must show in the same list).
+/// Entries whose key is not a chord at all (a `_`-comment lane, a
+/// misspelled modifier) have no place in a chord-keyed table and are the
+/// caller's to keep: `parse_chord` is the same filter this uses.
+pub(crate) fn effective_table(file: &[Entry]) -> Vec<Binding> {
+    let index = crate::ui::quick::command_index();
+    let named = |c: Chord| chord_text(c.0, c.1, c.2, c.3).unwrap_or_default();
+    let mut out: Vec<Binding> = Vec::new();
+    // Targets FIRST: the bare tool letters are in both built-in tables, and
+    // the target table is the one that can spell itself back into keys.json.
+    for (chord, targets) in crate::builtin_target_rows() {
+        out.push(Binding {
+            chord,
+            key: named(chord),
+            entries: targets.iter().map(target_text).collect(),
+            source: Source::Default,
+            spellable: true,
+            shadows: None,
+            raw: None,
+        });
+    }
+    for (chord, label) in crate::builtin_chords() {
+        if out.iter().any(|b| b.chord == chord) {
+            continue;
+        }
+        out.push(Binding {
+            chord,
+            key: named(chord),
+            entries: vec![label.to_owned()],
+            source: Source::Default,
+            spellable: index.iter().any(|(l, _, _)| l.eq_ignore_ascii_case(label)),
+            shadows: None,
+            raw: None,
+        });
+    }
+    for e in file {
+        let Some(chord) = parse_chord(&e.key) else {
+            continue;
+        };
+        let (entries, raw) = match entries_of(&e.value) {
+            Some(v) => (v, None),
+            None => (Vec::new(), Some(e.value.clone())),
+        };
+        let row = Binding {
+            chord,
+            key: e.key.clone(),
+            entries,
+            source: Source::File,
+            spellable: true,
+            shadows: None,
+            raw,
+        };
+        // A keys.json line SHADOWS the default of its chord — one row, with
+        // the default kept as the hint (and the ↺ that restores it).
+        match out.iter().position(|b| b.chord == chord) {
+            Some(i) => {
+                let default = std::mem::replace(&mut out[i], row);
+                out[i].shadows = Some(default.entries);
+            }
+            None => out.push(row),
+        }
+    }
+    out.sort_by(|a, b| sort_rank(a).cmp(&sort_rank(b)));
+    out
+}
+
+/// A file value as chips: a plain string is a one-step cycle, an array of
+/// strings is the cycle it looks like. Anything else is a raw row.
+fn entries_of(v: &serde_json::Value) -> Option<Vec<String>> {
+    match v {
+        serde_json::Value::String(s) => Some(vec![s.clone()]),
+        serde_json::Value::Array(a) if !a.is_empty() => {
+            a.iter().map(|x| x.as_str().map(str::to_owned)).collect()
+        }
+        _ => None,
+    }
+}
+
+/// The list's order: bare keys first (letters A..Z before the digits and
+/// punctuation), then the function keys, then everything with a modifier —
+/// which is roughly the order a hand finds them in.
+fn sort_rank(b: &Binding) -> (u8, u8, u16, &str) {
+    let (ctrl, shift, alt, vk) = b.chord;
+    let class = match (ctrl || shift || alt, vk) {
+        (true, _) => 2,
+        (false, 0x70..=0x7B) => 1,
+        (false, _) => 0,
+    };
+    let letter = u8::from(!(0x41..=0x5A).contains(&vk));
+    (class, letter, vk, &b.key)
+}
+
+/// A target back to its keys.json spelling — [`parse_target`]'s inverse,
+/// and the same names `ui::shortcut_tab::addable` offers, so a default row
+/// the tab turns into a file row loads back as the same target.
+pub(crate) fn target_text(t: &Target) -> String {
+    match t {
+        Target::Tool(tool) => format!("tool: {}", tool.label()),
+        Target::Group(tool, g) => format!("tool: {} / {g}", tool.label()),
+        Target::SubTool(p) => format!("tool: {} / {} / {}", p.tool.label(), p.group, p.sub.label()),
     }
 }
 
@@ -384,8 +574,8 @@ mod tests {
         assert!(m.lookup(true, false, false, 0x31).is_some(), "ctrl+1 bound");
         assert!(
             matches!(
-                m.lookup(false, false, false, 0x71),
-                Some(Bind::Cmd(AppCmd::Cut))
+                m.lookup(false, false, false, 0x71).map(Bind::steps),
+                Some([Step::Cmd(AppCmd::Cut)])
             ),
             "f2 bound, label case-insensitive"
         );
@@ -446,39 +636,167 @@ mod tests {
                 "n": "tool: Nope"
             }"#,
         );
-        assert!(
-            matches!(
-                m.lookup(false, false, false, 0x55),
-                Some(Bind::Targets(t)) if t[..] == [Target::Tool(Tool::Frame)]
-            ),
+        let aimed = |vk: u16, c: bool, s: bool| -> Vec<Target> {
+            m.lookup(c, s, false, vk)
+                .map(Bind::steps)
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|st| match st {
+                    Step::Target(t) => Some(*t),
+                    Step::Cmd(_) => None,
+                })
+                .collect()
+        };
+        assert_eq!(
+            aimed(0x55, false, false),
+            [Target::Tool(Tool::Frame)],
             "a bare tool"
         );
-        assert!(
-            matches!(
-                m.lookup(false, true, false, 0x55),
-                Some(Bind::Targets(t))
-                    if t[..] == [Target::Group(Tool::Figure, group::SATURATED_LINE)]
-            ),
+        assert_eq!(
+            aimed(0x55, false, true),
+            [Target::Group(Tool::Figure, group::SATURATED_LINE)],
             "a group, case-insensitively"
         );
-        assert!(
-            matches!(
-                m.lookup(true, false, false, 0x55),
-                Some(Bind::Targets(t))
-                    if t[..] == [Target::SubTool(SubToolPath::of(SubTool::Figure(
-                        FigureMode::Ellipse
-                    )))]
-            ),
+        assert_eq!(
+            aimed(0x55, true, false),
+            [Target::SubTool(SubToolPath::of(SubTool::Figure(
+                FigureMode::Ellipse
+            )))],
             "an exact sub tool"
         );
-        assert!(
-            matches!(m.lookup(false, false, false, 0x4A), Some(Bind::Targets(t)) if t.len() == 2),
-            "a cycle keeps its written order"
-        );
+        assert_eq!(aimed(0x4A, false, false).len(), 2, "a cycle keeps its order");
         assert!(m.lookup(false, false, false, 0x4B).is_none(), "bad cycle");
         assert!(m.lookup(false, false, false, 0x4C).is_none(), "empty cycle");
         assert!(m.lookup(false, false, false, 0x4E).is_none(), "bad target");
         assert_eq!(m.problems.len(), 3, "one each, no more: {:?}", m.problems);
+    }
+
+    /// A cycle may hold commands and targets side by side (owner ask
+    /// 2026-09-05): his `U` wants Frame border, Figure, and the
+    /// straight-line ruler, and the last of those is a palette command.
+    /// One bad entry still costs the whole chord exactly one complaint.
+    #[test]
+    fn a_cycle_may_mix_commands_and_targets() {
+        use crate::cmd::{RulerKind, Tool};
+        let m = Keymap::parse(
+            r#"{
+                "u": ["tool: Frame border", "tool: Figure", "Straight line ruler"],
+                "q": ["Undo", "tool: Nope"],
+                "r": ["Undo", 42]
+            }"#,
+        );
+        let steps = m.lookup(false, false, false, 0x55).map(Bind::steps);
+        assert!(
+            matches!(
+                steps,
+                Some(
+                    [
+                        Step::Target(Target::Tool(Tool::Frame)),
+                        Step::Target(Target::Tool(Tool::Figure)),
+                        Step::Cmd(AppCmd::RulerArm(RulerKind::Line)),
+                    ]
+                )
+            ),
+            "three steps, in written order: {steps:?}"
+        );
+        assert!(m.lookup(false, false, false, 0x51).is_none(), "one bad target");
+        assert!(m.lookup(false, false, false, 0x52).is_none(), "not a string");
+        assert_eq!(m.problems.len(), 2, "one each: {:?}", m.problems);
+    }
+
+    /// The pin behind the merged table's default rows: `builtin_target_rows`
+    /// is derived FROM `builtin_targets`, so their values cannot drift —
+    /// what can drift is the key list, so this walks the whole vk space and
+    /// fails if the match answers a chord no row lists.
+    #[test]
+    fn every_builtin_target_row_is_the_match() {
+        let rows = crate::builtin_target_rows();
+        assert!(rows.len() > 10, "the tool letters: {}", rows.len());
+        for ((ctrl, shift, alt, vk), targets) in &rows {
+            assert!(!ctrl && !alt, "{vk:#x}: the target table is Ctrl/Alt-free");
+            assert_eq!(
+                crate::builtin_targets(*vk, *shift),
+                Some(*targets),
+                "row {vk:#x} is not what the match answers"
+            );
+        }
+        for vk in 0u16..=0xFF {
+            for shift in [false, true] {
+                let Some(t) = crate::builtin_targets(vk, shift) else {
+                    continue;
+                };
+                assert!(
+                    rows.iter().any(|((.., v), r)| *v == vk && *r == t),
+                    "{vk:#x} (shift {shift}) aims at {t:?}, but no row lists it — \
+                     add it to builtin_target_rows or the Shortcuts tab hides it"
+                );
+            }
+        }
+    }
+
+    /// The merged table is every chord the app answers: the built-in tool
+    /// letters and command chords as `Default` rows, a keys.json line
+    /// REPLACING the default of its chord and remembering what it shadowed.
+    #[test]
+    fn the_merged_table_lists_defaults_and_the_file() {
+        let file = parse_entries(r#"{ "u": ["tool: Figure"], "_c": "note", "hyper+9": "Undo" }"#)
+            .expect("parses");
+        let table = effective_table(&file);
+        let row = |k: &str| table.iter().find(|b| b.key == k).expect(k);
+        // A built-in that was invisible before — the owner's complaint.
+        assert_eq!(row("ctrl+z").entries, ["Undo"]);
+        assert_eq!(row("ctrl+z").source, Source::Default);
+        assert_eq!(row("f").entries, ["tool: Figure"], "a default tool letter");
+        // The file's own row, in place of the default it shadows.
+        let u = row("u");
+        assert_eq!(u.source, Source::File);
+        assert_eq!(u.entries, ["tool: Figure"]);
+        assert_eq!(u.shadows.as_deref(), Some(&["tool: Frame border".to_owned()][..]));
+        assert_eq!(table.iter().filter(|b| b.key == "u").count(), 1, "one row");
+        // Keys that are not chords at all are the caller's to keep.
+        assert!(!table.iter().any(|b| b.key == "_c" || b.key == "hyper+9"));
+        // Sorted: bare letters, then function keys, then modifier chords.
+        let pos = |k: &str| table.iter().position(|b| b.key == k).expect(k);
+        assert!(pos("u") < pos("f8"), "letters before the function keys");
+        assert!(pos("f8") < pos("ctrl+z"), "modifier chords last");
+    }
+
+    /// A mixed cycle walks with no stored index: each press runs the step
+    /// after whichever one the app is standing on. This is the acceptance
+    /// lap — Frame border, Figure, ruler armed, back to Frame border.
+    #[test]
+    fn a_mixed_cycle_advances_from_the_current_step() {
+        use crate::cmd::{RulerKind, Tool, dispatch};
+        let Some(renderer) = crate::app::headless_renderer() else {
+            return;
+        };
+        let mut app = crate::app::App::new(renderer, (600, 400), 1.0);
+        app.layout = crate::app::UiLayout::default();
+        app.keymap = Keymap::parse(
+            r#"{ "q": ["tool: Frame border", "tool: Figure", "Straight line ruler"] }"#,
+        );
+        assert!(app.keymap.problems.is_empty(), "{:?}", app.keymap.problems);
+        let press = |app: &mut crate::app::App| {
+            assert!(crate::shortcut(app, 0x51, false), "the press consumed");
+            while let Some(c) = app.cmds.pop_front() {
+                dispatch(app, c);
+            }
+        };
+        press(&mut app);
+        assert_eq!(app.tool, Tool::Frame, "step 0, nothing was current");
+        press(&mut app);
+        assert_eq!(app.tool, Tool::Figure, "the step after the current one");
+        press(&mut app);
+        assert_eq!(
+            app.ruler_pending,
+            Some(RulerKind::Line),
+            "a command step runs like any other"
+        );
+        press(&mut app);
+        assert_eq!(app.tool, Tool::Frame, "round the lap");
+        // Auto-repeat never advances a cycle.
+        assert!(crate::shortcut(&mut app, 0x51, true), "still consumed");
+        assert!(app.cmds.is_empty(), "a held key queues nothing");
     }
 
     /// Garbage at the top level degrades to an empty map plus a complaint —
