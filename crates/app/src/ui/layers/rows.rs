@@ -1811,11 +1811,18 @@ fn layer_thumb_image(doc: &mn_core::Document, li: usize) -> egui::ColorImage {
         vec![li]
     };
     srcs.push(li);
+    // The window the 32×32 samples cover. A raster layer or a folder shows
+    // the whole page: where the ink sits on the page IS the information. A
+    // balloon, text or vector layer shows its CONTENT, cropped and fitted
+    // (CSP's zoomed object thumbnails; owner 2026-09-05): a whole-page thumb
+    // of one balloon is a grey dot, and the thumb's job is to say which
+    // layer this is.
+    let (x0, y0, win) = vector_thumb_window(layer, w, h).unwrap_or((0.0, 0.0, [w as f32, h as f32]));
     let mut px = Vec::with_capacity(TW * TH * 4);
     for ty in 0..TH {
         for tx in 0..TW {
-            let cx = ((tx as f32 + 0.5) / TW as f32 * w as f32) as i32;
-            let cy = ((ty as f32 + 0.5) / TH as f32 * h as f32) as i32;
+            let cx = (x0 + (tx as f32 + 0.5) / TW as f32 * win[0]) as i32;
+            let cy = (y0 + (ty as f32 + 0.5) / TH as f32 * win[1]) as i32;
             let idx = mn_core::TileIdx::of_pixel(cx, cy);
             let (ox, oy) = idx.origin();
             // Composite the stack bottom-up in premultiplied space.
@@ -1848,4 +1855,76 @@ fn layer_thumb_image(doc: &mn_core::Document, li: usize) -> egui::ColorImage {
         }
     }
     egui::ColorImage::from_rgba_unmultiplied([TW, TH], &px)
+}
+
+/// The page window a balloon / text / vector layer's thumbnail samples:
+/// the content's bounding box padded 12 % and squared around its centre,
+/// clamped to the page. `None` for every other kind (whole page), and for
+/// an empty vector layer (nothing to zoom to).
+///
+/// The box is scanned from the layer's tiles — vector layers rasterize to
+/// tiles like everything else, and the ones that carry a balloon or a line
+/// of text are few, so the pixel walk is cheap.
+fn vector_thumb_window(layer: &mn_core::Layer, w: u32, h: u32) -> Option<(f32, f32, [f32; 2])> {
+    if !(layer.is_balloon() || layer.is_text() || layer.is_vector()) || layer.folder {
+        return None;
+    }
+    let ts = mn_core::TILE_SIZE;
+    let (mut x0, mut y0, mut x1, mut y1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+    for (idx, tile) in layer.tiles() {
+        let (ox, oy) = idx.origin();
+        for y in 0..ts {
+            for x in 0..ts {
+                if tile.pixel(x, y)[3] > 0 {
+                    x0 = x0.min(ox + x as i32);
+                    y0 = y0.min(oy + y as i32);
+                    x1 = x1.max(ox + x as i32 + 1);
+                    y1 = y1.max(oy + y as i32 + 1);
+                }
+            }
+        }
+    }
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    let (bw, bh) = ((x1 - x0) as f32, (y1 - y0) as f32);
+    let side = (bw.max(bh) * 1.24).max(16.0).min(w.max(h) as f32);
+    let cx = (x0 + x1) as f32 * 0.5;
+    let cy = (y0 + y1) as f32 * 0.5;
+    let sx = (cx - side * 0.5).clamp(0.0, (w as f32 - side).max(0.0));
+    let sy = (cy - side * 0.5).clamp(0.0, (h as f32 - side).max(0.0));
+    Some((sx, sy, [side.min(w as f32), side.min(h as f32)]))
+}
+
+#[cfg(test)]
+mod thumb_window_tests {
+    use super::*;
+
+    /// A balloon layer's thumb zooms to the balloon; a raster layer carrying
+    /// the same ink keeps the whole page; an empty balloon layer keeps the
+    /// page too.
+    #[test]
+    fn vector_layers_zoom_to_their_content_and_raster_does_not() {
+        let mut doc = mn_core::Document::new(800, 600);
+        let empty = doc.add_balloon_layer("Empty", mn_core::BalloonSet::new(3.0));
+        assert!(
+            vector_thumb_window(&doc.layers[empty], 800, 600).is_none(),
+            "empty: whole page"
+        );
+        // A real bubble, rasterized by the document itself.
+        let mut bs = mn_core::BalloonSet::new(3.0);
+        bs.balloons.push(mn_core::Balloon { shape: mn_core::BalloonShape::Ellipse { center: [120.0, 210.0], radii: [40.0, 20.0] }, ..Default::default() });
+        let bl = doc.add_balloon_layer("Balloon", bs);
+        let (x, y, win) = vector_thumb_window(&doc.layers[bl], 800, 600).expect("zoomed");
+        assert!(win[0] < 160.0 && win[1] < 160.0, "a tight window, got {win:?}");
+        assert!(x <= 80.0 && x + win[0] >= 160.0, "covers the bubble horizontally: {x} + {}", win[0]);
+        assert!(y <= 190.0 && y + win[1] >= 230.0, "covers the bubble vertically: {y} + {}", win[1]);
+        // The same ink on a raster layer: whole page.
+        let rl = doc.add_layer("Raster");
+        let tiles: Vec<_> = doc.layers[bl].tiles().map(|(i, t)| (i, t.clone())).collect();
+        for (i, t) in tiles {
+            doc.layers[rl].set_tile(i, Some(t));
+        }
+        assert!(vector_thumb_window(&doc.layers[rl], 800, 600).is_none(), "raster: whole page");
+    }
 }
