@@ -1,5 +1,7 @@
 # Plan 2026-09-05: one shortcut system, Ruler as a tool, frame-folder fixes, lag, touch rotate
 
+> **STATE 2026-09-05 (evening, owner paused all agents).** Pushed through `abe1231`: Lanes 1, 3, 4 done; Lane 2 done except `docs/manual/rulers.html` + the CODE-MAP paragraph; Lane 5 item K landed (background write, pill, exit flush) but the REAL freeze is the .ora encode (14 s for 3 pages, write 1 ms) — K resumes with: per-layer PNG encode cost (compression level, encode only layers whose revision changed, snapshot Arc tiles and encode off-thread), re-save of unchanged pages skipped, then O, L, M, N. Lane 6 not started. Resume = one agent at a time (owner rule for this session): resume Lane 5 first from its report, then Lane 2 docs, then Lane 6. Lucide icons, zoomed thumbnails and the default U cycle were done by Fable directly.
+
 Written by Fable (main chat) for Opus implementation lanes. Owner asks from the 2026-09-05 session,
 in his words where it matters. Each item: what the owner saw, the cause on the page, the exact change,
 files, tests, acceptance. Lanes own DISJOINT files; a lane that needs a file outside its list stops
