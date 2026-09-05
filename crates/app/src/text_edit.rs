@@ -425,10 +425,10 @@ impl App {
         let Some(layer) = doc.layers.get_mut(li) else {
             return;
         };
-        let LayerKind::Text(ts) = &mut layer.kind else {
+        let LayerKind::Speech(sp) = &mut layer.kind else {
             return;
         };
-        let Some(item) = ts.texts.get_mut(ix) else {
+        let Some(item) = sp.texts.texts.get_mut(ix) else {
             return;
         };
 
@@ -445,7 +445,7 @@ impl App {
             }
         }
         item.cache = engine.render(item, dpi).ok().flatten();
-        let raster = ts.rasterize(size);
+        let raster = sp.rasterize(size);
         layer.replace_tiles(raster);
         doc.touch();
         self.mark_dirty();
@@ -546,36 +546,63 @@ impl App {
             }
         }
 
-        let (layer, new_layer, before) = match self.doc.layers.get(self.doc.active) {
-            Some(l) if l.is_text() => (
-                self.doc.active,
-                false,
-                l.texts().cloned().unwrap_or_default(),
-            ),
-            _ => {
-                // Not on a text layer: join the topmost visible, unlocked
-                // one the page already has (CSP's "add to selected text"
-                // — one text layer per page is the working shape), and
-                // only make "Text N" when there is none. Before this every
-                // balloon-then-words pair made a fresh text layer.
-                let join = (0..self.doc.layers.len()).rev().find(|&i| {
-                    let l = &self.doc.layers[i];
-                    l.is_text() && l.visible && !l.lock
-                });
-                match join {
-                    Some(li) => {
-                        self.doc.active = li;
-                        (li, false, self.doc.layers[li].texts().cloned().unwrap_or_default())
-                    }
-                    None => {
-                        let n = 1 + self.doc.layers.iter().filter(|l| l.is_text()).count();
-                        let li = self
-                            .doc
-                            .add_text_layer(format!("Text {n}"), TextSet::default());
-                        (li, true, TextSet::default())
+        // Item P's mirror of `BalloonAdd`: words typed INSIDE an existing
+        // bubble join that bubble's layer, so the pair moves as one. It beats
+        // the active layer on purpose — clicking into a bubble says where the
+        // words belong more loudly than the palette selection does.
+        let in_balloon = {
+            let c = [
+                item.pos[0] + item.size[0] * 0.5,
+                item.pos[1] + item.size[1] * 0.5,
+            ];
+            (0..self.doc.layers.len()).rev().find(|&i| {
+                let l = &self.doc.layers[i];
+                l.visible
+                    && !l.lock
+                    && l.balloons()
+                        .is_some_and(|bs| mn_core::balloon::body_at(bs, c).is_some())
+            })
+        };
+        let joined = in_balloon.map(|li| {
+            self.doc.active = li;
+            let ts = self.doc.layers[li].texts().cloned().unwrap_or_default();
+            (li, false, ts)
+        });
+        let (layer, new_layer, before) = match joined {
+            Some(x) => x,
+            None => match self.doc.layers.get(self.doc.active) {
+                Some(l) if l.is_text() => (
+                    self.doc.active,
+                    false,
+                    l.texts().cloned().unwrap_or_default(),
+                ),
+                _ => {
+                    // Not on a text layer: join the topmost visible,
+                    // unlocked one the page already has (CSP's "add to
+                    // selected text" — one text layer per page is the
+                    // working shape), and only make "Text N" when there is
+                    // none. Before this every balloon-then-words pair made
+                    // a fresh text layer.
+                    let join = (0..self.doc.layers.len()).rev().find(|&i| {
+                        let l = &self.doc.layers[i];
+                        l.is_text() && l.visible && !l.lock
+                    });
+                    match join {
+                        Some(li) => {
+                            self.doc.active = li;
+                            let ts = self.doc.layers[li].texts().cloned().unwrap_or_default();
+                            (li, false, ts)
+                        }
+                        None => {
+                            let n = 1 + self.doc.layers.iter().filter(|l| l.is_text()).count();
+                            let li = self
+                                .doc
+                                .add_text_layer(format!("Text {n}"), TextSet::default());
+                            (li, true, TextSet::default())
+                        }
                     }
                 }
-            }
+            },
         };
         self.warm_texts(layer);
 
@@ -583,11 +610,11 @@ impl App {
             let Some(l) = self.doc.layers.get_mut(layer) else {
                 return;
             };
-            let LayerKind::Text(ts) = &mut l.kind else {
+            let LayerKind::Speech(sp) = &mut l.kind else {
                 return;
             };
-            ts.texts.push(item);
-            ts.texts.len() - 1
+            sp.texts.texts.push(item);
+            sp.texts.texts.len() - 1
         };
         self.text_edit = Some(TextEditState {
             layer,
@@ -625,10 +652,10 @@ impl App {
         let Some(layer) = self.doc.layers.get_mut(li) else {
             return false;
         };
-        let LayerKind::Text(ts) = &mut layer.kind else {
+        let LayerKind::Speech(sp) = &mut layer.kind else {
             return false;
         };
-        let mut working = ts.clone();
+        let mut working = sp.texts.clone();
         if let Some(item) = working.texts.get(ed.index) {
             if item.text.is_empty() {
                 working.texts.remove(ed.index);
@@ -637,8 +664,8 @@ impl App {
         if working == ed.before {
             // Nothing changed (or an empty new item evaporated): restore the
             // starting state without touching history.
-            *ts = ed.before.clone();
-            let raster = ts.rasterize(self.doc.size);
+            sp.texts = ed.before.clone();
+            let raster = sp.rasterize(self.doc.size);
             layer.replace_tiles(raster);
             if ed.new_layer && working.texts.is_empty() {
                 self.doc.remove_layer(li);
@@ -649,7 +676,7 @@ impl App {
         }
         // Quietly rewind to the pre-session state, then apply the result as
         // ONE undoable step.
-        *ts = ed.before.clone();
+        sp.texts = ed.before.clone();
         self.doc.set_texts(li, working);
         self.mark_dirty();
         true
@@ -662,9 +689,9 @@ impl App {
         };
         let li = ed.layer;
         if let Some(layer) = self.doc.layers.get_mut(li) {
-            if let LayerKind::Text(ts) = &mut layer.kind {
-                *ts = ed.before.clone();
-                let raster = ts.rasterize(self.doc.size);
+            if let LayerKind::Speech(sp) = &mut layer.kind {
+                sp.texts = ed.before.clone();
+                let raster = sp.rasterize(self.doc.size);
                 layer.replace_tiles(raster);
             }
         }
@@ -1671,9 +1698,11 @@ impl App {
         }
         if let Some((li, ts)) = self.object_text_snapshot(f) {
             let size = self.doc.size;
-            let raster = ts.rasterize(size);
-            if let Some(layer) = self.doc.layers.get_mut(li) {
-                layer.kind = LayerKind::Text(ts);
+            if let Some(layer) = self.doc.layers.get_mut(li)
+                && let LayerKind::Speech(sp) = &mut layer.kind
+            {
+                sp.texts = ts;
+                let raster = sp.rasterize(size);
                 layer.replace_tiles(raster);
             }
             self.doc.touch();
@@ -1699,13 +1728,11 @@ impl App {
             let Some(layer) = self.doc.layers.get_mut(d.layer) else {
                 return;
             };
-            let LayerKind::Text(ts) = &mut layer.kind else {
+            let LayerKind::Speech(sp) = &mut layer.kind else {
                 return;
             };
-            let final_ts = ts.clone();
             // Quiet rewind, no re-raster — set_texts rasterizes right after.
-            *ts = d.before;
-            final_ts
+            std::mem::replace(&mut sp.texts, d.before)
         };
         self.doc.set_texts(d.layer, final_ts);
         self.mark_dirty();

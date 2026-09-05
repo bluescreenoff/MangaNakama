@@ -13,7 +13,7 @@ use mn_core::{Blend, LayerKind};
 mod blendif;
 mod breakout;
 mod property;
-mod rows;
+pub(crate) mod rows;
 
 pub(crate) use property::layer_property;
 pub(super) use rows::layer_section;
@@ -81,9 +81,11 @@ pub(super) fn tools_for_layer(l: &mn_core::Layer) -> &'static [Tool] {
         };
     }
     match l.kind {
-        LayerKind::Text(_) => &[Tool::Text, Tool::Object],
-        // The balloon's text is edited in place, so T belongs here too.
-        LayerKind::Balloon(_) => &[Tool::Balloon, Tool::Text, Tool::Object],
+        // Item P: one speech kind. A layer that carries bubbles offers the
+        // Balloon tool; every speech layer offers T (the balloon's text is
+        // edited in place) and O.
+        LayerKind::Speech(_) if l.is_balloon() => &[Tool::Balloon, Tool::Text, Tool::Object],
+        LayerKind::Speech(_) => &[Tool::Text, Tool::Object],
         LayerKind::Frame(_) => &[Tool::Frame, Tool::Object],
         // Live layers: a brush edits the WINDOW, and the parameters live in
         // Tool Property rather than in a tool of their own.
@@ -200,9 +202,12 @@ mod tests {
         );
     }
 
-    fn empty_balloons() -> mn_core::BalloonSet {
+    /// A set with ONE bubble in it: since item P a layer is a balloon layer
+    /// because it carries a balloon, not because of its kind tag, so an
+    /// empty set would not exercise the balloon rows.
+    fn one_balloon() -> mn_core::BalloonSet {
         mn_core::BalloonSet {
-            balloons: Vec::new(),
+            balloons: vec![mn_core::Balloon::default()],
             border_px: 4.0,
             pressure_width: false,
         }
@@ -236,8 +241,18 @@ mod tests {
                     2.0,
                 ))),
             ),
-            ("balloon", l(LayerKind::Balloon(empty_balloons()))),
-            ("text", l(LayerKind::Text(TextSet::default()))),
+            (
+                "balloon",
+                l(LayerKind::Speech(mn_core::SpeechSet::of_balloons(
+                    one_balloon(),
+                ))),
+            ),
+            (
+                "text",
+                l(LayerKind::Speech(mn_core::SpeechSet::of_texts(
+                    TextSet::default(),
+                ))),
+            ),
             (
                 "fill",
                 l(LayerKind::Fill(FillKind::Flat { color: [0.0; 4] })),
@@ -322,7 +337,7 @@ mod tests {
 
         // The two taste calls worth pinning by name.
         let mut balloon = mn_core::Layer::new("b");
-        balloon.kind = LayerKind::Balloon(empty_balloons());
+        balloon.kind = LayerKind::Speech(mn_core::SpeechSet::of_balloons(one_balloon()));
         assert_eq!(
             tools_for_layer(&balloon).to_vec(),
             vec![Tool::Balloon, Tool::Text, Tool::Object],

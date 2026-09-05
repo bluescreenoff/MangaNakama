@@ -88,7 +88,7 @@ pub use blendif::BlendIf;
 pub use curve::PressureCurve;
 pub use doc::{
     Blend, CompositeStep, DEFAULT_SIZE, Document, Layer, LayerExpression, LayerKind, Paper,
-    ResizeAnchor, SpillPart,
+    ResizeAnchor, SpeechBorn, SpeechSet, SpillPart,
 };
 pub use edge::EdgeParams;
 pub use export::Background;

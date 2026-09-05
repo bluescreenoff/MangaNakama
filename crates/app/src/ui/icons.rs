@@ -13,11 +13,15 @@ pub mod svg;
 use svg::Accent;
 
 /// How a Lucide-backed icon is drawn: one bundled glyph (with which of its
-/// elements take the accent), or a subject glyph wearing a plus badge.
+/// elements take the accent), a subject glyph wearing a plus badge, or a
+/// subject glyph wearing any other bundled glyph as a small corner mark.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Lucide {
     Glyph(&'static str, Accent),
     Badged(&'static str),
+    /// (subject, mark) — the mark rides the bottom-right corner at ~half
+    /// size on a disc of the panel colour. `Badged(x)` is `Marked(x, "plus")`.
+    Marked(&'static str, &'static str),
 }
 
 /// The icons that come from the Lucide pack (`assets/icons/lucide/`, ISC —
@@ -32,6 +36,8 @@ pub fn lucide_for(icon: Icon) -> Option<Lucide> {
         // Row kinds.
         Icon::Text => Glyph("type", Accent::None),
         Icon::Balloon => Glyph("message-circle", Accent::None),
+        // Item P: one layer holding both the bubble and the words in it.
+        Icon::Speech => Marked("type", "message-circle"),
         Icon::FrameFolder => Glyph("layout-template", Accent::None),
         Icon::Folder => Glyph("folder", Accent::None),
         Icon::FolderOpen => Glyph("folder-open", Accent::None),
@@ -81,6 +87,9 @@ pub enum Icon {
     Frame,
     /// Speech balloon tool: a bubble with a tail.
     Balloon,
+    /// A speech layer carrying BOTH words and bubbles (item P): the text
+    /// glyph wearing a small balloon mark.
+    Speech,
     /// Text tool: a capital A over a baseline.
     Text,
     /// Auto select (magic wand): a wand with sparkles.
@@ -280,6 +289,7 @@ impl Icon {
             | Self::Fill
             | Self::Text
             | Self::Balloon
+            | Self::Speech
             | Self::Frame
             | Self::Eyedrop
             | Self::Figure
@@ -434,7 +444,11 @@ pub fn paint_role(p: &Painter, r: Rect, icon: Icon, base: Color32, accent: Optio
             return;
         }
         Some(Lucide::Badged(name)) => {
-            svg::paint_badged(p, r, name, base, accent);
+            svg::paint_marked(p, r, name, "plus", base, accent);
+            return;
+        }
+        Some(Lucide::Marked(name, mark)) => {
+            svg::paint_marked(p, r, name, mark, base, accent);
             return;
         }
         None => {}
@@ -574,7 +588,9 @@ pub fn paint_role(p: &Painter, r: Rect, icon: Icon, base: Color32, accent: Optio
             p.line(poly(r, &[(0.34, 0.52), (0.66, 0.52)]), thin);
             p.line(poly(r, &[(0.14, 0.88), (0.86, 0.88)]), a_thin);
         }
-        Icon::Balloon => {
+        // `Icon::Speech` never reaches here: it is Lucide-backed (a `type`
+        // glyph wearing a `message-circle` mark) and returns above.
+        Icon::Speech | Icon::Balloon => {
             // Speech bubble: ellipse outline + a tail poking out bottom-left.
             let c = pt(r, 0.50, 0.42);
             let (rx, ry) = (w * 0.36, w * 0.28);
@@ -1642,7 +1658,8 @@ mod lucide_tests {
     #[test]
     fn every_lucide_mapping_names_a_bundled_glyph() {
         let all = [
-            Icon::Text, Icon::Balloon, Icon::FrameFolder, Icon::Folder, Icon::FolderOpen,
+            Icon::Text, Icon::Balloon, Icon::Speech, Icon::FrameFolder, Icon::Folder,
+            Icon::FolderOpen,
             Icon::Paper, Icon::Vector, Icon::Tone, Icon::FileObject, Icon::Reference,
             Icon::Draft, Icon::Eye, Icon::EyeOff, Icon::Lock, Icon::LockAlpha, Icon::Clip,
             Icon::Label, Icon::NewLayer, Icon::NewVector, Icon::NewFolder, Icon::NewFrameFolder,
@@ -1655,6 +1672,10 @@ mod lucide_tests {
             let (name, which) = match l {
                 Lucide::Glyph(n, w) => (n, w),
                 Lucide::Badged(n) => (n, Accent::None),
+                Lucide::Marked(n, mark) => {
+                    assert!(svg::glyph(mark).is_some(), "{icon:?}: mark {mark} not bundled");
+                    (n, Accent::None)
+                }
             };
             let els = svg::glyph(name).unwrap_or_else(|| panic!("{icon:?}: {name} not bundled"));
             let n = els.len();

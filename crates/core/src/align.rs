@@ -322,49 +322,54 @@ impl Document {
         (out, notes)
     }
 
-    /// Move one target by whole pixels: raster ink tile-by-tile, text
-    /// and balloon layers through their vector state + re-rasterize
-    /// (shifting their tiles alone would desync from the vectors).
-    /// Returns the undo member when anything moved.
-    fn shift_target(&mut self, li: usize, d: [f32; 2]) -> Option<UndoGroup> {
+    /// Move one target by whole pixels: raster ink tile-by-tile, speech
+    /// layers through their vector state + re-rasterize (shifting their
+    /// tiles alone would desync from the vectors).
+    /// Returns the undo members when anything moved — a speech layer
+    /// carrying both bubbles and words yields TWO of them (item P: one
+    /// layer moves both sets).
+    fn shift_target(&mut self, li: usize, d: [f32; 2]) -> Vec<UndoGroup> {
         let (dx, dy) = (d[0].round() as i32, d[1].round() as i32);
         if dx == 0 && dy == 0 {
-            return None;
+            return Vec::new();
         }
         let size = self.size;
-        let kind = self.layers.get(li)?.kind.clone();
+        let Some(kind) = self.layers.get(li).map(|l| l.kind.clone()) else {
+            return Vec::new();
+        };
         match kind {
-            LayerKind::Text(ts) => {
-                let mut ts = ts;
-                for t in &mut ts.texts {
+            LayerKind::Speech(mut sp) => {
+                for t in &mut sp.texts.texts {
                     t.pos = [t.pos[0] + d[0], t.pos[1] + d[1]];
                 }
-                let before = match &mut self.layers.get_mut(li)?.kind {
-                    LayerKind::Text(cur) => std::mem::replace(cur, ts.clone()),
-                    _ => return None,
-                };
-                let raster = ts.rasterize(size);
-                self.layers.get_mut(li)?.replace_tiles(raster);
-                Some(UndoGroup::Texts {
-                    layer: li,
-                    texts: before,
-                })
-            }
-            LayerKind::Balloon(bs) => {
-                let mut bs = bs;
-                for b in &mut bs.balloons {
+                for b in &mut sp.balloons.balloons {
                     b.translate(d[0], d[1]);
                 }
-                let before = match &mut self.layers.get_mut(li)?.kind {
-                    LayerKind::Balloon(cur) => std::mem::replace(cur, bs.clone()),
-                    _ => return None,
+                let Some(l) = self.layers.get_mut(li) else {
+                    return Vec::new();
                 };
-                let raster = bs.rasterize(size);
-                self.layers.get_mut(li)?.replace_tiles(raster);
-                Some(UndoGroup::Balloons {
-                    layer: li,
-                    balloons: before,
-                })
+                let LayerKind::Speech(cur) = &mut l.kind else {
+                    return Vec::new();
+                };
+                let had_texts = !cur.texts.texts.is_empty();
+                let had_balloons = !cur.balloons.balloons.is_empty();
+                let was = std::mem::replace(cur, sp);
+                let raster = cur.rasterize(size);
+                l.replace_tiles(raster);
+                let mut out = Vec::new();
+                if had_texts {
+                    out.push(UndoGroup::Texts {
+                        layer: li,
+                        texts: was.texts,
+                    });
+                }
+                if had_balloons {
+                    out.push(UndoGroup::Balloons {
+                        layer: li,
+                        balloons: was.balloons,
+                    });
+                }
+                out
             }
             _ => {
                 // Raster ink: snapshot, clear, write — inside one op
@@ -372,7 +377,7 @@ impl Document {
                 let src: Vec<(TileIdx, std::sync::Arc<crate::tile::Tile>)> =
                     self.layers[li].tiles().map(|(i, t)| (i, t.clone())).collect();
                 if src.is_empty() {
-                    return None;
+                    return Vec::new();
                 }
                 self.begin_op_on(li);
                 let (w, h) = (self.size.0 as i32, self.size.1 as i32);
@@ -410,7 +415,7 @@ impl Document {
                         }
                     }
                 }
-                self.end_op_take()
+                self.end_op_take().into_iter().collect()
             }
         }
     }
@@ -448,8 +453,9 @@ impl Document {
             let Some(bb) = self.layers.get(li).and_then(content_bbox) else {
                 continue;
             };
-            if let Some(g) = self.shift_target(li, align_delta(mode, bb, base_r)) {
-                members.push(g);
+            let groups = self.shift_target(li, align_delta(mode, bb, base_r));
+            if !groups.is_empty() {
+                members.extend(groups);
                 moved += 1;
             }
         }
@@ -513,9 +519,7 @@ impl Document {
     ) -> String {
         let mut members = Vec::new();
         for (&(li, _), d) in pairs.iter().zip(deltas) {
-            if let Some(g) = self.shift_target(li, *d) {
-                members.push(g);
-            }
+            members.extend(self.shift_target(li, *d));
         }
         // The extremes staying put is PART of the operation, so the
         // count is the targets, not the movers (an already-even spread
@@ -556,12 +560,13 @@ impl Document {
             t.pos = [t.pos[0] + d[0], t.pos[1] + d[1]];
         }
         let status = format!("aligned {} text items against each other", ts.texts.len());
-        let before = match &mut self.layers.get_mut(li).unwrap().kind {
-            LayerKind::Text(cur) => std::mem::replace(cur, ts.clone()),
-            _ => unreachable!("checked above"),
+        let l = self.layers.get_mut(li).unwrap();
+        let LayerKind::Speech(sp) = &mut l.kind else {
+            unreachable!("checked above")
         };
-        let raster = ts.rasterize(self.size);
-        self.layers.get_mut(li).unwrap().replace_tiles(raster);
+        let before = std::mem::replace(&mut sp.texts, ts);
+        let raster = sp.rasterize(self.size);
+        l.replace_tiles(raster);
         self.push_compound(
             &format!("Align items · {}", mode.label()),
             vec![UndoGroup::Texts {
@@ -618,12 +623,13 @@ impl Document {
             t.pos = [t.pos[0] + d[0], t.pos[1] + d[1]];
         }
         let status = format!("distributed {} text items", ts.texts.len());
-        let before = match &mut self.layers.get_mut(li).unwrap().kind {
-            LayerKind::Text(cur) => std::mem::replace(cur, ts.clone()),
-            _ => unreachable!("checked above"),
+        let l = self.layers.get_mut(li).unwrap();
+        let LayerKind::Speech(sp) = &mut l.kind else {
+            unreachable!("checked above")
         };
-        let raster = ts.rasterize(self.size);
-        self.layers.get_mut(li).unwrap().replace_tiles(raster);
+        let before = std::mem::replace(&mut sp.texts, ts);
+        let raster = sp.rasterize(self.size);
+        l.replace_tiles(raster);
         self.push_compound(
             label,
             vec![UndoGroup::Texts {

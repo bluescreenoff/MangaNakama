@@ -134,7 +134,7 @@ const TOOLS: &[(&str, &str, &str)] = &[
     (
         "layers_list",
         "layers.list",
-        "All layers of the current page, top of the stack first in paint terms: stable id, index, name, kind (raster/folder/fill/correction/frame/balloon/text), depth, visibility, opacity, which is active.",
+        "All layers of the current page, top of the stack first in paint terms: stable id, index, name, kind (raster/folder/fill/correction/frame/balloon/text/speech), depth, visibility, opacity, which is active. A 'speech' layer carries BOTH balloons and text (CSP's text layer); its 'texts' and 'balloons' fields say how many of each, and texts_* / balloons_* both accept it.",
     ),
     (
         "texts_list",

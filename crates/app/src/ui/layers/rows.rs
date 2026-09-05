@@ -193,6 +193,11 @@ pub(crate) fn row_glyph(l: &mn_core::Layer) -> Option<Icon> {
             Icon::Folder
         });
     }
+    // Item P: one speech layer, one row. Words + bubbles wear the combined
+    // glyph; either alone keeps the glyph it always had.
+    if l.is_text() && l.is_balloon() {
+        return Some(Icon::Speech);
+    }
     if l.is_text() {
         return Some(Icon::Text);
     }

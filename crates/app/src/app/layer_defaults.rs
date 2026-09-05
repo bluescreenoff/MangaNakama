@@ -48,8 +48,10 @@ pub fn kind_key(l: &Layer) -> &'static str {
         };
     }
     match l.kind {
-        LayerKind::Text(_) => "text",
-        LayerKind::Balloon(_) => "balloon",
+        // Item P: one kind, two answers — a layer that carries bubbles keys
+        // as a balloon, words-only (and the still-empty new layer) as text.
+        LayerKind::Speech(_) if l.is_balloon() => "balloon",
+        LayerKind::Speech(_) => "text",
         LayerKind::Frame(_) => "frame",
         LayerKind::Fill(FillKind::Flat { .. }) => "fill",
         LayerKind::Fill(FillKind::Gradient { .. }) => "gradient",
@@ -487,7 +489,7 @@ mod tests {
         flat.kind = LayerKind::Fill(FillKind::Flat { color: [0.0; 4] });
         assert_eq!(kind_key(&flat), "fill");
         let mut text = raster();
-        text.kind = LayerKind::Text(Default::default());
+        text.kind = LayerKind::Speech(Default::default());
         assert_eq!(kind_key(&text), "text");
 
         // A toned RASTER is still a raster: the tone is a property the

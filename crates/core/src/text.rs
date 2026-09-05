@@ -1346,6 +1346,23 @@ impl TextSet {
     /// Items without a cache contribute nothing — the app shapes before it
     /// commits. Pure, so undo can re-derive the raster from cloned state.
     pub fn rasterize(&self, size: (u32, u32)) -> HashMap<TileIdx, Arc<Tile>> {
+        self.rasterize_over(size, HashMap::new())
+    }
+
+    /// [`Self::rasterize`] with something already under it: the words land
+    /// source-over `base` instead of over nothing. Item P's speech layer
+    /// uses it to ink its balloons first and its text on top in ONE tile map.
+    ///
+    /// Tiles of `base` the text never touches are handed back untouched —
+    /// same `Arc`, so a balloon's shared flat-fill tiles stay shared.
+    pub fn rasterize_over(
+        &self,
+        size: (u32, u32),
+        base: HashMap<TileIdx, Arc<Tile>>,
+    ) -> HashMap<TileIdx, Arc<Tile>> {
+        if self.texts.iter().all(|t| t.cache.is_none()) {
+            return base;
+        }
         let mut build: HashMap<TileIdx, Tile> = HashMap::new();
         let (cw, ch) = (size.0 as i64, size.1 as i64);
         for item in &self.texts {
@@ -1370,7 +1387,11 @@ impl TextSet {
                     let idx = TileIdx::of_pixel(cx as i32, cy as i32);
                     let (tox, toy) = idx.origin();
                     let run_end = x1.min((tox + TILE_SIZE as i32) as i64);
-                    let tile = build.entry(idx).or_insert_with(Tile::new_transparent);
+                    let tile = build.entry(idx).or_insert_with(|| {
+                        base.get(&idx)
+                            .map(|t| (**t).clone())
+                            .unwrap_or_else(Tile::new_transparent)
+                    });
                     let data = tile.data_mut();
                     for x in cx..run_end {
                         let s = (x - ox) as usize * 4;
@@ -1393,11 +1414,15 @@ impl TextSet {
                 }
             }
         }
-        build
-            .into_iter()
-            .filter(|(_, t)| !t.is_blank())
-            .map(|(k, v)| (k, Arc::new(v)))
-            .collect()
+        let mut out: HashMap<TileIdx, Arc<Tile>> = base;
+        for (k, v) in build {
+            if v.is_blank() {
+                out.remove(&k);
+            } else {
+                out.insert(k, Arc::new(v));
+            }
+        }
+        out
     }
 }
 

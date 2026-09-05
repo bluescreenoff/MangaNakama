@@ -59,7 +59,10 @@ pub(crate) fn layer_property(ui: &mut egui::Ui, app: &mut App) {
     let name = l.name.clone();
     let (blend, opacity) = (l.blend, l.opacity);
     let frames = l.frames().cloned();
-    let balloons = l.balloons().cloned();
+    // Item P: every speech layer answers `balloons()`, so the emptiness
+    // test is what "this layer has bubbles on it" means now — otherwise a
+    // plain text layer would draw the Balloon line block and say "0".
+    let balloons = l.balloons().filter(|bs| !bs.balloons.is_empty()).cloned();
     let tone = l.tone;
     // LIVE layers (fill / gradient / tone) carry their picture as
     // parameters, not pixels — a different block below.
@@ -126,6 +129,11 @@ pub(crate) fn layer_property(ui: &mut egui::Ui, app: &mut App) {
                 "{} balloon(s) — W adds, O edits",
                 bs.balloons.len()
             ));
+            // Item P: the same layer may hold the words inside those bubbles.
+            let n = app.doc.layers[i].texts().map_or(0, |t| t.texts.len());
+            if n > 0 {
+                ui.weak(format!("{n} text box(es) — T types, O moves/rotates"));
+            }
         }
         (None, None) if app.doc.layers[i].is_text() => {
             group_caption(ui, "Text");

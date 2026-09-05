@@ -311,6 +311,11 @@ fn handle(app: &mut App, method: &str, params: &Value) -> Result<Value, HandleEr
                         "index": i,
                         "name": l.name,
                         "kind": kind_label(l),
+                        // Item P: a speech layer holds both halves, so a
+                        // script can see what is actually on it without a
+                        // second call. Absent on every other kind.
+                        "texts": l.texts().map(|ts| ts.texts.len()),
+                        "balloons": l.balloons().map(|bs| bs.balloons.len()),
                         "folder": l.folder,
                         "depth": l.depth,
                         "visible": l.visible,
@@ -643,8 +648,14 @@ fn kind_label(l: &mn_core::Layer) -> &'static str {
         Correction(_) => "correction",
         FileObject(_) => "file-object",
         Frame(_) => "frame",
-        Balloon(_) => "balloon",
-        Text(_) => "text",
+        // Item P: one speech kind. The wire keeps the two old words so an
+        // MCP client's `layers_list` reads the same; a layer carrying both
+        // says "speech".
+        Speech(_) => match (l.is_text(), l.is_balloon()) {
+            (true, true) => "speech",
+            (_, true) => "balloon",
+            _ => "text",
+        },
     }
 }
 

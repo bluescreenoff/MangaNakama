@@ -5132,6 +5132,12 @@ mod eyedropper_tests;
 #[cfg(test)]
 mod balloon_carries_text_tests;
 
+/// Item P — one speech layer holds a bubble and the words in it: where a
+/// drawn bubble lands, that the palette shows one row, that moving the layer
+/// moves both, and that the Object tool still picks each apart.
+#[cfg(test)]
+mod speech_layer_tests;
+
 /// ROADMAP good-first-issue #1 — "Fit a balloon to its text": which text it
 /// pairs with, and the single undo step the reshape costs.
 #[cfg(test)]

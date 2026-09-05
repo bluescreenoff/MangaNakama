@@ -306,17 +306,38 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
             // this, bubble → words → bubble → words bred a layer pair per
             // balloon, eight balloons = sixteen layers (surface pass
             // 2026-09-02).
-            let li = if app.doc.active_layer().is_balloon() {
-                Some(app.doc.active)
-            } else {
-                (0..app.doc.layers.len()).rev().find(|&i| {
-                    let l = &app.doc.layers[i];
-                    l.is_balloon() && l.visible && !l.lock
-                })
-            };
+            // Item P, and it wins over everything below: a bubble drawn
+            // AROUND lettering joins that lettering's own layer, the way
+            // CSP's text layer holds both. The layer move tool then moves
+            // the bubble and the words together, which is what the owner
+            // asked for ("it just added the balloon as a new layer above
+            // the text layer instead of combining them").
+            let over_text = (0..app.doc.layers.len()).rev().find(|&i| {
+                let l = &app.doc.layers[i];
+                l.visible
+                    && !l.lock
+                    && l.texts()
+                        .is_some_and(|ts| mn_core::balloon::text_in(&balloon, ts).is_some())
+            });
+            let li = over_text.or_else(|| {
+                if app.doc.active_layer().is_balloon() {
+                    Some(app.doc.active)
+                } else {
+                    (0..app.doc.layers.len()).rev().find(|&i| {
+                        let l = &app.doc.layers[i];
+                        l.is_balloon() && l.visible && !l.lock
+                    })
+                }
+            });
             let selected = match li {
                 Some(li) => {
-                    let mut bs = app.doc.layers[li].balloons().expect("is_balloon").clone();
+                    let mut bs = app.doc.layers[li].balloons().expect("speech layer").clone();
+                    if bs.balloons.is_empty() {
+                        // First bubble on a words-only layer: an empty set
+                        // has no outline width to inherit, so it takes the
+                        // Tool Property number a fresh balloon layer gets.
+                        bs.border_px = app.mm_to_px(app.balloon_border_mm).max(2.0);
+                    }
                     bs.balloons.push(balloon);
                     let last = bs.balloons.len() - 1;
                     app.doc.set_balloons(li, bs);

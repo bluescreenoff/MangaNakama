@@ -124,9 +124,12 @@ fn ink_in(img: &image::RgbaImage, r: [u32; 4]) -> usize {
     n
 }
 
+/// The layers that actually HOLD lettering. Since item P a bubbles-only
+/// layer is a speech layer too and answers `texts()` with an empty set, so
+/// the emptiness test is the one that means 'there are words here'.
 fn text_layers(app: &App) -> Vec<usize> {
     (0..app.doc.layers.len())
-        .filter(|&i| app.doc.layers[i].texts().is_some())
+        .filter(|&i| app.doc.layers[i].texts().is_some_and(|ts| !ts.texts.is_empty()))
         .collect()
 }
 

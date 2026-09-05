@@ -291,7 +291,7 @@ fn rgb_f(c: [u8; 3]) -> [f32; 3] {
     ]
 }
 
-/// Every balloon on a balloon layer + the shared outline width.
+/// Every balloon on a speech layer + the shared outline width.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BalloonSet {
     pub balloons: Vec<Balloon>,
@@ -301,6 +301,12 @@ pub struct BalloonSet {
     /// pressure (CSP's drawn-bubble feel — a light hand inks a thin line).
     #[serde(default)]
     pub pressure_width: bool,
+}
+
+impl Default for BalloonSet {
+    fn default() -> Self {
+        Self::new(Self::DEFAULT_BORDER_PX)
+    }
 }
 
 /// Widest `width_scale` in the set (≥ 1.0 so `reach` never shrinks below
@@ -1546,6 +1552,13 @@ impl BalloonSet {
         }
     }
 
+    /// Outline width of the empty set — a placeholder only. Every path that
+    /// puts the FIRST balloon on a layer sets `border_px` from the Tool
+    /// Property first (`cmd/text.rs`), because an empty set has no width to
+    /// inherit. It exists so a text-only speech layer can hold an empty
+    /// balloon half without inventing a number at every call site.
+    pub const DEFAULT_BORDER_PX: f32 = 6.0;
+
     /// Balloon containing `p` (body or tail), topmost in list order.
     pub fn balloon_at(&self, p: [f32; 2]) -> Option<usize> {
         self.balloons.iter().rposition(|b| b.contains(p))
@@ -2245,6 +2258,16 @@ impl Balloon {
 /// The test is against the BODY, not [`Balloon::contains`]: a tail is somewhere
 /// a bubble points, not somewhere lettering goes, and an SFX sitting over the
 /// tail must not capture the fit.
+/// The topmost balloon in `set` whose BODY contains `p`, if any.
+///
+/// The mirror of [`text_in`] and it uses the same rule for the same reason:
+/// the test is against the body, never the tail — a tail is somewhere a
+/// bubble points, not somewhere lettering goes. Item P asks it "are these
+/// new words being typed inside an existing bubble?".
+pub fn body_at(set: &BalloonSet, p: [f32; 2]) -> Option<usize> {
+    set.balloons.iter().rposition(|b| b.shape.sdf(p) <= 0.0)
+}
+
 pub fn text_in(body: &Balloon, texts: &crate::text::TextSet) -> Option<usize> {
     let inside = |p: [f32; 2]| body.shape.sdf(p) <= 0.0;
     texts

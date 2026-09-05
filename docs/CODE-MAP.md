@@ -553,6 +553,35 @@ The recurring failure shapes, in order of how often they have shipped:
   and the parse is an `unwrap_or_default()`, so every saved workspace would
   vanish without a word. New fields go on the END only.
 
+## Speech layers (core `doc.rs` `SpeechSet` ⇄ `text.rs` ⇄ `balloon.rs` ⇄ `ora.rs`)
+
+- There is ONE vector kind for lettering: `LayerKind::Speech(SpeechSet)`,
+  holding `texts: TextSet` AND `balloons: BalloonSet`. It replaced the old
+  `LayerKind::Text` and `LayerKind::Balloon` (item P, 2026-09-06) so a
+  bubble drawn around words can live on the words' own layer, the way CSP's
+  text layer does — one palette row, and the layer move moves both.
+- `is_text()` / `is_balloon()` answer by CONTENT, and a layer can be BOTH.
+  The empty layer is the one case content cannot answer, so `SpeechSet.born`
+  is the tiebreak: `layers.add_balloon` over MCP deliberately makes an empty
+  bubble layer for a script to fill on the next call, and it must still
+  report as a balloon layer. Never test the kind with `matches!` when you
+  mean "does this hold words" — use the predicates.
+- `texts()` and `balloons()` answer `Some` for EVERY speech layer, with an
+  empty set for the half that is not there. Code that meant "this layer has
+  words in it" must say `texts().is_some_and(|ts| !ts.texts.is_empty())`;
+  `texts().is_some()` now only means "this is a speech layer".
+- The raster is ONE pass: `SpeechSet::rasterize` inks the balloons, then
+  `TextSet::rasterize_over` lays the words on top of those tiles. Any seam
+  that installs half a layer (`set_texts`, `set_balloons`, both undo arms,
+  `align.rs`) must re-derive from BOTH halves or the other half disappears
+  from the page while staying in the model.
+- `.ora`: `mnc-texts` and `mnc-balloons` may ride the SAME `<layer>`
+  element — that is the whole format change. A half is written when it holds
+  something OR when the layer was born for it, so every speech layer writes
+  at least one attribute and an EMPTY one still loads as a speech layer.
+  A file from before the merge has one attribute per layer and therefore
+  loads as separate layers: **nothing is ever merged on load.**
+
 ## File objects (core `file_object.rs` ⇄ `ora.rs` ⇄ `app.rs` ⇄ `layers.rs`)
 
 - `LayerKind::FileObject` is the ONE non-`Raster` kind whose pixels live in

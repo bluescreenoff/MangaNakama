@@ -256,10 +256,23 @@ pub fn save_to_with<W: Write + Seek>(
             // Vector frame/balloon state rides along as private JSON; the PNG
             // above is the raster fallback any other ORA reader will show.
             frames: layer.frames().and_then(|fs| serde_json::to_string(fs).ok()),
+            // Item P: one speech layer may write BOTH `mnc-balloons` and
+            // `mnc-texts` — that is the whole format change. A half is
+            // written when it holds something OR when the layer was made for
+            // it (`SpeechSet::born`), so every speech layer writes at least
+            // one attribute (an EMPTY layer must still come back a speech
+            // layer, not a plain raster) and an unmerged text or balloon
+            // layer's file is byte-for-byte what it always was.
             balloons: layer
-                .balloons()
-                .and_then(|bs| serde_json::to_string(bs).ok()),
-            texts: layer.texts().and_then(|ts| serde_json::to_string(ts).ok()),
+                .speech()
+                .filter(|s| {
+                    !s.balloons.balloons.is_empty() || s.born == crate::doc::SpeechBorn::Balloon
+                })
+                .and_then(|s| serde_json::to_string(&s.balloons).ok()),
+            texts: layer
+                .speech()
+                .filter(|s| !s.texts.texts.is_empty() || s.born == crate::doc::SpeechBorn::Text)
+                .and_then(|s| serde_json::to_string(&s.texts).ok()),
             label: layer.label,
             layer_colour: layer
                 .layer_colour
@@ -948,21 +961,38 @@ fn load_inner<R: Read + Seek>(source: R, pixels: bool) -> Result<Document, OraEr
             if pixels {
                 Document::derive_frame_raster(&mut layer, (w.max(1), h.max(1)));
             }
-        } else if let Some(bs) = &e.balloons {
+        } else if e.balloons.is_some() || e.texts.is_some() {
+            // Speech layer (item P). A file from before the merge carries
+            // exactly one of the two attributes, so its text layers and its
+            // balloon layers arrive as separate speech layers holding one
+            // half each — nothing is merged on load, ever.
+            let sp = crate::doc::SpeechSet {
+                texts: e.texts.clone().unwrap_or_default(),
+                balloons: e.balloons.clone().unwrap_or_default(),
+                // Which attributes rode the element says what the layer was
+                // made for; a layer carrying both is a text layer that grew
+                // a bubble, which is the CSP reading.
+                born: if e.texts.is_some() {
+                    crate::doc::SpeechBorn::Text
+                } else {
+                    crate::doc::SpeechBorn::Balloon
+                },
+            };
             if pixels {
-                layer.replace_tiles(bs.rasterize((w.max(1), h.max(1))));
+                if sp.texts.texts.is_empty() {
+                    // Bubbles only: the raster is fully derivable here.
+                    layer.replace_tiles(sp.balloons.rasterize((w.max(1), h.max(1))));
+                } else if let Some(bytes) = read_entry(&mut zip, &e.src) {
+                    // Words present: shaping needs DirectWrite, which core
+                    // cannot call — keep the PNG raster (it *is* the exact
+                    // saved pixels, balloons included) and leave the sprite
+                    // caches empty; the app warms them before the first edit.
+                    let img = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)?
+                        .to_rgba8();
+                    paint_into_layer(&mut layer, &img, e.x, e.y);
+                }
             }
-            layer.kind = LayerKind::Balloon(bs.clone());
-        } else if let Some(ts) = &e.texts {
-            // Text layer: shaping needs DirectWrite, which core cannot call —
-            // keep the PNG raster (it *is* the exact saved pixels) and leave
-            // sprite caches empty; the app warms them before the first edit.
-            if pixels && let Some(bytes) = read_entry(&mut zip, &e.src) {
-                let img = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)?
-                    .to_rgba8();
-                paint_into_layer(&mut layer, &img, e.x, e.y);
-            }
-            layer.kind = LayerKind::Text(ts.clone());
+            layer.kind = LayerKind::Speech(sp);
         } else if let Some(k) = &e.fill {
             // Live fill layer (TRIAGE 137): the DERIVED raster re-derives from
             // the params + the persisted mask window; no PNG fallback needed.
@@ -2713,6 +2743,96 @@ mod tests {
                 "loaded PNG raster differs at {idx:?}"
             );
         }
+    }
+
+    /// Item P's file rule, both halves of it.
+    ///
+    /// A file written before the merge has a text layer and a balloon layer
+    /// side by side, each with ONE private attribute. Loading it must give
+    /// back TWO layers holding one half each — the merge happens when the
+    /// artist draws a bubble over words, never behind their back on load.
+    /// And a layer that DOES carry both writes both attributes and comes
+    /// back as one layer with both halves.
+    #[test]
+    fn an_old_files_separate_text_and_balloon_layers_stay_two_layers() {
+        use crate::balloon::{Balloon, BalloonShape};
+        use crate::text::{TextItem, TextSet};
+
+        let mut doc = Document::new(256, 256);
+        let mut item = TextItem::new([40.0, 40.0], "Meiryo".into(), 12.0, [0, 0, 0], true);
+        item.insert(0, "セリフ");
+        doc.add_text_layer(
+            "Text 1",
+            TextSet {
+                texts: vec![item.clone()],
+            },
+        );
+        let mut bs = BalloonSet::new(4.0);
+        bs.balloons.push(Balloon {
+            shape: BalloonShape::Ellipse {
+                center: [128.0, 100.0],
+                radii: [60.0, 40.0],
+            },
+            ..Default::default()
+        });
+        doc.add_balloon_layer("Balloon 1", bs.clone());
+
+        // The old shape: two layers, one half each.
+        let xml = String::from_utf8(
+            {
+                let mut zip = zip::ZipArchive::new(Cursor::new(to_bytes(&doc))).unwrap();
+                let mut v = Vec::new();
+                zip.by_name("stack.xml").unwrap().read_to_end(&mut v).unwrap();
+                v
+            },
+        )
+        .unwrap();
+        assert_eq!(xml.matches("mnc-texts=").count(), 1, "{xml}");
+        assert_eq!(xml.matches("mnc-balloons=").count(), 1, "{xml}");
+
+        let back = roundtrip(&doc);
+        assert_eq!(back.layers.len(), 3, "base + text + balloon, NOT merged");
+        assert_eq!(back.layers[1].name, "Text 1");
+        assert!(back.layers[1].is_text() && !back.layers[1].is_balloon());
+        assert_eq!(back.layers[1].texts().unwrap().texts.len(), 1);
+        assert!(back.layers[1].balloons().unwrap().balloons.is_empty());
+        assert_eq!(back.layers[2].name, "Balloon 1");
+        assert!(back.layers[2].is_balloon() && !back.layers[2].is_text());
+        assert_eq!(back.layers[2].balloons().unwrap().balloons.len(), 1);
+        assert!(back.layers[2].texts().unwrap().texts.is_empty());
+
+        // Now the merged layer: both attributes ride the SAME element.
+        let mut merged = Document::new(256, 256);
+        merged.add_text_layer("Speech", TextSet { texts: vec![item] });
+        assert!(merged.set_balloons(1, bs));
+        let xml = String::from_utf8(
+            {
+                let mut zip = zip::ZipArchive::new(Cursor::new(to_bytes(&merged))).unwrap();
+                let mut v = Vec::new();
+                zip.by_name("stack.xml").unwrap().read_to_end(&mut v).unwrap();
+                v
+            },
+        )
+        .unwrap();
+        assert_eq!(xml.matches("mnc-texts=").count(), 1, "{xml}");
+        assert_eq!(xml.matches("mnc-balloons=").count(), 1, "{xml}");
+        let back = roundtrip(&merged);
+        assert_eq!(back.layers.len(), 2, "one speech layer, not two");
+        assert_eq!(back.layers[1].texts().unwrap().texts.len(), 1);
+        assert_eq!(back.layers[1].balloons().unwrap().balloons.len(), 1);
+        assert!(back.layers[1].is_text() && back.layers[1].is_balloon());
+    }
+
+    /// An EMPTY speech layer must not come back a plain raster — which half
+    /// it was made for is carried by which attribute it writes.
+    #[test]
+    fn an_empty_speech_layer_comes_back_the_half_it_was_made_for() {
+        let mut doc = Document::new(64, 64);
+        doc.add_text_layer("words", crate::text::TextSet::default());
+        doc.add_balloon_layer("bubbles", BalloonSet::new(4.0));
+        let back = roundtrip(&doc);
+        assert!(back.layers[1].is_text() && !back.layers[1].is_balloon());
+        assert!(back.layers[2].is_balloon() && !back.layers[2].is_text());
     }
 
     #[test]

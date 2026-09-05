@@ -247,7 +247,7 @@ fn the_resample_scales_px_geometry_and_leaves_physical_units_alone() {
     doc.layers.push(frame);
 
     let mut balloon = Layer::new("balloons");
-    balloon.kind = LayerKind::Balloon(BalloonSet {
+    balloon.kind = LayerKind::Speech(crate::SpeechSet::of_balloons(BalloonSet {
         balloons: vec![Balloon {
             shape: BalloonShape::Ellipse {
                 center: [300.0, 240.0],
@@ -268,7 +268,7 @@ fn the_resample_scales_px_geometry_and_leaves_physical_units_alone() {
         }],
         border_px: 6.0,
         pressure_width: false,
-    });
+    }));
     doc.layers.push(balloon);
 
     let mut item = TextItem::new([120.0, 360.0], "Mincho".into(), 12.0, [0, 0, 0], true);
@@ -276,10 +276,10 @@ fn the_resample_scales_px_geometry_and_leaves_physical_units_alone() {
     item.letter_spacing_pt = 1.5;
     item.outline_px = 8.0;
     let mut text = Layer::new("text");
-    text.kind = LayerKind::Text(TextSet {
+    text.kind = LayerKind::Speech(crate::SpeechSet::of_texts(TextSet {
         texts: vec![item],
         ..TextSet::default()
-    });
+    }));
     doc.layers.push(text);
 
     let mut inked = Layer::new("vector ink");
@@ -335,9 +335,10 @@ fn the_resample_scales_px_geometry_and_leaves_physical_units_alone() {
     assert_eq!(fs.border_px, 6.0, "panel border is px");
     assert_eq!(fs.slot, Some([0.0, 0.0, 300.0, 300.0]));
 
-    let LayerKind::Balloon(bs) = &doc.layers[2].kind else {
+    let LayerKind::Speech(sp) = &doc.layers[2].kind else {
         panic!("balloon layer")
     };
+    let bs = &sp.balloons;
     let b = &bs.balloons[0];
     let BalloonShape::Ellipse { center, radii } = b.shape else {
         panic!("ellipse")
@@ -357,9 +358,10 @@ fn the_resample_scales_px_geometry_and_leaves_physical_units_alone() {
     );
     assert_eq!(bs.border_px, 3.0);
 
-    let LayerKind::Text(ts) = &doc.layers[3].kind else {
+    let LayerKind::Speech(tsp) = &doc.layers[3].kind else {
         panic!("text layer")
     };
+    let ts = &tsp.texts;
     let t = &ts.texts[0];
     assert_eq!(t.pos, [60.0, 180.0]);
     assert_eq!(t.size, [120.0, 60.0], "the wrap box is px");

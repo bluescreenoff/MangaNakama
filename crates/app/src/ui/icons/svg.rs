@@ -127,7 +127,17 @@ pub fn paint(p: &Painter, r: Rect, name: &str, base: Color32, accent: Option<Col
 /// Paint `main` at 82 % in the top-left and a `plus` badge in the accent
 /// colour at the bottom-right — the "make one of these" family (the
 /// hand-drawn set wears a corner plus the same way, owner 2026-08-21).
-pub fn paint_badged(p: &Painter, r: Rect, main: &str, base: Color32, accent: Option<Color32>) {
+/// A subject glyph wearing `mark` on its bottom-right corner. The plus of
+/// the "new …" buttons is one mark among several — item P's speech layer
+/// wears a balloon here.
+pub fn paint_marked(
+    p: &Painter,
+    r: Rect,
+    main: &str,
+    mark: &str,
+    base: Color32,
+    accent: Option<Color32>,
+) {
     let w = r.width().min(r.height());
     let main_r = Rect::from_min_size(r.min, egui::vec2(w * 0.82, w * 0.82));
     paint(p, main_r, main, base, None, Accent::None);
@@ -135,10 +145,10 @@ pub fn paint_badged(p: &Painter, r: Rect, main: &str, base: Color32, accent: Opt
         egui::pos2(r.min.x + w * 0.52, r.min.y + w * 0.52),
         egui::vec2(w * 0.48, w * 0.48),
     );
-    // A disc of the panel colour behind the plus so it reads over the
+    // A disc of the panel colour behind the mark so it reads over the
     // subject instead of tangling with it.
     p.circle_filled(br.center(), w * 0.26, super::super::theme::c().panel);
-    paint(p, br, "plus", accent.unwrap_or(base), None, Accent::None);
+    paint(p, br, mark, accent.unwrap_or(base), None, Accent::None);
 }
 
 fn paint_element(p: &Painter, r: Rect, e: &Element, col: Color32) {

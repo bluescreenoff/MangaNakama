@@ -6494,7 +6494,7 @@ fn story_editor_writes_replaces_and_restyles() {
     let add_text_layer = |app: &mut App, text: &str| {
         use mn_core::text::TextItem;
         let mut l = mn_core::Layer::new("script");
-        l.kind = mn_core::LayerKind::Text(mn_core::TextSet {
+        l.kind = mn_core::LayerKind::Speech(mn_core::SpeechSet::of_texts(mn_core::TextSet {
             texts: vec![TextItem {
                 id: 0,
                 text: text.into(),
@@ -6521,7 +6521,7 @@ fn story_editor_writes_replaces_and_restyles() {
                 style: None,
                 cache: None,
             }],
-        });
+        }));
         app.doc.layers.push(l);
     };
     crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::AddPage);
@@ -6619,7 +6619,7 @@ fn story_apply_tool_style_writes_each_layer_once() {
         set.texts.push(it);
     }
     let mut l = mn_core::Layer::new("script");
-    l.kind = mn_core::LayerKind::Text(set);
+    l.kind = mn_core::LayerKind::Speech(mn_core::SpeechSet::of_texts(set));
     app.doc.layers.push(l);
     let li = app.doc.layers.len() - 1;
     crate::cmd::dispatch(&mut app, crate::cmd::AppCmd::StoryEditor);

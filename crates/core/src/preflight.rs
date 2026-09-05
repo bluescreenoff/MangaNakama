@@ -337,8 +337,8 @@ fn tone_carriers<'a>(setup: &PageSetup, doc: &'a Document, printed: &[bool]) -> 
                     source,
                 });
             }
-            LayerKind::Balloon(bs) => {
-                for (n, b) in bs.balloons.iter().enumerate() {
+            LayerKind::Speech(sp) => {
+                for (n, b) in sp.balloons.balloons.iter().enumerate() {
                     let Some(bt) = b.fill_tone else { continue };
                     out.push(ToneCarrier {
                         label: format!("Balloon {} on {:?}", n + 1, layer.name),
