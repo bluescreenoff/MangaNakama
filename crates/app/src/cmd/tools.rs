@@ -45,6 +45,12 @@ pub enum Tool {
     /// push/expand/pinch/push-sideways/twirl, Alt inverts, hold
     /// accumulates (`core::liquify`).
     Liquify,
+    /// CSP 定規 Ruler: the next canvas gesture BUILDS a ruler of the sub
+    /// tool in hand ([`App::ruler_mode`]) instead of drawing. A tool rather
+    /// than the menu-only arming it grew up as (owner, 2026-09-05: "Ruler
+    /// doesn't seem to be a tool in the tool box for some reason") — the
+    /// menu and the palette still work, they select this tool now.
+    Ruler,
     Pan,
 }
 
@@ -67,6 +73,7 @@ impl Tool {
             Tool::Text => "Text",
             Tool::Eyedrop => "Eyedropper",
             Tool::Liquify => "Liquify",
+            Tool::Ruler => "Ruler",
             Tool::Pan => "Move view",
         }
     }
@@ -596,6 +603,77 @@ pub enum RulerKind {
     GuideV,
 }
 
+impl RulerKind {
+    /// The Sub Tool list's row order and row text — CSP's own names for its
+    /// 定規 sub tools, straight line first because it is the one you reach
+    /// for. This slice is what `SubTool::ALL` and the palette both walk, so
+    /// the twelve rows cannot fall out of step with each other.
+    pub const ALL: &'static [RulerKind] = &[
+        RulerKind::Line,
+        RulerKind::Curve,
+        RulerKind::Parallel,
+        RulerKind::Radial,
+        RulerKind::Concentric,
+        RulerKind::VanishingPoint,
+        RulerKind::Perspective1,
+        RulerKind::Perspective,
+        RulerKind::Perspective3,
+        RulerKind::Symmetric,
+        RulerKind::GuideH,
+        RulerKind::GuideV,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            RulerKind::Line => "Straight line",
+            RulerKind::Curve => "Curve",
+            RulerKind::Parallel => "Parallel line",
+            RulerKind::Radial => "Radial line",
+            RulerKind::Concentric => "Concentric circle",
+            RulerKind::VanishingPoint => "Vanishing point",
+            RulerKind::Perspective1 => "Perspective 1-point",
+            RulerKind::Perspective => "Perspective 2-point",
+            RulerKind::Perspective3 => "Perspective 3-point",
+            RulerKind::Symmetric => "Symmetrical",
+            RulerKind::GuideH => "Guide horizontal",
+            RulerKind::GuideV => "Guide vertical",
+        }
+    }
+
+    /// What the gesture is, in one line. ONE home for it: the status line
+    /// the tool sets on the way in, the Sub Tool row's hover and the Tool
+    /// Property panel all read this, so the three cannot describe different
+    /// gestures for the same row.
+    pub fn hint(self) -> &'static str {
+        match self {
+            RulerKind::Line => "drag on the canvas to draw a line ruler",
+            RulerKind::VanishingPoint => "drag from the vanishing point to set its first ray",
+            RulerKind::Perspective => {
+                "drag the eye level — both ends become vanishing points; strokes aim at either VP or run vertical"
+            }
+            RulerKind::Perspective1 => {
+                "drag from the vanishing point along the eye level; strokes aim at it, or run along/across the horizon"
+            }
+            RulerKind::Perspective3 => {
+                "drag the eye level — a third vanishing point lands on the side you dragged toward; drag it where you want it"
+            }
+            RulerKind::Curve => "click the curve's corners — double-click (or Enter) to finish",
+            RulerKind::Parallel => "drag the direction — every stroke comes out parallel to it",
+            RulerKind::Radial => {
+                "click where the focus lines converge — every stroke then runs through it"
+            }
+            RulerKind::Concentric => {
+                "click for free rings, or drag from the centre to set a ring spacing"
+            }
+            RulerKind::Symmetric => {
+                "drag from the symmetry centre outward — the drag sets the first axis"
+            }
+            RulerKind::GuideH => "click where the horizontal guide goes",
+            RulerKind::GuideV => "click where the vertical guide goes",
+        }
+    }
+}
+
 /// Selection sub-modes (CSP: Rectangle / Lasso sub tools).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SelectMode {
@@ -952,6 +1030,10 @@ pub enum SubTool {
     /// E-016 平均色: the eyedropper's sample SIZE in pixels a side — its own
     /// group in the list, and its own rows so a shortcut can name one.
     EyedropSize(u32),
+    /// The twelve 定規 the Ruler tool builds. The kind IS the sub tool, the
+    /// way `FrameMode` is for the frame tool: `App::ruler_mode` is the
+    /// tool's memory of which row you are on.
+    Ruler(RulerKind),
     Pan(PanMode),
 }
 
@@ -1021,6 +1103,22 @@ impl SubTool {
             SubTool::EyedropSize(2),
             SubTool::EyedropSize(3),
             SubTool::EyedropSize(5),
+            // The twelve ruler rows, in `RulerKind::ALL`'s order — spelled
+            // out because `ALL` is a const slice and cannot be mapped in a
+            // const; `subtools::tests::the_registry_holds_every_row_once`
+            // pins the two lists together.
+            SubTool::Ruler(RulerKind::Line),
+            SubTool::Ruler(RulerKind::Curve),
+            SubTool::Ruler(RulerKind::Parallel),
+            SubTool::Ruler(RulerKind::Radial),
+            SubTool::Ruler(RulerKind::Concentric),
+            SubTool::Ruler(RulerKind::VanishingPoint),
+            SubTool::Ruler(RulerKind::Perspective1),
+            SubTool::Ruler(RulerKind::Perspective),
+            SubTool::Ruler(RulerKind::Perspective3),
+            SubTool::Ruler(RulerKind::Symmetric),
+            SubTool::Ruler(RulerKind::GuideH),
+            SubTool::Ruler(RulerKind::GuideV),
             SubTool::Pan(PanMode::Hand),
             SubTool::Pan(PanMode::Rotate),
         ]
@@ -1042,6 +1140,7 @@ impl SubTool {
             SubTool::Figure(_) => Tool::Figure,
             SubTool::Gradient(_) => Tool::Gradient,
             SubTool::Eyedrop(_) | SubTool::EyedropSize(_) => Tool::Eyedrop,
+            SubTool::Ruler(_) => Tool::Ruler,
             SubTool::Pan(_) => Tool::Pan,
         }
     }
@@ -1088,6 +1187,7 @@ impl SubTool {
             SubTool::EyedropSize(3) => "3 × 3",
             SubTool::EyedropSize(5) => "5 × 5",
             SubTool::EyedropSize(_) => "1 × 1 (one pixel)",
+            SubTool::Ruler(k) => k.label(),
             SubTool::Pan(PanMode::Hand) => "Hand",
             SubTool::Pan(PanMode::Rotate) => "Rotate",
         }
@@ -1111,6 +1211,7 @@ impl SubTool {
             SubTool::Figure(_) => "Sub Tool ▸ Figure",
             SubTool::Gradient(_) => "Sub Tool ▸ Gradient",
             SubTool::Eyedrop(_) | SubTool::EyedropSize(_) => "Sub Tool ▸ Eyedropper",
+            SubTool::Ruler(_) => "Sub Tool ▸ Ruler",
             SubTool::Pan(_) => "Sub Tool ▸ Move",
         }
     }

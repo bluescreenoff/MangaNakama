@@ -450,90 +450,69 @@ pub(super) fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 }
             });
             ui.menu_button("Ruler", |ui| {
-                if item(ui, "Straight line…", "") {
-                    app.push_cmd(AppCmd::RulerArm(crate::cmd::RulerKind::Line));
-                    ui.close();
-                }
-                if item(ui, "Vanishing point…", "") {
-                    app.push_cmd(AppCmd::RulerArm(crate::cmd::RulerKind::VanishingPoint));
-                    ui.close();
-                }
-                if item(ui, "Perspective (1-point)…", "") {
-                    app.push_cmd(AppCmd::RulerArm(crate::cmd::RulerKind::Perspective1));
-                    ui.close();
-                }
-                if item(ui, "Perspective (2-point)…", "") {
-                    app.push_cmd(AppCmd::RulerArm(crate::cmd::RulerKind::Perspective));
-                    ui.close();
-                }
-                if item(ui, "Perspective (3-point)…", "") {
-                    app.push_cmd(AppCmd::RulerArm(crate::cmd::RulerKind::Perspective3));
-                    ui.close();
-                }
-                if item(ui, "Curve…", "") {
-                    app.push_cmd(AppCmd::RulerArm(crate::cmd::RulerKind::Curve));
-                    ui.close();
-                }
-                ui.separator();
-                if item(ui, "Parallel line…", "") {
-                    app.push_cmd(AppCmd::RulerArm(crate::cmd::RulerKind::Parallel));
-                    ui.close();
-                }
-                // CSP's Special ruler order: parallel line, radial line,
-                // concentric circle. Radial is a CLICK (the centre is the
-                // whole ruler); concentric is a click for free rings, a
-                // drag to set a spacing.
-                if item(ui, "Radial line…", "") {
-                    app.push_cmd(AppCmd::RulerArm(crate::cmd::RulerKind::Radial));
-                    ui.close();
-                }
-                if item(ui, "Concentric circles…", "") {
-                    app.push_cmd(AppCmd::RulerArm(crate::cmd::RulerKind::Concentric));
-                    ui.close();
-                }
-                // The ring spacing, cyclable after the fact — shown only
-                // once a concentric ruler exists, since unlike the
-                // symmetry count it is not also a creation default.
-                if let Some(dr) = app.doc.rulers.items.iter().rev().find_map(|r| match r {
-                    mn_core::Ruler::Concentric { dr, .. } => Some(*dr),
-                    _ => None,
-                }) {
-                    let spacing = if dr <= 0.0 {
-                        "free".to_string()
-                    } else {
-                        format!("{dr:.0} px")
-                    };
-                    if item(ui, &format!("Ring spacing: {spacing} (cycle)"), "") {
-                        app.push_cmd(AppCmd::RulerRingSpacing);
+                // The twelve creation rows are the Ruler TOOL's twelve sub
+                // tools (2026-09-05), so the menu walks `RulerKind::ALL`
+                // rather than a hand-typed copy of it: the menu, the Sub
+                // Tool list and a `keys.json` target now offer the same
+                // rows, in the same order, under the same names. Each row
+                // still pushes `RulerArm`, which selects the tool with that
+                // row lit — so this menu is a shortcut into the tool, not a
+                // second way of doing the same thing.
+                use crate::cmd::RulerKind;
+                for &k in RulerKind::ALL {
+                    // The three blocks CSP separates: ordinary rulers, the
+                    // special (continuum) ones, then the perspective sets;
+                    // the guides sit apart at the end.
+                    if matches!(
+                        k,
+                        RulerKind::Parallel | RulerKind::VanishingPoint | RulerKind::GuideH
+                    ) {
+                        ui.separator();
+                    }
+                    if item(ui, &format!("{}…", k.label()), "") {
+                        app.push_cmd(AppCmd::RulerArm(k));
                         ui.close();
                     }
-                }
-                if item(ui, "Symmetrical…", "") {
-                    app.push_cmd(AppCmd::RulerArm(crate::cmd::RulerKind::Symmetric));
-                    ui.close();
-                }
-                let sym = app
-                    .doc
-                    .rulers
-                    .items
-                    .iter()
-                    .rev()
-                    .find_map(|r| match r {
-                        mn_core::Ruler::Symmetric { lines, .. } => Some(*lines),
-                        _ => None,
-                    })
-                    .unwrap_or(app.symmetric_lines);
-                if item(ui, &format!("Symmetry lines: {sym} (cycle)"), "") {
-                    app.push_cmd(AppCmd::RulerSymmetricCount);
-                    ui.close();
-                }
-                if item(ui, "Guide (horizontal)…", "") {
-                    app.push_cmd(AppCmd::RulerArm(crate::cmd::RulerKind::GuideH));
-                    ui.close();
-                }
-                if item(ui, "Guide (vertical)…", "") {
-                    app.push_cmd(AppCmd::RulerArm(crate::cmd::RulerKind::GuideV));
-                    ui.close();
+                    // The two ladders sit under the row they re-count. Both
+                    // also live in the Ruler tool's Tool Property now; they
+                    // stay here because they act on the rulers ALREADY on
+                    // the page, which is a menu job as much as a tool one.
+                    if k == RulerKind::Concentric {
+                        // Shown only once a concentric ruler exists, since
+                        // unlike the symmetry count it is not also a
+                        // creation default.
+                        if let Some(dr) = app.doc.rulers.items.iter().rev().find_map(|r| match r {
+                            mn_core::Ruler::Concentric { dr, .. } => Some(*dr),
+                            _ => None,
+                        }) {
+                            let spacing = if dr <= 0.0 {
+                                "free".to_string()
+                            } else {
+                                format!("{dr:.0} px")
+                            };
+                            if item(ui, &format!("Ring spacing: {spacing} (cycle)"), "") {
+                                app.push_cmd(AppCmd::RulerRingSpacing);
+                                ui.close();
+                            }
+                        }
+                    }
+                    if k == RulerKind::Symmetric {
+                        let sym = app
+                            .doc
+                            .rulers
+                            .items
+                            .iter()
+                            .rev()
+                            .find_map(|r| match r {
+                                mn_core::Ruler::Symmetric { lines, .. } => Some(*lines),
+                                _ => None,
+                            })
+                            .unwrap_or(app.symmetric_lines);
+                        if item(ui, &format!("Symmetry lines: {sym} (cycle)"), "") {
+                            app.push_cmd(AppCmd::RulerSymmetricCount);
+                            ui.close();
+                        }
+                    }
                 }
                 ui.separator();
                 let attached = app.doc.rulers.attached_count();

@@ -339,3 +339,67 @@ fn shift_snaps_a_ruler_creation_drag_to_45_degrees() {
     };
     assert!((b[1] - a[1] - 35.0).abs() < 2.0, "{a:?} -> {b:?}");
 }
+
+/// Item C (2026-09-05): the Ruler is a TOOL now — "Ruler doesn't seem to be
+/// a tool in the tool box for some reason, how come?" Selecting the row the
+/// way a `keys.json` target or a Sub Tool click does and then dragging must
+/// build exactly the ruler the menu built, undo step and all. And a tool
+/// stays in your hand: the SECOND drag builds a second ruler with no second
+/// arming, which is the difference between a tool and a menu pick.
+#[test]
+fn the_ruler_tool_drag_creates_a_line_ruler() {
+    use crate::cmd::{SubTool, Tool};
+    use crate::subtools::{SubToolPath, Target};
+    let Some(mut app) = super::new_document_tests::headless() else {
+        return;
+    };
+    app.viewport.zoom = 1.0;
+    let steps = app.doc.undo_len();
+
+    // The shortcut path, end to end: a target names the row, `press` queues
+    // the command, the queue runs it.
+    crate::subtools::press(
+        &mut app,
+        &[Target::SubTool(SubToolPath::of(SubTool::Ruler(
+            RulerKind::Line,
+        )))],
+    );
+    while let Some(c) = app.cmds.pop_front() {
+        dispatch(&mut app, c);
+    }
+    assert_eq!(app.tool, Tool::Ruler, "the row picked its tool");
+    assert_eq!(app.ruler_mode, RulerKind::Line);
+    assert_eq!(
+        app.ruler_arm(),
+        Some(RulerKind::Line),
+        "holding the tool IS the arming"
+    );
+
+    let drag = |app: &mut App, a: [f32; 2], b: [f32; 2]| {
+        let (x0, y0) = app.viewport.to_screen(a[0], a[1]);
+        let (x1, y1) = app.viewport.to_screen(b[0], b[1]);
+        app.canvas_down(x0, y0, PointerKind::Mouse, &NONE);
+        app.canvas_up(x1, y1, &NONE);
+    };
+    drag(&mut app, [100.0, 200.0], [400.0, 200.0]);
+    assert_eq!(app.doc.rulers.items.len(), 1, "the drag made one ruler");
+    assert!(anchors_near(
+        &app.doc.rulers.items[0],
+        &[[100.0, 200.0], [400.0, 200.0]]
+    ));
+    assert_eq!(app.doc.undo_len(), steps + 1, "one step, like the menu's");
+    assert_eq!(app.doc.undo_labels().last().unwrap(), "Add ruler");
+
+    // Still armed: a tool does not spend itself on one gesture.
+    drag(&mut app, [100.0, 300.0], [400.0, 300.0]);
+    assert_eq!(app.doc.rulers.items.len(), 2, "the tool stays in your hand");
+
+    // And leaving the tool disarms it — a pen stroke after this must ink,
+    // not build a third ruler.
+    dispatch(&mut app, AppCmd::SetTool(Tool::Pen));
+    assert_eq!(app.ruler_arm(), None, "the pen builds no rulers");
+
+    dispatch(&mut app, AppCmd::Undo);
+    dispatch(&mut app, AppCmd::Undo);
+    assert!(app.doc.rulers.items.is_empty(), "both drags take back");
+}

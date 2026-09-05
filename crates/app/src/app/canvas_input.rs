@@ -677,11 +677,12 @@ impl App {
             return;
         }
         // TODO #3: an armed ruler creation owns the next drag — CSP's
-        // Layer ▸ Ruler ▸ …-then-draw flow. No tool switch, no painting.
-        if self.ruler_pending.is_some() {
+        // Layer ▸ Ruler ▸ …-then-draw flow, and since 2026-09-05 the Ruler
+        // TOOL's ordinary drag as well ([`App::ruler_arm`]). No painting.
+        if let Some(arm) = self.ruler_arm() {
             let (cx, cy) = self.viewport.to_canvas(x, y);
             // Curve (part 2): click vertices; a double-click closes.
-            if self.ruler_pending == Some(RulerKind::Curve) {
+            if arm == RulerKind::Curve {
                 if clicks >= 2 {
                     self.finish_curve_ruler();
                     return;
@@ -1188,7 +1189,10 @@ impl App {
                 let shift = self.shell.sync_modifiers().shift;
                 self.text_tool_down(cx, cy, shift, clicks);
             }
-            Tool::Pan => unreachable!("handled above"),
+            // Both handled above: Pan by the space/hand branch, Ruler by
+            // the armed-creation branch — holding the tool IS the arming
+            // (`App::ruler_arm`), so the press never reaches this match.
+            Tool::Pan | Tool::Ruler => unreachable!("handled above"),
         }
         self.needs_redraw = true;
     }
@@ -3797,8 +3801,12 @@ impl App {
         // KB-022: the temporary grab releases; the drag finishers below
         // run through their tool-independent paths.
         self.temp_object = false;
-        // TODO #3: complete an armed ruler creation.
-        if let (Some(kind), Some(a)) = (self.ruler_pending.take(), self.ruler_drag.take()) {
+        // TODO #3: complete an armed ruler creation. The MENU's arming is
+        // spent here (one pick, one ruler); the TOOL's is not — a tool
+        // stays in your hand, so the next drag builds another ruler, which
+        // is what CSP's 定規 tool does.
+        if let (Some(kind), Some(a)) = (self.ruler_arm(), self.ruler_drag.take()) {
+            self.ruler_pending = None;
             let (cx, cy) = self.viewport.to_canvas(x, y);
             let mut b = [cx, cy];
             // CSP: "Hold Shift while dragging to draw a straight line ruler
@@ -4727,6 +4735,22 @@ impl ObjRef {
 }
 
 impl App {
+    /// What the next canvas gesture BUILDS, if it builds a ruler at all —
+    /// the one reading of "a ruler is armed", so the press and the release
+    /// can never disagree about it.
+    ///
+    /// Two ways in, and the tool wins because it is the one you can see:
+    /// holding `Tool::Ruler` arms its own sub tool (`ruler_mode`) for as
+    /// long as you hold it, while a Layer ▸ Ruler menu pick or a Ctrl+K row
+    /// leaves the ONE-SHOT `ruler_pending` behind — spent by the first
+    /// release, so a menu pick cannot silently eat the drag after it.
+    pub fn ruler_arm(&self) -> Option<RulerKind> {
+        if self.tool == Tool::Ruler {
+            return Some(self.ruler_mode);
+        }
+        self.ruler_pending
+    }
+
     /// Rulers part 2: close the in-progress curve ruler (Enter or
     /// double-click). Fewer than 2 vertices is discarded.
     pub fn finish_curve_ruler(&mut self) {

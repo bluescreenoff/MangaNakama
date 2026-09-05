@@ -16,7 +16,7 @@ use super::widgets::icon_btn;
 /// icon"): CSP files 選択ペン / 選択消し as SUB tools of the Selection tool
 /// with a fixed create-type, and so do we — they live in `ui/subtool.rs`'s
 /// Selection list, reachable there, from Ctrl+K, and from the `,`/`.` cycle.
-pub(super) const STRIP_TOOLS: [(Tool, Icon); 15] = [
+pub(super) const STRIP_TOOLS: [(Tool, Icon); 16] = [
     (Tool::Pen, Icon::Pen),
     (Tool::Eraser, Icon::Eraser),
     (Tool::Figure, Icon::Figure),
@@ -31,6 +31,10 @@ pub(super) const STRIP_TOOLS: [(Tool, Icon); 15] = [
     (Tool::Balloon, Icon::Balloon),
     (Tool::Text, Icon::Text),
     (Tool::Eyedrop, Icon::Eyedrop),
+    // CSP's strip ends … Text, Frame border, Correct line, Balloon, Ruler:
+    // the ruler is the last of the "things you build on the page" before
+    // the view tools, and that is where it sits here too.
+    (Tool::Ruler, Icon::Ruler),
     (Tool::Pan, Icon::Pan),
 ];
 
@@ -55,6 +59,10 @@ fn tool_key(t: Tool) -> &'static str {
         Tool::Balloon => "T",
         Tool::Text => "T",
         Tool::Eyedrop => "I",
+        // No key YET: the third step of the owner's U cycle (Figure →
+        // Frame border → Ruler) goes into `main.rs`'s table, which this
+        // lane does not own. Put "U" here the day it lands.
+        Tool::Ruler => "",
         Tool::Pan => "H/R",
     }
 }
@@ -62,7 +70,7 @@ fn tool_key(t: Tool) -> &'static str {
 /// Tool families, in `STRIP_TOOLS` order: draw+erase+fill, selection,
 /// objects+utility. CSP separates its tool palette into exactly three such
 /// blocks (`csp/150_tools_0002.png`, the numbered orange boxes).
-const GROUPS: [usize; 3] = [7, 2, 6];
+const GROUPS: [usize; 3] = [7, 2, 7];
 
 /// Icon cell. CSP's cell metric is ~34 px including its padding; ours is the
 /// icon square plus [`GAP`], which lands in the same place.

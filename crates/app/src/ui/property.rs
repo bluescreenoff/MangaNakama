@@ -291,6 +291,7 @@ fn context_title(app: &App) -> String {
 mod frames_balloons;
 mod gradient;
 mod pen;
+mod rulers;
 mod select;
 mod text;
 mod tone;
@@ -298,6 +299,7 @@ mod tone;
 pub(crate) use frames_balloons::*;
 pub(crate) use gradient::*;
 pub(crate) use pen::*;
+pub(crate) use rulers::*;
 pub(crate) use select::*;
 pub(crate) use text::*;
 pub(crate) use tone::*;
@@ -612,6 +614,23 @@ fn prop_sections_for_tool(app: &App) -> Vec<Section> {
             title: "Guide",
             body: sec_pan,
         }],
+        Tool::Ruler => vec![
+            Section {
+                id: "ruler.tool",
+                title: "Create ruler",
+                body: sec_ruler_tool,
+            },
+            Section {
+                id: "ruler.snap",
+                title: "Snapping",
+                body: sec_ruler_snap,
+            },
+            Section {
+                id: "ruler.guide",
+                title: "Guide",
+                body: sec_ruler_guide,
+            },
+        ],
         Tool::Figure => vec![
             Section {
                 id: "figure.brush",

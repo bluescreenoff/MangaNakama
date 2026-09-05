@@ -54,6 +54,8 @@ pub mod group {
     pub const GRADIENT: &str = "Gradient";
     pub const EYEDROPPER: &str = "Eyedropper";
     pub const AVERAGE_COLOR: &str = "Average color";
+    /// The Ruler tool's one tab — CSP's 定規作成 group caption.
+    pub const CREATE_RULER: &str = "Create ruler";
     pub const MOVE: &str = "Move";
 }
 
@@ -85,6 +87,7 @@ pub fn group_of(s: SubTool) -> &'static str {
         SubTool::Gradient(_) => group::GRADIENT,
         SubTool::Eyedrop(_) => group::EYEDROPPER,
         SubTool::EyedropSize(_) => group::AVERAGE_COLOR,
+        SubTool::Ruler(_) => group::CREATE_RULER,
         SubTool::Pan(_) => group::MOVE,
     }
 }
@@ -216,6 +219,15 @@ pub fn is_current(app: &App, s: SubTool) -> bool {
         SubTool::Gradient(m) => app.grad_mode == m,
         SubTool::Eyedrop(r) => app.eyedrop_opts.refer == r,
         SubTool::EyedropSize(n) => app.eyedrop_opts.size == n,
+        // The ONE row kind that also asks which tool is in hand, and the
+        // exception is deliberate: a ruler row is not a setting you carry
+        // around, it is an ARMED gesture — `ruler_mode` decides what the
+        // next canvas drag BUILDS, and only while the Ruler tool holds the
+        // canvas. Saying "you are standing on Curve" with the pen in hand
+        // would arm a cycle step that does nothing. The ui.txt memory is
+        // unaffected: `note_memory` snapshots every frame, so the row is
+        // written down while the tool IS in hand and merges from there.
+        SubTool::Ruler(k) => app.tool == Tool::Ruler && app.ruler_mode == k,
         SubTool::Pan(m) => app.pan_mode == m,
     }
 }
@@ -281,6 +293,15 @@ pub fn apply_state(app: &mut App, s: SubTool) {
         }
         SubTool::Eyedrop(r) => app.eyedrop_opts.refer = r,
         SubTool::EyedropSize(n) => app.eyedrop_opts.size = n,
+        SubTool::Ruler(k) => {
+            app.ruler_mode = k;
+            // A half-clicked curve ruler belongs to the row that started
+            // it (the figure/gradient rule) — and its vertices are read
+            // back by the kind that is armed NOW, so leaving them would
+            // finish a curve you switched away from.
+            app.curve_pending = None;
+            app.ruler_drag = None;
+        }
         SubTool::Pan(m) => app.pan_mode = m,
     }
 }
@@ -584,6 +605,20 @@ mod tests {
         );
         // The selection pen pair is listed under Selection, not on its own.
         assert_eq!(names(Tool::Select), vec![group::SELECTION]);
+        // The Ruler tool is ONE tab of twelve rows, and the tab is
+        // `RulerKind::ALL` in order: the `SubTool::ALL` block is spelled
+        // out by hand (a const cannot map a slice), so this is the pin
+        // that keeps the two from drifting a row apart.
+        assert_eq!(names(Tool::Ruler), vec![group::CREATE_RULER]);
+        assert_eq!(
+            rows(Tool::Ruler, group::CREATE_RULER),
+            crate::cmd::RulerKind::ALL
+                .iter()
+                .map(|&k| SubTool::Ruler(k))
+                .collect::<Vec<_>>()
+                .as_slice(),
+            "every ruler kind is a row, in RulerKind::ALL's order"
+        );
         assert_eq!(
             groups_of(Tool::SelPen).as_ptr(),
             groups_of(Tool::Select).as_ptr(),
@@ -591,6 +626,50 @@ mod tests {
         );
         assert!(groups_of(Tool::Pen).is_empty(), "brush presets are files");
         assert!(groups_of(Tool::Liquify).is_empty(), "modes are properties");
+    }
+
+    /// The CODE-MAP's fourth place for a ruler row: `is_current` is the
+    /// reverse of `apply_state`, so picking a row makes that row — and only
+    /// that row — report that you are standing on it. Miss this arm and the
+    /// U cycle silently restarts from the top on every press.
+    #[test]
+    fn a_ruler_row_reports_current() {
+        use crate::cmd::RulerKind;
+        let Some(mut app) = headless() else { return };
+        let row = SubTool::Ruler(RulerKind::Curve);
+        dispatch(&mut app, AppCmd::SetSubTool(row));
+        assert_eq!(app.tool, Tool::Ruler, "the row picks its tool");
+        assert_eq!(app.ruler_mode, RulerKind::Curve);
+        for &k in RulerKind::ALL {
+            assert_eq!(
+                is_current(&app, SubTool::Ruler(k)),
+                k == RulerKind::Curve,
+                "{k:?}"
+            );
+        }
+        assert!(is_lit(&app, row), "and the palette lights it");
+        // A ruler row is an ARMED gesture, not a carried setting: with
+        // another tool in hand no row is current, so a cycle step aimed at
+        // one is honestly "not where you are".
+        dispatch(&mut app, AppCmd::SetTool(Tool::Pen));
+        assert!(
+            !RulerKind::ALL
+                .iter()
+                .any(|&k| is_current(&app, SubTool::Ruler(k))),
+            "no ruler row is current with the pen in hand"
+        );
+        assert_eq!(app.ruler_mode, RulerKind::Curve, "but the mode is kept");
+        // The three spellings a keys.json row may use, all reaching the
+        // registry with no keymap change (C5).
+        assert_eq!(parse_target("tool: Ruler"), Ok(Target::Tool(Tool::Ruler)));
+        assert_eq!(
+            parse_target("tool: Ruler / Create ruler"),
+            Ok(Target::Group(Tool::Ruler, group::CREATE_RULER))
+        );
+        assert_eq!(
+            parse_target("tool: Ruler / Create ruler / Curve"),
+            Ok(Target::SubTool(SubToolPath::of(row)))
+        );
     }
 
     /// The three target kinds, each resolving through one more level of

@@ -892,34 +892,17 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                 app.mark_dirty();
             }
         }
+        // "Arm a ruler" IS "pick the Ruler tool's sub tool" since the tool
+        // exists (2026-09-05). The menu, the Ctrl+K palette and a keys.json
+        // command binding all still say `RulerArm`, and all three now land
+        // you on the tool with that row lit — one code path, so the tool
+        // and the menu can never build different rulers from one gesture.
+        // `ruler_pending` rides along for the ONE-SHOT reading (a menu pick
+        // is armed even after the tool moves on).
         AppCmd::RulerArm(kind) => {
+            dispatch(app, AppCmd::SetSubTool(SubTool::Ruler(kind)));
             app.ruler_pending = Some(kind);
-            app.set_status(match kind {
-                RulerKind::Line => "drag on the canvas to draw a line ruler",
-                RulerKind::VanishingPoint => "drag from the vanishing point to set its first ray",
-                RulerKind::Perspective => {
-                    "drag the eye level — both ends become vanishing points; strokes aim at either VP or run vertical"
-                }
-                RulerKind::Perspective1 => {
-                    "drag from the vanishing point along the eye level; strokes aim at it, or run along/across the horizon"
-                }
-                RulerKind::Perspective3 => {
-                    "drag the eye level — a third vanishing point lands on the side you dragged toward; drag it where you want it"
-                }
-                RulerKind::Curve => "click the curve's corners — double-click (or Enter) to finish",
-                RulerKind::Parallel => "drag the direction — every stroke comes out parallel to it",
-                RulerKind::Radial => {
-                    "click where the focus lines converge — every stroke then runs through it"
-                }
-                RulerKind::Concentric => {
-                    "click for free rings, or drag from the centre to set a ring spacing"
-                }
-                RulerKind::Symmetric => {
-                    "drag from the symmetry centre outward — the drag sets the first axis"
-                }
-                RulerKind::GuideH => "click where the horizontal guide goes",
-                RulerKind::GuideV => "click where the vertical guide goes",
-            });
+            app.set_status(kind.hint());
         }
         AppCmd::RulerSnapToggle => {
             app.doc.rulers.on = !app.doc.rulers.on;

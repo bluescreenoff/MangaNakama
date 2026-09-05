@@ -90,6 +90,9 @@ pub enum Icon {
     /// Liquify (CSP 液化): two straight rails with a warped line
     /// between them — the grid-bend read of a warp tool.
     Liquify,
+    /// Ruler tool (CSP 定規): a straight-edge lying at 45° with its
+    /// graduations along the working edge.
+    Ruler,
     Pan,
     Undo,
     Redo,
@@ -287,6 +290,9 @@ impl Icon {
             | Self::SmartShape
             | Self::Gradient
             | Self::Liquify
+            // The graduations are the accent: a ruler is furniture the ink
+            // runs along, so it belongs with the marks it makes.
+            | Self::Ruler
             | Self::Tone
             | Self::StreamLines
             | Self::FocusLines
@@ -548,6 +554,19 @@ pub fn paint_role(p: &Painter, r: Rect, icon: Icon, base: Color32, accent: Optio
             // The koma divisions are what this tool draws.
             p.line(poly(r, &[(0.12, 0.48), (0.88, 0.48)]), a_thin);
             p.line(poly(r, &[(0.54, 0.14), (0.54, 0.48)]), a_thin);
+        }
+        Icon::Ruler => {
+            // A straight-edge lying at 45°, graduations along the edge the
+            // ink runs on — the one shape that reads as "ruler" at 22 px
+            // without borrowing the Figure tool's bare line.
+            p.add(Shape::convex_polygon(
+                poly(r, &[(0.08, 0.72), (0.70, 0.10), (0.92, 0.32), (0.30, 0.94)]),
+                Color32::TRANSPARENT,
+                line,
+            ));
+            for (x, y) in [(0.235, 0.565), (0.390, 0.410), (0.545, 0.255)] {
+                p.line(poly(r, &[(x, y), (x + 0.085, y + 0.085)]), a_thin);
+            }
         }
         Icon::Text => {
             // Capital A over a baseline — the classic text-tool glyph.

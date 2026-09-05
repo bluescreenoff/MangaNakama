@@ -846,7 +846,16 @@ pub struct App {
     /// arms the next canvas drag). The set itself lives on the document
     /// (`app.doc.rulers`) so ruler edits ride the document's one undo
     /// history; this is the arming state of a menu, which does not.
+    ///
+    /// Since the Ruler TOOL exists (2026-09-05) this is the one-shot half
+    /// only: `App::ruler_arm` answers the tool's own `ruler_mode` whenever
+    /// the Ruler tool is in hand, and this field carries the arming a menu
+    /// pick leaves behind. Read `ruler_arm()`, never this field.
     pub ruler_pending: Option<RulerKind>,
+    /// The Ruler tool's remembered sub tool — the kind the next canvas
+    /// gesture builds while `Tool::Ruler` is in hand. Every other tool
+    /// keeps its mode in exactly this shape (`frame_mode`, `balloon_mode`).
+    pub ruler_mode: RulerKind,
 
     /// Default line count for the next symmetric ruler (RL-021); existing
     /// ones are re-counted through the menu ladder.
@@ -1901,6 +1910,7 @@ impl App {
             refs: crate::ui::refs::RefBank::from_layout(&layout.references),
             fit_sticky: false,
             ruler_pending: None,
+            ruler_mode: RulerKind::Line,
             symmetric_lines: 2,
             ruler_drag: None,
             ruler_move: None,
@@ -4576,6 +4586,13 @@ impl App {
                         self.set_status(m.label());
                     }
                     SubTool::Pan(m) => self.pan_mode = m,
+                    // The armed ruler kind, and the half-clicked curve
+                    // that belonged to the row you just stepped off.
+                    SubTool::Ruler(k) => {
+                        self.ruler_mode = k;
+                        self.curve_pending = None;
+                        self.ruler_drag = None;
+                    }
                     // Text's one-row walk steps onto itself — the same
                     // nothing the old arm did. The eyedropper's size row
                     // is filtered out of its walk and never lands here.

@@ -631,6 +631,28 @@ fn mode_sub_tools(ui: &mut egui::Ui, app: &mut App) {
             // The seven modes live in Tool Property, one flat radio list
             // — no sub-tool shapes to mirror here.
         }
+        Tool::Ruler => {
+            // Straight from the registry, like the Average color rows: the
+            // palette, Ctrl+K and a `keys.json` target all reach the same
+            // twelve rows by the same names, and adding a ruler kind is one
+            // `RulerKind::ALL` entry rather than twelve lines of list code.
+            group_caption(ui, group::CREATE_RULER);
+            let mut pick = None;
+            for &s in crate::subtools::rows(Tool::Ruler, group::CREATE_RULER) {
+                let crate::cmd::SubTool::Ruler(k) = s else {
+                    continue;
+                };
+                if mode_row(ui, crate::subtools::is_lit(app, s), Icon::Ruler, s.label())
+                    .on_hover_text(k.hint())
+                    .clicked()
+                {
+                    pick = Some(s);
+                }
+            }
+            if let Some(s) = pick {
+                app.push_cmd(AppCmd::SetSubTool(s));
+            }
+        }
         Tool::Pan => {
             group_caption(ui, group::MOVE);
             if mode_row(ui, app.pan_mode == PanMode::Hand, Icon::Pan, "Hand").clicked() {
