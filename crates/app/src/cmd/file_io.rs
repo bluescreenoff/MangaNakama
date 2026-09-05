@@ -1,7 +1,31 @@
 //! `AppCmd` arms: print, and every path-taking open/save/export
 //! (`.ora`, `.mnc`, `.psd`, `.png`, text dumps) plus autosave.
+//!
+//! **Item K (2026-09-05): every save here is now two halves.** The ENCODE
+//! (document → bytes) stays on this thread, because it reads the live layers.
+//! The WRITE (bytes → disk) goes to `cmd::save_bg`'s one background thread,
+//! because it does not — and because it was the half that held the Windows
+//! message pump long enough for the OS to paint "not responding" over the
+//! window. See `save_bg.rs` for the queue, the pill and the poll.
+//!
+//! The bookkeeping (`mark_saved`, `set_doc_path`, per-page `saved_rev`) runs
+//! HERE, optimistically, the moment the bytes are handed over.
+//! `save_bg::poll_saves` takes it back if the write fails.
 
 use super::*;
+
+use crate::cmd::save_bg;
+
+/// Encode any seekable-sink writer into bytes on this thread. Every save door
+/// below funnels through this so there is exactly one place that decides what
+/// "encoded" means.
+fn to_bytes(
+    write: impl FnOnce(&mut std::io::Cursor<Vec<u8>>) -> Result<(), mn_core::ora::OraError>,
+) -> Result<Vec<u8>, String> {
+    let mut buf = std::io::Cursor::new(Vec::new());
+    write(&mut buf).map_err(|e| e.to_string())?;
+    Ok(buf.into_inner())
+}
 
 pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
     match cmd {
@@ -250,12 +274,33 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                 .file_name()
                 .is_some_and(|n| n.eq_ignore_ascii_case("work.mnc"));
             if is_work_index {
-                match app.save_work_folder(&p) {
-                    Ok(msg) => {
+                // The encode + the bookkeeping run here; only the disk write
+                // crosses to the writer thread (item K). `folder_page_ids`
+                // answers the one question the write used to answer — which
+                // id each page got — so the bookkeeping does not have to wait
+                // for it.
+                let label = p.display().to_string();
+                let queued = app.save_work_folder_via(&p, |wf, dir, managed| {
+                    let ids = save_bg::folder_page_ids(&wf);
+                    save_bg::submit(
+                        label,
+                        true,
+                        save_bg::Write::Folder {
+                            wf: Box::new(wf),
+                            dir: dir.to_path_buf(),
+                            managed: managed.to_vec(),
+                        },
+                    );
+                    Ok((ids, 0))
+                });
+                match queued {
+                    Ok(_) => {
                         app.set_doc_path(Some(p.clone()));
                         app.mark_saved();
                         app.note_recent(&p);
-                        app.set_status(msg);
+                        // The real "saved …" line arrives from the writer
+                        // thread through `save_bg::poll_saves`.
+                        app.set_status(format!("saving {}…", p.display()));
                     }
                     Err(e) => app.set_error(format!("save failed: {e}")),
                 }
@@ -289,15 +334,23 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                                 .collect();
                             // The active page keeps living in `doc`, not in bytes.
                             app.pages[app.page_index].bytes = None;
-                            match mn_core::project::save(&proj, &p) {
-                                Ok(()) => {
+                            let n = proj.pages.len();
+                            match to_bytes(|w| mn_core::project::save_to(&proj, w)) {
+                                Ok(bytes) => {
+                                    save_bg::submit(
+                                        p.display().to_string(),
+                                        true,
+                                        save_bg::Write::File {
+                                            path: p.clone(),
+                                            bytes,
+                                        },
+                                    );
                                     app.set_doc_path(Some(p.clone()));
                                     app.mark_saved();
                                     app.note_recent(&p);
                                     app.set_status(format!(
-                                        "saved {} ({} pages)",
-                                        p.display(),
-                                        proj.pages.len()
+                                        "saving {} ({n} pages)…",
+                                        p.display()
                                     ));
                                 }
                                 Err(e) => app.set_error(format!("save failed: {e}")),
@@ -308,18 +361,26 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                     // S03: a bare `.ora` has no page setup to reopen with,
                     // so the dpi rides the image element instead.
                     app.stamp_doc_dpi();
-                    match mn_core::ora::save(&app.doc, &p) {
-                        Ok(()) => {
+                    match mn_core::project::doc_to_bytes(&app.doc) {
+                        Ok(bytes) => {
+                            save_bg::submit(
+                                p.display().to_string(),
+                                true,
+                                save_bg::Write::File {
+                                    path: p.clone(),
+                                    bytes,
+                                },
+                            );
                             app.set_doc_path(Some(p.clone()));
                             app.mark_saved();
                             app.note_recent(&p);
                             if app.is_comic() {
                                 app.set_status(format!(
-                                    "saved CURRENT PAGE ONLY to {} — use .mnc for the whole comic",
+                                    "saving CURRENT PAGE ONLY to {} — use .mnc for the whole comic",
                                     p.display()
                                 ));
                             } else {
-                                app.set_status(format!("saved {}", p.display()));
+                                app.set_status(format!("saving {}…", p.display()));
                             }
                         }
                         Err(e) => app.set_error(format!("save failed: {e}")),
@@ -330,6 +391,10 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
             // (PR-040). Leaving it behind means a crash months later offers
             // work the user already replaced — the one way a recovery prompt
             // can do harm.
+            // Item K note: this now runs while the write is still in flight.
+            // That is safe — if the write fails, `save_bg::poll_saves` marks
+            // the work dirty again and the next autosave tick re-creates the
+            // shadow this line just removed.
             if app.doc_path.as_deref() == Some(p.as_path()) && !app.dirty() {
                 crate::recovery::clear_sibling_autosave(&p);
                 // This document has a real file now, so its never-saved
@@ -365,12 +430,22 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                         .collect();
                     // The active page keeps living in `doc`, not in bytes.
                     app.pages[app.page_index].bytes = None;
-                    match mn_core::project::save(&proj, &p) {
-                        Ok(()) => app.set_status(format!(
-                            "exported single file {} ({} pages)",
-                            p.display(),
-                            proj.pages.len()
-                        )),
+                    let n = proj.pages.len();
+                    match to_bytes(|w| mn_core::project::save_to(&proj, w)) {
+                        Ok(bytes) => {
+                            save_bg::submit(
+                                p.display().to_string(),
+                                false,
+                                save_bg::Write::File {
+                                    path: p.clone(),
+                                    bytes,
+                                },
+                            );
+                            app.set_status(format!(
+                                "exporting single file {} ({n} pages)…",
+                                p.display()
+                            ));
+                        }
                         Err(e) => app.set_error(format!("export failed: {e}")),
                     }
                 }
@@ -395,16 +470,25 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
         }
         AppCmd::ExportPsdPath(p) => {
             app.refresh_tones();
-            let file = match std::fs::File::create(&p) {
-                Ok(f) => f,
-                Err(e) => return app.set_error(format!("psd export failed: {e}")),
-            };
-            match mn_core::psd::save_psd(&app.doc, std::io::BufWriter::new(file)) {
-                Ok(()) => app.set_status(format!(
-                    "exported layered PSD ({} layers) -> {}",
-                    app.doc.layers.len(),
-                    p.display()
-                )),
+            // Same two halves as the saves: build the PSD in memory here (it
+            // reads the layers), let the writer thread put it on disk.
+            let mut buf = std::io::Cursor::new(Vec::new());
+            match mn_core::psd::save_psd(&app.doc, &mut buf) {
+                Ok(()) => {
+                    save_bg::submit(
+                        p.display().to_string(),
+                        false,
+                        save_bg::Write::File {
+                            path: p.clone(),
+                            bytes: buf.into_inner(),
+                        },
+                    );
+                    app.set_status(format!(
+                        "exporting layered PSD ({} layers) -> {}",
+                        app.doc.layers.len(),
+                        p.display()
+                    ));
+                }
                 Err(e) => app.set_error(format!("psd export failed: {e}")),
             }
         }
@@ -451,9 +535,20 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                     mn_core::export::crop_marks(app.page.as_ref(), [0, 0, w, h], 1.0, (w, h));
                 mn_core::export::apply_crop_marks(&mut img, &marks);
             }
-            match img.save(&p) {
+            // PNG deflate happens here (it is CPU, and the image is already
+            // in memory); only the file write crosses to the writer thread.
+            let mut buf = std::io::Cursor::new(Vec::new());
+            match img.write_to(&mut buf, image::ImageFormat::Png) {
                 Ok(()) => {
-                    app.set_status(format!("exported {w}x{h} PNG -> {}", p.display()));
+                    save_bg::submit(
+                        p.display().to_string(),
+                        false,
+                        save_bg::Write::File {
+                            path: p.clone(),
+                            bytes: buf.into_inner(),
+                        },
+                    );
+                    app.set_status(format!("exporting {w}x{h} PNG -> {}", p.display()));
                     // This page's image just landed on disk, so the export
                     // reminder stops counting it (and starts counting the
                     // work at all, if this was its first export). After the
@@ -475,8 +570,13 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
 
             // Skip while clean or mid-stroke; never touches doc_path or the
             // dirty state (an autosave is not the user's save).
+            //
+            // Item K adds a third skip: while the writer thread still has a
+            // write in flight. An autosave is a tick, not a request — piling
+            // ticks up behind a slow disk would make every later save wait for
+            // work nobody asked for. The next tick catches what this one skips.
             let _ = parked;
-            if app.dirty() && !app.drawing() {
+            if app.dirty() && !app.drawing() && save_bg::queued() == 0 {
                 // Work-folder-backed works autosave IN PLACE, incrementally:
                 // each changed page lands atomically (tmp+rename), the index
                 // commits last. Nothing is rewritten for untouched pages —
@@ -490,8 +590,22 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                     })
                     .cloned();
                 if let Some(p) = folder_index {
-                    match app.save_work_folder(&p) {
-                        Ok(msg) => app.set_status(format!("autosave: {msg}")),
+                    let label = p.display().to_string();
+                    let queued = app.save_work_folder_via(&p, |wf, dir, managed| {
+                        let ids = save_bg::folder_page_ids(&wf);
+                        save_bg::submit(
+                            label,
+                            false,
+                            save_bg::Write::Folder {
+                                wf: Box::new(wf),
+                                dir: dir.to_path_buf(),
+                                managed: managed.to_vec(),
+                            },
+                        );
+                        Ok((ids, 0))
+                    });
+                    match queued {
+                        Ok(_) => app.set_status(format!("autosaving {}…", p.display())),
                         Err(e) => app.set_error(format!("autosave failed: {e}")),
                     }
                 } else if let Some(doc) = app.doc_path.clone() {
@@ -525,8 +639,18 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                         // literal here and a literal there is how a recovery
                         // feature ends up hunting for a file nothing writes.
                         let path = crate::recovery::sibling_autosave(&doc);
-                        match mn_core::project::save(&proj, &path) {
-                            Ok(()) => app.set_status(format!("autosaved -> {}", path.display())),
+                        match to_bytes(|w| mn_core::project::save_to(&proj, w)) {
+                            Ok(bytes) => {
+                                save_bg::submit(
+                                    path.display().to_string(),
+                                    false,
+                                    save_bg::Write::File {
+                                        path: path.clone(),
+                                        bytes,
+                                    },
+                                );
+                                app.set_status(format!("autosaving -> {}", path.display()));
+                            }
                             Err(e) => app.set_error(format!("autosave failed: {e}")),
                         }
                     }
@@ -536,8 +660,22 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                     // re-encode, instead of one monolithic zip built from
                     // every page on the UI thread every tick.
                     let index = crate::app::unsaved_autosave_folder_for(app.active_doc);
-                    match app.autosave_work_folder(&index) {
-                        Ok(msg) => app.set_status(format!("autosave: {msg}")),
+                    let label = index.display().to_string();
+                    let queued = app.autosave_work_folder_via(&index, |wf, dir| {
+                        let ids = save_bg::folder_page_ids(&wf);
+                        save_bg::submit(
+                            label,
+                            false,
+                            save_bg::Write::Folder {
+                                wf: Box::new(wf),
+                                dir: dir.to_path_buf(),
+                                managed: Vec::new(),
+                            },
+                        );
+                        Ok((ids, 0))
+                    });
+                    match queued {
+                        Ok(_) => app.set_status(format!("autosaving -> {}", index.display())),
                         Err(e) => app.set_error(format!("autosave failed: {e}")),
                     }
                 }
@@ -546,4 +684,118 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
         other => return layers::run(app, other, cmd_tail),
     }
     run_cmd_tail(app, cmd_tail);
+}
+
+/// The blocking-command timing table (item K's addendum, 2026-09-05). The
+/// owner reported Windows painting "not responding" over the window during
+/// saves, which is what happens when the message pump does not run for ~5 s.
+/// This measures every path in this file that writes or reads a whole work,
+/// on a three-page work, and prints one `[time]` line each. It asserts
+/// nothing about wall clock — a laptop under load has no stable budget —
+/// it exists so the numbers in the lane report can be re-measured.
+#[cfg(test)]
+mod blocking_time_tests {
+    use super::*;
+    use std::time::Instant;
+
+    fn ms(t: Instant) -> f64 {
+        t.elapsed().as_secs_f64() * 1000.0
+    }
+
+    /// A three-page work with real ink on every page, at a dpi that keeps
+    /// this test honest without asking a 15.8 GB laptop for a 600 dpi B4.
+    fn three_page_work(dpi: u32) -> Option<App> {
+        let mut app = App::new(crate::app::headless_renderer()?, (1280, 860), 1.0);
+        app.new_doc_draft.setup.dpi = dpi;
+        app.new_doc_draft.pages = 3;
+        app.new_doc_draft.story = "Timing".into();
+        dispatch(&mut app, AppCmd::NewComicCreate);
+        for p in 0..3 {
+            dispatch(&mut app, AppCmd::SelectPage(p));
+            let (w, h) = app.doc.size;
+            let li = app.doc.active;
+            for k in 0..400u32 {
+                let x = (w as f32 * 0.15 + k as f32 * 3.0) as i32;
+                let y = (h as f32 * 0.5 + (k as f32 * 0.11).sin() * 60.0) as i32;
+                for dy in -6..6 {
+                    for dx in -6..6 {
+                        let (px, py) = (x + dx, y + dy);
+                        if px >= 0 && py >= 0 && (px as u32) < w && (py as u32) < h {
+                            let t = app.doc.layers[li]
+                                .tile_mut(mn_core::tile::TileIdx::new(px / 64, py / 64));
+                            t.set_pixel((px % 64) as usize, (py % 64) as usize, [0, 0, 0, 32767]);
+                        }
+                    }
+                }
+            }
+            // Pixels written straight into the tiles do not advance the
+            // document revision, and the page stash skips a page whose
+            // revision has not moved — so without this the later `.mnc`
+            // doors would encode three EMPTY pages and time nothing.
+            app.doc.touch();
+            app.mark_pages_dirty();
+        }
+        dispatch(&mut app, AppCmd::SelectPage(0));
+        Some(app)
+    }
+
+    #[test]
+    fn every_blocking_file_command_is_timed() {
+        // 200 dpi B4 ≈ 1930×2730 px per page. The owner draws at 600 dpi,
+        // which is 9× the pixels — read every number below as "×9 for his
+        // page" (PNG deflate is close to linear in pixel count).
+        let Some(mut app) = three_page_work(200) else {
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("mn-lane5-time-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        println!(
+            "[time] page {:?} px, {} pages, {} layers",
+            app.doc.size,
+            app.pages.len(),
+            app.doc.layers.len()
+        );
+
+        let cases: Vec<(&str, AppCmd)> = vec![
+            ("SaveOraPath .ora (one page)", AppCmd::SaveOraPath(dir.join("t.ora"))),
+            ("SaveOraPath .mnc (single file)", AppCmd::SaveOraPath(dir.join("t.mnc"))),
+            (
+                "SaveOraPath work.mnc (work folder, first save)",
+                AppCmd::SaveOraPath(dir.join("wf").join("work.mnc")),
+            ),
+            (
+                "SaveOraPath work.mnc (work folder, re-save, nothing dirty)",
+                AppCmd::SaveOraPath(dir.join("wf").join("work.mnc")),
+            ),
+            ("ExportMncPath", AppCmd::ExportMncPath(dir.join("e.mnc"))),
+            ("ExportPngPath", AppCmd::ExportPngPath(dir.join("e.png"))),
+            ("ExportPsdPath", AppCmd::ExportPsdPath(dir.join("e.psd"))),
+            ("SaveDuplicatePath", AppCmd::SaveDuplicatePath(dir.join("dup.mnc"))),
+            ("ExportTextPath", AppCmd::ExportTextPath(dir.join("script.txt"))),
+            ("Autosave", AppCmd::Autosave),
+            ("OpenOraPath (.mnc, 3 pages)", AppCmd::OpenOraPath(dir.join("t.mnc"))),
+        ];
+        for (name, cmd) in cases {
+            let t = Instant::now();
+            dispatch(&mut app, cmd);
+            println!("[time] {name}: {:.0} ms — {}", ms(t), app.status);
+        }
+
+        // The SPLIT the fix rests on: of that total, how much is the encode
+        // (stays on the UI thread — it reads the live layers) and how much is
+        // the disk write (now on the writer thread)? Measured on the same
+        // work, through the same core calls the arms above use.
+        let t = Instant::now();
+        let one_page = mn_core::project::doc_to_bytes(&app.doc).expect("encode the page");
+        let enc = ms(t);
+        let t = Instant::now();
+        std::fs::write(dir.join("split.bin"), &one_page).expect("write the bytes");
+        println!(
+            "[time] SPLIT one page ({} KB): encode {enc:.0} ms (stays on the UI thread) + write {:.0} ms (now off it)",
+            one_page.len() / 1024,
+            ms(t)
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

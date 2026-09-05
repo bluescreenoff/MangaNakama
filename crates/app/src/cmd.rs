@@ -30,6 +30,9 @@ mod history;
 mod layers;
 mod misc;
 mod pages;
+/// The background save writer + the "Saving…" pill (item K, 2026-09-05).
+/// Public to the crate because `ui::build` polls it once a frame.
+pub(crate) mod save_bg;
 mod text;
 mod tools;
 mod transform;
@@ -1350,6 +1353,13 @@ fn run_cmd_tail(app: &mut App, cmd_tail: CmdTail) {
         clip_before,
         rec_step,
     } = cmd_tail;
+    // Item K: a background write that finished lands in the status line here
+    // as well as once per UI frame, so a headless driver (tests,
+    // `--e2e-workfolder`) still reads the real "saved …" line rather than the
+    // "saving …" one the save arm left behind. Draining an empty queue is a
+    // mutex lock and nothing else. Before `report_clip_changes`, so a clip
+    // report still wins the line.
+    save_bg::poll_saves(app);
     // The Pages palette follows the document (manga ⇒ present, plain image ⇒
     // closed) — after the command, so new/open/add/delete page all reconcile.
     app.sync_pages_palette();

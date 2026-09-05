@@ -69,6 +69,11 @@ use widgets::chrome_frame;
 use crate::app::App;
 
 pub fn build(ui: &mut egui::Ui, app: &mut App) {
+    // Item K: the background save writer reports here, once a frame — the
+    // only place in the app holding a `&mut App` on every frame. A save that
+    // failed on the writer thread becomes a status-line error here, and puts
+    // the work back to dirty.
+    crate::cmd::save_bg::poll_saves(app);
     // One brush preview generated per frame: startup trickles, never hitches.
     app.preview_budget = 1;
     // Same rule for the docking-2 page panes' display textures.
@@ -182,6 +187,10 @@ pub fn build(ui: &mut egui::Ui, app: &mut App) {
     // Last, so the Ctrl+K overlay floats over every palette and dialog.
     quick::command_palette(ui.ctx(), app);
 
+    // Item K: the "Saving…" pill, top-right of the canvas. Last, so it sits
+    // over every palette — and never a modal, which would steal the pen
+    // mid-stroke.
+    crate::cmd::save_bg::saving_pill(ui, app.shell.canvas_rect_points());
     app.sync_dock_layout();
     // The sub tool memory is SNAPSHOT beside the save, not written on every
     // switch: the app's own mode fields are the truth, whatever moved them

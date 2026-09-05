@@ -1666,6 +1666,15 @@ fn builtin_targets(vk: u16, shift: bool) -> Option<&'static [Target]> {
         group: group::OPERATION,
         sub: SubTool::Object(crate::cmd::ObjectMode::PickLayer),
     })];
+    const U_CYCLE: &[Target] = &[
+        Target::Tool(Tool::Figure),
+        Target::Tool(Tool::Frame),
+        Target::SubTool(SubToolPath {
+            tool: Tool::Ruler,
+            group: group::CREATE_RULER,
+            sub: SubTool::Ruler(crate::cmd::RulerKind::Line),
+        }),
+    ];
     Some(match vk {
         // P / B — B stays a pen alias (old MangaNakama habit).
         0x50 | 0x42 => &[Target::Tool(Tool::Pen)],
@@ -1676,7 +1685,9 @@ fn builtin_targets(vk: u16, shift: bool) -> Option<&'static [Target]> {
         // F = Figure, V = Gradient (my picks — no CSP defaults in his set).
         0x46 => &[Target::Tool(Tool::Figure)],
         0x56 => &[Target::Tool(Tool::Gradient)],
-        0x55 => &[Target::Tool(Tool::Frame)], // U (CSP: frame border)
+        // U: CSP's own cycle, Figure → Frame border → Ruler (owner 2026-09-05;
+        // the Ruler tool landed the same day).
+        0x55 => U_CYCLE,
         // CSP puts Text and Balloon both on T, and duplicates cycle.
         0x54 => &[Target::Tool(Tool::Text), Target::Tool(Tool::Balloon)],
         0x49 => &[Target::Tool(Tool::Eyedrop)], // I
@@ -2873,6 +2884,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
 
         WM_DESTROY => {
+            // A save handed to the background writer (cmd/save_bg.rs) must
+            // not die with the process: the bookkeeping already called it
+            // saved, so nothing else would ever write it again.
+            crate::cmd::save_bg::flush();
             unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) };
             note_geom_now(hwnd);
             persist_geom(app);
