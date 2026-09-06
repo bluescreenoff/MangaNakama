@@ -98,7 +98,10 @@ pub use file_object::FileObject;
 pub use fill_layer::FillKind;
 pub use filter::{Filter, MotionDir, MotionMode, Raster, Smear, WaveDir};
 pub use frame::{Frame, FrameSet};
-pub use genlines::{FocusLinesParams, SpeedLinesParams, render_focus, render_speed};
+pub use genlines::{
+    FocusLinesParams, LineKind, LineOpts, LinePreset, SpeedLinesParams, builtin_presets,
+    render_focus, render_speed,
+};
 pub use gradient::{
     EdgeProcess, GradStop, GradientSet, MidStops, MixMode, NamedRamp, Ramp, RampOpts,
 };

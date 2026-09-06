@@ -13,10 +13,17 @@ use std::sync::Arc;
 
 use crate::tile::{FIX15_ONE, TILE_SIZE, Tile, TileIdx};
 
+pub mod presets;
+pub use presets::{LineKind, LineOpts, LinePreset, builtin_presets};
+
 /// 集中線 — focus lines: `count` rays converging toward `center`, drawn
 /// from `r_in` to `r_out` (jittered per line), each a segment from a
 /// jittered angle. Width jitters by `width_jitter` (0..1 of `width`).
-#[derive(Clone, Debug)]
+///
+/// `Default` exists so the parity round could add fields without
+/// rewriting every literal; zeroing every knob is exactly the legacy
+/// meaning, the same contract [`SpeedLinesParams`] already carried.
+#[derive(Clone, Debug, Default)]
 pub struct FocusLinesParams {
     pub center: [f32; 2],
     pub r_in: f32,
@@ -33,7 +40,96 @@ pub struct FocusLinesParams {
     /// convergence and carries its weight at the rim). 0 = the legacy
     /// constant-width ray, bit-stable.
     pub taper: f32,
+    /// The parity round's shared knobs — see [`Mix`]. 0 everywhere is the
+    /// pre-parity ray set, bit for bit.
+    pub mix: Mix,
+    /// The angular gap in degrees the bundle walk steps by. Only read
+    /// when the walk applies (`sweep_deg` > 0 or `group` > 1) — the plain
+    /// gap-drives-the-count path lives in [`GenLinesSpec::ray_count`] and
+    /// still lays rays out as `i · 2π / count`, which is what every saved
+    /// file drew.
+    pub gap_deg: f32,
+    /// >0 — rays only inside `sweep_center_deg ± sweep_deg/2` instead of
+    /// the full circle. ref-11's left panel: a burst whose centre sits
+    /// off the page below fills a fan, not a ring, and clipping a full
+    /// circle cannot make one (the rays that would leave the panel are
+    /// the ones you want gone, but so are their opposites).
+    pub sweep_deg: f32,
+    /// Where that arc is centred, degrees. Fed from `hand_deg` — the
+    /// direction the placing drag was made in.
+    pub sweep_center_deg: f32,
+    /// まとまり in ANGLE space: `group` rays a `gap_deg` apart, then a
+    /// hole of `group_gap × gap_deg`. The owner's missing grouping
+    /// setting, and the reason ref-08's burst reads as drawn rather than
+    /// stepped. 0/1 = no bundling. Only read when `gap_deg` > 0.
+    pub group: u32,
+    /// The hole between bundles, in multiples of `gap_deg` (see `group`).
+    pub group_gap: f32,
     pub seed: u64,
+}
+
+/// The knobs the parity round (2026-09-06) gave BOTH line renderers, so
+/// they are declared once instead of twice.
+///
+/// Every field's 0 is the pre-parity behaviour and every `rand()` call
+/// they add sits behind its own `> 0` guard, so a spec saved without
+/// them draws the same pixels in the same order (`legacy_renders_are_bit_stable`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Mix {
+    /// 0..1 — the fraction of lines drawn as ACCENTS. The single biggest
+    /// gap against a printed page: ref-07's streak block and ref-08's
+    /// burst both carry many hairlines and a FEW heavy strokes, and the
+    /// old width jitter could only ever THIN a line, never thicken one.
+    pub accent_frac: f32,
+    /// An accent's half-width multiplier (applied after the width
+    /// jitter). 0 reads as 1.
+    pub accent_mul: f32,
+    /// 0..1 — the fraction of the length at the BASE end that ramps up
+    /// from a point (入り). With `taper` on the other end this is a
+    /// spindle: thin, thick, thin — ref-07's streaks, which our round cap
+    /// could not make.
+    pub entry: f32,
+    /// The exponent on the taper ramp, `(1 − taper·t)^k`. 0 reads as
+    /// k = 1, today's straight wedge. >1 thins fast and then runs a long
+    /// thin needle (ref-08's wedges); <1 keeps a belly.
+    pub needle: f32,
+    /// 0..1 — biases every length draw toward the LONG end
+    /// (`u.powf(1 + 3·len_skew)` on the shortening draw). A printed set
+    /// has most lines long and a few stubs; a uniform draw has neither.
+    pub len_skew: f32,
+}
+
+impl Mix {
+    /// Pull a 0..1 sample toward 0 — "toward the full length". Every
+    /// length draw here is a SHORTENING (how far an end pulls in), so
+    /// biasing long is biasing this sample small.
+    fn skew(&self, u: f32) -> f32 {
+        if self.len_skew > 0.0 {
+            u.powf(1.0 + 3.0 * self.len_skew.clamp(0.0, 1.0))
+        } else {
+            u
+        }
+    }
+
+    /// This line's half-width after the accent roll. Guarded: with
+    /// `accent_frac` 0 no random number is drawn, so the sequence is the
+    /// one every saved file was rendered with.
+    fn accent(&self, hw: f32, seed: &mut u64) -> f32 {
+        if self.accent_frac > 0.0 && rand(seed) < self.accent_frac {
+            hw * self.accent_mul.max(1.0)
+        } else {
+            hw
+        }
+    }
+
+    /// The stroke profile this mix asks [`segment`] for.
+    fn profile(&self, taper: f32) -> Profile {
+        Profile {
+            taper: taper.clamp(0.0, 1.0),
+            entry: self.entry.clamp(0.0, 1.0),
+            needle: self.needle.max(0.0),
+        }
+    }
 }
 
 /// 流線 — speed lines: `count` parallel segments along `angle` degrees,
@@ -81,6 +177,21 @@ pub struct SpeedLinesParams {
     /// 0..1 — per-run width wobble, a fraction pulled off `width`. Walk
     /// only; 0 = every run at the nominal width.
     pub jit_width: f32,
+    /// The parity round's shared knobs — see [`Mix`].
+    pub mix: Mix,
+    /// 0 = scatter each run along the direction (today, bit-stable).
+    /// 1 = every run STARTS on the reference line — the line through
+    /// `anchor` perpendicular to the direction — and runs `len` from
+    /// there. ref-09's ゴ… drip lines: verticals that all hang off the
+    /// panel's top edge at different lengths, which a scatter cannot do
+    /// (it puts half of them in mid-air).
+    pub start_mode: u8,
+    /// 0..1 — `start_mode` 1 only: how far along the direction a run may
+    /// start off that line, as a fraction of its own length.
+    pub jit_start: f32,
+    /// Where the reference line sits (`start_mode` 1 only). `None` = the
+    /// canvas origin's projection, i.e. the line through (0, 0).
+    pub anchor: Option<[f32; 2]>,
     pub seed: u64,
 }
 
@@ -194,14 +305,66 @@ fn put(map: &mut HashMap<TileIdx, Tile>, x: i32, y: i32) {
     }
 }
 
+/// The half-width ramp along one stroke, `t` = 0 at the base `a` and 1
+/// at the tip `b`. Carried as a struct rather than three more positional
+/// floats: both renderers thread it through and a bare
+/// `segment(.., 0.35, 1.2, ..)` call site is unreadable and easy to
+/// transpose.
+#[derive(Clone, Copy, Debug, Default)]
+struct Profile {
+    taper: f32,
+    entry: f32,
+    needle: f32,
+}
+
+impl Profile {
+    /// Just a taper — the pre-parity shape, and what the flash-round
+    /// tests measure.
+    #[cfg(test)]
+    fn taper(taper: f32) -> Self {
+        Self {
+            taper,
+            ..Self::default()
+        }
+    }
+
+    fn width_at(&self, t: f32) -> f32 {
+        width_at(t, self.taper, self.entry, self.needle)
+    }
+}
+
+/// The profile, spelled out: exit ramp, needle exponent, entry ramp.
+///
+/// `taper 0, entry 0, needle 0` returns exactly `1.0` for every `t` —
+/// not "1.0 to within a float" but the literal, because that is the
+/// value every effect-line layer saved before this existed was
+/// rasterized with. Both extras are skipped rather than applied at their
+/// identity for the same reason: `powf(1.0)` is not contractually the
+/// identity on every input.
+fn width_at(t: f32, taper: f32, entry: f32, needle: f32) -> f32 {
+    let mut w = (1.0 - taper * t).max(0.0);
+    if needle > 0.0 {
+        w = w.powf(needle);
+    }
+    // 入り: a fast-in ramp from a point, so the base end is a needle too
+    // and the stroke reads as the spindle ref-07's streaks are. 0.7 is
+    // the "fast" — a linear ramp leaves a visible triangle at the base,
+    // which is a wedge pointing the wrong way.
+    if entry > 0.0 && t < entry {
+        w *= (t / entry).powf(0.7);
+    }
+    w
+}
+
 /// Rasterize one thick segment (a x b, half-width hw) by scanning its
 /// bbox and testing point-to-segment distance. Hard edges — speed lines
 /// are print black; AA lives in the resample on export.
 ///
-/// `taper` (0..1) ramps the half-width down along a→b, so `b` is the
-/// needle end; 0 leaves the constant-width behaviour untouched (the
-/// ramp evaluates to `hw * 1.0`, the same float, so every effect-line
-/// layer saved before tapering existed regenerates bit for bit).
+/// The [`Profile`] ramps the half-width along a→b, so `b` is the needle
+/// end; an all-zero profile leaves the constant-width behaviour
+/// untouched (the ramp evaluates to `hw * 1.0`, the same float, so every
+/// effect-line layer saved before tapering existed regenerates bit for
+/// bit).
 ///
 /// The bbox is CLIPPED to the canvas here, not after: the dialog's own
 /// maximums (count 512, outer radius 2×width) put a segment's unclipped
@@ -214,7 +377,7 @@ fn segment(
     a: [f32; 2],
     b: [f32; 2],
     hw: f32,
-    taper: f32,
+    prof: Profile,
     size: (u32, u32),
 ) {
     let d = [b[0] - a[0], b[1] - a[1]];
@@ -238,7 +401,7 @@ fn segment(
             let qy = a[1] + t * d[1];
             let ex = px - qx;
             let ey = py - qy;
-            let hwt = hw * (1.0 - taper * t);
+            let hwt = hw * prof.width_at(t);
             if ex * ex + ey * ey <= hwt * hwt {
                 put(map, x, y);
             }
@@ -272,20 +435,93 @@ fn fill_tooth(map: &mut HashMap<TileIdx, Tile>, c: [f32; 2], t: &Tooth, size: (u
     }
 }
 
+/// The walk's ceiling on rays — the same number [`GenLinesSpec::ray_count`]
+/// clamps a silly `gap_deg` to, for the same reason.
+const MAX_RAYS: usize = 4096;
+
+/// Where a radial set's rays sit, or `None` for the legacy layout
+/// (`i · 2π / count`, one full even circle) — which is what every file
+/// saved before the sweep and the angular bundle walk existed drew, so
+/// `None` has to stay reachable by exactly the old field values.
+///
+/// The walk mirrors [`render_speed`]'s: `group` rays a `gap_deg` apart,
+/// then a hole of `group_gap × gap_deg`. Bundling needs a gap to be a
+/// multiple OF, so — like the speed walk keying on `gap_px` — it is only
+/// read when `gap_deg` > 0.
+fn radial_angles(
+    count: u32,
+    gap_deg: f32,
+    sweep_deg: f32,
+    center_deg: f32,
+    group: u32,
+    group_gap: f32,
+) -> Option<Vec<f32>> {
+    let walk = gap_deg > 0.0 && group > 1;
+    if !walk && sweep_deg <= 0.0 {
+        return None;
+    }
+    let sweep = if sweep_deg > 0.0 {
+        sweep_deg.min(360.0)
+    } else {
+        360.0
+    }
+    .to_radians();
+    let start = center_deg.to_radians() - sweep * 0.5;
+    let mut out = Vec::new();
+    if walk {
+        let gap = gap_deg.to_radians();
+        let hole = group_gap.max(1.0);
+        let (mut a, mut i) = (start, 0u32);
+        while a < start + sweep && out.len() < MAX_RAYS {
+            out.push(a);
+            a += if (i + 1) % group == 0 { gap * hole } else { gap };
+            i += 1;
+        }
+    } else {
+        // Sweep without bundling: `count` rays spread evenly over the arc.
+        let n = count.max(1).min(MAX_RAYS as u32);
+        let step = sweep / n as f32;
+        out.extend((0..n).map(|i| start + i as f32 * step));
+    }
+    (!out.is_empty()).then_some(out)
+}
+
 /// Render focus lines into sparse tiles (opaque black premul fix15).
 pub fn render_focus(p: &FocusLinesParams, size: (u32, u32)) -> HashMap<TileIdx, Arc<Tile>> {
     let mut map: HashMap<TileIdx, Tile> = HashMap::new();
     let mut seed = p.seed | 1;
     let span = (p.r_out - p.r_in).max(1.0);
-    for i in 0..p.count.max(1) {
-        let base = i as f32 * std::f32::consts::TAU / p.count.max(1) as f32;
-        let ang = base
-            + (rand(&mut seed) - 0.5)
-                * p.angle_jitter
-                * (std::f32::consts::TAU / p.count.max(1) as f32);
-        let r1 = p.r_in + rand(&mut seed) * p.length_jitter * span * 0.5;
-        let r2 = p.r_out - rand(&mut seed) * p.length_jitter * span * 0.5;
+    let bases = radial_angles(
+        p.count,
+        p.gap_deg,
+        p.sweep_deg,
+        p.sweep_center_deg,
+        p.group,
+        p.group_gap,
+    );
+    let n = bases.as_ref().map_or(p.count.max(1), |v| v.len() as u32);
+    // The unit the angle jitter is a fraction OF: the walk's own step
+    // when it walks, else the even circle's gap — which is the value the
+    // legacy path used and must keep using.
+    let unit = match &bases {
+        Some(v) if v.len() >= 2 => v[1] - v[0],
+        _ => std::f32::consts::TAU / n as f32,
+    };
+    let prof = p.mix.profile(p.taper);
+    for i in 0..n {
+        let base = match &bases {
+            Some(v) => v[i as usize],
+            None => i as f32 * std::f32::consts::TAU / n as f32,
+        };
+        let ang = base + (rand(&mut seed) - 0.5) * p.angle_jitter * unit;
+        // The two ends pull IN from the ring by a skewed draw: a printed
+        // 集中線 has its inner ends scattered over a wide band with most
+        // rays long (ref-10, ref-11), where a uniform draw makes the
+        // fuzzy-but-even ring the critic keeps seeing.
+        let r1 = p.r_in + p.mix.skew(rand(&mut seed)) * p.length_jitter * span * 0.5;
+        let r2 = p.r_out - p.mix.skew(rand(&mut seed)) * p.length_jitter * span * 0.5;
         let w = p.width * (1.0 - rand(&mut seed) * p.width_jitter);
+        let hw = p.mix.accent((w * 0.5).max(0.5), &mut seed);
         let (s, c) = ang.sin_cos();
         // OUTER first: segment() tapers toward `b`, and a focus ray thins
         // toward the convergence (the inner end). With taper 0 the order
@@ -295,8 +531,8 @@ pub fn render_focus(p: &FocusLinesParams, size: (u32, u32)) -> HashMap<TileIdx, 
             &mut map,
             [p.center[0] + c * r2, p.center[1] + s * r2],
             [p.center[0] + c * r1, p.center[1] + s * r1],
-            (w * 0.5).max(0.5),
-            p.taper.clamp(0.0, 1.0),
+            hw,
+            prof,
             size,
         );
     }
@@ -355,6 +591,7 @@ pub fn render_speed(p: &SpeedLinesParams, size: (u32, u32)) -> HashMap<TileIdx, 
     } else {
         offsets.len() as u32
     };
+    let prof = p.mix.profile(p.taper);
     for i in 0..n {
         let mut t = match offsets.get(i as usize) {
             Some(t) => *t,
@@ -363,17 +600,39 @@ pub fn render_speed(p: &SpeedLinesParams, size: (u32, u32)) -> HashMap<TileIdx, 
         if p.jit_gap > 0.0 {
             t += (rand(&mut seed) - 0.5) * p.jit_gap.clamp(0.0, 1.0) * p.gap_px.max(0.25);
         }
-        let mut len = p.len_min + rand(&mut seed) * (p.len_max - p.len_min).max(0.0);
+        // The spread draw, biased toward len_max when `len_skew` is on —
+        // a printed streak block (ref-07) is mostly long strokes with a
+        // few stubs, which a flat draw states as "every length equally".
+        let u = rand(&mut seed);
+        let u = if p.mix.len_skew > 0.0 {
+            1.0 - p.mix.skew(1.0 - u)
+        } else {
+            u
+        };
+        let mut len = p.len_min + u * (p.len_max - p.len_min).max(0.0);
         if p.jit_len > 0.0 {
-            len *= 1.0 - rand(&mut seed) * p.jit_len.clamp(0.0, 0.9);
+            len *= 1.0 - p.mix.skew(rand(&mut seed)) * p.jit_len.clamp(0.0, 0.9);
         }
-        // Start offset along the direction so the run crosses the canvas.
-        // `t` is already the ABSOLUTE normal coordinate (corner
-        // projection) — no canvas-centre offset.
-        let along = rand(&mut seed) * (w.max(h) + len) - len;
+        // Where the run's base sits along the direction. `t` is already
+        // the ABSOLUTE normal coordinate (corner projection) — no
+        // canvas-centre offset.
+        let start_along = if p.start_mode == 1 {
+            // Hang off the reference line: every run's base lands on the
+            // line through `anchor` perpendicular to the direction, so
+            // the block has one straight edge and ragged tails (ref-09).
+            let base_at = p.anchor.map_or(0.0, |a| a[0] * dir[0] + a[1] * dir[1]);
+            let off = if p.jit_start > 0.0 {
+                rand(&mut seed) * p.jit_start.clamp(0.0, 1.0) * len
+            } else {
+                0.0
+            };
+            base_at + off
+        } else {
+            rand(&mut seed) * (w.max(h) + len) - len - len * 0.5
+        };
         let base = [
-            nrm[0] * t + dir[0] * (along - len * 0.5),
-            nrm[1] * t + dir[1] * (along - len * 0.5),
+            nrm[0] * t + dir[0] * start_along,
+            nrm[1] * t + dir[1] * start_along,
         ];
         // Convergence aims the run at a far point instead of along the
         // shared direction; the SCATTER stays the parallel layout's, so
@@ -391,14 +650,8 @@ pub fn render_speed(p: &SpeedLinesParams, size: (u32, u32)) -> HashMap<TileIdx, 
         if p.jit_width > 0.0 {
             hw *= 1.0 - rand(&mut seed) * p.jit_width.clamp(0.0, 0.9);
         }
-        segment(
-            &mut map,
-            base,
-            tip,
-            hw.max(0.5),
-            p.taper.clamp(0.0, 1.0),
-            size,
-        );
+        let hw = p.mix.accent(hw.max(0.5), &mut seed);
+        segment(&mut map, base, tip, hw, prof, size);
     }
     let (wi, hi_) = (size.0 as i32, size.1 as i32);
     map.retain(|idx, _| {
@@ -509,6 +762,7 @@ mod tests {
             length_jitter: 0.2,
             taper: 0.0,
             seed: 7,
+            ..Default::default()
         };
         let m = render_focus(&p, (512, 512));
         // Sectors with ink at r ≈ 200 — each sector samples a short ARC
@@ -551,6 +805,7 @@ mod tests {
                 length_jitter: 0.2,
                 taper: 0.0,
                 seed: 7,
+                ..Default::default()
             },
             (512, 512),
         );
@@ -654,6 +909,7 @@ mod tests {
             length_jitter: 0.2,
             taper: 0.0,
             seed: 7,
+            ..Default::default()
         };
         assert_eq!(
             fingerprint(&render_focus(&f, (512, 512))),
@@ -791,6 +1047,7 @@ mod tests {
             length_jitter: 0.0,
             taper,
             seed: 7,
+            ..Default::default()
         };
         let cross = |m: &HashMap<TileIdx, Arc<Tile>>, x: i32| {
             (0..40).filter(|dy| ink_at(m, x, 256 - 20 + dy)).count() as i32
@@ -822,7 +1079,7 @@ mod tests {
                 [50.0, 256.0],
                 [450.0, 256.0],
                 8.0,
-                taper,
+                Profile::taper(taper),
                 (512, 512),
             );
             (0..512)
@@ -1187,6 +1444,377 @@ mod tests {
             let _ = render_urchin(&p, (64, 64));
         }
     }
+
+    // --- parity round, 2026-09-06 --------------------------------------
+    // Everything below measures ONE of the five gaps the reference pages
+    // showed up (weight mix, stroke profile, skewed lengths, angular
+    // bundling, runs that hang off a line). None of them re-pins a
+    // fingerprint: the pins above are the guard that the zero value of
+    // every knob here is still the old raster.
+
+    /// The angular positions of a radial set's rays at radius `r`, in
+    /// degrees, as the gaps between consecutive inked arcs. The angular
+    /// twin of [`band_gaps`], and the same claim: a bundled set has TWO
+    /// gap values, a tight one and a hole.
+    fn ray_gaps(m: &HashMap<TileIdx, Arc<Tile>>, c: [f32; 2], r: f32) -> Vec<f32> {
+        const N: usize = 3600;
+        let hit: Vec<bool> = (0..N)
+            .map(|k| {
+                let a = k as f32 * std::f32::consts::TAU / N as f32;
+                let (s, cs) = a.sin_cos();
+                ink_at(m, (c[0] + cs * r) as i32, (c[1] + s * r) as i32)
+            })
+            .collect();
+        let mut centres = Vec::new();
+        let mut run: Option<(usize, usize)> = None;
+        for (k, on) in hit.iter().enumerate() {
+            if *on {
+                run = Some(match run {
+                    Some((a, _)) => (a, k),
+                    None => (k, k),
+                });
+            } else if let Some((a, b)) = run.take() {
+                centres.push((a + b) as f32 * 0.5);
+            }
+        }
+        if let Some((a, b)) = run {
+            centres.push((a + b) as f32 * 0.5);
+        }
+        centres
+            .windows(2)
+            .map(|w| (w[1] - w[0]) * 360.0 / N as f32)
+            .collect()
+    }
+
+    /// まとまり in ANGLE space — the owner's "doesn't seem to have a
+    /// grouping setting". Bundles of `group` rays a `gap_deg` apart, then
+    /// a hole: the gap histogram has two values, and the hole is the
+    /// bigger. The mirror of `speed_lines_grouping_leaves_holes`.
+    #[test]
+    fn radial_grouping_leaves_angular_holes() {
+        let m = render_focus(
+            &FocusLinesParams {
+                center: [512.0, 512.0],
+                r_in: 100.0,
+                r_out: 500.0,
+                count: 72,
+                width: 2.0,
+                gap_deg: 3.0,
+                group: 3,
+                group_gap: 3.0,
+                seed: 5,
+                ..Default::default()
+            },
+            (1024, 1024),
+        );
+        let gaps = ray_gaps(&m, [512.0, 512.0], 300.0);
+        assert!(gaps.len() > 30, "enough rays to see the pattern");
+        let tight = gaps.iter().filter(|g| (**g - 3.0).abs() < 0.6).count();
+        let holes = gaps.iter().filter(|g| (**g - 9.0).abs() < 1.0).count();
+        assert!(holes >= 15, "bundles stand apart ({holes} holes in {gaps:?})");
+        assert!(
+            tight >= holes,
+            "and each bundle is several tight rays ({tight} tight, {holes} holes)"
+        );
+
+        // The same rays WITHOUT bundling: one gap, repeated — the even
+        // pitch that reads as machine-made.
+        let even = render_focus(
+            &FocusLinesParams {
+                center: [512.0, 512.0],
+                r_in: 100.0,
+                r_out: 500.0,
+                count: 72,
+                width: 2.0,
+                seed: 5,
+                ..Default::default()
+            },
+            (1024, 1024),
+        );
+        let eg = ray_gaps(&even, [512.0, 512.0], 300.0);
+        let hi = eg.iter().copied().fold(0.0f32, f32::max);
+        let lo = eg.iter().copied().fold(f32::INFINITY, f32::min);
+        assert!(hi - lo < 0.5, "the unbundled set is dead even ({lo}..{hi})");
+    }
+
+    /// ref-11's left panel: a burst whose centre is off the page fills a
+    /// FAN. `sweep_deg` is the only way to say that — clipping a full
+    /// circle keeps the rays pointing the wrong way.
+    #[test]
+    fn sweep_limits_the_arc() {
+        let p = FocusLinesParams {
+            center: [512.0, 512.0],
+            r_in: 60.0,
+            r_out: 480.0,
+            count: 120,
+            width: 3.0,
+            sweep_deg: 90.0,
+            sweep_center_deg: 0.0,
+            seed: 9,
+            ..Default::default()
+        };
+        let m = render_focus(&p, (1024, 1024));
+        let ring = |lo: i32, hi: i32| {
+            (lo..hi)
+                .filter(|d| {
+                    let a = (*d as f32).to_radians();
+                    let (s, c) = a.sin_cos();
+                    ink_at(&m, (512.0 + c * 300.0) as i32, (512.0 + s * 300.0) as i32)
+                })
+                .count()
+        };
+        assert!(ring(-40, 40) > 20, "the arc carries the rays");
+        assert_eq!(ring(60, 300), 0, "and nothing outside it");
+        // Full circle for comparison: the same set answers everywhere.
+        let full = render_focus(
+            &FocusLinesParams {
+                sweep_deg: 0.0,
+                ..p.clone()
+            },
+            (1024, 1024),
+        );
+        assert!(
+            (60..300).any(|d| {
+                let a = (d as f32).to_radians();
+                let (s, c) = a.sin_cos();
+                ink_at(&full, (512.0 + c * 300.0) as i32, (512.0 + s * 300.0) as i32)
+            }),
+            "sweep 0 is still the whole ring"
+        );
+    }
+
+    /// The thicknesses of a horizontal run block, band by band, sampled
+    /// down three columns — how the weight MIX is measured.
+    ///
+    /// Bands that touch the top or bottom edge are DROPPED: half a
+    /// heavy stroke measures the same as a whole hairline, which is
+    /// exactly the reading that would make this test lie.
+    fn band_widths(m: &HashMap<TileIdx, Arc<Tile>>, h: i32) -> Vec<i32> {
+        let mut out = Vec::new();
+        for x in [128, 256, 384] {
+            let mut start: Option<i32> = None;
+            for y in 0..h {
+                if ink_at(m, x, y) {
+                    if start.is_none() {
+                        start = Some(y);
+                    }
+                } else if let Some(s) = start.take() {
+                    if s > 0 {
+                        out.push(y - s);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// The weight MIX, the biggest single gap against a printed page:
+    /// many hairlines and a FEW heavy strokes in one set. The old width
+    /// jitter could only THIN a line, so every set had one weight.
+    #[test]
+    fn accents_are_wider_than_the_rest() {
+        let base = SpeedLinesParams {
+            angle_deg: 0.0,
+            len_min: 400.0,
+            len_max: 400.0,
+            width: 4.0,
+            gap_px: 40.0,
+            seed: 5,
+            ..Default::default()
+        };
+        let plain = render_speed(&base, (512, 512));
+        let pw = band_widths(&plain, 512);
+        assert!(pw.len() > 5, "runs to measure ({pw:?})");
+        assert!(
+            pw.iter().max() == pw.iter().min(),
+            "without accents there is ONE weight ({pw:?})"
+        );
+        let thin = pw[0];
+
+        let mixed = render_speed(
+            &SpeedLinesParams {
+                mix: Mix {
+                    accent_frac: 0.3,
+                    accent_mul: 4.0,
+                    ..Default::default()
+                },
+                ..base.clone()
+            },
+            (512, 512),
+        );
+        let mw = band_widths(&mixed, 512);
+        let heavy = mw.iter().filter(|w| **w >= thin * 3).count();
+        let hair = mw.iter().filter(|w| **w <= thin).count();
+        assert!(heavy >= 1, "a few strokes carry real weight ({mw:?})");
+        assert!(hair > heavy, "and most of them are still hairlines ({mw:?})");
+    }
+
+    /// 入り: with an entry ramp the stroke starts as a POINT and swells,
+    /// so the block is spindles rather than round-capped bars — ref-07's
+    /// streaks. `entry` 0 keeps the cap (pinned by the fingerprints).
+    #[test]
+    fn entry_taper_starts_at_a_point() {
+        let col = |prof: Profile, x: i32| {
+            let mut m: HashMap<TileIdx, Tile> = HashMap::new();
+            segment(&mut m, [50.0, 256.0], [450.0, 256.0], 8.0, prof, (512, 512));
+            (0..512)
+                .filter(|y| {
+                    let idx = TileIdx::of_pixel(x, *y);
+                    m.get(&idx).is_some_and(|t| {
+                        let (ox, oy) = idx.origin();
+                        t.pixel((x - ox) as usize, (*y - oy) as usize)[3] > 0
+                    })
+                })
+                .count()
+        };
+        let capped = Profile::taper(0.0);
+        let spindle = Profile {
+            taper: 1.0,
+            entry: 0.25,
+            needle: 1.0,
+        };
+        assert!(col(capped, 52) >= 14, "a round cap is full width at once");
+        assert!(
+            col(spindle, 52) <= 3,
+            "the spindle enters as a point ({})",
+            col(spindle, 52)
+        );
+        let belly = col(spindle, 150);
+        assert!(
+            belly >= col(spindle, 52) * 3 && belly >= 8,
+            "and swells to a belly ({belly})"
+        );
+    }
+
+    /// The needle exponent: a wedge that thins fast and then runs a long
+    /// thin point (ref-08's rays) instead of the straight ramp.
+    #[test]
+    fn needle_exponent_thins_faster() {
+        let col = |needle: f32, x: i32| {
+            let mut m: HashMap<TileIdx, Tile> = HashMap::new();
+            segment(
+                &mut m,
+                [50.0, 256.0],
+                [450.0, 256.0],
+                8.0,
+                Profile {
+                    taper: 0.8,
+                    entry: 0.0,
+                    needle,
+                },
+                (512, 512),
+            );
+            (0..512)
+                .filter(|y| {
+                    let idx = TileIdx::of_pixel(x, *y);
+                    m.get(&idx).is_some_and(|t| {
+                        let (ox, oy) = idx.origin();
+                        t.pixel((x - ox) as usize, (*y - oy) as usize)[3] > 0
+                    })
+                })
+                .count()
+        };
+        assert_eq!(col(0.0, 52), col(2.5, 52), "both start at the full width");
+        let straight = col(0.0, 350);
+        let needled = col(2.5, 350);
+        assert!(
+            needled * 2 < straight,
+            "the needle is well past the wedge by three quarters ({needled} vs {straight})"
+        );
+        // And the exponent below 1 keeps a belly — the other direction.
+        assert!(col(0.5, 350) > straight, "k < 1 holds its weight longer");
+    }
+
+    /// The mean inner end of a 集中線, ray by ray: how far in the ink
+    /// reaches along each exact ray angle.
+    fn mean_inner_radius(m: &HashMap<TileIdx, Arc<Tile>>, c: [f32; 2], n: u32, r_out: f32) -> f32 {
+        let mut sum = 0.0;
+        for i in 0..n {
+            let a = i as f32 * std::f32::consts::TAU / n as f32;
+            let (s, cs) = a.sin_cos();
+            let mut inner = r_out;
+            for r in 20..(r_out as i32) {
+                let r = r as f32;
+                if ink_at(m, (c[0] + cs * r) as i32, (c[1] + s * r) as i32) {
+                    inner = r;
+                    break;
+                }
+            }
+            sum += inner;
+        }
+        sum / n as f32
+    }
+
+    /// A printed burst is mostly LONG rays with a few stubs; a uniform
+    /// draw is an even fuzzy ring. `len_skew` pulls the inner ends in.
+    #[test]
+    fn len_skew_biases_long() {
+        let p = |len_skew: f32| FocusLinesParams {
+            center: [512.0, 512.0],
+            r_in: 100.0,
+            r_out: 400.0,
+            count: 36,
+            width: 4.0,
+            length_jitter: 1.0,
+            mix: Mix {
+                len_skew,
+                ..Default::default()
+            },
+            seed: 11,
+            ..Default::default()
+        };
+        let flat = mean_inner_radius(&render_focus(&p(0.0), (1024, 1024)), [512.0, 512.0], 36, 400.0);
+        let skewed =
+            mean_inner_radius(&render_focus(&p(1.0), (1024, 1024)), [512.0, 512.0], 36, 400.0);
+        assert!(
+            skewed < flat - 20.0,
+            "skewed rays reach further in ({skewed:.1} vs {flat:.1})"
+        );
+        assert!(skewed > 100.0, "but never past the hole ({skewed:.1})");
+    }
+
+    /// ref-09's ゴ… drips hang off the panel's top edge: every run STARTS
+    /// on one line and ends where its own length ran out. The scatter
+    /// cannot do that — it leaves half the runs floating.
+    #[test]
+    fn anchored_runs_start_on_the_reference_line() {
+        let p = |start_mode: u8| SpeedLinesParams {
+            // 90° = straight down the page.
+            angle_deg: 90.0,
+            len_min: 200.0,
+            len_max: 200.0,
+            width: 2.0,
+            gap_px: 16.0,
+            jit_len: 0.7,
+            start_mode,
+            anchor: Some([256.0, 50.0]),
+            seed: 5,
+            ..Default::default()
+        };
+        let m = render_speed(&p(1), (512, 512));
+        let row = |y: i32| (0..512).filter(|x| ink_at(&m, *x, y)).count();
+        assert_eq!(
+            (0..46).map(row).sum::<usize>(),
+            0,
+            "nothing above the reference line"
+        );
+        assert!(row(55) >= 15, "and every run hangs off it ({})", row(55));
+        // Ragged tails: the far end thins out as the short runs stop.
+        assert!(
+            row(240) * 2 < row(55),
+            "lengths differ ({} at the top, {} deep)",
+            row(55),
+            row(240)
+        );
+
+        // The scatter puts runs above the line — that is the before
+        // picture, and why the mode exists.
+        let loose = render_speed(&p(0), (512, 512));
+        assert!(
+            (0..46).any(|y| (0..512).any(|x| ink_at(&loose, x, y))),
+            "the scatter really does start anywhere"
+        );
+    }
 }
 
 // --- SF-004/005 (TRIAGE 140, r85): the generator's parameters persist on
@@ -1271,8 +1899,43 @@ pub struct GenLinesSpec {
     #[serde(default)]
     pub color: [u8; 3],
 
-    // --- screen-side only: these drive the Object tool's handles and
-    // never reach a renderer, so they cannot move a saved raster.
+    // --- parity round, 2026-09-06 (plan `2026-09-06-effect-lines-parity`).
+    // Same rule again, and it is the load-bearing one: every field below
+    // is `#[serde(default)]` and its zero MUST be exactly today's raster,
+    // because every effect-line layer in every saved file regenerates
+    // through this struct. Each of them guards its own `rand()` call, so
+    // an absent field does not even shift the random sequence.
+    /// 0..1 — [`Mix::accent_frac`]. 0 = no accents, one weight as before.
+    #[serde(default)]
+    pub accent_frac: f32,
+    /// [`Mix::accent_mul`]. 0 reads as 1.
+    #[serde(default)]
+    pub accent_mul: f32,
+    /// 0..1 — [`Mix::entry`]. 0 = the round cap every older file drew.
+    #[serde(default)]
+    pub entry: f32,
+    /// [`Mix::needle`]. 0 = k = 1 = the straight wedge.
+    #[serde(default)]
+    pub needle: f32,
+    /// 0..1 — [`Mix::len_skew`]. 0 = the uniform length draw.
+    #[serde(default)]
+    pub len_skew: f32,
+    /// Radial kinds: [`FocusLinesParams::sweep_deg`], centred on
+    /// `hand_deg`. 0 = the full 360°.
+    #[serde(default)]
+    pub sweep_deg: f32,
+    /// Speed lines: [`SpeedLinesParams::start_mode`]. 0 = the scatter.
+    #[serde(default)]
+    pub start_mode: u8,
+    /// Speed lines: [`SpeedLinesParams::jit_start`].
+    #[serde(default)]
+    pub jit_start: f32,
+
+    // --- placement geometry. These were screen-side only until the
+    // parity round: `hand_deg` now also aims a radial `sweep_deg` and
+    // `anchor` now also holds a stream's `start_mode 1` reference line.
+    // Both readings are behind the new field's own `> 0` guard, so a file
+    // that predates them still renders from geometry alone.
     /// Radial kinds: the angle (degrees) the r_in/r_out driver handles sit
     /// at — the direction the placing drag was made in, so the handles
     /// land where the gesture did instead of always due east (and off the
@@ -1364,14 +2027,49 @@ impl GenLinesSpec {
         self.kind == 1 || self.kind == 2 || self.focus
     }
 
-    /// How many rays/spikes a radial kind draws: gap-driven when
-    /// `gap_deg` is set (CSP's own unit for a 集中線), else the stored
-    /// count. Capped — a 0.05° gap is 7 200 rays and a UI hang.
+    /// How many rays/spikes a radial kind draws: the length of the
+    /// angular walk when a sweep or a bundle asks for one, else
+    /// gap-driven when `gap_deg` is set (CSP's own unit for a 集中線),
+    /// else the stored count. Capped — a 0.05° gap is 7 200 rays and a
+    /// UI hang.
+    ///
+    /// Only kind 0 consults the walk: the flashes count their teeth and
+    /// spread them over the full circle by construction, so a sweep on
+    /// one would return a number the tooth renderer does not honour.
     pub fn ray_count(&self) -> u32 {
+        if let Some(v) = self.radial_angles() {
+            return v.len() as u32;
+        }
         if self.gap_deg > 0.0 {
             ((360.0 / self.gap_deg).ceil() as u32).clamp(1, 4096)
         } else {
             self.count.max(1)
+        }
+    }
+
+    /// This spec's ray angles, or `None` for the even full circle.
+    fn radial_angles(&self) -> Option<Vec<f32>> {
+        if self.kind != 0 {
+            return None;
+        }
+        radial_angles(
+            self.count,
+            self.gap_deg,
+            self.sweep_deg,
+            self.hand_deg,
+            self.group,
+            self.group_gap,
+        )
+    }
+
+    /// The parity-round knobs both renderers share, read off the spec.
+    fn mix(&self) -> Mix {
+        Mix {
+            accent_frac: self.accent_frac,
+            accent_mul: self.accent_mul,
+            entry: self.entry,
+            needle: self.needle,
+            len_skew: self.len_skew,
         }
     }
 
@@ -1410,6 +2108,15 @@ impl GenLinesSpec {
                     width_jitter: self.jit(self.jit_width),
                     length_jitter: self.jit(self.jit_len),
                     taper: self.taper.clamp(0.0, 1.0),
+                    mix: self.mix(),
+                    gap_deg: self.gap_deg,
+                    sweep_deg: self.sweep_deg,
+                    // The drag's direction aims the arc; with sweep 0 it
+                    // is not read at all, which is what keeps every file
+                    // saved before the sweep bit-identical.
+                    sweep_center_deg: self.hand_deg,
+                    group: self.group,
+                    group_gap: self.group_gap,
                     seed: self.seed,
                 },
                 size,
@@ -1430,6 +2137,10 @@ impl GenLinesSpec {
                     jit_gap: self.jit_gap,
                     jit_len: self.jit_len,
                     jit_width: self.jit_width,
+                    mix: self.mix(),
+                    start_mode: self.start_mode,
+                    jit_start: self.jit_start,
+                    anchor: self.anchor,
                     seed: self.seed,
                 },
                 size,
@@ -1470,6 +2181,7 @@ mod spec_tests {
                 length_jitter: 0.5,
                 taper: 0.0,
                 seed: 7,
+                ..Default::default()
             },
             (512, 512),
         );

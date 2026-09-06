@@ -2465,6 +2465,12 @@ impl App {
                 converge: None,
                 color: [0, 0, 0],
                 seed: opts.seed,
+                // The parity round's knobs (accents, entry, needle,
+                // len_skew, sweep, anchored starts) at their 0 = today's
+                // set exactly. Lane A2 deletes this whole body for
+                // `opts.place(kind, a, b, bounds, seed)`, which is what
+                // actually writes them.
+                ..Default::default()
             },
             panel.map(|(i, _)| i),
         ));
