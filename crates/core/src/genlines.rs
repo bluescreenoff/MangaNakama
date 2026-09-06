@@ -65,6 +65,17 @@ pub struct FocusLinesParams {
     pub group: u32,
     /// The hole between bundles, in multiples of `gap_deg` (see `group`).
     pub group_gap: f32,
+    /// 0..1 — pull each ray's INNER end BELOW `r_in` by up to
+    /// `core_jit × r_in`, drawn per ray, so the white core is a ragged
+    /// BAND rather than a circle.
+    ///
+    /// `length_jitter` alone cannot do it: it only ever pulls an end
+    /// OUTWARD from `r_in`, so with any length skew a crowd of rays land
+    /// on `r_in` exactly and the core reads as a compass circle (gauntlet
+    /// critic, round 1: "the white core is a ragged blob, never a
+    /// circle"). 0 = the old inner ring, and the extra `rand()` is inside
+    /// that guard.
+    pub core_jit: f32,
     pub seed: u64,
 }
 
@@ -81,8 +92,16 @@ pub struct Mix {
     /// burst both carry many hairlines and a FEW heavy strokes, and the
     /// old width jitter could only ever THIN a line, never thicken one.
     pub accent_frac: f32,
-    /// An accent's half-width multiplier (applied after the width
-    /// jitter). 0 reads as 1.
+    /// The TOP of an accent's half-width multiplier (applied after the
+    /// width jitter). 0 reads as 1.
+    ///
+    /// An accent draws its multiplier UNIFORMLY from `1.5 .. accent_mul`
+    /// rather than always landing on `accent_mul` — a printed set is a
+    /// continuum from hairline to heavy (gauntlet critic, round 1: "a
+    /// wall of 1 px plus one fat line"), and one fixed multiplier can
+    /// only ever make two weights. The extra `rand()` sits inside the
+    /// `accent_frac > 0` guard, so a spec without accents draws the same
+    /// sequence it always did.
     pub accent_mul: f32,
     /// 0..1 — the fraction of the length at the BASE end that ramps up
     /// from a point (入り). With `taper` on the other end this is a
@@ -116,7 +135,12 @@ impl Mix {
     /// one every saved file was rendered with.
     fn accent(&self, hw: f32, seed: &mut u64) -> f32 {
         if self.accent_frac > 0.0 && rand(seed) < self.accent_frac {
-            hw * self.accent_mul.max(1.0)
+            // The SPREAD, not the ceiling — see `accent_mul`. Both rand
+            // calls are inside the guard, so the accent-free sequence is
+            // untouched.
+            let top = self.accent_mul.max(1.0);
+            let lo = 1.5f32.min(top);
+            hw * (lo + rand(seed) * (top - lo))
         } else {
             hw
         }
@@ -230,6 +254,16 @@ pub struct UrchinParams {
     pub angle_jitter: f32,
     /// 0..1 — per-spike length jitter; each tip pulls in from `r_out`.
     pub length_jitter: f32,
+    /// 0..1 — per-spike APEX jitter, the flash's half of
+    /// [`FocusLinesParams::core_jit`]: each tooth's point drops below
+    /// `r_in` by up to `core_jit × r_in`, so the teeth do not all start
+    /// on one circle. 0 = the old shared apex.
+    ///
+    /// It moves the FILLED (`solid` false) variant only. The solid
+    /// variant's ring scan starts at `r_in` whatever the teeth do, so its
+    /// hole stays a circle — making that one ragged means rebuilding the
+    /// ring scan, which is out of this round's scope.
+    pub core_jit: f32,
     pub solid: bool,
     pub seed: u64,
 }
@@ -258,7 +292,18 @@ impl Tooth {
             return false;
         }
         let perp = -dx * self.s + dy * self.c;
-        perp.abs() <= self.hw * ((along - self.r_apex) / span)
+        // The tooth's half-width at this radius, floored at half a pixel
+        // — the SAME floor `segment` puts on its ramp, and for the same
+        // reason: this test is hard-edged, so once the wedge narrows
+        // under ~0.35 px it catches only the odd pixel centre and the
+        // apex prints as a row of dots. `segment` got the floor in round
+        // 0 and `fill_tooth` did not, which is why the dashes survived in
+        // `sea-urchin-flash-crop` and in the solid flash's slits.
+        //
+        // It only ADDS pixels, all of them within half a pixel of the
+        // spike's own axis; no flash kind carries a fingerprint pin, and
+        // the two shape tests measure rim-vs-hole ink, not the apex.
+        perp.abs() <= (self.hw * ((along - self.r_apex) / span)).max(0.5)
     }
 }
 
@@ -542,7 +587,13 @@ pub fn render_focus(p: &FocusLinesParams, size: (u32, u32)) -> HashMap<TileIdx, 
         // 集中線 has its inner ends scattered over a wide band with most
         // rays long (ref-10, ref-11), where a uniform draw makes the
         // fuzzy-but-even ring the critic keeps seeing.
-        let r1 = p.r_in + p.mix.skew(rand(&mut seed)) * p.length_jitter * span * 0.5;
+        let mut r1 = p.r_in + p.mix.skew(rand(&mut seed)) * p.length_jitter * span * 0.5;
+        // ...and then a BAND around `r_in`, downward: see
+        // `FocusLinesParams::core_jit`. Clamped at 0 so a big jitter on a
+        // small hole cannot flip the ray inside out.
+        if p.core_jit > 0.0 {
+            r1 = (r1 - p.r_in * p.core_jit.clamp(0.0, 1.0) * rand(&mut seed)).max(0.0);
+        }
         let r2 = p.r_out - p.mix.skew(rand(&mut seed)) * p.length_jitter * span * 0.5;
         let w = p.width * (1.0 - rand(&mut seed) * p.width_jitter);
         let hw = p.mix.accent((w * 0.5).max(0.5), &mut seed);
@@ -582,10 +633,18 @@ pub fn render_speed(p: &SpeedLinesParams, size: (u32, u32)) -> HashMap<TileIdx, 
     let corners = [[0.0, 0.0], [w, 0.0], [w, h], [0.0, h]];
     let mut lo = f32::INFINITY;
     let mut hi = f32::NEG_INFINITY;
+    // The same projection ALONG the direction — how much room a run has
+    // to sit in. The walk needs it (see `start_along` below); the legacy
+    // scatter never asked.
+    let mut a_lo = f32::INFINITY;
+    let mut a_hi = f32::NEG_INFINITY;
     for c in corners {
         let t = c[0] * nrm[0] + c[1] * nrm[1];
         lo = lo.min(t);
         hi = hi.max(t);
+        let u = c[0] * dir[0] + c[1] * dir[1];
+        a_lo = a_lo.min(u);
+        a_hi = a_hi.max(u);
     }
     // Where the runs sit along the normal. The WALK (gap_px > 0) steps a
     // fixed gap with optional bundling; the legacy path scatters `count`
@@ -651,6 +710,30 @@ pub fn render_speed(p: &SpeedLinesParams, size: (u32, u32)) -> HashMap<TileIdx, 
                 0.0
             };
             base_at + off
+        } else if p.gap_px > 0.0 {
+            // FIT the run inside the canvas's along-extent instead of
+            // scattering it over `w.max(h) + len`.
+            //
+            // This is where the density went. The old draw spreads a
+            // run's start over the canvas PLUS a whole run length and
+            // then shifts it back by another half length, so at any
+            // cross-section only about `len / (extent + len)` of the runs
+            // are present — for a panel-crossing 流線 that is half of
+            // them, and the "dense" preset measured 14 strokes per 25 mm
+            // where its own 0.6 mm gap asks for 36 (gauntlet critic,
+            // round 1: "dense is not dense"). Nothing was dropping
+            // `gap_px`; the walk laid the runs out correctly and the
+            // along-offset threw half of them off the page.
+            //
+            // `slack` is negative when the run outruns the extent, and
+            // then both ends of the draw still cover it end to end — so a
+            // long run always crosses and a short one lands anywhere
+            // inside, which is the reference's "many never cross the
+            // panel" without the bald half.
+            //
+            // Guarded on the WALK (`gap_px` > 0): the scatter is what
+            // every pre-density file drew and it is pinned bit for bit.
+            a_lo + rand(&mut seed) * (a_hi - a_lo - len)
         } else {
             rand(&mut seed) * (w.max(h) + len) - len - len * 0.5
         };
@@ -705,11 +788,16 @@ pub fn render_urchin(p: &UrchinParams, size: (u32, u32)) -> HashMap<TileIdx, Arc
         .map(|i| {
             let ang = i as f32 * step + (rand(&mut seed) - 0.5) * aj * step;
             let r_tip = r_out - rand(&mut seed) * lj * span * 0.5;
+            let r_apex = if p.core_jit > 0.0 {
+                (r_in - r_in * p.core_jit.clamp(0.0, 1.0) * rand(&mut seed)).max(0.0)
+            } else {
+                r_in
+            };
             let (s, c) = ang.sin_cos();
             Tooth {
                 c,
                 s,
-                r_apex: r_in,
+                r_apex,
                 r_base: r_tip,
                 hw,
             }
@@ -857,6 +945,7 @@ mod tests {
                     width: 18.0,
                     angle_jitter: 0.2,
                     length_jitter: 0.2,
+                    core_jit: 0.0,
                     solid,
                     seed: 5,
                 },
@@ -1196,6 +1285,7 @@ mod tests {
             width: 26.0,
             angle_jitter: 0.2,
             length_jitter: 0.1,
+            core_jit: 0.0,
             solid: false,
             seed: 11,
         };
@@ -1249,6 +1339,7 @@ mod tests {
             width: 26.0,
             angle_jitter: 0.2,
             length_jitter: 0.0,
+            core_jit: 0.0,
             solid: false,
             seed: 11,
         };
@@ -1462,6 +1553,7 @@ mod tests {
                 width: 40.0,
                 angle_jitter: 1.0,
                 length_jitter: 1.0,
+                core_jit: 0.0,
                 solid,
                 seed: 1,
             };
@@ -1833,22 +1925,93 @@ mod tests {
 
     /// The mean inner end of a 集中線, ray by ray: how far in the ink
     /// reaches along each exact ray angle.
-    fn mean_inner_radius(m: &HashMap<TileIdx, Arc<Tile>>, c: [f32; 2], n: u32, r_out: f32) -> f32 {
-        let mut sum = 0.0;
-        for i in 0..n {
-            let a = i as f32 * std::f32::consts::TAU / n as f32;
-            let (s, cs) = a.sin_cos();
-            let mut inner = r_out;
-            for r in 20..(r_out as i32) {
-                let r = r as f32;
-                if ink_at(m, (c[0] + cs * r) as i32, (c[1] + s * r) as i32) {
-                    inner = r;
-                    break;
+    fn inner_radii(m: &HashMap<TileIdx, Arc<Tile>>, c: [f32; 2], n: u32, r_out: f32) -> Vec<f32> {
+        (0..n)
+            .map(|i| {
+                let a = i as f32 * std::f32::consts::TAU / n as f32;
+                let (s, cs) = a.sin_cos();
+                let mut inner = r_out;
+                for r in 4..(r_out as i32) {
+                    let r = r as f32;
+                    if ink_at(m, (c[0] + cs * r) as i32, (c[1] + s * r) as i32) {
+                        inner = r;
+                        break;
+                    }
                 }
-            }
-            sum += inner;
-        }
-        sum / n as f32
+                inner
+            })
+            .collect()
+    }
+
+    fn mean_inner_radius(m: &HashMap<TileIdx, Arc<Tile>>, c: [f32; 2], n: u32, r_out: f32) -> f32 {
+        let v = inner_radii(m, c, n, r_out);
+        v.iter().sum::<f32>() / v.len() as f32
+    }
+
+    /// How far the inner ends scatter, in px.
+    fn inner_spread(m: &HashMap<TileIdx, Arc<Tile>>, c: [f32; 2], n: u32, r_out: f32) -> f32 {
+        let v = inner_radii(m, c, n, r_out);
+        let mean = v.iter().sum::<f32>() / v.len() as f32;
+        (v.iter().map(|r| (r - mean) * (r - mean)).sum::<f32>() / v.len() as f32).sqrt()
+    }
+
+    /// The white core of a printed 集中線 is a ragged BLOB — the inner
+    /// ends sit in a band, not on a circle (gauntlet critic, round 1:
+    /// "inner ends form a visible ring around a clean circular core").
+    ///
+    /// `length_jitter` alone cannot make one: it only pulls an end
+    /// OUTWARD from `r_in`, and with a length skew most rays draw a tiny
+    /// pull and land back on `r_in` exactly. `core_jit` pulls the other
+    /// way, so the ends straddle the hole radius.
+    ///
+    /// Angle and width jitters off, so what is measured is the radial
+    /// draw and nothing else. Two claims, because one number cannot carry
+    /// both:
+    ///
+    /// - ISOLATED (`length_jitter` 0): without `core_jit` every ray ends
+    ///   on `r_in` to the pixel — a compass circle, σ ≈ 0. With it, the
+    ///   draw is uniform over `0.3 × 150 = 45 px`, σ ≈ 13 by arithmetic
+    ///   and 12.1 measured (0.5 px without it).
+    /// - AS SHIPPED (`length_jitter` 0.3, the presets' shape): the two
+    ///   draws together measure σ = 17.4 px on a 150 px hole, past the
+    ///   0.1 · r_in the eye needs to stop reading a circle. One-sided
+    ///   uniform noise can never reach that on its own — 0.3/√12 is
+    ///   0.087 · r_in — which is why both halves are stated.
+    #[test]
+    fn inner_ends_stagger_not_ring() {
+        let p = |length_jitter: f32, core_jit: f32| FocusLinesParams {
+            center: [512.0, 512.0],
+            r_in: 150.0,
+            r_out: 480.0,
+            count: 72,
+            width: 6.0,
+            angle_jitter: 0.0,
+            width_jitter: 0.0,
+            length_jitter,
+            core_jit,
+            seed: 11,
+            ..Default::default()
+        };
+        let sd = |lj: f32, cj: f32| {
+            inner_spread(
+                &render_focus(&p(lj, cj), (1024, 1024)),
+                [512.0, 512.0],
+                72,
+                480.0,
+            )
+        };
+        let ring = sd(0.0, 0.0);
+        let staggered = sd(0.0, 0.3);
+        assert!(ring < 1.0, "without it, one circle ({ring:.1} px sd)");
+        assert!(
+            staggered > 10.0,
+            "core_jit alone scatters the ends ({staggered:.1} px sd on a 150 px hole)"
+        );
+        let shipped = sd(0.3, 0.3);
+        assert!(
+            shipped >= 15.0,
+            "and the shipped mix clears 0.1 · r_in ({shipped:.1} px)"
+        );
     }
 
     /// A printed burst is mostly LONG rays with a few stubs; a uniform
@@ -2036,6 +2199,11 @@ pub struct GenLinesSpec {
     /// Speed lines: [`SpeedLinesParams::jit_start`].
     #[serde(default)]
     pub jit_start: f32,
+    /// Radial kinds: [`FocusLinesParams::core_jit`] (and the flashes'
+    /// [`UrchinParams::core_jit`]). 0 = every inner end on the same
+    /// circle, which is what every older file drew.
+    #[serde(default)]
+    pub core_jit: f32,
 
     // --- placement geometry. These were screen-side only until the
     // parity round: `hand_deg` now also aims a radial `sweep_deg` and
@@ -2197,6 +2365,7 @@ impl GenLinesSpec {
                     width: self.width,
                     angle_jitter: self.jit(self.jit_gap),
                     length_jitter: self.jit(self.jit_len),
+                    core_jit: self.core_jit,
                     solid: self.kind == 2,
                     seed: self.seed,
                 },
@@ -2223,6 +2392,7 @@ impl GenLinesSpec {
                     sweep_center_deg: self.hand_deg,
                     group: self.group,
                     group_gap: self.group_gap,
+                    core_jit: self.core_jit,
                     seed: self.seed,
                 },
                 size,

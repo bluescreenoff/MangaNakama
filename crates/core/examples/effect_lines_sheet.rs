@@ -63,9 +63,11 @@ fn main() {
         // A fixed drag per kind, so every row is judged on the same
         // gesture and two runs of this example are the same PNGs.
         let (a, b) = if p.name == "Drip lines" {
-            // The drips hang off the panel's top edge: drag straight
-            // down from it (ref-09).
-            (at(0.50, 0.02), at(0.50, 0.40))
+            // The drips hang off the panel's top EDGE — y = 0, not 2 %
+            // down: in ref-09 every line touches the frame, and starting
+            // the drag inside the panel left a white strip along the top
+            // that read as "the set floats" (critic, round 1).
+            (at(0.50, 0.0), at(0.50, 0.40))
         } else if p.kind.radial() {
             let c = at(0.55, 0.45);
             (c, [c[0] + w * 0.22, c[1]])
@@ -149,12 +151,7 @@ fn write_panel(
     let ink = full.pixels().filter(|p| p.0[0] < 128).count();
     assert!(ink > 0, "{name} inked nothing");
 
-    let small = image::imageops::resize(
-        &full,
-        size.0 / SHRINK,
-        size.1 / SHRINK,
-        image::imageops::FilterType::Triangle,
-    );
+    let small = box_shrink(&full, SHRINK);
     let stem = slug(name);
     save(&small, &dir.join(format!("{stem}.png")));
 
@@ -167,6 +164,32 @@ fn write_panel(
     save(&crop, &dir.join(format!("{stem}-crop.png")));
 
     panels.push((name.to_string(), small));
+}
+
+/// Average every `n × n` block into one pixel — the honest reading of a
+/// 1-bit page at a third of print scale: an output pixel's grey IS the
+/// fraction of the block that carries ink.
+///
+/// `image`'s Triangle resample also produces greys, but its kernel
+/// reaches ±3 source pixels at this ratio, so a single 1 px hairline
+/// comes out as two soft half-tones rather than one honest 33 % grey —
+/// the "hairline shows as dots" reading the critic took for a renderer
+/// bug. A box filter is also what a printer's screen does.
+fn box_shrink(src: &GrayImage, n: u32) -> GrayImage {
+    let (w, h) = (src.width() / n, src.height() / n);
+    let mut out = GrayImage::new(w, h);
+    for y in 0..h {
+        for x in 0..w {
+            let mut sum = 0u32;
+            for dy in 0..n {
+                for dx in 0..n {
+                    sum += src.get_pixel(x * n + dx, y * n + dy).0[0] as u32;
+                }
+            }
+            out.put_pixel(x, y, Luma([(sum / (n * n)) as u8]));
+        }
+    }
+    out
 }
 
 /// Spec -> paper-white / ink-black greyscale, the way the Materials

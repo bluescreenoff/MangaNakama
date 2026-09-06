@@ -92,8 +92,14 @@ pub struct LineOpts {
     /// 0..1 — the fraction of lines drawn heavy (see
     /// [`super::Mix::accent_frac`]).
     pub accent_frac: f32,
-    /// An accent's width multiplier.
+    /// The TOP of an accent's width multiplier — each accent draws its
+    /// own from `1.5 .. accent_mul` (see [`super::Mix::accent_mul`]), so
+    /// the set is a continuum rather than two weights.
     pub accent_mul: f32,
+    /// Radial: 0..1 — how far below the hole radius an inner end may
+    /// fall, so the white core is a ragged band and not a compass circle
+    /// (see [`super::FocusLinesParams::core_jit`]).
+    pub core_jit: f32,
     /// 入り: the fraction of the length that ramps up from a point at the
     /// base, giving a spindle when combined with `taper`.
     pub entry: f32,
@@ -129,13 +135,20 @@ impl LineOpts {
     /// and printed 流線/集中線 thin to needles. Tool defaults are free to
     /// be right — nothing saved regenerates through them, the
     /// 0-means-legacy rule guards SPECS, not sub tools.
+    ///
+    /// `taper` is 0.9, not 1.0 (gauntlet round 1). A full taper drives
+    /// the ramp to zero, so with any needle exponent most of a stroke's
+    /// length sits under two pixels and the whole set measures as a wall
+    /// of hairlines — the critic's "p50 = 1 px at 600 dpi", which is
+    /// 0.04 mm, a quarter of what a G-pen can hold. 0.9 keeps weight
+    /// along the stroke and still ends in a point.
     fn from_mm(dpi: u32, width_mm: f32, gap_mm: f32) -> Self {
         let px = |mm: f32| mm / 25.4 * dpi as f32;
         Self {
             count: 60,
             width: px(width_mm).max(0.5),
             gap_px: px(gap_mm),
-            taper: 1.0,
+            taper: 0.9,
             accent_mul: 1.0,
             seed: 1,
             ..Self::default()
@@ -144,7 +157,7 @@ impl LineOpts {
 
     /// 流線, the everyday one: 1 mm between runs, 0.20 mm wide, bundles
     /// of 4 with a two-and-a-half-gap hole. The spindle (`entry` 0.35
-    /// against a full taper) is what ref-07's streak block is made of —
+    /// against the 0.9 taper) is what ref-07's streak block is made of —
     /// thin, thick, thin, no round cap anywhere on the page.
     pub fn stream(dpi: u32) -> Self {
         Self {
@@ -153,53 +166,66 @@ impl LineOpts {
             jit_gap: 0.25,
             jit_len: 0.5,
             jit_width: 0.4,
-            accent_frac: 0.08,
-            accent_mul: 3.0,
+            accent_frac: 0.12,
+            accent_mul: 4.0,
             entry: 0.35,
-            needle: 1.2,
+            needle: 0.9,
             len_skew: 0.4,
             ..Self::from_mm(dpi, 0.20, 1.0)
         }
     }
 
-    /// A tighter block: 0.6 mm gap, 0.15 mm lines, bundles of 6.
+    /// A tighter block: 0.6 mm gap, 0.17 mm lines, bundles of 6 with a
+    /// two-and-a-half-gap hole (a 2× hole vanished under the 0.25 gap
+    /// wobble — the critic saw "no bundling anywhere").
     pub fn dense_stream(dpi: u32) -> Self {
         Self {
             group: 6,
-            group_gap: 2.0,
+            group_gap: 2.5,
             jit_len: 0.4,
             entry: 0.3,
-            accent_frac: 0.06,
+            accent_frac: 0.10,
+            accent_mul: 3.5,
             ..Self::stream(dpi)
         }
-        .with_mm(dpi, 0.15, 0.6)
+        .with_mm(dpi, 0.17, 0.6)
     }
 
     /// The same rule read the other way: gaps you can see between the
-    /// runs, so no bundling on top of them.
+    /// runs. Pairs rather than the stream's bundles of four — ref-07 and
+    /// ref-09 both put two or three strokes nearly touching and then a
+    /// wide hole, and an even sprinkle is the thing that reads as
+    /// generated.
     pub fn sparse_stream(dpi: u32) -> Self {
         Self {
-            group: 0,
-            group_gap: 0.0,
+            group: 2,
+            group_gap: 3.5,
             jit_gap: 0.3,
             jit_width: 0.3,
-            accent_frac: 0.1,
-            accent_mul: 2.5,
+            accent_frac: 0.12,
+            accent_mul: 3.0,
             entry: 0.4,
-            needle: 1.0,
+            needle: 0.9,
             jit_len: 0.6,
             len_skew: 0.3,
             ..Self::stream(dpi)
         }
-        .with_mm(dpi, 0.30, 2.5)
+        // 1.1 mm inside a pair, 3.85 mm between pairs — a MEAN pitch of
+        // 2.5 mm, the same set as before the bundling, re-spent as
+        // rhythm. Bundling on top of the old 2.5 mm gap would have halved
+        // the count, which is not what "sparse" was asking for.
+        .with_mm(dpi, 0.30, 1.1)
     }
 
     /// The perspective block: the same streaks, aimed at a point beyond
     /// the drag so they fan into the impact (ref-08's second panel).
+    /// ref-08 puts SOLID RAILS beside the hairlines, so this row carries
+    /// the widest accent spread of the stream group.
     pub fn perspective_stream(dpi: u32) -> Self {
         Self {
             entry: 0.3,
-            accent_frac: 0.1,
+            accent_frac: 0.15,
+            accent_mul: 5.0,
             jit_len: 0.6,
             len_skew: 0.5,
             converge_far: 2.5,
@@ -208,78 +234,103 @@ impl LineOpts {
     }
 
     /// ref-09's ゴ… drips: sparse thin verticals hanging off one edge,
-    /// each a different length, no bundles. The `start_mode` is the
-    /// whole preset — scattered, half of them would float in mid-air.
+    /// each a different length, in near-touching pairs. The `start_mode`
+    /// is the whole preset — scattered, half of them would float in
+    /// mid-air.
     pub fn drip_lines(dpi: u32) -> Self {
         Self {
-            group: 0,
-            group_gap: 0.0,
+            // Pairs and triples nearly touching, then a wide hole —
+            // ref-09's spacing, which an even comb cannot state.
+            group: 2,
+            group_gap: 6.0,
             jit_gap: 0.4,
             jit_width: 0.3,
             accent_frac: 0.0,
             accent_mul: 1.0,
             entry: 0.0,
-            needle: 1.5,
-            jit_len: 0.7,
-            len_skew: 0.0,
+            needle: 1.0,
+            // Depths from a stub to the full panel: `place` gives an
+            // anchored run the distance from the reference line to the
+            // far edge, so `jit_len` 0.8 spans 1/5 of it to all of it and
+            // the long bias keeps most of them deep.
+            jit_len: 0.8,
+            len_skew: 0.3,
             start_mode: 1,
-            jit_start: 0.15,
+            jit_start: 0.1,
             ..Self::stream(dpi)
         }
-        .with_mm(dpi, 0.12, 2.5)
+        // 0.7 mm inside a pair, 4.2 mm between pairs — same mean pitch as
+        // the old even 2.5 mm comb, but the pairs nearly touch and the
+        // holes are wide, which is what ref-09 actually looks like.
+        .with_mm(dpi, 0.16, 0.7)
     }
 
-    /// 集中線: a 3° gap, 0.30 mm rays needling to the convergence, a
+    /// 集中線: a 2.2° gap, 0.35 mm rays needling to the convergence, a
     /// 35 % hole for the art, and bundles of 4 — the rays come in
     /// clumps on every reference sheet, never at one even pitch.
     ///
     /// No `entry`: a focus ray is heavy at the RIM and needles at the
     /// centre, so it has one point, not two.
+    /// The gap is 2.2°, not the 3° a CSP tutorial quotes, because the
+    /// HOLE is what a tutorial does not price in: a bundle of four with a
+    /// 3× hole spends 18° per bundle, so at 3° the ray count would drop
+    /// from 108 to 80 and the burst would thin out exactly where the
+    /// critic asked for more. 2.2° buys the hole back (109 rays) and the
+    /// bundle is what the eye reads, not the pitch.
+    ///
+    /// The old 1.5× hole was invisible under a 0.35 position wobble — the
+    /// wobble was half the hole. The hole went to 3× and the wobble down
+    /// to 0.25.
     pub fn focus(dpi: u32) -> Self {
         Self {
-            gap_deg: 3.0,
+            gap_deg: 2.2,
             gap_px: 0.0,
             r_in_frac: 0.35,
             group: 4,
-            group_gap: 1.5,
-            jit_gap: 0.35,
+            group_gap: 3.0,
+            jit_gap: 0.25,
             jit_len: 0.9,
-            jit_width: 0.5,
-            accent_frac: 0.12,
+            jit_width: 0.4,
+            accent_frac: 0.20,
             accent_mul: 4.0,
             entry: 0.0,
-            needle: 1.2,
+            needle: 0.8,
             len_skew: 0.6,
-            ..Self::from_mm(dpi, 0.30, 0.0)
+            core_jit: 0.3,
+            ..Self::from_mm(dpi, 0.35, 0.0)
         }
     }
 
-    /// The dense end of CSP's 3°/10° rule: a 2° gap on 0.25 mm rays.
+    /// The dense end of CSP's 3°/10° rule, priced the same way: a 1.6°
+    /// gap in bundles of five, on 0.30 mm rays.
     pub fn dense_focus(dpi: u32) -> Self {
         Self {
-            gap_deg: 2.0,
+            gap_deg: 1.6,
             group: 5,
-            group_gap: 1.3,
-            accent_frac: 0.10,
-            accent_mul: 3.5,
+            group_gap: 2.5,
+            accent_frac: 0.18,
+            accent_mul: 4.0,
             ..Self::focus(dpi)
         }
-        .with_mm(dpi, 0.25, 0.0)
+        .with_mm(dpi, 0.30, 0.0)
     }
 
-    /// A black burst: rays at a 1.5° gap, nearly twice the weight, a
-    /// third of them heavy, small hole (ref-08's top panel).
+    /// A black burst: rays at a 1° gap, nearly twice the weight, a
+    /// quarter of them heavy, small hole (ref-08's top panel). The widest
+    /// accent spread in the set — this is the row that has to put a 2 mm
+    /// wedge next to a hairline.
     pub fn dark_burst(dpi: u32) -> Self {
         Self {
-            gap_deg: 1.5,
+            gap_deg: 1.0,
             r_in_frac: 0.2,
             group: 3,
-            group_gap: 1.2,
-            jit_gap: 0.4,
-            accent_frac: 0.30,
-            accent_mul: 4.0,
-            needle: 1.0,
+            group_gap: 3.0,
+            jit_gap: 0.3,
+            accent_frac: 0.25,
+            accent_mul: 5.0,
+            needle: 0.8,
             len_skew: 0.7,
+            core_jit: 0.35,
             ..Self::focus(dpi)
         }
         .with_mm(dpi, 0.50, 0.0)
@@ -289,11 +340,20 @@ impl LineOpts {
     /// `width` is a spike BASE in px and their teeth are counted, not
     /// gapped — so they keep the count-driven preset, and the parity
     /// knobs stay off: the teeth carry their own shape.
+    ///
+    /// The jitters are the flashes' ONLY irregularity, and at 0.25 they
+    /// were not enough: the critic read both rows as "a polar zoom
+    /// filter" — same length, same spacing, one circle. Angle 0.35 (the
+    /// renderer's cap is 0.5), length 0.5, and `core_jit` 0.3 so the
+    /// filled variant's teeth do not all start on one circle.
     pub fn flash(dpi: u32, count: u32, width_mm: f32, r_in_frac: f32) -> Self {
         Self {
             count,
             gap_deg: 0.0,
             jitter: 0.25,
+            jit_gap: 0.35,
+            jit_len: 0.5,
+            core_jit: 0.3,
             r_in_frac,
             taper: 0.0,
             ..Self::from_mm(dpi, width_mm, 0.0)
@@ -364,7 +424,30 @@ impl LineOpts {
             // at any angle), protruding past both sides until the panel
             // clips them.
             let cross = ((bounds[2] - bounds[0]).hypot(bounds[3] - bounds[1]) * 1.05).max(len);
-            (dir_deg, cross, cross, 0.0)
+            // An ANCHORED set (ref-09's drips) is different: the runs all
+            // start on the drag's line, so their longest useful length is
+            // the distance from that line to the far edge — the panel
+            // HEIGHT for drips off the top edge, not the diagonal. Given
+            // the diagonal instead, `jit_len` had to eat 45 % before a run
+            // even stopped inside the panel, so the depths bunched and
+            // the bottom quarter stayed blank (critic, round 1).
+            let reach = if self.start_mode == 1 && len > 1e-3 {
+                let d = [(b[0] - a[0]) / len, (b[1] - a[1]) / len];
+                let base = a[0] * d[0] + a[1] * d[1];
+                [
+                    [bounds[0], bounds[1]],
+                    [bounds[2], bounds[1]],
+                    [bounds[0], bounds[3]],
+                    [bounds[2], bounds[3]],
+                ]
+                .iter()
+                .map(|c| c[0] * d[0] + c[1] * d[1] - base)
+                .fold(0.0f32, f32::max)
+                .max(len)
+            } else {
+                cross
+            };
+            (dir_deg, reach, reach, 0.0)
         };
         GenLinesSpec {
             // Kinds 1/2 keep focus = true: the Object tool's driver
@@ -410,6 +493,9 @@ impl LineOpts {
             needle: self.needle,
             len_skew: self.len_skew,
             sweep_deg: if radial { self.sweep_deg } else { 0.0 },
+            // The ragged core is a radial idea: a stream has no hole to
+            // stagger the ends around.
+            core_jit: if radial { self.core_jit } else { 0.0 },
             start_mode: if radial { 0 } else { self.start_mode },
             jit_start: if radial { 0.0 } else { self.jit_start },
             // WHERE THE DRIVER HANDLES GO — and, since the parity round,
@@ -724,6 +810,62 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The density a preset states in millimetres and degrees has to
+    /// SURVIVE the drag. Round 1 of the gauntlet opened with "dense-stream
+    /// draws 8 strokes per 25 mm where its 0.6 mm gap asks for 36", and
+    /// the first suspect was `place` quietly dropping `gap_px` / `group`
+    /// on the way to the spec. It does not — the loss was the
+    /// along-the-direction scatter in `render_speed`, fixed there — but a
+    /// preset whose numbers never reach the renderer is a silent failure
+    /// with no symptom except a set that looks thin, so it gets a guard.
+    #[test]
+    fn placed_presets_keep_their_density() {
+        let bounds = [0.0f32, 0.0, 2362.0, 1653.0];
+        let row = |name: &str| {
+            builtin_presets()
+                .iter()
+                .find(|p| p.name == name)
+                .unwrap_or_else(|| panic!("no preset called {name}"))
+        };
+
+        // 流線: the gap is a MILLIMETRE figure and must land in px at the
+        // page's dpi, bundles and hole intact.
+        let (k, o) = {
+            let p = row("Dense stream");
+            (p.kind, (p.opts)(600))
+        };
+        let s = o.place(k, [354.0, 909.0], [2008.0, 744.0], bounds, 1);
+        let want_px = 0.6 / 25.4 * 600.0;
+        assert!(
+            (s.gap_px - want_px).abs() < 0.05,
+            "dense stream keeps its 0.6 mm gap ({} px, wanted {want_px:.2})",
+            s.gap_px
+        );
+        assert_eq!((s.group, s.group_gap), (6, 2.5), "and its bundle of six");
+
+        // 集中線: the gap is in DEGREES and drives the ray count through
+        // the angular walk, so the walk has to produce the bundles too.
+        let (k, o) = {
+            let p = row("Saturated line");
+            (p.kind, (p.opts)(600))
+        };
+        let s = o.place(k, [1299.0, 744.0], [1819.0, 744.0], bounds, 1);
+        assert_eq!(
+            (s.gap_deg, s.group, s.group_gap),
+            (o.gap_deg, o.group, o.group_gap),
+            "the preset's angular density reaches the spec"
+        );
+        // The shipped tuning, spelled out: 2.2° in bundles of four with a
+        // 3× hole. (It was 3° / 1.5× before round 1 — the hole had to grow
+        // to be visible at all, and the gap shrank to pay for it.)
+        assert_eq!((s.gap_deg, s.group, s.group_gap), (2.2, 4, 3.0));
+        assert!(
+            (100..=120).contains(&s.ray_count()),
+            "which is ~109 rays over the circle, not 80 ({})",
+            s.ray_count()
+        );
     }
 
     /// `same_as` ignores the seed and nothing else — it is what tells a
