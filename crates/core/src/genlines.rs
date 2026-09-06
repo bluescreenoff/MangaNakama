@@ -401,7 +401,20 @@ fn segment(
             let qy = a[1] + t * d[1];
             let ex = px - qx;
             let ey = py - qy;
-            let hwt = hw * prof.width_at(t);
+            // The ramped half-width, floored at half a pixel: a pen
+            // needle stays a 1 px line until it ends, and this test is
+            // hard-edged, so once `hw · width_at(t)` drops under ~0.35 px
+            // it only catches the odd pixel centre and the last third of
+            // every tapered stroke prints DASHED. The floor is where the
+            // ramp stops — one pixel wide, held to the tip.
+            //
+            // The trap: both callers already floor `hw` at 0.5, and a
+            // zero profile returns exactly 1.0, so `hwt == hw` on every
+            // pre-parity layer and the pinned rasters do not move
+            // (`legacy_renders_are_bit_stable`). A layer saved WITH a
+            // taper does redraw — solid tails instead of dotted ones —
+            // which is the fix, not a regression.
+            let hwt = (hw * prof.width_at(t)).max(0.5);
             if ex * ex + ey * ey <= hwt * hwt {
                 put(map, x, y);
             }
@@ -448,6 +461,14 @@ const MAX_RAYS: usize = 4096;
 /// then a hole of `group_gap × gap_deg`. Bundling needs a gap to be a
 /// multiple OF, so — like the speed walk keying on `gap_px` — it is only
 /// read when `gap_deg` > 0.
+///
+/// A SWEEP walks too, bundles or not (`group <= 1` = a walk with no
+/// holes). It has to: the even-spread branch below spreads `count` rays
+/// over the arc, and for a gap-driven set `count` is
+/// [`GenLinesSpec::ray_count`]'s 360/gap — so a 3° set swept to 170°
+/// used to squeeze all 120 rays into that arc at double density. The
+/// even spread is now only for `gap_deg == 0`, where `count` IS the
+/// stored ray count and means what it says.
 fn radial_angles(
     count: u32,
     gap_deg: f32,
@@ -456,7 +477,7 @@ fn radial_angles(
     group: u32,
     group_gap: f32,
 ) -> Option<Vec<f32>> {
-    let walk = gap_deg > 0.0 && group > 1;
+    let walk = gap_deg > 0.0 && (group > 1 || sweep_deg > 0.0);
     if !walk && sweep_deg <= 0.0 {
         return None;
     }
@@ -470,11 +491,14 @@ fn radial_angles(
     let mut out = Vec::new();
     if walk {
         let gap = gap_deg.to_radians();
-        let hole = group_gap.max(1.0);
+        // No bundle asked for = a plain walk at the gap: `group.max(1)`
+        // keeps the modulo off zero, and a hole of 1× is no hole.
+        let bundle = group.max(1);
+        let hole = if group > 1 { group_gap.max(1.0) } else { 1.0 };
         let (mut a, mut i) = (start, 0u32);
         while a < start + sweep && out.len() < MAX_RAYS {
             out.push(a);
-            a += if (i + 1) % group == 0 { gap * hole } else { gap };
+            a += if (i + 1) % bundle == 0 { gap * hole } else { gap };
             i += 1;
         }
     } else {
@@ -1583,6 +1607,41 @@ mod tests {
         );
     }
 
+    /// A sweep with a GAP has to walk. It used to fall through to the
+    /// even-spread branch, where `count` is whatever `ray_count()` says —
+    /// 360/gap for a gap-driven set — so a 3° fan swept to half a circle
+    /// drew all 120 rays inside 180°, at double density. 180° at 3° is
+    /// 60 rays, and the ring still measures 3° between them.
+    #[test]
+    fn sweep_keeps_the_gap() {
+        let full = GenLinesSpec {
+            focus: true,
+            a: 512.0,
+            b: 512.0,
+            c: 80.0,
+            d: 500.0,
+            count: 1,
+            width: 3.0,
+            gap_deg: 3.0,
+            seed: 11,
+            ..Default::default()
+        };
+        assert_eq!(full.ray_count(), 120, "360 / 3°");
+        let swept = GenLinesSpec {
+            sweep_deg: 180.0,
+            ..full
+        };
+        // 60 steps of 3° across 180°, ±1 for whether the ray that lands
+        // ON the far edge clears the float compare — not 120.
+        let n = swept.ray_count();
+        assert!((59..=61).contains(&n), "180 / 3°, not 120 squeezed in ({n})");
+        let gaps = ray_gaps(&swept.render((1024, 1024)), [512.0, 512.0], 300.0);
+        let tight = gaps.iter().filter(|g| (**g - 3.0).abs() < 0.6).count();
+        let doubled = gaps.iter().filter(|g| (**g - 1.5).abs() < 0.4).count();
+        assert!(tight > 40, "the arc keeps its pitch ({tight} of {gaps:?})");
+        assert_eq!(doubled, 0, "and nothing sits at half the gap");
+    }
+
     /// The thicknesses of a horizontal run block, band by band, sampled
     /// down three columns — how the weight MIX is measured.
     ///
@@ -1723,6 +1782,53 @@ mod tests {
         );
         // And the exponent below 1 keeps a belly — the other direction.
         assert!(col(0.5, 350) > straight, "k < 1 holds its weight longer");
+    }
+
+    /// A pen needle stays a 1 px LINE until it ends. Before the
+    /// half-pixel floor in `segment`, `taper 1` + `needle 1.2` drove the
+    /// ramped half-width under ~0.35 px over the last sixth of the
+    /// stroke, and a hard-edged distance test then caught only the odd
+    /// pixel centre — the tail printed as a dashed line (it was visible
+    /// in `saturated-line-crop.png`). One long ray, walked base to tip:
+    /// no hole longer than 1 px anywhere before the tip.
+    #[test]
+    fn needles_end_solid_not_dashed() {
+        let m = render_focus(
+            &FocusLinesParams {
+                center: [520.0, 512.0],
+                r_in: 40.0,
+                r_out: 480.0,
+                count: 1,
+                width: 6.0,
+                taper: 1.0,
+                mix: Mix {
+                    needle: 1.2,
+                    ..Mix::default()
+                },
+                seed: 3,
+                ..Default::default()
+            },
+            (1024, 1024),
+        );
+        // Ray 0 runs along +x from the centre, so the axis is y = 512.0
+        // and the stroke spans x = 560 (tip, the inner end taper aims at)
+        // to x = 1000 (base).
+        let on: Vec<bool> = (560..=1000)
+            .map(|x| ink_at(&m, x, 511) || ink_at(&m, x, 512))
+            .collect();
+        let first = on.iter().position(|v| *v).expect("the ray drew");
+        let last = on.iter().rposition(|v| *v).unwrap();
+        let (mut gap, mut worst) = (0usize, 0usize);
+        for v in &on[first..=last] {
+            gap = if *v { 0 } else { gap + 1 };
+            worst = worst.max(gap);
+        }
+        assert!(worst <= 1, "the tail is solid, not dashed ({worst} px hole)");
+        assert!(
+            first <= 2 && last >= on.len() - 3,
+            "and it runs the whole ray ({first}..{last} of {})",
+            on.len()
+        );
     }
 
     /// The mean inner end of a 集中線, ray by ray: how far in the ink
