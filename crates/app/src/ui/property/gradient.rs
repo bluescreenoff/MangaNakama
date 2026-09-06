@@ -259,9 +259,15 @@ pub(crate) fn ramp_stop_fields(
     changed
 }
 
-/// Edge process, flip, dithering, start-from-centre, mixing mode and
-/// mixing rate — `G-002`/`G-004`/`G-005`/`G-006`/`G-009`/`G-015`.
-pub(crate) fn ramp_options(ui: &mut egui::Ui, opts: &mut mn_core::RampOpts, salt: &str) -> bool {
+// --- ramp options, one control at a time -----------------------------------
+//
+// Edge process, flip, dithering, start-from-centre, mixing mode and mixing
+// rate — `G-002`/`G-004`/`G-005`/`G-006`/`G-009`/`G-015`. Written once and
+// drawn twice: the Gradient TOOL's Ramp section (one row each since lane B2)
+// and a live gradient LAYER's parameters, which are still one block because
+// they share an undo-coalescing session.
+
+fn ramp_edge(ui: &mut egui::Ui, opts: &mut mn_core::RampOpts, salt: &str) -> bool {
     let mut changed = false;
     ui.horizontal(|ui| {
         ui.weak("Edge");
@@ -275,6 +281,11 @@ pub(crate) fn ramp_options(ui: &mut egui::Ui, opts: &mut mn_core::RampOpts, salt
     })
     .response
     .on_hover_text("what the ramp does OUTSIDE the length you dragged");
+    changed
+}
+
+fn ramp_mixing(ui: &mut egui::Ui, opts: &mut mn_core::RampOpts, salt: &str) -> bool {
+    let mut changed = false;
     ui.horizontal(|ui| {
         ui.weak("Mixing");
         egui::ComboBox::from_id_salt(format!("mn.grad.mix.{salt}"))
@@ -287,31 +298,43 @@ pub(crate) fn ramp_options(ui: &mut egui::Ui, opts: &mut mn_core::RampOpts, salt
     })
     .response
     .on_hover_text("Perceptual keeps a ramp's lightness even across the middle");
-    // `G-010`. Shown only where it does something — CSP greys it out in the
-    // other modes, and a control that is always dead is worse than absent.
-    if opts.mix == mn_core::MixMode::Perceptual {
-        let mut lv = opts.bright as f32;
-        if ValueBar::new("Brightness", 0.0, mn_core::gradient::MAX_BRIGHT as f32)
-            .step(1.0)
-            .show(ui, &mut lv)
-            .changed()
-        {
-            opts.bright = lv.round() as u8;
-            changed = true;
-        }
+    changed
+}
+
+/// `G-010`. Shown only where it does something — CSP greys it out in the
+/// other modes, and a control that is always dead is worse than absent.
+fn ramp_brightness(ui: &mut egui::Ui, opts: &mut mn_core::RampOpts) -> bool {
+    let mut lv = opts.bright as f32;
+    if ValueBar::new("Brightness", 0.0, mn_core::gradient::MAX_BRIGHT as f32)
+        .step(1.0)
+        .show(ui, &mut lv)
+        .changed()
+    {
+        opts.bright = lv.round() as u8;
+        return true;
     }
-    changed |= ui
-        .checkbox(&mut opts.flip, "Flip")
+    false
+}
+
+fn ramp_flip(ui: &mut egui::Ui, opts: &mut mn_core::RampOpts) -> bool {
+    ui.checkbox(&mut opts.flip, "Flip")
         .on_hover_text("paint the ramp end-first, without re-dragging it")
-        .changed();
-    changed |= ui
-        .checkbox(&mut opts.dither, "Dithering")
+        .changed()
+}
+
+fn ramp_dither(ui: &mut egui::Ui, opts: &mut mn_core::RampOpts) -> bool {
+    ui.checkbox(&mut opts.dither, "Dithering")
         .on_hover_text("ordered noise inside the ramp so print does not band")
-        .changed();
-    changed |= ui
-        .checkbox(&mut opts.from_center, "Start from centre")
+        .changed()
+}
+
+fn ramp_from_center(ui: &mut egui::Ui, opts: &mut mn_core::RampOpts) -> bool {
+    ui.checkbox(&mut opts.from_center, "Start from centre")
         .on_hover_text("the drag START is the middle of the ramp")
-        .changed();
+        .changed()
+}
+
+fn ramp_rate(ui: &mut egui::Ui, opts: &mut mn_core::RampOpts) -> bool {
     let mut rate = opts.curve * 100.0;
     if ValueBar::new("Mixing rate", -100.0, 100.0)
         .suffix("%")
@@ -319,23 +342,42 @@ pub(crate) fn ramp_options(ui: &mut egui::Ui, opts: &mut mn_core::RampOpts, salt
         .changed()
     {
         opts.curve = rate / 100.0;
-        changed = true;
+        return true;
     }
+    false
+}
+
+/// The whole block in order — what a live gradient LAYER's panel draws.
+pub(crate) fn ramp_options(ui: &mut egui::Ui, opts: &mut mn_core::RampOpts, salt: &str) -> bool {
+    let mut changed = ramp_edge(ui, opts, salt);
+    changed |= ramp_mixing(ui, opts, salt);
+    if opts.mix == mn_core::MixMode::Perceptual {
+        changed |= ramp_brightness(ui, opts);
+    }
+    changed |= ramp_flip(ui, opts);
+    changed |= ramp_dither(ui, opts);
+    changed |= ramp_from_center(ui, opts);
+    changed |= ramp_rate(ui, opts);
     changed
 }
 
-pub(crate) fn sec_gradient_info(ui: &mut egui::Ui, app: &mut App) {
+// --- the Gradient tool's own rows ------------------------------------------
+
+pub(crate) fn row_grad_mode(ui: &mut egui::Ui, app: &mut App) {
     ui.weak(format!(
         "{} (set in the Sub Tool list)",
         app.grad_mode.label()
     ));
+}
+
+/// The colour bar. The return value only matters to a LIVE layer, which has
+/// to push a re-derive; the tool's ramp is plain app state, written back
+/// every frame.
+pub(crate) fn row_grad_bar(ui: &mut egui::Ui, app: &mut App) {
     let (from, to) = tool_ends(app);
     let mut mid = app.grad_mid;
     let mut sel = app.grad_stop_sel;
     let mut dragging = app.grad_stop_drag;
-    // The return value only matters to a LIVE layer, which has to push a
-    // re-derive; the tool's ramp is plain app state, written back every
-    // frame.
     ramp_bar(
         ui,
         from,
@@ -345,25 +387,93 @@ pub(crate) fn sec_gradient_info(ui: &mut egui::Ui, app: &mut App) {
         &mut sel,
         &mut dragging,
     );
-    let (main, sub) = (app.active_color(), app.sub_color);
-    ramp_stop_fields(ui, &mut mid, &mut sel, main, sub);
     app.grad_mid = mid;
     app.grad_stop_sel = sel;
     app.grad_stop_drag = dragging;
-    // I-016 (CSP "Where to create") / NL-006's live switch — the GRADIENT
-    // tool's own copy of it, defaulting ON: spawn a gradient LAYER whose
-    // parameters stay editable, or turn it off to bake the ramp into the
-    // layer's pixels. The bucket keeps a separate switch of its own.
+}
+
+/// The selected stop's numbers. Its own row because it is a different
+/// question from the bar above it — which stop, versus what that stop is.
+pub(crate) fn row_grad_stop(ui: &mut egui::Ui, app: &mut App) {
+    let (main, sub) = (app.active_color(), app.sub_color);
+    let mut mid = app.grad_mid;
+    let mut sel = app.grad_stop_sel;
+    ramp_stop_fields(ui, &mut mid, &mut sel, main, sub);
+    app.grad_mid = mid;
+    app.grad_stop_sel = sel;
+}
+
+/// I-016 (CSP "Where to create") / NL-006's live switch — the GRADIENT tool's
+/// own copy of it, defaulting ON: spawn a gradient LAYER whose parameters
+/// stay editable, or turn it off to bake the ramp into the layer's pixels.
+/// The bucket keeps a separate switch of its own.
+pub(crate) fn row_grad_live(ui: &mut egui::Ui, app: &mut App) {
     ui.checkbox(&mut app.gradient_live, "Create live layer")
         .on_hover_text("on: a gradient layer you can re-drag later · off: paint pixels");
 }
 
-pub(crate) fn sec_gradient_opts(ui: &mut egui::Ui, app: &mut App) {
+pub(crate) const ROWS_GRAD_INFO: &[Row] = &[
+    row("grad.info.mode", "Sub tool mode", row_grad_mode),
+    row("grad.info.bar", "Ramp", row_grad_bar),
+    row("grad.info.stop", "Selected stop", row_grad_stop),
+    row("grad.info.live", "Create live layer", row_grad_live),
+];
+
+fn grad_opts_row(
+    ui: &mut egui::Ui,
+    app: &mut App,
+    f: impl FnOnce(&mut egui::Ui, &mut mn_core::RampOpts) -> bool,
+) {
     let mut opts = app.grad_opts;
-    if ramp_options(ui, &mut opts, "tool") {
+    if f(ui, &mut opts) {
         app.grad_opts = opts;
     }
 }
+
+fn grad_perceptual(app: &App) -> bool {
+    app.grad_opts.mix == mn_core::MixMode::Perceptual
+}
+
+pub(crate) fn row_grad_edge(ui: &mut egui::Ui, app: &mut App) {
+    grad_opts_row(ui, app, |ui, o| ramp_edge(ui, o, "tool"));
+}
+pub(crate) fn row_grad_mixing(ui: &mut egui::Ui, app: &mut App) {
+    grad_opts_row(ui, app, |ui, o| ramp_mixing(ui, o, "tool"));
+}
+pub(crate) fn row_grad_brightness(ui: &mut egui::Ui, app: &mut App) {
+    grad_opts_row(ui, app, ramp_brightness);
+}
+pub(crate) fn row_grad_flip(ui: &mut egui::Ui, app: &mut App) {
+    grad_opts_row(ui, app, ramp_flip);
+}
+pub(crate) fn row_grad_dither(ui: &mut egui::Ui, app: &mut App) {
+    grad_opts_row(ui, app, ramp_dither);
+}
+pub(crate) fn row_grad_from_center(ui: &mut egui::Ui, app: &mut App) {
+    grad_opts_row(ui, app, ramp_from_center);
+}
+pub(crate) fn row_grad_rate(ui: &mut egui::Ui, app: &mut App) {
+    grad_opts_row(ui, app, ramp_rate);
+}
+
+pub(crate) const ROWS_GRAD_OPTS: &[Row] = &[
+    row("grad.opts.edge", "Edge", row_grad_edge),
+    row("grad.opts.mixing", "Mixing", row_grad_mixing),
+    row_when(
+        "grad.opts.brightness",
+        "Brightness",
+        row_grad_brightness,
+        grad_perceptual,
+    ),
+    row("grad.opts.flip", "Flip", row_grad_flip),
+    row("grad.opts.dither", "Dithering", row_grad_dither),
+    row(
+        "grad.opts.from_center",
+        "Start from centre",
+        row_grad_from_center,
+    ),
+    row("grad.opts.rate", "Mixing rate", row_grad_rate),
+];
 
 // --- the gradient SET (`G-011`/`G-012`/`G-016`) --------------------------
 
@@ -462,72 +572,104 @@ pub(crate) fn apply_named_ramp(app: &mut App, g: mn_core::NamedRamp) {
     app.set_status(format!("“{}” applied — main/sub now its ends", g.name));
 }
 
-pub(crate) fn sec_gradient_set(ui: &mut egui::Ui, app: &mut App) {
+// --- the gradient SET's rows ----------------------------------------------
+
+/// The entry in hand, with the index clamped into the list the way the
+/// whole-section body used to clamp it once per frame.
+fn grad_sel(app: &mut App) -> Option<usize> {
     if app.grad_set.is_empty() {
+        return None;
+    }
+    let sel = app.grad_set_sel.min(app.grad_set.len() - 1);
+    app.grad_set_sel = sel;
+    Some(sel)
+}
+
+fn grad_set_filled(app: &App) -> bool {
+    !app.grad_set.is_empty()
+}
+
+/// Which saved gradient, and what it looks like. Always drawn, because the
+/// empty set has to say it is empty somewhere.
+pub(crate) fn row_grad_set_pick(ui: &mut egui::Ui, app: &mut App) {
+    let Some(sel) = grad_sel(app) else {
         ui.weak("no saved gradients");
-    } else {
-        let sel = app.grad_set_sel.min(app.grad_set.len() - 1);
-        app.grad_set_sel = sel;
-        let names: Vec<String> = app.grad_set.items.iter().map(|g| g.name.clone()).collect();
-        egui::ComboBox::from_id_salt("mn.grad.set")
-            .width(ui.available_width())
-            .selected_text(names[sel].clone())
-            .show_ui(ui, |ui| {
-                for (i, n) in names.iter().enumerate() {
-                    ui.selectable_value(&mut app.grad_set_sel, i, n);
-                }
-            });
-        let sel = app.grad_set_sel;
-        ramp_preview(ui, &app.grad_set.items[sel].ramp(), 14.0);
-        // Rename in place: a set of six "Gradient 4"s is a set you cannot
-        // use, and there is nowhere else in the UI a name could be edited.
-        let mut name = app.grad_set.items[sel].name.clone();
+        return;
+    };
+    let names: Vec<String> = app.grad_set.items.iter().map(|g| g.name.clone()).collect();
+    egui::ComboBox::from_id_salt("mn.grad.set")
+        .width(ui.available_width())
+        .selected_text(names[sel].clone())
+        .show_ui(ui, |ui| {
+            for (i, n) in names.iter().enumerate() {
+                ui.selectable_value(&mut app.grad_set_sel, i, n);
+            }
+        });
+    let sel = app.grad_set_sel;
+    ramp_preview(ui, &app.grad_set.items[sel].ramp(), 14.0);
+}
+
+/// Rename in place: a set of six "Gradient 4"s is a set you cannot use, and
+/// there is nowhere else in the UI a name could be edited.
+pub(crate) fn row_grad_set_name(ui: &mut egui::Ui, app: &mut App) {
+    let Some(sel) = grad_sel(app) else { return };
+    let mut name = app.grad_set.items[sel].name.clone();
+    if ui
+        .add(egui::TextEdit::singleline(&mut name).desired_width(ui.available_width()))
+        .changed()
+    {
+        app.grad_set.items[sel].name = name;
+        grad_set_save(app);
+    }
+}
+
+pub(crate) fn row_grad_set_apply(ui: &mut egui::Ui, app: &mut App) {
+    let Some(sel) = grad_sel(app) else { return };
+    ui.horizontal(|ui| {
         if ui
-            .add(egui::TextEdit::singleline(&mut name).desired_width(ui.available_width()))
-            .changed()
+            .button("Apply")
+            .on_hover_text("load this ramp into the tool (or the active gradient layer)")
+            .clicked()
         {
-            app.grad_set.items[sel].name = name;
+            let g = app.grad_set.items[sel].clone();
+            apply_named_ramp(app, g);
+        }
+        if ui
+            .small_button("Replace")
+            .on_hover_text("overwrite this entry with the ramp as it is now")
+            .clicked()
+        {
+            let keep = app.grad_set.items[sel].name.clone();
+            app.grad_set.items[sel] = tool_named_ramp(app, keep);
             grad_set_save(app);
         }
-        ui.horizontal(|ui| {
-            if ui
-                .button("Apply")
-                .on_hover_text("load this ramp into the tool (or the active gradient layer)")
-                .clicked()
-            {
-                let g = app.grad_set.items[sel].clone();
-                apply_named_ramp(app, g);
-            }
-            if ui
-                .small_button("Replace")
-                .on_hover_text("overwrite this entry with the ramp as it is now")
-                .clicked()
-            {
-                let keep = app.grad_set.items[sel].name.clone();
-                app.grad_set.items[sel] = tool_named_ramp(app, keep);
-                grad_set_save(app);
-            }
-            if ui.small_button("Copy").clicked() {
-                app.grad_set_sel = app.grad_set.duplicate(sel).unwrap_or(sel);
-                grad_set_save(app);
-            }
-        });
-        ui.horizontal(|ui| {
-            if ui.small_button("Up").clicked() {
-                app.grad_set_sel = app.grad_set.move_by(sel, -1);
-                grad_set_save(app);
-            }
-            if ui.small_button("Down").clicked() {
-                app.grad_set_sel = app.grad_set.move_by(sel, 1);
-                grad_set_save(app);
-            }
-            if ui.small_button("Delete").clicked() {
-                app.grad_set.items.remove(sel);
-                app.grad_set_sel = sel.saturating_sub(1);
-                grad_set_save(app);
-            }
-        });
-    }
+        if ui.small_button("Copy").clicked() {
+            app.grad_set_sel = app.grad_set.duplicate(sel).unwrap_or(sel);
+            grad_set_save(app);
+        }
+    });
+}
+
+pub(crate) fn row_grad_set_arrange(ui: &mut egui::Ui, app: &mut App) {
+    let Some(sel) = grad_sel(app) else { return };
+    ui.horizontal(|ui| {
+        if ui.small_button("Up").clicked() {
+            app.grad_set_sel = app.grad_set.move_by(sel, -1);
+            grad_set_save(app);
+        }
+        if ui.small_button("Down").clicked() {
+            app.grad_set_sel = app.grad_set.move_by(sel, 1);
+            grad_set_save(app);
+        }
+        if ui.small_button("Delete").clicked() {
+            app.grad_set.items.remove(sel);
+            app.grad_set_sel = sel.saturating_sub(1);
+            grad_set_save(app);
+        }
+    });
+}
+
+pub(crate) fn row_grad_set_add(ui: &mut egui::Ui, app: &mut App) {
     ui.horizontal(|ui| {
         if ui
             .button("Add")
@@ -549,6 +691,24 @@ pub(crate) fn sec_gradient_set(ui: &mut egui::Ui, app: &mut App) {
         }
     });
 }
+
+pub(crate) const ROWS_GRAD_SET: &[Row] = &[
+    row("grad.set.pick", "Saved gradient", row_grad_set_pick),
+    row_when("grad.set.name", "Name", row_grad_set_name, grad_set_filled),
+    row_when(
+        "grad.set.apply",
+        "Apply / Replace / Copy",
+        row_grad_set_apply,
+        grad_set_filled,
+    ),
+    row_when(
+        "grad.set.arrange",
+        "Up / Down / Delete",
+        row_grad_set_arrange,
+        grad_set_filled,
+    ),
+    row("grad.set.add", "Add / Import", row_grad_set_add),
+];
 
 /// The ACTIVE LIVE LAYER's parameters (TRIAGE 137): edit the fill a week
 /// later — colour, ramp endpoints, or tone density/pattern/frequency/angle.

@@ -15,7 +15,7 @@ use super::headless_renderer;
 use super::layout::UiLayout;
 use crate::cmd::{FigureMode, Tool};
 use crate::ui::property::{
-    hidden_from_line, move_entry, order_from_json, order_to_json, palette_row_ids,
+    flat_order, hidden_from_line, move_entry, order_from_json, order_to_json, palette_row_ids,
 };
 
 /// `App::new` reads the ui.txt beside the TEST EXE, which the parallel
@@ -257,11 +257,23 @@ fn the_settings_window_settles_on_screen() {
                 .expect("the settings window is visible")
         })
     };
-    // Every section of the busiest converted context, plus a section that
-    // does not apply (Figure with an effect-line preset armed).
+    // Every section of every context lane B2 converted. Two things at once:
+    // the window settles (its own subject), and every row BODY survives
+    // being drawn — the window draws rows that do not apply to the armed sub
+    // tool, greyed, so a row whose body assumed its old `if` would panic
+    // here and nowhere else.
     for (tool, mode, secs) in [
         (Tool::Text, FigureMode::Line, 9usize),
         (Tool::Figure, FigureMode::Stream, 5),
+        (Tool::Figure, FigureMode::Rect, 5),
+        (Tool::Balloon, FigureMode::Line, 4),
+        (Tool::Frame, FigureMode::Line, 2),
+        (Tool::Fill, FigureMode::Line, 2),
+        (Tool::Tone, FigureMode::Line, 3),
+        (Tool::Wand, FigureMode::Line, 2),
+        (Tool::Select, FigureMode::Line, 1),
+        (Tool::Gradient, FigureMode::Line, 4),
+        (Tool::Ruler, FigureMode::Line, 3),
     ] {
         app.tool = tool;
         app.figure_mode = mode;
@@ -325,8 +337,177 @@ fn non_applying_sections_are_skipped() {
             "{mode:?} generates its own layer — no Dynamics: {ids:?}"
         );
         assert!(
-            ids.contains(&"figure.opts"),
+            ids.contains(&"figure.opts.width"),
             "the effect-line knobs are still there: {ids:?}"
         );
     }
+}
+
+/// Lane B2: every panel is rows now, and an id is only a stable handle if it
+/// is UNIQUE inside the context it lives in. `prop_order` stores one flat
+/// list of section ids and row ids per context and looks a row up by
+/// `position`, so two rows sharing an id would silently both jump to
+/// wherever the first one sits, and one eye toggle would hide both.
+///
+/// The check runs over the FULL id list (`flat_order`), not the visible
+/// palette: a row that does not apply to the armed sub tool still occupies
+/// its id, and it is the id space `prop_order` writes down.
+#[test]
+fn every_context_has_unique_row_ids() {
+    let Some(mut app) = app() else {
+        return;
+    };
+
+    let check = |app: &App, what: &str| {
+        let ids = flat_order(app);
+        let mut seen = std::collections::BTreeSet::new();
+        for id in &ids {
+            assert!(
+                seen.insert(id.clone()),
+                "{what}: {id} appears twice — {ids:?}"
+            );
+        }
+    };
+
+    for tool in [
+        Tool::Pen,
+        Tool::Eraser,
+        Tool::Figure,
+        Tool::Gradient,
+        Tool::Fill,
+        Tool::Tone,
+        Tool::Select,
+        Tool::SelPen,
+        Tool::SelEraser,
+        Tool::Wand,
+        Tool::Object,
+        Tool::Frame,
+        Tool::Balloon,
+        Tool::Text,
+        Tool::Eyedrop,
+        Tool::Liquify,
+        Tool::Ruler,
+        Tool::Pan,
+    ] {
+        app.tool = tool;
+        // The Figure tool swaps knobs per armed sub tool, and the sub tool
+        // decides which rows exist at all — walk them too.
+        if tool == Tool::Figure {
+            for m in [
+                FigureMode::Line,
+                FigureMode::Stream,
+                FigureMode::Focus,
+                FigureMode::Urchin,
+                FigureMode::SolidFlash,
+            ] {
+                app.figure_mode = m;
+                check(&app, &format!("{tool:?}/{m:?}"));
+            }
+            app.figure_mode = FigureMode::Line;
+            continue;
+        }
+        check(&app, &format!("{tool:?}"));
+    }
+
+    // The Operation tool's palette is the SELECTED OBJECT's, so each kind of
+    // selection is its own context with its own stored order.
+    app.tool = Tool::Object;
+    app.object_mode = crate::cmd::ObjectMode::PickLayer;
+    check(&app, "obj.picklayer");
+    app.object_mode = crate::cmd::ObjectMode::Object;
+
+    app.text_sel = Some((0, 0));
+    check(&app, "obj.text");
+    app.text_sel = None;
+
+    app.balloon_sel = Some((0, 0));
+    check(&app, "obj.balloon");
+    app.balloon_sel = None;
+
+    app.doc.layers[0].genlines = Some(mn_core::genlines::GenLinesSpec::default());
+    app.gen_sel = Some(0);
+    check(&app, "obj.gen");
+    app.gen_sel = None;
+    app.doc.layers[0].genlines = None;
+
+    app.object_sel = Some((0, 0));
+    check(&app, "obj.frame");
+    app.object_sel = None;
+}
+
+/// The knobs an effect-line sub tool has depend on WHICH KIND it is, and lane
+/// B2 moved those conditions out of the section bodies onto `Row::applies`.
+/// The two that would be nonsense are the pairs below: a stream has no centre
+/// to hollow and no arc to sweep, and a burst's rays cannot start off a line
+/// or fan toward a point — they already converge on one.
+///
+/// This is the test that says the move kept the conditions. Before it, the
+/// same rule lived inside an `if` nothing could reach.
+#[test]
+fn effect_line_rows_apply_per_kind() {
+    let Some(mut app) = app() else {
+        return;
+    };
+    app.tool = Tool::Figure;
+
+    app.figure_mode = FigureMode::Stream;
+    let ids = palette_row_ids(&app);
+    for id in ["figure.opts.sweep", "figure.opts.hollow"] {
+        assert!(
+            !ids.contains(&id),
+            "a stream has no hollow centre and no sweep: {id} in {ids:?}"
+        );
+    }
+    for id in ["figure.opts.start", "figure.opts.fan", "figure.opts.width"] {
+        assert!(ids.contains(&id), "a stream keeps {id}: {ids:?}");
+    }
+    // A stream's own wobbles: the angular one is its alone, the radial ones
+    // are not there at all.
+    assert!(ids.contains(&"figure.wobble.angle"));
+    assert!(!ids.contains(&"figure.wobble.core"));
+    assert!(!ids.contains(&"figure.wobble.outer_length"));
+
+    app.figure_mode = FigureMode::Focus;
+    let ids = palette_row_ids(&app);
+    for id in ["figure.opts.start", "figure.opts.fan"] {
+        assert!(
+            !ids.contains(&id),
+            "a burst's rays already converge — no {id}: {ids:?}"
+        );
+    }
+    for id in [
+        "figure.opts.sweep",
+        "figure.opts.hollow",
+        "figure.wobble.core",
+        "figure.wobble.outer_length",
+    ] {
+        assert!(ids.contains(&id), "a burst keeps {id}: {ids:?}");
+    }
+    assert!(!ids.contains(&"figure.wobble.angle"));
+
+    // A FLASH has neither stroke profile nor length skew: its teeth are
+    // filled wedges, counted and spread over the whole circle.
+    for m in [FigureMode::Urchin, FigureMode::SolidFlash] {
+        app.figure_mode = m;
+        let ids = palette_row_ids(&app);
+        for id in [
+            "figure.opts.taper",
+            "figure.opts.entry",
+            "figure.opts.needle",
+            "figure.opts.accents",
+            "figure.opts.sweep",
+            "figure.wobble.width",
+        ] {
+            assert!(!ids.contains(&id), "{m:?} has no {id}: {ids:?}");
+        }
+        assert!(ids.contains(&"figure.opts.hollow"), "{m:?}: {ids:?}");
+        assert!(ids.contains(&"figure.wobble.core"), "{m:?}: {ids:?}");
+    }
+
+    // An INKING figure sub tool has none of them, and gets its own two rows.
+    app.figure_mode = FigureMode::Rect;
+    let ids = palette_row_ids(&app);
+    assert!(!ids.iter().any(|id| id.starts_with("figure.wobble.")));
+    assert!(ids.contains(&"figure.opts.fill"));
+    assert!(ids.contains(&"figure.opts.adjust_angle"));
 }

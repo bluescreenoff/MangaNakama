@@ -288,6 +288,9 @@ pub(super) fn context_title(app: &App) -> String {
     format!("{:?} tool", app.tool)
 }
 
+mod balloon_ink;
+mod effect_lines;
+mod figure_lines;
 mod frames_balloons;
 mod gradient;
 mod pen;
@@ -296,6 +299,9 @@ mod select;
 mod text;
 mod tone;
 
+pub(crate) use balloon_ink::*;
+pub(crate) use effect_lines::*;
+pub(crate) use figure_lines::*;
 pub(crate) use frames_balloons::*;
 pub(crate) use gradient::*;
 pub(crate) use pen::*;
@@ -359,6 +365,23 @@ const fn row(id: &'static str, label: &'static str, body: fn(&mut egui::Ui, &mut
         label,
         body,
         applies: always,
+    }
+}
+
+/// A row that only means something for SOME sub tools — the condition that
+/// used to be an `if` around the control inside a section body. The palette
+/// leaves it out; the settings window greys it and says why.
+const fn row_when(
+    id: &'static str,
+    label: &'static str,
+    body: fn(&mut egui::Ui, &mut App),
+    applies: fn(&App) -> bool,
+) -> Row {
+    Row {
+        id,
+        label,
+        body,
+        applies,
     }
 }
 
@@ -498,6 +521,36 @@ const TEXT_SECTIONS: &[Section] = &[
     SEC_TEXT_GUIDE,
 ];
 
+// --- the panels lane B2 converted ------------------------------------------
+//
+// The row arrays live beside the fns they call (`property/*.rs`); this is
+// only where a section gets its id and its caption, so one file lists every
+// section this build has.
+
+const SEC_FRAME_TOOL: Section = sec_rows("frame.tool", "Frame", ROWS_FRAME_TOOL);
+const SEC_BALLOON_INK: Section = sec_rows("balloon.ink", "Colour", ROWS_BALLOON_INK);
+const SEC_BALLOON_TAIL: Section = sec_rows("balloon.tail", "Tail", ROWS_BALLOON_TAIL);
+const SEC_OBJ_BALLOON: Section = sec_rows("obj.balloon", "Balloon", ROWS_OBJ_BALLOON);
+const SEC_OBJ_INK: Section = sec_rows("obj.balloon.ink", "Colour", ROWS_OBJ_INK);
+const SEC_OBJ_TAIL: Section = sec_rows("obj.balloon.tail", "Tail", ROWS_OBJ_TAIL);
+const SEC_OBJ_FRAME: Section = sec_rows("obj.frame", "Frame border", ROWS_OBJ_FRAME);
+const SEC_OBJ_GEN: Section = sec_rows("obj.gen", "Effect lines", ROWS_OBJ_GEN);
+const SEC_OBJ_GEN_DENSITY: Section =
+    sec_rows("obj.gen.density", "Density", ROWS_OBJ_GEN_DENSITY);
+const SEC_FIGURE: Section = sec_rows("figure.opts", "Figure", ROWS_FIGURE);
+const SEC_FIGURE_WOBBLE: Section = sec_rows("figure.wobble", "Wobble", ROWS_FIGURE_WOBBLE);
+const SEC_TONE: Section = sec_rows("tone.screen", "Tone", ROWS_TONE);
+const SEC_TONE_REGION: Section = sec_rows("tone.region", "Area detection", ROWS_TONE_REGION);
+const SEC_SELECT: Section = sec_rows("select.opts", "Selection", ROWS_SELECT);
+const SEC_PICK_LAYER: Section = sec_rows("obj.picklayer", "Select layer", ROWS_PICK_LAYER);
+const SEC_WAND: Section = sec_rows("wand.opts", "Auto select", ROWS_WAND);
+const SEC_FILL: Section = sec_rows("fill.opts", "Fill", ROWS_FILL);
+const SEC_GRAD_INFO: Section = sec_rows("grad.info", "Gradient", ROWS_GRAD_INFO);
+const SEC_GRAD_OPTS: Section = sec_rows("grad.opts", "Ramp", ROWS_GRAD_OPTS);
+const SEC_GRAD_SET: Section = sec_rows("grad.set", "Gradient set", ROWS_GRAD_SET);
+const SEC_RULER_TOOL: Section = sec_rows("ruler.tool", "Create ruler", ROWS_RULER_TOOL);
+const SEC_RULER_SNAP: Section = sec_rows("ruler.snap", "Snapping", ROWS_RULER_SNAP);
+
 /// Every section this build has SPLIT into rows — the migration table for
 /// `prop_hidden`, which used to hold section ids. An unsplit section is
 /// absent on purpose: its id already IS its row id, so there is nothing to
@@ -509,6 +562,28 @@ const SPLIT_SECTIONS: &[Section] = &[
     SEC_SPACING,
     SEC_STYLE,
     SEC_RUBY,
+    SEC_FRAME_TOOL,
+    SEC_BALLOON_INK,
+    SEC_BALLOON_TAIL,
+    SEC_OBJ_BALLOON,
+    SEC_OBJ_INK,
+    SEC_OBJ_TAIL,
+    SEC_OBJ_FRAME,
+    SEC_OBJ_GEN,
+    SEC_OBJ_GEN_DENSITY,
+    SEC_FIGURE,
+    SEC_FIGURE_WOBBLE,
+    SEC_TONE,
+    SEC_TONE_REGION,
+    SEC_SELECT,
+    SEC_PICK_LAYER,
+    SEC_WAND,
+    SEC_FILL,
+    SEC_GRAD_INFO,
+    SEC_GRAD_OPTS,
+    SEC_GRAD_SET,
+    SEC_RULER_TOOL,
+    SEC_RULER_SNAP,
 ];
 
 /// A `prop_hidden=` line written before lane B1 named SECTIONS. Expand each
@@ -777,16 +852,11 @@ fn prop_sections_for_tool(app: &App) -> Vec<Section> {
             // S-001: the layer pick is its own sub tool, and nothing else
             // in the Operation tool applies while it is the active one.
             if app.object_mode == crate::cmd::ObjectMode::PickLayer {
-                vec![sec("obj.picklayer", "Select layer", sec_pick_layer)]
+                vec![SEC_PICK_LAYER]
             } else if app.text_sel.is_some() {
                 TEXT_SECTIONS.to_vec()
             } else if app.balloon_sel.is_some() {
-                vec![
-                    sec("obj.balloon", "Balloon", sec_obj_balloon),
-                    sec("obj.balloon.ink", "Colour", sec_obj_ink),
-                    sec("obj.balloon.tail", "Tail", sec_obj_tail),
-                    SEC_OBJ_GUIDE,
-                ]
+                vec![SEC_OBJ_BALLOON, SEC_OBJ_INK, SEC_OBJ_TAIL, SEC_OBJ_GUIDE]
             } else if app
                 .gen_sel
                 .is_some_and(|li| app.doc.layers.get(li).is_some_and(|l| l.genlines.is_some()))
@@ -796,16 +866,9 @@ fn prop_sections_for_tool(app: &App) -> Vec<Section> {
                 // text box, balloon or panel" and offered nothing, so a
                 // placed effect-line set could only be re-tuned by deleting
                 // it and dragging a new one.
-                vec![
-                    sec("obj.gen", "Effect lines", sec_obj_genlines),
-                    sec("obj.gen.density", "Density", sec_obj_genlines_density),
-                    SEC_OBJ_GUIDE,
-                ]
+                vec![SEC_OBJ_GEN, SEC_OBJ_GEN_DENSITY, SEC_OBJ_GUIDE]
             } else if app.object_sel.is_some() {
-                vec![
-                    sec("obj.frame", "Frame border", sec_obj_frame),
-                    SEC_OBJ_GUIDE,
-                ]
+                vec![SEC_OBJ_FRAME, SEC_OBJ_GUIDE]
             } else {
                 vec![SEC_OBJ_GUIDE]
             }
@@ -813,34 +876,34 @@ fn prop_sections_for_tool(app: &App) -> Vec<Section> {
         Tool::Text => TEXT_SECTIONS.to_vec(),
         Tool::Balloon => vec![
             sec("balloon.line", "Balloon line", sec_balloon_line),
-            sec("balloon.ink", "Colour", sec_balloon_ink),
-            sec("balloon.tail", "Tail", sec_balloon_tail),
+            SEC_BALLOON_INK,
+            SEC_BALLOON_TAIL,
             sec("balloon.guide", "Guide", sec_balloon_guide),
         ],
         Tool::Frame => vec![
-            sec("frame.tool", "Frame", sec_frame_tool),
+            SEC_FRAME_TOOL,
             sec("frame.guide", "Guide", sec_frame_guide),
         ],
         Tool::Fill => vec![
-            sec("fill.opts", "Fill", sec_fill),
+            SEC_FILL,
             sec("fill.guide", "Guide", sec_wand_guide),
         ],
         Tool::Tone => vec![
-            sec("tone.screen", "Tone", sec_tone),
-            sec("tone.region", "Area detection", sec_tone_region),
+            SEC_TONE,
+            SEC_TONE_REGION,
             sec("tone.guide", "Guide", sec_tone_guide),
         ],
         Tool::Wand => vec![
-            sec("wand.opts", "Auto select", sec_wand),
+            SEC_WAND,
             sec("wand.guide", "Guide", sec_wand_guide),
         ],
-        Tool::Select => vec![sec("select.opts", "Selection", sec_select)],
+        Tool::Select => vec![SEC_SELECT],
         Tool::Eyedrop => vec![sec("eyedrop.guide", "Guide", sec_eyedrop)],
         Tool::Liquify => vec![sec("liquify.opts", "Liquify", sec_liquify)],
         Tool::Pan => vec![sec("pan.guide", "Guide", sec_pan)],
         Tool::Ruler => vec![
-            sec("ruler.tool", "Create ruler", sec_ruler_tool),
-            sec("ruler.snap", "Snapping", sec_ruler_snap),
+            SEC_RULER_TOOL,
+            SEC_RULER_SNAP,
             sec("ruler.guide", "Guide", sec_ruler_guide),
         ],
         Tool::Figure => vec![
@@ -849,19 +912,19 @@ fn prop_sections_for_tool(app: &App) -> Vec<Section> {
             // two used to sit here doing nothing (B1.1).
             sec_when("figure.brush", "Brush", brush_sliders, figure_inks),
             sec_when("figure.dynamics", "Dynamics", dynamics_editor, figure_inks),
-            sec("figure.opts", "Figure", sec_figure),
+            SEC_FIGURE,
             // The eight wobbles, split off the Figure section in the parity
             // round: nineteen numbers in one column is a wall nobody reads,
             // and "what is a line?" and "how much does the hand vary?" are
             // two different questions. Right after Figure, because it is the
             // second half of the same answer.
-            sec("figure.wobble", "Wobble", sec_figure_wobble),
+            SEC_FIGURE_WOBBLE,
             sec("figure.guide", "Guide", sec_figure_guide),
         ],
         Tool::Gradient => vec![
-            sec("grad.info", "Gradient", sec_gradient_info),
-            sec("grad.opts", "Ramp", sec_gradient_opts),
-            sec("grad.set", "Gradient set", sec_gradient_set),
+            SEC_GRAD_INFO,
+            SEC_GRAD_OPTS,
+            SEC_GRAD_SET,
             sec("grad.guide", "Guide", sec_gradient_guide),
         ],
         _ => Vec::new(),
