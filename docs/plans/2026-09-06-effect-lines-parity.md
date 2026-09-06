@@ -1,8 +1,7 @@
 # Plan 2026-09-06: effect lines that look like a printed page + a Tool Property settings box
 
 > **STATE 2026-09-06: Lane A1 DONE (3afcd12). Gauntlet DONE, 4 critic rounds, final verdict PASS 10/10 live presets (flashes parked) — see docs/plans/2026-09-06-gauntlet-REPORT.md + critic-round1..4.md; shipped presets have MORE knobs than the A1 table (jit_len_out, group_jit, jit_angle, core_jit, start_back): presets.rs is the truth. NEXT: Lane A2 (app wiring), then A3, B1, B2.**
-> TIME in the order below. Each lane keeps a `docs/plans/2026-09-06-lane-<X>-REPORT.md` with a
-> done / next box at the top, updated as it works.**
+> Lanes run ONE AT A TIME in the order below. Each lane keeps a `docs/plans/2026-09-06-lane-<X>-REPORT.md` with a done / next box at the top, updated as it works.
 
 Owner asks, 2026-09-06, his words:
 - "manganakama effect lines in general need to be way way better, like even the default one needs to
