@@ -221,7 +221,7 @@ Run by Fable with the `gauntlet-loop` skill. One agent at a time. Builder and cr
 - Reference pairing: Saturated line / Dense saturated ↔ ref-10 left, ref-11 right; Dark burst ↔
   ref-08 top, ref-11 left; Stream line / Dense / Sparse ↔ ref-07 top; Perspective stream ↔ ref-08
   second panel, ref-07 second panel; Drip lines ↔ ref-09; off-panel variants ↔ ref-11 left, ref-10 right.
-- Max 4 rounds. Fable reviews each critic verdict before the next builder round and stops early if
+- At most 4 rounds. Fable reviews each critic verdict before the next builder round and stops early if
   the critic is grading noise.
 
 ---
