@@ -83,20 +83,59 @@ fn main() {
     // ref-10's right (a burst from beyond the top-right corner). A
     // centre outside the panel is the case a full circle plus clipping
     // gets wrong, so it gets its own picture.
+    //
+    // These are their OWN looks, not `saturated-line` re-aimed. A centre
+    // inside the panel spends its rays over the full circle and the panel
+    // sees all of them; a centre outside spends them over a 360° circle
+    // of which the panel sees a narrow arc, so the same 2.2° gap printed
+    // 32 rays for a whole page — "a ruled vector starburst, not 集中線"
+    // (gauntlet critic, round 2, worst score in the sheet). The fix is
+    // arithmetic, not taste: sweep only the arc the panel occupies, and
+    // buy the pitch back out of the rays the sweep saved.
+    //
+    // The width also comes DOWN. Both variants have to fit ~40 strokes
+    // into 25 mm at the panel's middle; at the shipped 0.35 mm that is
+    // more than half the paper inked before a single accent, so the
+    // hairlines the critic asked for (its crop had none, p5 = 4 px) can
+    // only exist at a finer nib.
     let sat = LineOpts::focus(DPI);
+    let curtain = |sweep: f32, gap: f32, width_mm: f32| LineOpts {
+        sweep_deg: sweep,
+        gap_deg: gap,
+        // A 50 % width wobble against a 0.16 mm nib is the hairline end
+        // of the continuum; the accents are the other end.
+        jit_width: 0.5,
+        accent_frac: 0.15,
+        // 6× a 0.16 mm nib is ~1 mm: against a 0.07 mm hairline that is
+        // the continuum. The in-panel preset's 4× would top out at 8 px
+        // once the taper has had its share, which reads as one weight.
+        accent_mul: 6.0,
+        // …and the LENGTH rhythm. `focus`'s 0.6 long-bias puts almost
+        // every inner end on the hole radius, which for an off-panel
+        // centre is off the panel too — so every ray ran frame to frame
+        // and the critic scored length variation 3/5 with "nearly every
+        // line runs frame to frame". 0.25 spreads the inner ends across
+        // the panel instead, which is where ref-11's right panel gets its
+        // white core from: strokes that stop, not a mask.
+        len_skew: 0.25,
+        width: width_mm / 25.4 * DPI as f32,
+        ..sat
+    };
     let below = at(0.50, 1.20);
     write_panel(
         &out,
         "Saturated line - centre below",
-        &LineOpts {
-            // 170° of arc, aimed straight up into the panel.
-            sweep_deg: 170.0,
-            ..sat
-        }
-        .place(
+        // 170° of arc, aimed straight up into the panel (ref-11's left
+        // panel: a fan rising from below the frame).
+        // The drag is LONGER than the in-panel presets' — the hole is a
+        // fraction of it, and an off-panel centre needs a hole big enough
+        // to reach the near frame edge or the rays converge to a black
+        // knot just outside it (ref-11's left panel keeps a white core
+        // sitting on the bottom edge).
+        &curtain(170.0, 0.42, 0.16).place(
             LineKind::Focus,
             below,
-            [below[0], below[1] - w * 0.22],
+            [below[0], below[1] - w * 0.45],
             bounds,
             2_001,
         ),
@@ -107,10 +146,12 @@ fn main() {
     write_panel(
         &out,
         "Saturated line - centre off corner",
-        &sat.place(
+        // The panel subtends ~79° from this centre; 110° covers it with
+        // margin for the angle jitter and nothing to spare.
+        &curtain(110.0, 0.28, 0.16).place(
             LineKind::Focus,
             corner,
-            [corner[0] - w * 0.16, corner[1] + h * 0.16],
+            [corner[0] - w * 0.352, corner[1] + h * 0.352],
             bounds,
             2_002,
         ),

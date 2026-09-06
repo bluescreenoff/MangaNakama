@@ -239,3 +239,210 @@ Warnings: **0**. 31 tests before, 33 now (`placed_presets_keep_their_density`,
 - Perspective-stream's vanishing knot still sits off the panel and the top-right stays empty; it was
   not on this round's list.
 - `genlines.rs` is ~2 600 lines. Still Fable's call.
+
+---
+
+## Round 2 (builder) — round caps, off-centre density, rails, broken combs
+
+Critic verdict was FAIL again, 0/10, with `saturated-line` and `dense-saturated-line` failing on
+ONE axis (tips) for one reason. Seven items, in the brief's order. Measured before and after with a
+throwaway probe example (rendered the same panels the harness does; the probe is deleted). Only
+`genlines.rs`, `genlines/presets.rs` and `examples/effect_lines_sheet.rs` changed.
+
+Three new spec fields, all `#[serde(default)]`, all guarding their own `rand()`: `jit_len_out`,
+`group_jit`, `jit_angle`. Nothing re-pinned.
+
+### 1. The round cap — the defect that failed the three best presets
+
+`segment` finds a pixel's distance to the SEGMENT, so both ends are half-disc caps. A focus ray's
+outer end pulled in by up to `jit_len/2` of the span (0.45 of it at `jit_len` 0.9), and the placed
+reach is only the far corner plus a margin — so a heavy accent's outer end regularly landed inside
+the frame and printed a semicircular blob.
+
+Two answers, both needed:
+
+- **`jit_len_out` 0.15** (new field; 0 = "use `jit_len` for both ends", the old raster; the `rand()`
+  is drawn either way, only the multiplier changes, so the sequence never moves). Nearly every outer
+  end is now past the frame where the border hides it.
+- **`entry` 0.25** on the focus family. `segment`'s `a` IS the outer end for focus rays (the
+  endpoints are swapped so the taper aims at the convergence), so `entry` already applies there —
+  confirmed by reading the call, and pinned by the new test. On a ray that does run off the page the
+  ramp is spent off-page and invisible.
+
+**Measured** (probe: erode the panel to strokes at least 6 px wide, take each heavy blob's outermost
+point, march outward in the full ink — a needle keeps inking, a cap stops within a couple of pixels):
+
+| preset | heavy strokes ending inside the frame | of which ROUND CAPS, round 1 | round 2 |
+|---|---|---|---|
+| saturated-line | 1 | **5** | **0** |
+| dense-saturated-line | 1 | **1** | **0** |
+| dark-burst | 19 | **15** | **0** |
+| centre-below | 3 | **4** | **0** |
+| centre-off-corner | 2 | **2** | **0** |
+
+26 round caps across the sheet → **0**. At 1:1 in `saturated-line-crop.png` and `dark-burst-crop.png`
+there is no semicircular end anywhere.
+
+New test `outer_ends_are_needles_not_caps`: one 24 px ray, measured perpendicular to its own axis.
+Without `entry` the ink is at least 10 px half-height at its own last pixel (the cap this test exists
+to catch); with `entry` 0.25 it is 2 px or less there and back to 8 px a quarter of the way in. It
+BITES both ways.
+
+### 2. The two off-centre curtains are their own look now, not `saturated-line` re-aimed
+
+A centre INSIDE the panel spends its rays over 360° and the panel sees all of them; a centre outside
+spends them over 360° of which the panel sees ~79°, so the shipped 2.2° gap printed 32 rays for a
+whole page. The fix is arithmetic: sweep only the arc the panel occupies and buy the pitch back.
+
+The harness variants now carry their own opts — a `curtain(sweep, gap, width_mm)` closure — with
+`jit_width` 0.5, `accent_frac` 0.15, `accent_mul` 6 and `len_skew` 0.25. The **width comes down to
+0.16 mm**: 40 strokes in 25 mm is a 0.63 mm pitch, and at 0.35 mm that is over half the paper inked
+before a single accent, so the hairlines the critic asked for could not exist at the shipped nib.
+Both drags are also longer, so the hole reaches the near frame edge instead of knotting just outside
+it.
+
+| variant | sweep / gap | strokes per 25.4 mm at the panel centre | width p5 |
+|---|---|---|---|
+| centre-below | 170° / 0.42° | **7 → 40** (target at least 40) | 4 px → **1 px** (target 2.5 or less) |
+| centre-off-corner | 110° / 0.28° | **6 → 43** (target at least 40) | — → **1 px** |
+
+Rails: 10 and 8 strokes at 3× the median width or more, spread [5,2,3] and [2,2,4] across the panel's
+thirds. `len_skew` 0.25 (against the in-panel preset's 0.6) is what gives the length rhythm — the
+long bias put almost every inner end on the hole radius, which for an off-panel centre is off the
+panel, so every ray ran frame to frame.
+
+**Deviation from the brief, stated:** the brief suggested gap 0.9° for off-corner and 1.0° for
+centre-below. Those gaps and the "at least 40 strokes per 25 mm" target contradict each other: at the
+off-corner panel centre (r = 1730 px) a 0.9° gap with bundles of 4 and a 3× hole is 14 strokes per
+25 mm, not 40. The gaps here are solved from the target instead.
+
+### 3. Rails in the streams and the drips
+
+`accent_mul` 8 on the whole stream family (accents draw uniformly from 1.5..mul, so it is a
+continuum up to ~1.6 mm, not a second fixed weight), `accent_frac` 0.15 / dense 0.12 /
+sparse **0.22** / drips **0.28**.
+
+**Deviation, stated:** the brief said sparse 0.15 and drips 0.08. A fraction has to be read against
+the count it applies to. `sparse-stream` puts ~21 runs on a panel and `drip-lines` ~43, and half the
+accent spread lands mild against a thin nib — measured, 0.15 on the drips was TWO visible rails.
+0.22 and 0.28 measure as three and eight.
+
+| preset | runs on a full cross-panel scan | p50 | top widths, px | rails at 3× median or more, per third |
+|---|---|---|---|---|
+| stream-line | 47 | 2 | 11, 11, 11, 10, 8, 8 | 6 — [3, 0, 3] |
+| dense-stream | 78 | 2 | 11, 9, 9, 8, 7, 7 | 7 — [2, 4, 1] |
+| sparse-stream | 21 | 4 | 18, 15, 12 | 3 — [1, 0, 2] |
+| perspective-stream | 53 | 2 | 21, 16, 11, 10, 8, 8 | 7 — [2, 3, 2] |
+| drip-lines | 43 | 3 | 23, 21, 18, 17, 15, 14 | 8 — [3, 2, 3] |
+
+**The accent roll is NOT correlated with position** — checked in the code, not inferred: `Mix::accent`
+is called once per line inside the render loop, drawing from the shared stream, and the number of
+`rand()`s per line varies (an accent costs one extra), so the sequence cannot lock to the walk's
+period. The clustering the critic saw was small-N luck: `stream-line` had ~7 accents on the whole
+panel. With the new fractions the per-third counts above are the evidence. Only `stream-line` is
+still lopsided (3/0/3, an empty middle third).
+
+### 4. `group_jit` — the exact-2 comb is gone
+
+New shared helper `walk_step(group, group_gap, group_jit, seed)`: the next bundle's size is
+`group − round(rand·group_jit·(group−1))`, clamped to 1..=group, and the hole after it is
+`group_gap·(1 + (rand−0.5)·group_jit)`. `group_jit` 0 returns `(group, group_gap)` and draws NO
+random number, so both walks are bit-identical without it. The speed walk moved into its own
+`walk_offsets` so the test can read the bundle sizes back off it.
+
+Both walks use it. The radial one takes a `seed` and runs a stream of its OWN (seeded from the spec
+seed with a decorrelating splash): `GenLinesSpec::ray_count` calls `radial_angles` outside any render
+to size the set, so the walk cannot draw from the per-ray sequence or the two would disagree about
+how many rays there are.
+
+Presets: streams `group 5, group_jit 0.7`; sparse `group 4, group_gap 6, group_jit 0.8` (was the
+exact pair); drips `group 3, group_gap 6, group_jit 0.9` (was the exact pair); radial `group_jit 0.5`.
+
+New test `bundle_sizes_vary`: with `group_jit` 0.8 over a 512 px band the speed walk's bundles come
+in at least 3 distinct sizes and so do the radial walk's, and with `group_jit` 0 every bundle is
+exactly `group`.
+
+### 5. `jit_angle`, and the perspective void
+
+New field, degrees, per-run direction wobble of `± jit_angle/2` behind its own guard: 1.0° on
+stream/dense/sparse, 0.5° on drips, **0 on perspective** (the convergence already fans every run;
+a second wobble only softens the vanishing point).
+
+The perspective void was the along-extent fit from round 1 solving in the WRONG BASIS. A converged
+run does not travel along the shared direction, so its start was solved for a direction it never
+took and it stopped short. Now the fit runs along the run's OWN direction: a provisional base at the
+middle of the extent gives the direction, the canvas extent is projected onto THAT, and the result is
+converted back into the (normal, direction) basis the base point is built in. With `converge` None
+the conversion is a division by exactly 1 and the whole thing collapses to the line it replaced, bit
+for bit — the guard is still `gap_px > 0`.
+
+**perspective-stream ink per quarter:** critic measured the bottom-right at 1.8 % against a 13.9 %
+maximum. Now TL 11.1 / TR 8.0 / BL 7.5 / **BR 5.8**, mean 8.1. Target was "no quarter below half the
+mean" (4.05) — met, with the emptiest quarter at 72 % of the mean.
+
+### 6. dark-burst tips — one fixed, one explained with a measurement
+
+**Merging heavies.** `Mix::accent` now refuses an accent immediately after an accent: the roll's
+`rand()` still happens on every line so no other random number moves, only the draw is refused. New
+test `accents_never_land_on_neighbours`. Honest result: it did NOT move the sliver count. Walking
+five arcs (r = 300…1100) and counting 1–2 px white gaps sitting between two wedges of 8 px or more
+gives **4 slivers out of 156 wedges** now against 3 out of 171 before — noise, both ways. The cap is
+still right (two touching 40 px wedges are a slab), but it is not what makes the sliver.
+
+**The rectangular width step.** Measured directly: walk 720 rays outward from r = 200 to 1400 and
+count places where the ink width across the ray jumps 8 px or more in one 4 px radial step.
+
+| dark-burst variant | hard width steps | ink |
+|---|---|---|
+| shipped | **128** (biggest 22 px) | 27.8 % |
+| same, gap ×3 so no two rays can overlap | **27** (biggest 19 px) | 9.5 % |
+| taper 1.0 + needle 0.5 (a true point at the tip) | 158 | 31.4 % |
+| taper 1.0 + needle 0.5, gap ×3 | 44 | 5.5 % |
+
+So the step is **ray OVERLAP, not a profile fault**: removing overlap removes 79 % of them, and the
+count tracks ink density almost linearly across every variant. At a 1° pitch a 41 px accent spans
+3.4 ray slots, so one stroke's end sitting inside another's body is geometric. The candidate fixes
+were tried and are worse: a true-point profile ADDS steps (it carries more weight further, so more
+overlap), and `needle` 1.4 halves them only by cutting the ink from 27.8 % to 17.9 % — which throws
+away the weight mix the critic scored 5/5. Left alone, deliberately, and stated.
+
+### 7. Gates
+
+    cargo test -p mn-core genlines
+    test result: ok. 36 passed; 0 failed; 0 ignored; 0 measured; 803 filtered out; finished in 63.70s
+
+    cargo check --workspace --all-targets
+        Finished `dev` profile [unoptimized + debuginfo] target(s) in 47.94s
+
+Warnings: **0**. 33 tests before, 36 now (`outer_ends_are_needles_not_caps`, `bundle_sizes_vary`,
+`accents_never_land_on_neighbours`). `legacy_renders_are_bit_stable` and
+`pre_flash_specs_load_with_the_old_meaning` pass UNCHANGED — no fingerprint re-pinned.
+`cargo run -p mn-core --example effect_lines_sheet` re-run; `target/effect-lines/` is fresh.
+
+### Eyeball check (Read tool, honest one-liners)
+
+- `saturated-line-crop.png` — not one round end left: every stroke that dies mid-field comes to a
+  fine point, and hairlines, mediums and two black rails share the same 600 px patch. The ray angles
+  still clump a shade too evenly on the left side.
+- `dark-burst-crop.png` — 2 mm wedges against hairlines, ragged core, no blobs; on the right at
+  y ≈ 180 two heavy wedges do still nearly merge and the white sliver between them dashes, which is
+  the one thing item 6 could not remove without draining the black out of it.
+- `stream-line.png` — the rails are scattered top, middle and bottom now instead of piled in one
+  corner, and the lines are visibly not parallel; the bundling is still the weakest thing here, it
+  reads more as an even sprinkle than as clumps.
+- `sparse-stream.png` — the picket fence is gone: singles, pairs and triples with holes you cannot
+  find a period in. Both black rails sit in the lower half, so the top two thirds are still all one
+  weight.
+- `saturated-line-centre-off-corner.png` — was the worst panel in the sheet and is now a real
+  curtain: it fills the frame corner to corner, has hairlines against rails, and you can see strokes
+  stopping mid-field. It is still slightly too uniform across the panel for a Jump page.
+- `perspective-stream.png` — the vanishing knot resolves on the right edge and every quarter now
+  carries ink, with rails at the top and through the bottom-left; the far side by the vanishing
+  point is still the thinnest part of the panel.
+
+### Not done, out of scope (stated)
+
+- The flash kinds (parked) and anti-aliasing. The sliver in `dark-burst-crop` is an AA problem
+  wearing a geometry costume: a 1 px white gap between two hard-edged blacks can only be a dashed
+  line until `segment` writes coverage instead of a hit test.
+- `genlines.rs` is ~3 030 lines. Still Fable's call.

@@ -36,6 +36,20 @@ pub struct FocusLinesParams {
     pub width_jitter: f32,
     /// 0..1 — per-line length jitter fraction of (r_out − r_in).
     pub length_jitter: f32,
+    /// 0..1 — the OUTER end's own length jitter. 0 = use
+    /// `length_jitter` for both ends, which is what every file saved
+    /// before this field drew (and the `rand()` is drawn either way —
+    /// only the multiplier changes, so the sequence never moves).
+    ///
+    /// Why it had to split: the placed reach is the panel's far corner
+    /// plus a margin, so an outer end that pulls in by up to
+    /// `length_jitter/2` of the span lands INSIDE the frame — and
+    /// `segment` caps a stroke with a half-disc, so a heavy ray ended in a
+    /// semicircular blob (gauntlet critic, round 2: the single defect
+    /// that failed the three best presets). A printed 集中線 runs every
+    /// stroke off the frame at the rim; the INNER ends are the ragged
+    /// ones. Keep this small (≤ 0.2) and let `length_jitter` stay big.
+    pub jit_len_out: f32,
     /// 0..1 — rays thin toward the CENTRE (a printed 集中線 needles at the
     /// convergence and carries its weight at the rim). 0 = the legacy
     /// constant-width ray, bit-stable.
@@ -65,6 +79,11 @@ pub struct FocusLinesParams {
     pub group: u32,
     /// The hole between bundles, in multiples of `gap_deg` (see `group`).
     pub group_gap: f32,
+    /// 0..1 — how much a bundle's SIZE and its following hole wobble.
+    /// See [`walk_step`]. 0 = every bundle exactly `group` rays with an
+    /// exactly `group_gap` hole, which is what every file saved before
+    /// this drew, and the extra `rand()`s live behind the `> 0` guard.
+    pub group_jit: f32,
     /// 0..1 — pull each ray's INNER end BELOW `r_in` by up to
     /// `core_jit × r_in`, drawn per ray, so the white core is a ragged
     /// BAND rather than a circle.
@@ -133,8 +152,25 @@ impl Mix {
     /// This line's half-width after the accent roll. Guarded: with
     /// `accent_frac` 0 no random number is drawn, so the sequence is the
     /// one every saved file was rendered with.
-    fn accent(&self, hw: f32, seed: &mut u64) -> f32 {
-        if self.accent_frac > 0.0 && rand(seed) < self.accent_frac {
+    ///
+    /// `prev` carries "the line before this one was an accent", and a
+    /// second accent immediately after one is REFUSED. Two neighbours in
+    /// a bundle are a gap apart — 1° on `dark-burst`, which at the crop
+    /// radius is ~9 px — and an accent is up to `accent_mul × width`
+    /// wide, so two adjacent heavies MERGE into one slab and the white
+    /// sliver left between them breaks into dashes (gauntlet critic,
+    /// round 2: "reads as a print fault", `dark-burst-crop` y≈225). The
+    /// refusal is on the DRAW, not the roll: the `rand` for the roll
+    /// still happens every line, so the position of every other random
+    /// number is where it was.
+    fn accent(&self, hw: f32, seed: &mut u64, prev: &mut bool) -> f32 {
+        if self.accent_frac <= 0.0 {
+            *prev = false;
+            return hw;
+        }
+        let take = rand(seed) < self.accent_frac && !*prev;
+        *prev = take;
+        if take {
             // The SPREAD, not the ceiling — see `accent_mul`. Both rand
             // calls are inside the guard, so the accent-free sequence is
             // untouched.
@@ -192,6 +228,12 @@ pub struct SpeedLinesParams {
     pub group: u32,
     /// The hole between bundles, in multiples of `gap_px` (see `group`).
     pub group_gap: f32,
+    /// 0..1 — how much a bundle's SIZE and its following hole wobble.
+    /// See [`walk_step`]. 0 = every bundle exactly `group` runs, the
+    /// constant that made `sparse-stream` and `drip-lines` read as "a
+    /// picket fence of pairs" (gauntlet critic, round 2). Walk only, and
+    /// its `rand()`s are behind its own `> 0` guard.
+    pub group_jit: f32,
     /// 0..1 — positional wobble as a fraction of `gap_px`, so the walk is
     /// even without being mechanical. Walk only; 0 = dead even.
     pub jit_gap: f32,
@@ -201,6 +243,13 @@ pub struct SpeedLinesParams {
     /// 0..1 — per-run width wobble, a fraction pulled off `width`. Walk
     /// only; 0 = every run at the nominal width.
     pub jit_width: f32,
+    /// DEGREES — per-run direction wobble, `± jit_angle/2`. 0 = dead
+    /// parallel, which is what every saved file drew and also what the
+    /// critic measured on the page: "parallel to within ~3 px over
+    /// 23 mm", i.e. ruled, not drawn. A hand-inked 流線 block leans by
+    /// under a degree per stroke and that is the whole difference.
+    /// The extra `rand()` is behind the `> 0` guard.
+    pub jit_angle: f32,
     /// The parity round's shared knobs — see [`Mix`].
     pub mix: Mix,
     /// 0 = scatter each run along the direction (today, bit-stable).
@@ -497,6 +546,65 @@ fn fill_tooth(map: &mut HashMap<TileIdx, Tile>, c: [f32; 2], t: &Tooth, size: (u
 /// clamps a silly `gap_deg` to, for the same reason.
 const MAX_RAYS: usize = 4096;
 
+/// One step of a bundled walk: how many lines the NEXT bundle holds, and
+/// how wide the hole after it is in multiples of the base gap. Shared by
+/// both walks so a bundle means the same thing in degrees and in pixels.
+///
+/// `group_jit` 0 returns exactly `(group, group_gap)` and draws NO random
+/// number — the constant-size bundle both walks have always had, kept bit
+/// for bit. That constant is what the critic read as "a picket fence of
+/// pairs at a near-constant pitch" in `sparse-stream` and `drip-lines`
+/// (round 2): a repeated unit is a texture, and the eye finds the period
+/// in about a second. Above 0 the size is drawn from `1..=group` (biased
+/// toward `group`, because a set of mostly-full bundles with the odd
+/// single is what a hand does) and the hole wobbles by `±group_jit/2` of
+/// itself, so no two bundles are the same shape.
+fn walk_step(group: u32, group_gap: f32, group_jit: f32, seed: &mut u64) -> (u32, f32) {
+    let g = group.max(1);
+    // A hole only exists once there is something to bundle; `group <= 1`
+    // is a plain walk at the gap, hole multiplier 1×.
+    let hole = if group > 1 { group_gap.max(1.0) } else { 1.0 };
+    if group_jit <= 0.0 || g <= 1 {
+        return (g, hole);
+    }
+    let j = group_jit.clamp(0.0, 1.0);
+    let cut = (rand(seed) * j * (g - 1) as f32).round() as u32;
+    (
+        g.saturating_sub(cut).max(1),
+        hole * (1.0 + (rand(seed) - 0.5) * j),
+    )
+}
+
+/// Where a bundled walk puts its runs across `lo..=hi`, stepping `gap`
+/// and leaving a hole after each bundle. Its own function so the test can
+/// read the bundle sizes back off it — the thing the critic reads off the
+/// page is exactly this list.
+fn walk_offsets(
+    lo: f32,
+    hi: f32,
+    gap: f32,
+    group: u32,
+    group_gap: f32,
+    group_jit: f32,
+    seed: &mut u64,
+) -> Vec<f32> {
+    let mut out = Vec::new();
+    let (mut bundle, mut hole) = walk_step(group, group_gap, group_jit, seed);
+    let (mut t, mut i) = (lo, 0u32);
+    while t <= hi && (out.len() as u32) < MAX_RUNS {
+        out.push(t);
+        i += 1;
+        if i >= bundle {
+            t += gap * hole;
+            i = 0;
+            (bundle, hole) = walk_step(group, group_gap, group_jit, seed);
+        } else {
+            t += gap;
+        }
+    }
+    out
+}
+
 /// Where a radial set's rays sit, or `None` for the legacy layout
 /// (`i · 2π / count`, one full even circle) — which is what every file
 /// saved before the sweep and the angular bundle walk existed drew, so
@@ -514,6 +622,13 @@ const MAX_RAYS: usize = 4096;
 /// used to squeeze all 120 rays into that arc at double density. The
 /// even spread is now only for `gap_deg == 0`, where `count` IS the
 /// stored ray count and means what it says.
+///
+/// `seed` only matters when `group_jit` > 0, and it seeds a stream of its
+/// OWN: [`GenLinesSpec::ray_count`] calls this outside any render to size
+/// the set, so the walk cannot draw from the per-ray sequence
+/// [`render_focus`] uses or the two would disagree about how many rays
+/// there are. The constant is just a decorrelating splash so bundle sizes
+/// do not shadow the first ray's angle jitter.
 fn radial_angles(
     count: u32,
     gap_deg: f32,
@@ -521,6 +636,8 @@ fn radial_angles(
     center_deg: f32,
     group: u32,
     group_gap: f32,
+    group_jit: f32,
+    seed: u64,
 ) -> Option<Vec<f32>> {
     let walk = gap_deg > 0.0 && (group > 1 || sweep_deg > 0.0);
     if !walk && sweep_deg <= 0.0 {
@@ -536,15 +653,21 @@ fn radial_angles(
     let mut out = Vec::new();
     if walk {
         let gap = gap_deg.to_radians();
-        // No bundle asked for = a plain walk at the gap: `group.max(1)`
-        // keeps the modulo off zero, and a hole of 1× is no hole.
-        let bundle = group.max(1);
-        let hole = if group > 1 { group_gap.max(1.0) } else { 1.0 };
+        let mut s = (seed ^ 0x517C_C1B7_2722_0A95) | 1;
+        // No bundle asked for = a plain walk at the gap: `walk_step`
+        // returns `(1, 1.0)` and a hole of 1× is no hole.
+        let (mut bundle, mut hole) = walk_step(group, group_gap, group_jit, &mut s);
         let (mut a, mut i) = (start, 0u32);
         while a < start + sweep && out.len() < MAX_RAYS {
             out.push(a);
-            a += if (i + 1) % bundle == 0 { gap * hole } else { gap };
             i += 1;
+            if i >= bundle {
+                a += gap * hole;
+                i = 0;
+                (bundle, hole) = walk_step(group, group_gap, group_jit, &mut s);
+            } else {
+                a += gap;
+            }
         }
     } else {
         // Sweep without bundling: `count` rays spread evenly over the arc.
@@ -567,6 +690,8 @@ pub fn render_focus(p: &FocusLinesParams, size: (u32, u32)) -> HashMap<TileIdx, 
         p.sweep_center_deg,
         p.group,
         p.group_gap,
+        p.group_jit,
+        p.seed,
     );
     let n = bases.as_ref().map_or(p.count.max(1), |v| v.len() as u32);
     // The unit the angle jitter is a fraction OF: the walk's own step
@@ -577,6 +702,15 @@ pub fn render_focus(p: &FocusLinesParams, size: (u32, u32)) -> HashMap<TileIdx, 
         _ => std::f32::consts::TAU / n as f32,
     };
     let prof = p.mix.profile(p.taper);
+    // The OUTER end's own jitter — 0 means "the same as the inner end",
+    // which is what every file saved before the split drew. See
+    // `FocusLinesParams::jit_len_out`.
+    let out_jit = if p.jit_len_out > 0.0 {
+        p.jit_len_out
+    } else {
+        p.length_jitter
+    };
+    let mut prev_accent = false;
     for i in 0..n {
         let base = match &bases {
             Some(v) => v[i as usize],
@@ -594,9 +728,9 @@ pub fn render_focus(p: &FocusLinesParams, size: (u32, u32)) -> HashMap<TileIdx, 
         if p.core_jit > 0.0 {
             r1 = (r1 - p.r_in * p.core_jit.clamp(0.0, 1.0) * rand(&mut seed)).max(0.0);
         }
-        let r2 = p.r_out - p.mix.skew(rand(&mut seed)) * p.length_jitter * span * 0.5;
+        let r2 = p.r_out - p.mix.skew(rand(&mut seed)) * out_jit * span * 0.5;
         let w = p.width * (1.0 - rand(&mut seed) * p.width_jitter);
-        let hw = p.mix.accent((w * 0.5).max(0.5), &mut seed);
+        let hw = p.mix.accent((w * 0.5).max(0.5), &mut seed, &mut prev_accent);
         let (s, c) = ang.sin_cos();
         // OUTER first: segment() tapers toward `b`, and a focus ray thins
         // toward the convergence (the inner end). With taper 0 the order
@@ -654,20 +788,15 @@ pub fn render_speed(p: &SpeedLinesParams, size: (u32, u32)) -> HashMap<TileIdx, 
     // draw sequence has to be untouched when the new knobs are absent.
     let mut offsets: Vec<f32> = Vec::new();
     if p.gap_px > 0.0 {
-        let gap = p.gap_px.max(0.25);
-        let ggap = if p.group > 1 {
-            p.group_gap.max(1.0)
-        } else {
-            1.0
-        };
-        let mut t = lo;
-        let mut i = 0u32;
-        while t <= hi && (offsets.len() as u32) < MAX_RUNS {
-            offsets.push(t);
-            let bundle_end = p.group > 1 && (i + 1) % p.group == 0;
-            t += if bundle_end { gap * ggap } else { gap };
-            i += 1;
-        }
+        offsets = walk_offsets(
+            lo,
+            hi,
+            p.gap_px.max(0.25),
+            p.group,
+            p.group_gap,
+            p.group_jit,
+            &mut seed,
+        );
     }
     let n = if offsets.is_empty() {
         p.count.max(1)
@@ -675,6 +804,15 @@ pub fn render_speed(p: &SpeedLinesParams, size: (u32, u32)) -> HashMap<TileIdx, 
         offsets.len() as u32
     };
     let prof = p.mix.profile(p.taper);
+    let mut prev_accent = false;
+    // The extent along ANY direction, not just the shared one — see the
+    // per-run fit below. Corners are the only points that can bound it.
+    let extent_along = |d: [f32; 2]| {
+        corners.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(l, h), c| {
+            let u = c[0] * d[0] + c[1] * d[1];
+            (l.min(u), h.max(u))
+        })
+    };
     for i in 0..n {
         let mut t = match offsets.get(i as usize) {
             Some(t) => *t,
@@ -699,6 +837,27 @@ pub fn render_speed(p: &SpeedLinesParams, size: (u32, u32)) -> HashMap<TileIdx, 
         // Where the run's base sits along the direction. `t` is already
         // the ABSOLUTE normal coordinate (corner projection) — no
         // canvas-centre offset.
+        // Where this run actually POINTS. With `converge` that is not the
+        // shared `dir`, and the along-extent fit below has to be solved in
+        // the run's own basis or a leaning run gets its start solved for a
+        // direction it never takes: it stops short, and on
+        // `perspective-stream` a whole quarter of the panel came out at
+        // 1.8 % ink against a 13.9 % mean (gauntlet critic, round 2).
+        //
+        // Two passes, because the direction depends on the base and the
+        // base depends on the direction: a PROVISIONAL base at the middle
+        // of the along-extent gives a direction close enough to fit
+        // against, then the final base gives the direction that is drawn.
+        // With `converge` None both passes are `dir` and every line below
+        // collapses to the arithmetic it replaced, bit for bit.
+        let aim = |b: [f32; 2]| match p.converge {
+            Some(v) => {
+                let (vx, vy) = (v[0] - b[0], v[1] - b[1]);
+                let l = vx.hypot(vy);
+                if l > 1e-3 { [vx / l, vy / l] } else { dir }
+            }
+            None => dir,
+        };
         let start_along = if p.start_mode == 1 {
             // Hang off the reference line: every run's base lands on the
             // line through `anchor` perpendicular to the direction, so
@@ -733,7 +892,19 @@ pub fn render_speed(p: &SpeedLinesParams, size: (u32, u32)) -> HashMap<TileIdx, 
             //
             // Guarded on the WALK (`gap_px` > 0): the scatter is what
             // every pre-density file drew and it is pinned bit for bit.
-            a_lo + rand(&mut seed) * (a_hi - a_lo - len)
+            let mid = (a_lo + a_hi) * 0.5;
+            let r0 = aim([nrm[0] * t + dir[0] * mid, nrm[1] * t + dir[1] * mid]);
+            let (u_lo, u_hi) = extent_along(r0);
+            let u = u_lo + rand(&mut seed) * (u_hi - u_lo - len);
+            // `u` is measured along the RUN; the base point is built in
+            // the shared (nrm, dir) basis, so convert. `dir·r0` is exactly
+            // 1 with no convergence — the whole expression is then
+            // `a_lo + rand·(a_hi − a_lo − len)`, the line it replaced —
+            // and a run aimed nearly sideways to `dir` cannot be placed
+            // along `dir` at all, so under 0.2 it falls back.
+            let dr = dir[0] * r0[0] + dir[1] * r0[1];
+            let nr = nrm[0] * r0[0] + nrm[1] * r0[1];
+            if dr.abs() > 0.2 { (u - t * nr) / dr } else { u }
         } else {
             rand(&mut seed) * (w.max(h) + len) - len - len * 0.5
         };
@@ -744,20 +915,22 @@ pub fn render_speed(p: &SpeedLinesParams, size: (u32, u32)) -> HashMap<TileIdx, 
         // Convergence aims the run at a far point instead of along the
         // shared direction; the SCATTER stays the parallel layout's, so
         // the fan is a lean on the block rather than a second tool.
-        let run = match p.converge {
-            Some(v) => {
-                let (vx, vy) = (v[0] - base[0], v[1] - base[1]);
-                let l = vx.hypot(vy);
-                if l > 1e-3 { [vx / l, vy / l] } else { dir }
-            }
-            None => dir,
-        };
+        let mut run = aim(base);
+        // …and then the hand's own wobble. Without it a block is EXACTLY
+        // parallel, which is measurable (the critic did: "3 px over
+        // 23 mm") and is the single most machine-made thing about a
+        // generated 流線. Guarded, so a dead-parallel spec stays dead
+        // parallel and bit-stable.
+        if p.jit_angle > 0.0 {
+            let (s, c) = ((rand(&mut seed) - 0.5) * p.jit_angle.to_radians()).sin_cos();
+            run = [run[0] * c - run[1] * s, run[0] * s + run[1] * c];
+        }
         let tip = [base[0] + run[0] * len, base[1] + run[1] * len];
         let mut hw = p.width * 0.5;
         if p.jit_width > 0.0 {
             hw *= 1.0 - rand(&mut seed) * p.jit_width.clamp(0.0, 0.9);
         }
-        let hw = p.mix.accent(hw.max(0.5), &mut seed);
+        let hw = p.mix.accent(hw.max(0.5), &mut seed, &mut prev_accent);
         segment(&mut map, base, tip, hw, prof, size);
     }
     let (wi, hi_) = (size.0 as i32, size.1 as i32);
@@ -1923,6 +2096,136 @@ mod tests {
         );
     }
 
+    /// A heavy ray that stops INSIDE the panel must exit as a spindle
+    /// point, not as a half-disc. `segment` caps a stroke by distance to
+    /// its endpoint, so with no `entry` a 12 px-wide accent whose outer
+    /// end landed mid-field printed a 12 px semicircular blob — "a
+    /// felt-tip dot, not a G-pen exit", the single defect that failed the
+    /// two best presets (gauntlet critic, round 2).
+    ///
+    /// Measured on the ray's own axis: the ink width perpendicular to it,
+    /// at the outer end and a quarter of the way in.
+    #[test]
+    fn outer_ends_are_needles_not_caps() {
+        // One ray along +x, outer end at x = 900, inner at x = 300.
+        let p = FocusLinesParams {
+            center: [300.0, 512.0],
+            r_in: 0.0,
+            r_out: 600.0,
+            count: 1,
+            width: 24.0,
+            taper: 0.9,
+            seed: 5,
+            ..Default::default()
+        };
+        // The ink's half-height at a given x, measured off the axis.
+        let hh = |m: &HashMap<TileIdx, Arc<Tile>>, x: i32| {
+            (0..200).take_while(|d| ink_at(m, x, 512 + d) || ink_at(m, x, 512 - d)).count()
+        };
+        let blunt = render_focus(&p, (1024, 1024));
+        let needled = render_focus(
+            &FocusLinesParams {
+                mix: Mix {
+                    entry: 0.25,
+                    ..Mix::default()
+                },
+                ..p.clone()
+            },
+            (1024, 1024),
+        );
+        // The cap: full width right up to the last pixel of the stroke.
+        assert!(
+            hh(&blunt, 898) >= 10,
+            "the round cap this test exists to catch is 12 px wide at its own end ({} px)",
+            hh(&blunt, 898)
+        );
+        // With `entry`, the same end is a point and the body is untouched.
+        assert!(
+            hh(&needled, 898) <= 2,
+            "the outer end needles ({} px half-height)",
+            hh(&needled, 898)
+        );
+        assert!(
+            hh(&needled, 750) >= 8,
+            "…and it is back to full weight a quarter in ({} px)",
+            hh(&needled, 750)
+        );
+    }
+
+    /// `group_jit` has to make bundles of DIFFERENT sizes, in both walks.
+    /// Bundles of exactly two at a near-constant pitch is a picket fence,
+    /// and the critic could read the period off the page (round 2).
+    #[test]
+    fn bundle_sizes_vary() {
+        // Sizes between the holes: a step bigger than 1.5 × the gap ends
+        // a bundle.
+        let sizes = |v: &[f32], gap: f32| {
+            let mut out = Vec::new();
+            let mut n = 1;
+            for w in v.windows(2) {
+                if w[1] - w[0] > gap * 1.5 {
+                    out.push(n);
+                    n = 1;
+                } else {
+                    n += 1;
+                }
+            }
+            out
+        };
+        let mut seed = 9u64 | 1;
+        let runs = walk_offsets(0.0, 512.0, 8.0, 5, 3.0, 0.8, &mut seed);
+        let a = sizes(&runs, 8.0);
+        let mut set: Vec<u32> = a.clone();
+        set.sort_unstable();
+        set.dedup();
+        assert!(
+            set.len() >= 3,
+            "the speed walk's bundles come in at least three sizes over 512 px, got {a:?}"
+        );
+
+        let rays = radial_angles(0, 2.0, 180.0, 0.0, 5, 3.0, 0.8, 9).expect("a walked sweep");
+        let b = sizes(&rays, 2f32.to_radians());
+        let mut rset: Vec<u32> = b.clone();
+        rset.sort_unstable();
+        rset.dedup();
+        assert!(
+            rset.len() >= 3,
+            "and so do the radial walk's, {b:?}"
+        );
+
+        // …and with the knob off, every bundle is exactly `group` — the
+        // behaviour every file saved before this field still gets.
+        let mut s0 = 9u64 | 1;
+        let flat = sizes(&walk_offsets(0.0, 512.0, 8.0, 5, 3.0, 0.0, &mut s0), 8.0);
+        assert!(
+            flat.iter().all(|n| *n == 5),
+            "group_jit 0 is the old constant bundle, got {flat:?}"
+        );
+    }
+
+    /// Two NEIGHBOURING lines are never both accents: at `dark-burst`'s
+    /// 1° pitch two adjacent 40 px wedges merge into a slab and the white
+    /// sliver left between them dashes out. The roll still happens every
+    /// line, so nothing else in the random sequence moves.
+    #[test]
+    fn accents_never_land_on_neighbours() {
+        let mix = Mix {
+            accent_frac: 0.9,
+            accent_mul: 6.0,
+            ..Mix::default()
+        };
+        let mut seed = 12_345u64 | 1;
+        let (mut prev, mut last, mut n) = (false, false, 0);
+        for _ in 0..500 {
+            let is = mix.accent(2.0, &mut seed, &mut prev) > 2.0;
+            assert!(!(is && last), "two neighbours both drew as accents");
+            n += is as u32;
+            last = is;
+        }
+        // A 0.9 roll refused after every hit still lands on about half.
+        assert!(n > 150, "…but accents still happen ({n} of 500)");
+    }
+
     /// The mean inner end of a 集中線, ray by ray: how far in the ink
     /// reaches along each exact ray angle.
     fn inner_radii(m: &HashMap<TileIdx, Arc<Tile>>, c: [f32; 2], n: u32, r_out: f32) -> Vec<f32> {
@@ -2205,6 +2508,22 @@ pub struct GenLinesSpec {
     #[serde(default)]
     pub core_jit: f32,
 
+    // --- gauntlet round 2, 2026-09-06. Same rule a third time: every
+    // field here is `#[serde(default)]`, its zero is exactly the raster
+    // above it, and each guards its own `rand()`.
+    /// Radial kinds: [`FocusLinesParams::jit_len_out`]. 0 = the outer end
+    /// jitters by `jit_len` like the inner one, which is the round cap.
+    #[serde(default)]
+    pub jit_len_out: f32,
+    /// 0..1 — [`SpeedLinesParams::group_jit`] /
+    /// [`FocusLinesParams::group_jit`]. 0 = constant-size bundles.
+    #[serde(default)]
+    pub group_jit: f32,
+    /// Speed lines, DEGREES: [`SpeedLinesParams::jit_angle`]. 0 = dead
+    /// parallel runs.
+    #[serde(default)]
+    pub jit_angle: f32,
+
     // --- placement geometry. These were screen-side only until the
     // parity round: `hand_deg` now also aims a radial `sweep_deg` and
     // `anchor` now also holds a stream's `start_mode 1` reference line.
@@ -2333,6 +2652,8 @@ impl GenLinesSpec {
             self.hand_deg,
             self.group,
             self.group_gap,
+            self.group_jit,
+            self.seed,
         )
     }
 
@@ -2382,6 +2703,7 @@ impl GenLinesSpec {
                     angle_jitter: self.jit(self.jit_gap),
                     width_jitter: self.jit(self.jit_width),
                     length_jitter: self.jit(self.jit_len),
+                    jit_len_out: self.jit_len_out,
                     taper: self.taper.clamp(0.0, 1.0),
                     mix: self.mix(),
                     gap_deg: self.gap_deg,
@@ -2392,6 +2714,7 @@ impl GenLinesSpec {
                     sweep_center_deg: self.hand_deg,
                     group: self.group,
                     group_gap: self.group_gap,
+                    group_jit: self.group_jit,
                     core_jit: self.core_jit,
                     seed: self.seed,
                 },
@@ -2410,9 +2733,11 @@ impl GenLinesSpec {
                     gap_px: self.gap_px,
                     group: self.group,
                     group_gap: self.group_gap,
+                    group_jit: self.group_jit,
                     jit_gap: self.jit_gap,
                     jit_len: self.jit_len,
                     jit_width: self.jit_width,
+                    jit_angle: self.jit_angle,
                     mix: self.mix(),
                     start_mode: self.start_mode,
                     jit_start: self.jit_start,

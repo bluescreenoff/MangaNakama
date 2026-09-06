@@ -89,6 +89,17 @@ pub struct LineOpts {
     pub jit_len: f32,
     /// Width wobble, as a fraction pulled off the width.
     pub jit_width: f32,
+    /// Radial: the OUTER end's own length wobble (see
+    /// [`super::FocusLinesParams::jit_len_out`]). Keep it small — a
+    /// stroke that stops inside the frame ends in a round cap.
+    pub jit_len_out: f32,
+    /// 0..1 — how much a bundle's size and the hole after it wobble (the
+    /// renderer's `walk_step`). 0 = every bundle the same size, which the
+    /// eye reads as a comb.
+    pub group_jit: f32,
+    /// Stream: per-run direction wobble in DEGREES (see
+    /// [`super::SpeedLinesParams::jit_angle`]). Under a degree.
+    pub jit_angle: f32,
     /// 0..1 — the fraction of lines drawn heavy (see
     /// [`super::Mix::accent_frac`]).
     pub accent_frac: f32,
@@ -161,16 +172,24 @@ impl LineOpts {
     /// thin, thick, thin, no round cap anywhere on the page.
     pub fn stream(dpi: u32) -> Self {
         Self {
-            group: 4,
+            group: 5,
             group_gap: 2.5,
+            group_jit: 0.7,
             jit_gap: 0.25,
             jit_len: 0.5,
             jit_width: 0.4,
-            accent_frac: 0.12,
-            accent_mul: 4.0,
+            // ref-07's streak block is not "hairlines plus one stray": a
+            // few strokes in every handful are RAILS, ~10× the hairline,
+            // and they are what gives the block its speed. 0.15 × a
+            // 1.5..8 spread is a continuum topping out at ~1.6 mm.
+            accent_frac: 0.15,
+            accent_mul: 8.0,
             entry: 0.35,
             needle: 0.9,
             len_skew: 0.4,
+            // One degree of hand. Dead-parallel is measurable and it is
+            // the thing that reads as ruled (critic, round 2).
+            jit_angle: 1.0,
             ..Self::from_mm(dpi, 0.20, 1.0)
         }
     }
@@ -184,36 +203,45 @@ impl LineOpts {
             group_gap: 2.5,
             jit_len: 0.4,
             entry: 0.3,
-            accent_frac: 0.10,
-            accent_mul: 3.5,
+            accent_frac: 0.12,
             ..Self::stream(dpi)
         }
         .with_mm(dpi, 0.17, 0.6)
     }
 
     /// The same rule read the other way: gaps you can see between the
-    /// runs. Pairs rather than the stream's bundles of four — ref-07 and
+    /// runs. HANDFULS rather than the stream's tight blocks — ref-07 and
     /// ref-09 both put two or three strokes nearly touching and then a
     /// wide hole, and an even sprinkle is the thing that reads as
     /// generated.
+    ///
+    /// It was bundles of exactly TWO until round 2, and that turned out
+    /// worse than no bundling: a repeated pair at a fixed pitch is a
+    /// picket fence, and the critic could see the period. `group_jit`
+    /// 0.8 against a group of 4 draws 1..4 with a hole that wobbles by a
+    /// fifth of itself, so the run of the eye never finds a unit.
     pub fn sparse_stream(dpi: u32) -> Self {
         Self {
-            group: 2,
-            group_gap: 3.5,
+            group: 4,
+            group_gap: 6.0,
+            group_jit: 0.8,
             jit_gap: 0.3,
             jit_width: 0.3,
-            accent_frac: 0.12,
-            accent_mul: 3.0,
+            // 0.22, not the streams' 0.15: this row only puts ~21 runs on
+            // a panel, and a 0.15 chance on 21 draws is TWO rails — the
+            // critic counted exactly one and scored the weight mix 2/5.
+            // A fraction has to be read against the count it applies to.
+            accent_frac: 0.22,
             entry: 0.4,
             needle: 0.9,
             jit_len: 0.6,
             len_skew: 0.3,
             ..Self::stream(dpi)
         }
-        // 1.1 mm inside a pair, 3.85 mm between pairs — a MEAN pitch of
-        // 2.5 mm, the same set as before the bundling, re-spent as
-        // rhythm. Bundling on top of the old 2.5 mm gap would have halved
-        // the count, which is not what "sparse" was asking for.
+        // 1.1 mm inside a bundle, ~6.6 mm between bundles — a MEAN pitch
+        // of ~3 mm once the size wobble is priced in, which is what
+        // "sparse" was asking for. Bundling on top of an already 2.5 mm
+        // gap would have halved the count instead.
         .with_mm(dpi, 0.30, 1.1)
     }
 
@@ -225,10 +253,13 @@ impl LineOpts {
         Self {
             entry: 0.3,
             accent_frac: 0.15,
-            accent_mul: 5.0,
             jit_len: 0.6,
             len_skew: 0.5,
             converge_far: 2.5,
+            // No hand wobble on this one: the convergence already fans
+            // every run by its own amount, and a second wobble on top of
+            // it only softens the vanishing point.
+            jit_angle: 0.0,
             ..Self::stream(dpi)
         }
     }
@@ -239,16 +270,30 @@ impl LineOpts {
     /// mid-air.
     pub fn drip_lines(dpi: u32) -> Self {
         Self {
-            // Pairs and triples nearly touching, then a wide hole —
-            // ref-09's spacing, which an even comb cannot state.
-            group: 2,
+            // Ones, twos and threes nearly touching, then a wide hole —
+            // ref-09's spacing, which an even comb cannot state, and
+            // which bundles of exactly two stated as a picket fence
+            // (critic, round 2). `group_jit` 0.9 on a group of 3 is the
+            // widest wobble in the set: these are the most exposed lines
+            // on the page, nothing else in the panel to hide the period.
+            group: 3,
             group_gap: 6.0,
+            group_jit: 0.9,
             jit_gap: 0.4,
             jit_width: 0.3,
-            accent_frac: 0.0,
-            accent_mul: 1.0,
+            // ref-09 has several clearly bolder verticals among the
+            // hairlines; round 1 shipped zero, and the critic scored the
+            // weight mix 2/5 for it. Same arithmetic as `sparse_stream`,
+            // and the highest fraction in the set: ~43 runs on a panel,
+            // half the accent spread lands mild against a 0.16 mm nib,
+            // and 0.15 measured as TWO visible rails. 0.28 measures as
+            // eight, spread three/two/three across the panel.
+            accent_frac: 0.28,
             entry: 0.0,
             needle: 1.0,
+            // Half a degree — a drip is closer to ruled than a streak is,
+            // but "closer to" is not "exactly".
+            jit_angle: 0.5,
             // Depths from a stub to the full panel: `place` gives an
             // anchored run the distance from the reference line to the
             // far edge, so `jit_len` 0.8 spans 1/5 of it to all of it and
@@ -269,8 +314,15 @@ impl LineOpts {
     /// 35 % hole for the art, and bundles of 4 — the rays come in
     /// clumps on every reference sheet, never at one even pitch.
     ///
-    /// No `entry`: a focus ray is heavy at the RIM and needles at the
-    /// centre, so it has one point, not two.
+    /// `entry` 0.25 is NOT a second decorative point. `segment` caps a
+    /// stroke with a half-disc, and the outer end of a ray that stopped
+    /// short of the frame sat INSIDE the panel, so a heavy accent ended
+    /// in a semicircular blob — a felt-tip dot, not a G-pen exit, and the
+    /// one defect that failed the two best presets (critic, round 2).
+    /// Two answers together: `jit_len_out` 0.15 keeps almost every outer
+    /// end past the frame, where the border hides it, and `entry` thins
+    /// whatever still lands inside so it exits as a needle. On a ray that
+    /// does run off the page the ramp is spent off-page and invisible.
     /// The gap is 2.2°, not the 3° a CSP tutorial quotes, because the
     /// HOLE is what a tutorial does not price in: a bundle of four with a
     /// 3× hole spends 18° per bundle, so at 3° the ray count would drop
@@ -288,12 +340,14 @@ impl LineOpts {
             r_in_frac: 0.35,
             group: 4,
             group_gap: 3.0,
+            group_jit: 0.5,
             jit_gap: 0.25,
             jit_len: 0.9,
+            jit_len_out: 0.15,
             jit_width: 0.4,
             accent_frac: 0.20,
             accent_mul: 4.0,
-            entry: 0.0,
+            entry: 0.25,
             needle: 0.8,
             len_skew: 0.6,
             core_jit: 0.3,
@@ -484,9 +538,15 @@ impl LineOpts {
             // gap.
             group: if gen_kind == 0 { self.group } else { 0 },
             group_gap: if gen_kind == 0 { self.group_gap } else { 0.0 },
+            group_jit: if gen_kind == 0 { self.group_jit } else { 0.0 },
             jit_gap: self.jit_gap,
             jit_len: self.jit_len,
             jit_width: self.jit_width,
+            // The outer end is a RADIAL idea (a stream's far end is its
+            // taper, not a rim); the direction wobble is a STREAM idea (a
+            // ray's angle already wobbles through `jit_gap`).
+            jit_len_out: if radial { self.jit_len_out } else { 0.0 },
+            jit_angle: if radial { 0.0 } else { self.jit_angle },
             accent_frac: self.accent_frac,
             accent_mul: self.accent_mul,
             entry: self.entry,
