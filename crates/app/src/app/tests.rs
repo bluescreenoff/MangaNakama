@@ -4442,7 +4442,10 @@ fn workspace_entries_migrate_from_the_old_six_field_shape() {
     crate::ui::dock::close_palette(&mut app, crate::ui::dock::Palette::Tool);
     app.workspace_register("rough");
     assert_eq!(app.workspaces.len(), 1, "re-register overwrites in place");
-    assert_eq!(app.workspaces[0].len(), 9);
+    // 10 since lane B1 added `prop_order` on the END (field 9). The number
+    // is the point of the test: fields only ever grow rightwards, so an
+    // older build's shorter entry keeps meaning what it meant.
+    assert_eq!(app.workspaces[0].len(), 10);
     assert!(
         !app.workspaces[0][8].is_empty(),
         "the tree snapshot rode along"

@@ -1,7 +1,11 @@
 //! Modal dialogs and always-on-top windows: New Manga, Work Settings, the
 //! Sub Tool Detail wrench window, and the F1 Diagnostics HUD.
 
-use super::property::{Section, brush_sliders, prop_sections};
+use super::icons::Icon;
+use super::property::{
+    Row, brush_sliders, context_title, move_entry, ordered_rows, ordered_sections,
+};
+use super::widgets::icon_btn;
 use super::theme::{self, ValueBar};
 use crate::app::{App, PromoteDraft};
 use crate::cmd::AppCmd;
@@ -141,10 +145,78 @@ pub(super) fn detail_window(ctx: &egui::Context, app: &mut App) {
     app.detail_open = open;
 }
 
-/// The Tool Property FULL list (CSP: Tool Property ▸ detail window): every
-/// section of the current context with its eye toggle — unchecked sections
-/// disappear from the compact palette but stay fully editable here (owner
-/// request, pics 6-7).
+/// One row of the settings window: the eye, the move arrows, the row's name,
+/// and under it the row's OWN live widget — editing a hidden row here still
+/// works, exactly like the old whole-section window.
+///
+/// A row that does not apply to the armed sub tool is greyed and says so
+/// rather than vanishing: "why is Brush gone?" is a worse question than
+/// "why is Brush grey?", and the answer to the second one is written down.
+fn detail_row(ui: &mut egui::Ui, app: &mut App, r: Row, arrows: bool) {
+    let applies = (r.applies)(app);
+    ui.horizontal(|ui| {
+        let hidden = app.prop_hidden.contains(r.id);
+        if icon_btn(
+            ui,
+            if hidden { Icon::EyeOff } else { Icon::Eye },
+            14.0,
+            !hidden,
+            true,
+            if hidden {
+                "hidden from the Tool Property palette — click to show it"
+            } else {
+                "showing in the Tool Property palette — click to hide it"
+            },
+        )
+        .clicked()
+        {
+            if hidden {
+                app.prop_hidden.remove(r.id);
+            } else {
+                app.prop_hidden.insert(r.id.to_owned());
+            }
+        }
+        if arrows {
+            if ui
+                .small_button("▲")
+                .on_hover_text("one place up in the palette")
+                .clicked()
+            {
+                move_entry(app, r.id, false, true);
+            }
+            if ui
+                .small_button("▼")
+                .on_hover_text("one place down in the palette")
+                .clicked()
+            {
+                move_entry(app, r.id, false, false);
+            }
+        }
+        ui.label(
+            egui::RichText::new(r.label)
+                .size(11.5)
+                .color(super::theme::c().text_strong),
+        );
+        if !applies {
+            ui.weak("not for this sub tool");
+        }
+    });
+    ui.add_enabled_ui(applies, |ui| (r.body)(ui, app));
+    ui.add_space(3.0);
+}
+
+/// The Tool Property SETTINGS window — the owner's ask, 2026-09-06: "there
+/// should probably be a button that opens the full settings box similar to
+/// how the preferences box works and in there you can checkbox/eye icon
+/// click for each setting on whether or not you want to show it in the
+/// subtool settings and you should be able to reorder them too".
+///
+/// Preferences-shaped on purpose: the same 540 px width, search box, 110 px
+/// tab rail and PAINTED divider. That last one is not cosmetic — see the
+/// comment in `prefs_dialog::prefs_window`: a vertical `ui.separator()`
+/// between a rail and a body inside an auto-sized window is a feedback loop
+/// (the separator stretches to last frame's height, the footer adds to it)
+/// and the window grew ~50 pt every frame until it walked off the desktop.
 pub(super) fn property_detail_window(ctx: &egui::Context, app: &mut App) {
     if !app.prop_detail_open
         || matches!(
@@ -157,41 +229,175 @@ pub(super) fn property_detail_window(ctx: &egui::Context, app: &mut App) {
     {
         return;
     }
+    let sections = ordered_sections(app);
+    if sections.is_empty() {
+        return;
+    }
+    app.prop_detail_sec = app.prop_detail_sec.min(sections.len() - 1);
     let mut open = app.prop_detail_open;
-    egui::Window::new("Tool Property — full list")
-        .open(&mut open)
-        .default_width(290.0)
-        .resizable(false)
-        .show(ctx, |ui| {
-            ui.weak("uncheck a category to hide it from the palette");
-            ui.add_space(2.0);
+    let mut close = false;
+    egui::Window::new(format!(
+        "Tool Property settings — {}",
+        context_title(app)
+    ))
+    .open(&mut open)
+    .resizable(false)
+    .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, -30.0))
+    .show(ctx, |ui| {
+        ui.set_width(540.0);
+        ui.add(
+            egui::TextEdit::singleline(&mut app.prop_detail_search)
+                .hint_text("Search settings…")
+                .desired_width(f32::INFINITY),
+        );
+        let q = app.prop_detail_search.trim().to_lowercase();
+
+        // --- search: one flat list across every section ----------------
+        // No arrows here on purpose: "up" has no meaning in a list that is
+        // not the order anything draws in.
+        if !q.is_empty() {
+            ui.add_space(4.0);
+            let mut hits = 0usize;
             egui::ScrollArea::vertical()
-                .max_height(520.0)
+                .id_salt("mn.propdetail.search")
+                .max_height(420.0)
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    for Section { id, title, body } in prop_sections(app) {
-                        let mut vis = !app.prop_hidden.contains(id);
-                        ui.horizontal(|ui| {
-                            if ui.checkbox(&mut vis, "").changed() {
-                                if vis {
-                                    app.prop_hidden.remove(id);
-                                } else {
-                                    app.prop_hidden.insert(id.to_owned());
-                                }
+                    for s in &sections {
+                        for r in ordered_rows(app, s) {
+                            if !r.label.to_lowercase().contains(&q) {
+                                continue;
                             }
-                            ui.label(
-                                egui::RichText::new(title.to_owned())
-                                    .size(11.5)
-                                    .color(super::theme::c().text_strong),
-                            );
-                        });
-                        body(ui, app);
-                        ui.add_space(3.0);
-                        ui.separator();
+                            hits += 1;
+                            ui.weak(s.title);
+                            detail_row(ui, app, r, false);
+                            ui.separator();
+                        }
                     }
                 });
-        });
-    app.prop_detail_open = open;
+            if hits == 0 {
+                ui.weak("no matching setting");
+            }
+            close |= detail_footer(ui, app, &sections);
+            return;
+        }
+
+        ui.add_space(4.0);
+        // --- rail + body -----------------------------------------------
+        let mut divider_x = 0.0;
+        let row = ui
+            .horizontal_top(|ui| {
+                ui.vertical(|ui| {
+                    ui.set_width(110.0);
+                    for (i, s) in sections.iter().enumerate() {
+                        let on = app.prop_detail_sec == i;
+                        if ui.selectable_label(on, s.title).clicked() {
+                            app.prop_detail_sec = i;
+                        }
+                    }
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        let id = sections[app.prop_detail_sec].id;
+                        if ui
+                            .small_button("▲")
+                            .on_hover_text("move this whole group up")
+                            .clicked()
+                        {
+                            move_entry(app, id, true, true);
+                        }
+                        if ui
+                            .small_button("▼")
+                            .on_hover_text("move this whole group down")
+                            .clicked()
+                        {
+                            move_entry(app, id, true, false);
+                        }
+                        ui.weak("group");
+                    });
+                });
+                // The lane the Separator widget used to occupy — width only,
+                // so it cannot feed height back into the window.
+                let (lane, _) = ui.allocate_exact_size(egui::vec2(6.0, 0.0), egui::Sense::hover());
+                divider_x = lane.center().x;
+                ui.vertical(|ui| {
+                    ui.set_min_width(410.0);
+                    ui.set_min_height(230.0);
+                    let s = sections[app.prop_detail_sec];
+                    if !(s.applies)(app) {
+                        ui.weak("this whole group is not for the armed sub tool");
+                        ui.add_space(3.0);
+                    }
+                    let rows = ordered_rows(app, &s);
+                    // Arrows only where there is somewhere to move: a
+                    // section that is one row has no order to change.
+                    let arrows = rows.len() > 1;
+                    egui::ScrollArea::vertical()
+                        .id_salt("mn.propdetail.body")
+                        .max_height(420.0)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            for r in rows {
+                                detail_row(ui, app, r, arrows);
+                                ui.separator();
+                            }
+                        });
+                });
+            })
+            .response
+            .rect;
+        ui.painter().vline(
+            divider_x,
+            row.y_range(),
+            ui.visuals().widgets.noninteractive.bg_stroke,
+        );
+        close |= detail_footer(ui, app, &sections);
+    });
+    app.prop_detail_open = open && !close;
+    if !app.prop_detail_open {
+        app.prop_detail_search.clear();
+    }
+}
+
+/// Show all / Default order / Close. Returns true when Close was pressed.
+/// Both resets are scoped to the CONTEXT on screen — clearing the text rows
+/// must not clear what you set up for balloons.
+fn detail_footer(ui: &mut egui::Ui, app: &mut App, sections: &[super::property::Section]) -> bool {
+    ui.add_space(6.0);
+    ui.separator();
+    let mut close = false;
+    ui.horizontal(|ui| {
+        if ui
+            .button("Show all")
+            .on_hover_text("put every row of this panel back in the palette")
+            .clicked()
+        {
+            for s in sections {
+                for r in s.row_list() {
+                    app.prop_hidden.remove(r.id);
+                }
+            }
+        }
+        if ui
+            .button("Default order")
+            .on_hover_text("back to the shipped order for this panel")
+            .clicked()
+        {
+            let ctx = super::property::prop_context(app);
+            app.prop_order.remove(&ctx);
+        }
+        if ui.button("Close").clicked() {
+            close = true;
+        }
+    });
+    ui.add_space(2.0);
+    ui.weak(
+        egui::RichText::new(
+            "The eye hides a row from the Tool Property palette — it stays \
+             editable here. Hidden rows and order are remembered per panel.",
+        )
+        .size(10.0),
+    );
+    close
 }
 
 // --- new document dialog ------------------------------------------------

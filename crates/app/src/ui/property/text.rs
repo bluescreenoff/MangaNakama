@@ -1,6 +1,21 @@
+//! The Text tool's Tool Property rows.
+//!
+//! Lane B1 (`docs/plans/2026-09-06-effect-lines-parity.md`) split this file
+//! from six section bodies into ROWS: one control per `Row`, so the settings
+//! window can hide and reorder them one at a time. The section a row belongs
+//! to only decides its caption and its neighbours — every fn below is
+//! independently drawable, and `text_state(app)` is recomputed per row
+//! (three field reads off the selected item; the palette draws a dozen of
+//! them a frame and it does not show up anywhere).
+//!
+//! The DEFAULT order is the owner's, 2026-09-06: "for fonts the
+//! horizontal/vertical ordering and centered/left/right aligned should be
+//! next to each other" — Direction now sits directly above Align, where
+//! Style and Furigana used to be.
+
 use super::*;
 
-/// The values the text sections edit: the item under edit / the Object
+/// The values the text rows edit: the item under edit / the Object
 /// selection, falling back to the new-text defaults.
 pub(crate) struct TextState {
     font: String,
@@ -42,10 +57,12 @@ pub(crate) fn text_state(app: &App) -> TextState {
     }
 }
 
-pub(crate) fn sec_text_font(ui: &mut egui::Ui, app: &mut App) {
+// --- Font -----------------------------------------------------------------
+
+/// Font family — CSP's Font list shape: the button opens an inline panel
+/// with search, Recently used (max 10) and every installed family.
+pub(crate) fn row_text_font(ui: &mut egui::Ui, app: &mut App) {
     let st = text_state(app);
-    // Font family — CSP's Font list shape: the button opens an inline panel
-    // with search, Recently used (max 10) and every installed family.
     if ui
         .button(format!(
             "Font ▾  {}",
@@ -107,7 +124,10 @@ pub(crate) fn sec_text_font(ui: &mut egui::Ui, app: &mut App) {
             }
         }
     }
-    let mut pt = st.pt;
+}
+
+pub(crate) fn row_text_size(ui: &mut egui::Ui, app: &mut App) {
+    let mut pt = text_state(app).pt;
     let resp = ValueBar::new("Size", 4.0, 72.0)
         .decimals(1)
         .suffix(" pt")
@@ -121,276 +141,11 @@ pub(crate) fn sec_text_font(ui: &mut egui::Ui, app: &mut App) {
     if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
         app.commit_text_bar_drag();
     }
-    // Character spacing (CSP Font group): pt at the document dpi, negative
-    // tightens.
-    let mut ls = st.letter_pt;
-    let resp = ValueBar::new("Char space", -3.0, 6.0)
-        .decimals(2)
-        .suffix(" pt")
-        .show(ui, &mut ls);
-    if resp.changed() {
-        app.begin_text_bar_drag();
-        app.text_letter_pt = ls;
-        app.preview_text_prop(move |i| i.letter_spacing_pt = ls);
-    }
-    if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
-        app.commit_text_bar_drag();
-    }
 }
 
-/// Furigana (TX-062). Select the kanji in the text, type the reading, press
-/// ルビ. The field's hint shows the reading already under the caret, so an
-/// existing annotation is visible without a round trip through the canvas.
-pub(crate) fn sec_text_ruby(ui: &mut egui::Ui, app: &mut App) {
-    let editing = app.text_editing();
-    let has_sel = app.text_edit.as_ref().is_some_and(|ed| ed.has_selection());
-    let at_caret = app.ruby_at_caret();
-    ui.horizontal(|ui| {
-        let hint = at_caret.clone().unwrap_or_else(|| "よみ".to_owned());
-        let field = egui::TextEdit::singleline(&mut app.text_ruby)
-            .hint_text(hint)
-            .desired_width(ui.available_width() - 46.0);
-        let resp = ui.add_enabled(editing, field);
-        let entered = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-        let pressed = ui
-            .add_enabled(has_sel, egui::Button::new("ルビ"))
-            .on_hover_text(
-                "Set the reading over the selected characters.\n\
-                 An empty field clears it. Vertical text sets the reading on \
-                 the right of the column, horizontal above the word.",
-            )
-            .clicked();
-        if pressed || (entered && has_sel) {
-            app.text_ruby_button();
-        }
-    });
-    if !editing {
-        ui.label(
-            egui::RichText::new("double-click the text to set furigana")
-                .weak()
-                .size(10.0),
-        );
-    } else if !has_sel {
-        ui.label(
-            egui::RichText::new("select the kanji first")
-                .weak()
-                .size(10.0),
-        );
-    }
+// --- Direction ------------------------------------------------------------
 
-    // CSP's "Reading settings" (owner: furigana "needs a lot of settings you
-    // can access like Clip Studio's"). These are per TEXT ITEM, not per
-    // reading — CSP's are too, and a page where two readings in one balloon
-    // are set differently is a page with a mistake on it.
-    let st = crate::text_edit::property_target(app)
-        .and_then(|(li, ti)| app.doc.layers.get(li)?.texts()?.texts.get(ti))
-        .map(|i| i.ruby_style.clone())
-        .unwrap_or_default();
-
-    let mut size_pct = st.size_pct;
-    let resp = ValueBar::new("Size", 20.0, 100.0)
-        .decimals(0)
-        .suffix(" %")
-        .show(ui, &mut size_pct);
-    if resp.changed() {
-        app.begin_text_bar_drag();
-        app.preview_text_prop(move |i| i.ruby_style.size_pct = size_pct);
-    }
-    if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
-        app.commit_text_bar_drag();
-    }
-
-    let mut gap = st.gap_pt;
-    let resp = ValueBar::new("Gap", -2.0, 6.0)
-        .decimals(2)
-        .suffix(" pt")
-        .show(ui, &mut gap);
-    if resp.changed() {
-        app.begin_text_bar_drag();
-        app.preview_text_prop(move |i| i.ruby_style.gap_pt = gap);
-    }
-    if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
-        app.commit_text_bar_drag();
-    }
-
-    let mut adjust = st.offset_pt;
-    let resp = ValueBar::new("Adjust", -12.0, 12.0)
-        .decimals(2)
-        .suffix(" pt")
-        .show(ui, &mut adjust);
-    if resp.changed() {
-        app.begin_text_bar_drag();
-        app.preview_text_prop(move |i| i.ruby_style.offset_pt = adjust);
-    }
-    if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
-        app.commit_text_bar_drag();
-    }
-
-    ui.horizontal(|ui| {
-        ui.label(
-            egui::RichText::new("Along")
-                .size(10.5)
-                .color(theme::c().text_weak),
-        );
-        let mut align = st.align;
-        for (label, value, tip) in [
-            (
-                "Start",
-                mn_core::text::Align::Leading,
-                "against the start of the word",
-            ),
-            (
-                "Center",
-                mn_core::text::Align::Center,
-                "centred on the word (the usual setting)",
-            ),
-            (
-                "End",
-                mn_core::text::Align::Trailing,
-                "against the end of the word",
-            ),
-        ] {
-            if ui
-                .selectable_label(align == value, label)
-                .on_hover_text(tip)
-                .clicked()
-                && align != value
-            {
-                align = value;
-                app.apply_text_prop(move |i| i.ruby_style.align = value);
-            }
-        }
-    });
-}
-
-pub(crate) fn sec_text_align(ui: &mut egui::Ui, app: &mut App) {
-    let st = text_state(app);
-    // Row alignment (CSP "Alignment") + block position in the frame (CSP
-    // "Position in frame"). Labels follow the orientation exactly like
-    // CSP's palette; Leading = the reading start (left / top).
-    let mut row_pick: Option<mn_core::text::Align> = None;
-    let mut frame_pick: Option<mn_core::text::FrameAlign> = None;
-    ui.horizontal(|ui| {
-        ui.weak("Rows");
-        let names: [&str; 3] = if st.vert {
-            ["Top", "Center", "Bottom"]
-        } else {
-            ["Left", "Center", "Right"]
-        };
-        for (a, label) in [
-            (mn_core::text::Align::Leading, names[0]),
-            (mn_core::text::Align::Center, names[1]),
-            (mn_core::text::Align::Trailing, names[2]),
-        ] {
-            if ui.selectable_label(st.align == a, label).clicked() {
-                row_pick = Some(a);
-            }
-        }
-    });
-    ui.horizontal(|ui| {
-        ui.weak("In frame");
-        let names: [&str; 3] = if st.vert {
-            ["Right", "Center", "Left"]
-        } else {
-            ["Top", "Center", "Bottom"]
-        };
-        for (a, label) in [
-            (mn_core::text::FrameAlign::Near, names[0]),
-            (mn_core::text::FrameAlign::Center, names[1]),
-            (mn_core::text::FrameAlign::Far, names[2]),
-        ] {
-            if ui.selectable_label(st.frame_align == a, label).clicked() {
-                frame_pick = Some(a);
-            }
-        }
-    })
-    .response
-    .on_hover_text("Where the text block sits in the wrap box (CSP: Position in frame)");
-    if let Some(a) = row_pick {
-        app.text_align = a;
-        app.apply_text_prop(move |i| i.align = a);
-    }
-    if let Some(a) = frame_pick {
-        app.text_frame_align = a;
-        app.apply_text_prop(move |i| i.frame_align = a);
-    }
-}
-
-pub(crate) fn sec_text_spacing(ui: &mut egui::Ui, app: &mut App) {
-    let st = text_state(app);
-    // Line space + "How to specify" (CSP L-row): Auto = the font's own
-    // metrics; a percentage of the natural line height; or an absolute pt.
-    let mut mode = match st.line {
-        mn_core::text::LineSpacing::Auto => 0u8,
-        mn_core::text::LineSpacing::Percent(_) => 1,
-        mn_core::text::LineSpacing::Pt(_) => 2,
-    };
-    let mut mode_pick: Option<u8> = None;
-    ui.horizontal(|ui| {
-        ui.selectable_value(&mut mode, 0, "Auto");
-        ui.selectable_value(&mut mode, 1, "%");
-        ui.selectable_value(&mut mode, 2, "pt");
-        if mode
-            != match st.line {
-                mn_core::text::LineSpacing::Auto => 0,
-                mn_core::text::LineSpacing::Percent(_) => 1,
-                mn_core::text::LineSpacing::Pt(_) => 2,
-            }
-        {
-            mode_pick = Some(mode);
-        }
-    });
-    if let Some(m) = mode_pick {
-        let ls = match m {
-            0 => mn_core::text::LineSpacing::Auto,
-            1 => mn_core::text::LineSpacing::Percent(100.0),
-            // Absolute seed ≈ the common 1.3× line for the current size.
-            _ => mn_core::text::LineSpacing::Pt((st.pt * 1.3).max(1.0)),
-        };
-        app.text_line = ls;
-        app.apply_text_prop(move |i| i.line_spacing = ls);
-        return;
-    }
-    match st.line {
-        mn_core::text::LineSpacing::Percent(v) => {
-            let mut val = v;
-            let resp = ValueBar::new("Line", 50.0, 300.0)
-                .decimals(0)
-                .suffix(" %")
-                .show(ui, &mut val);
-            if resp.changed() {
-                app.begin_text_bar_drag();
-                app.text_line = mn_core::text::LineSpacing::Percent(val);
-                app.preview_text_prop(move |i| {
-                    i.line_spacing = mn_core::text::LineSpacing::Percent(val)
-                });
-            }
-            if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
-                app.commit_text_bar_drag();
-            }
-        }
-        mn_core::text::LineSpacing::Pt(v) => {
-            let mut val = v;
-            let resp = ValueBar::new("Line", 5.0, 150.0)
-                .decimals(1)
-                .suffix(" pt")
-                .show(ui, &mut val);
-            if resp.changed() {
-                app.begin_text_bar_drag();
-                app.text_line = mn_core::text::LineSpacing::Pt(val);
-                app.preview_text_prop(move |i| {
-                    i.line_spacing = mn_core::text::LineSpacing::Pt(val)
-                });
-            }
-            if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
-                app.commit_text_bar_drag();
-            }
-        }
-        mn_core::text::LineSpacing::Auto => {}
-    }
-}
-
-pub(crate) fn sec_text_dir(ui: &mut egui::Ui, app: &mut App) {
+pub(crate) fn row_text_vertical(ui: &mut egui::Ui, app: &mut App) {
     let st = text_state(app);
     ui.horizontal(|ui| {
         let mut vert = st.vert;
@@ -401,7 +156,6 @@ pub(crate) fn sec_text_dir(ui: &mut egui::Ui, app: &mut App) {
             app.apply_text_prop(move |i| i.vertical = vert);
         }
     });
-    sec_text_auto_tcy(ui, app);
 }
 
 /// Auto 縦中横 (TX-062) — CSP's "Advanced ▸ Text ▸ Auto TateChuYoko", the
@@ -415,7 +169,7 @@ pub(crate) fn sec_text_dir(ui: &mut egui::Ui, app: &mut App) {
 /// The value is per ITEM (a balloon of dialogue and a page number want
 /// different answers) and doubles as the default for new text, exactly like
 /// the alignment and spacing controls one section down.
-pub(crate) fn sec_text_auto_tcy(ui: &mut egui::Ui, app: &mut App) {
+pub(crate) fn row_text_auto_tcy(ui: &mut egui::Ui, app: &mut App) {
     let vertical = text_state(app).vert;
     let current = crate::text_edit::property_target(app)
         .and_then(|(li, ti)| app.doc.layers.get(li)?.texts()?.texts.get(ti))
@@ -464,9 +218,160 @@ pub(crate) fn sec_text_auto_tcy(ui: &mut egui::Ui, app: &mut App) {
     }
 }
 
-pub(crate) fn sec_text_style(ui: &mut egui::Ui, app: &mut App) {
-    // B / I / U on the current selection while editing; on the whole item
-    // otherwise.
+// --- Align ----------------------------------------------------------------
+
+/// Row alignment (CSP "Alignment"). Labels follow the orientation exactly
+/// like CSP's palette; Leading = the reading start (left / top).
+pub(crate) fn row_text_align_rows(ui: &mut egui::Ui, app: &mut App) {
+    let st = text_state(app);
+    let mut row_pick: Option<mn_core::text::Align> = None;
+    ui.horizontal(|ui| {
+        ui.weak("Rows");
+        let names: [&str; 3] = if st.vert {
+            ["Top", "Center", "Bottom"]
+        } else {
+            ["Left", "Center", "Right"]
+        };
+        for (a, label) in [
+            (mn_core::text::Align::Leading, names[0]),
+            (mn_core::text::Align::Center, names[1]),
+            (mn_core::text::Align::Trailing, names[2]),
+        ] {
+            if ui.selectable_label(st.align == a, label).clicked() {
+                row_pick = Some(a);
+            }
+        }
+    });
+    if let Some(a) = row_pick {
+        app.text_align = a;
+        app.apply_text_prop(move |i| i.align = a);
+    }
+}
+
+/// Block position in the wrap box (CSP "Position in frame").
+pub(crate) fn row_text_in_frame(ui: &mut egui::Ui, app: &mut App) {
+    let st = text_state(app);
+    let mut frame_pick: Option<mn_core::text::FrameAlign> = None;
+    ui.horizontal(|ui| {
+        ui.weak("In frame");
+        let names: [&str; 3] = if st.vert {
+            ["Right", "Center", "Left"]
+        } else {
+            ["Top", "Center", "Bottom"]
+        };
+        for (a, label) in [
+            (mn_core::text::FrameAlign::Near, names[0]),
+            (mn_core::text::FrameAlign::Center, names[1]),
+            (mn_core::text::FrameAlign::Far, names[2]),
+        ] {
+            if ui.selectable_label(st.frame_align == a, label).clicked() {
+                frame_pick = Some(a);
+            }
+        }
+    })
+    .response
+    .on_hover_text("Where the text block sits in the wrap box (CSP: Position in frame)");
+    if let Some(a) = frame_pick {
+        app.text_frame_align = a;
+        app.apply_text_prop(move |i| i.frame_align = a);
+    }
+}
+
+// --- Spacing --------------------------------------------------------------
+
+/// "How to specify" (CSP L-row): Auto = the font's own metrics; a percentage
+/// of the natural line height; or an absolute pt.
+pub(crate) fn row_text_line_mode(ui: &mut egui::Ui, app: &mut App) {
+    let st = text_state(app);
+    let was = match st.line {
+        mn_core::text::LineSpacing::Auto => 0u8,
+        mn_core::text::LineSpacing::Percent(_) => 1,
+        mn_core::text::LineSpacing::Pt(_) => 2,
+    };
+    let mut mode = was;
+    ui.horizontal(|ui| {
+        ui.selectable_value(&mut mode, 0, "Auto");
+        ui.selectable_value(&mut mode, 1, "%");
+        ui.selectable_value(&mut mode, 2, "pt");
+    });
+    if mode != was {
+        let ls = match mode {
+            0 => mn_core::text::LineSpacing::Auto,
+            1 => mn_core::text::LineSpacing::Percent(100.0),
+            // Absolute seed ≈ the common 1.3× line for the current size.
+            _ => mn_core::text::LineSpacing::Pt((st.pt * 1.3).max(1.0)),
+        };
+        app.text_line = ls;
+        app.apply_text_prop(move |i| i.line_spacing = ls);
+    }
+}
+
+/// The line-spacing NUMBER. Auto has none, so this row draws nothing then —
+/// the mode row above it is where you get one.
+pub(crate) fn row_text_line(ui: &mut egui::Ui, app: &mut App) {
+    match text_state(app).line {
+        mn_core::text::LineSpacing::Percent(v) => {
+            let mut val = v;
+            let resp = ValueBar::new("Line", 50.0, 300.0)
+                .decimals(0)
+                .suffix(" %")
+                .show(ui, &mut val);
+            if resp.changed() {
+                app.begin_text_bar_drag();
+                app.text_line = mn_core::text::LineSpacing::Percent(val);
+                app.preview_text_prop(move |i| {
+                    i.line_spacing = mn_core::text::LineSpacing::Percent(val)
+                });
+            }
+            if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
+                app.commit_text_bar_drag();
+            }
+        }
+        mn_core::text::LineSpacing::Pt(v) => {
+            let mut val = v;
+            let resp = ValueBar::new("Line", 5.0, 150.0)
+                .decimals(1)
+                .suffix(" pt")
+                .show(ui, &mut val);
+            if resp.changed() {
+                app.begin_text_bar_drag();
+                app.text_line = mn_core::text::LineSpacing::Pt(val);
+                app.preview_text_prop(move |i| {
+                    i.line_spacing = mn_core::text::LineSpacing::Pt(val)
+                });
+            }
+            if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
+                app.commit_text_bar_drag();
+            }
+        }
+        mn_core::text::LineSpacing::Auto => {}
+    }
+}
+
+/// Character spacing (CSP's Font group; it lives under Spacing here because
+/// that is the question it answers): pt at the document dpi, negative
+/// tightens.
+pub(crate) fn row_text_letter(ui: &mut egui::Ui, app: &mut App) {
+    let mut ls = text_state(app).letter_pt;
+    let resp = ValueBar::new("Char space", -3.0, 6.0)
+        .decimals(2)
+        .suffix(" pt")
+        .show(ui, &mut ls);
+    if resp.changed() {
+        app.begin_text_bar_drag();
+        app.text_letter_pt = ls;
+        app.preview_text_prop(move |i| i.letter_spacing_pt = ls);
+    }
+    if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
+        app.commit_text_bar_drag();
+    }
+}
+
+// --- Style ----------------------------------------------------------------
+
+/// B / I / U / S (+ 縦中横) on the current selection while editing; on the
+/// whole item otherwise.
+pub(crate) fn row_text_marks(ui: &mut egui::Ui, app: &mut App) {
     ui.horizontal(|ui| {
         let can = app.text_edit.as_ref().is_some_and(|ed| ed.has_selection());
         for (label, flag, tip) in [
@@ -519,7 +424,10 @@ pub(crate) fn sec_text_style(ui: &mut egui::Ui, app: &mut App) {
             app.text_tcy_button();
         }
     });
-    // Text colour (CSP ties it to the drawing colour).
+}
+
+/// Text colour (CSP ties it to the drawing colour).
+pub(crate) fn row_text_color(ui: &mut egui::Ui, app: &mut App) {
     ui.horizontal(|ui| {
         let c = app.active_color();
         let rgb = egui::Color32::from_rgb(
@@ -544,6 +452,8 @@ pub(crate) fn sec_text_style(ui: &mut egui::Ui, app: &mut App) {
         }
     });
 }
+
+// --- Edge -----------------------------------------------------------------
 
 pub(crate) fn sec_text_edge(ui: &mut egui::Ui, app: &mut App) {
     let st = text_state(app);
@@ -572,6 +482,146 @@ pub(crate) fn sec_text_edge(ui: &mut egui::Ui, app: &mut App) {
         }
     });
 }
+
+// --- Furigana -------------------------------------------------------------
+
+/// Furigana (TX-062). Select the kanji in the text, type the reading, press
+/// ルビ. The field's hint shows the reading already under the caret, so an
+/// existing annotation is visible without a round trip through the canvas.
+pub(crate) fn row_ruby_reading(ui: &mut egui::Ui, app: &mut App) {
+    let editing = app.text_editing();
+    let has_sel = app.text_edit.as_ref().is_some_and(|ed| ed.has_selection());
+    let at_caret = app.ruby_at_caret();
+    ui.horizontal(|ui| {
+        let hint = at_caret.clone().unwrap_or_else(|| "よみ".to_owned());
+        let field = egui::TextEdit::singleline(&mut app.text_ruby)
+            .hint_text(hint)
+            .desired_width((ui.available_width() - 46.0).max(40.0));
+        let resp = ui.add_enabled(editing, field);
+        let entered = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        let pressed = ui
+            .add_enabled(has_sel, egui::Button::new("ルビ"))
+            .on_hover_text(
+                "Set the reading over the selected characters.\n\
+                 An empty field clears it. Vertical text sets the reading on \
+                 the right of the column, horizontal above the word.",
+            )
+            .clicked();
+        if pressed || (entered && has_sel) {
+            app.text_ruby_button();
+        }
+    });
+    if !editing {
+        ui.label(
+            egui::RichText::new("double-click the text to set furigana")
+                .weak()
+                .size(10.0),
+        );
+    } else if !has_sel {
+        ui.label(
+            egui::RichText::new("select the kanji first")
+                .weak()
+                .size(10.0),
+        );
+    }
+}
+
+/// CSP's "Reading settings" (owner: furigana "needs a lot of settings you
+/// can access like Clip Studio's"). These are per TEXT ITEM, not per
+/// reading — CSP's are too, and a page where two readings in one balloon
+/// are set differently is a page with a mistake on it.
+fn ruby_style(app: &App) -> mn_core::text::RubyStyle {
+    crate::text_edit::property_target(app)
+        .and_then(|(li, ti)| app.doc.layers.get(li)?.texts()?.texts.get(ti))
+        .map(|i| i.ruby_style.clone())
+        .unwrap_or_default()
+}
+
+pub(crate) fn row_ruby_size(ui: &mut egui::Ui, app: &mut App) {
+    let mut size_pct = ruby_style(app).size_pct;
+    let resp = ValueBar::new("Size", 20.0, 100.0)
+        .decimals(0)
+        .suffix(" %")
+        .show(ui, &mut size_pct);
+    if resp.changed() {
+        app.begin_text_bar_drag();
+        app.preview_text_prop(move |i| i.ruby_style.size_pct = size_pct);
+    }
+    if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
+        app.commit_text_bar_drag();
+    }
+}
+
+pub(crate) fn row_ruby_gap(ui: &mut egui::Ui, app: &mut App) {
+    let mut gap = ruby_style(app).gap_pt;
+    let resp = ValueBar::new("Gap", -2.0, 6.0)
+        .decimals(2)
+        .suffix(" pt")
+        .show(ui, &mut gap);
+    if resp.changed() {
+        app.begin_text_bar_drag();
+        app.preview_text_prop(move |i| i.ruby_style.gap_pt = gap);
+    }
+    if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
+        app.commit_text_bar_drag();
+    }
+}
+
+pub(crate) fn row_ruby_adjust(ui: &mut egui::Ui, app: &mut App) {
+    let mut adjust = ruby_style(app).offset_pt;
+    let resp = ValueBar::new("Adjust", -12.0, 12.0)
+        .decimals(2)
+        .suffix(" pt")
+        .show(ui, &mut adjust);
+    if resp.changed() {
+        app.begin_text_bar_drag();
+        app.preview_text_prop(move |i| i.ruby_style.offset_pt = adjust);
+    }
+    if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
+        app.commit_text_bar_drag();
+    }
+}
+
+pub(crate) fn row_ruby_along(ui: &mut egui::Ui, app: &mut App) {
+    let st = ruby_style(app);
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new("Along")
+                .size(10.5)
+                .color(theme::c().text_weak),
+        );
+        let mut align = st.align;
+        for (label, value, tip) in [
+            (
+                "Start",
+                mn_core::text::Align::Leading,
+                "against the start of the word",
+            ),
+            (
+                "Center",
+                mn_core::text::Align::Center,
+                "centred on the word (the usual setting)",
+            ),
+            (
+                "End",
+                mn_core::text::Align::Trailing,
+                "against the end of the word",
+            ),
+        ] {
+            if ui
+                .selectable_label(align == value, label)
+                .on_hover_text(tip)
+                .clicked()
+                && align != value
+            {
+                align = value;
+                app.apply_text_prop(move |i| i.ruby_style.align = value);
+            }
+        }
+    });
+}
+
+// --- Work style + guide ---------------------------------------------------
 
 /// TX-styles: the WORK style row — pick a named style (Dialogue, Thought…)
 /// for the selected text, or set the new-text defaults from one; Styles…

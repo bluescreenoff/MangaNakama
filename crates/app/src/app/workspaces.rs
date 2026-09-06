@@ -22,6 +22,9 @@ const WS_PROP_HIDDEN: usize = 5;
 /// Docking 2: the whole tree as one JSON field. A workspace registered by
 /// an older build lacks it and migrates from fields 1..=4 at APPLY time.
 const WS_DOCK_TREE: usize = 8;
+/// Lane B1: the Tool Property row ORDER (`prop_order=`'s JSON), beside the
+/// visibility already in field 5. On the END, like every field before it.
+const WS_PROP_ORDER: usize = 9;
 
 impl App {
     /// One field of a workspace entry, or `""` when the entry is an older
@@ -54,6 +57,7 @@ impl App {
             String::new(),
             String::new(),
             crate::ui::dock::to_json_tree(&self.dock),
+            crate::ui::property::order_to_json(&self.prop_order),
         ];
         if let Some(e) = self
             .workspaces
@@ -103,7 +107,15 @@ impl App {
             crate::ui::dock::merge_columns(&left, &right, lw, rw, 1280.0)
                 .unwrap_or_else(crate::ui::dock::default_tree)
         };
+        // The LIVE sets, not just the saved lines: `sync_dock_layout` writes
+        // `app.prop_hidden` into `layout.prop_hidden` at the end of every
+        // frame, so an apply that only touched the layout copy was undone
+        // one frame later and the workspace's Tool Property visibility never
+        // actually arrived (found in lane B1, present since UI-060).
+        self.prop_hidden = crate::ui::property::hidden_from_line(&f(WS_PROP_HIDDEN));
+        self.prop_order = crate::ui::property::order_from_json(&f(WS_PROP_ORDER));
         self.layout.prop_hidden = f(WS_PROP_HIDDEN);
+        self.layout.prop_order = f(WS_PROP_ORDER);
         self.workspace_current = name.to_string();
         self.persist();
         true

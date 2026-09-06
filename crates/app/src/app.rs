@@ -904,7 +904,22 @@ pub struct App {
     /// Tool Property sections hidden from the COMPACT palette (the eye
     /// toggles; the full window always shows everything). Persisted in
     /// ui.txt as `prop_hidden=`.
+    ///
+    /// Lane B1: these are ROW ids now, not section ids. An old ui.txt that
+    /// names a section is migrated on load (`ui::property::migrate_hidden`).
     pub prop_hidden: std::collections::BTreeSet<String>,
+    /// Lane B1: the artist's row/section ORDER, per Tool Property context
+    /// (the tool name, or `obj.text` / `obj.balloon` / `obj.gen` /
+    /// `obj.frame` under the Operation tool). Persisted as the one JSON
+    /// line `prop_order=` in ui.txt. A context with no entry draws in the
+    /// registry's default order; ids in an entry that this build no longer
+    /// has are ignored, and ids it has that the entry lacks append at the
+    /// end in default order.
+    pub prop_order: std::collections::BTreeMap<String, Vec<String>>,
+    /// The settings window's search box and selected rail entry (session
+    /// only — where you were looking is not a setting).
+    pub prop_detail_search: String,
+    pub prop_detail_sec: usize,
     /// Palette layout: widths, order, collapsed/floating sets. Persisted.
     pub layout: UiLayout,
     /// User preferences (`prefs.txt` beside the exe — deliberately NOT
@@ -1938,6 +1953,9 @@ impl App {
             pen_rows_open: false,
             prop_detail_open: false,
             prop_hidden: std::collections::BTreeSet::new(),
+            prop_order: std::collections::BTreeMap::new(),
+            prop_detail_search: String::new(),
+            prop_detail_sec: 0,
             dock,
             brush_previews: HashMap::new(),
             preview_budget: 0,
@@ -2191,13 +2209,12 @@ impl App {
         // The startup doc is a plain image — no Pages palette until a manga
         // shows up (dispatch re-syncs on every doc/page command).
         app.sync_pages_palette();
-        // Tool Property section visibility from ui.txt.
-        let hidden = app.layout.prop_hidden.clone();
-        app.prop_hidden = hidden
-            .split(',')
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_owned())
-            .collect();
+        // Tool Property row visibility + order from ui.txt. The hidden list
+        // was SECTION ids before lane B1; `migrate_hidden` expands the ones
+        // that have since been split into rows, so a hidden section does not
+        // quietly come back on the update that split it.
+        app.prop_hidden = crate::ui::property::hidden_from_line(&app.layout.prop_hidden);
+        app.prop_order = crate::ui::property::order_from_json(&app.layout.prop_order);
         // Recorded action sequences (actions.json beside the exe).
         app.actions_load();
         // keys.json complaints show once, up front — a chord that failed
@@ -2760,6 +2777,8 @@ impl App {
         self.layout.note_dock_tree(&t);
         let hidden: Vec<&str> = self.prop_hidden.iter().map(|s| s.as_str()).collect();
         self.layout.note_prop_hidden(&hidden.join(","));
+        self.layout
+            .note_prop_order(&crate::ui::property::order_to_json(&self.prop_order));
     }
 
     /// One line for the top bar (and the console, which is the log).
@@ -5297,6 +5316,12 @@ mod surface_figure_tests;
 /// figure back one point at a time.
 #[cfg(test)]
 mod figure_stage_tests;
+
+/// Lane B1 of the effect-lines parity plan (2026-09-06): the Tool Property
+/// ROW model — per-row eye toggles, the per-context order in `prop_order=`,
+/// and the `prop_hidden=` section→rows migration.
+#[cfg(test)]
+mod prop_rows_tests;
 
 /// Lane A3 of the effect-lines parity plan (2026-09-06): the artist's own
 /// effect-line sub tools — Duplicate / Rename / Save current / Update /

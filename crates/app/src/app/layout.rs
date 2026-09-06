@@ -56,9 +56,16 @@ pub struct UiLayout {
     /// never saved by this build: startup migrates the legacy columns, or
     /// falls back to the default tree.
     pub dock_tree: String,
-    /// Tool Property sections hidden from the compact palette, comma-joined
-    /// (the full-properties window's eye toggles).
+    /// Tool Property ROWS hidden from the compact palette, comma-joined
+    /// (the settings window's eye toggles). Pre-B1 files name whole
+    /// SECTIONS here; `ui::property::hidden_from_line` migrates those.
     pub prop_hidden: String,
+    /// Lane B1: the artist's Tool Property row/section ORDER, one JSON
+    /// object on one line — context id (tool name, or `obj.text` etc.) → the
+    /// ids in the order they should draw. Empty = nobody has reordered
+    /// anything, which is also what a junk line degrades to: every panel
+    /// then draws in its shipped order, and nothing is lost but the order.
+    pub prop_order: String,
     /// Restored window geometry, `win=x,y,w,h,max` (main.rs feeds it; empty =
     /// first run, default placement).
     pub win: String,
@@ -224,6 +231,7 @@ impl Default for UiLayout {
             dock_right: String::new(),
             dock_tree: String::new(),
             prop_hidden: String::new(),
+            prop_order: String::new(),
             win: String::new(),
             gpu_dabs: false,
             mono_preview: false,
@@ -323,6 +331,15 @@ impl UiLayout {
     pub fn note_prop_hidden(&mut self, hidden: &str) {
         if self.prop_hidden != hidden {
             self.prop_hidden = hidden.to_owned();
+            self.dirty = true;
+        }
+    }
+
+    /// Lane B1: the Tool Property row/section order, as
+    /// `ui::property::order_to_json` writes it (empty = nobody reordered).
+    pub fn note_prop_order(&mut self, json: &str) {
+        if self.prop_order != json {
+            self.prop_order = json.to_owned();
             self.dirty = true;
         }
     }
@@ -537,7 +554,8 @@ references={}
 grid={}
 grid_mm={}
 grid_div={}
-figure_presets={}\n",
+figure_presets={}
+prop_order={}\n",
             self.left_w,
             self.right_w,
             self.left_collapsed as u8,
@@ -584,6 +602,8 @@ figure_presets={}\n",
             // a stray newline inside a value would turn the rest of the list
             // into unknown keys that are silently dropped on the next load.
             self.figure_presets.replace('\n', ""),
+            // One key is one line — the `gradients` rule again.
+            self.prop_order.replace('\n', ""),
         )
     }
 
@@ -605,6 +625,11 @@ figure_presets={}\n",
             "dock_right" if !line.contains('\n') => self.dock_right = v.to_owned(),
             "dock_tree" if !line.contains('\n') => self.dock_tree = v.to_owned(),
             "prop_hidden" => self.prop_hidden = v.trim().to_owned(),
+            // Lane B1: the row/section order, one JSON line. Kept as WRITTEN
+            // and decoded where it is used (`ui::property::order_from_json`),
+            // which is where the "junk ⇒ default order" rule lives — this
+            // module knows nothing about section ids and should not start.
+            "prop_order" if !line.contains('\n') => self.prop_order = v.to_owned(),
             "win" => self.win = v.trim().to_owned(),
             "quick_pins" => self.quick_pins = v.trim().to_owned(),
             "workspaces" => self.workspaces = v.trim().to_owned(),

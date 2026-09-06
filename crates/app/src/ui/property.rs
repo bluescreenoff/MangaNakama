@@ -47,7 +47,7 @@ fn tool_property_body(ui: &mut egui::Ui, app: &mut App) {
         pen_property(ui, app);
         return;
     }
-    let sections = prop_sections(app);
+    let sections = palette_rows(app);
     ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new(context_title(app))
@@ -70,10 +70,10 @@ fn tool_property_body(ui: &mut egui::Ui, app: &mut App) {
         });
     });
     ui.add_space(1.0);
-    for s in &sections {
-        if !app.prop_hidden.contains(s.id) {
-            group_caption(ui, s.title);
-            (s.body)(ui, app);
+    for (s, rows) in sections {
+        group_caption(ui, s.title);
+        for r in rows {
+            (r.body)(ui, app);
         }
     }
 }
@@ -262,7 +262,7 @@ fn transform_property(ui: &mut egui::Ui, app: &mut App) {
 
 /// The palette header's context: the selected object when there is one, else
 /// the tool (CSP's Tool Property titles itself after the selection).
-fn context_title(app: &App) -> String {
+pub(super) fn context_title(app: &App) -> String {
     if app.tool == Tool::Object {
         if let Some((li, _)) = app.text_sel {
             if let Some(l) = app.doc.layers.get(li) {
@@ -304,62 +304,412 @@ pub(crate) use select::*;
 pub(crate) use text::*;
 pub(crate) use tone::*;
 
-// --- the section registry --------------------------------------------------
 
-/// One named, toggleable group of the Tool Property palette (the compact
-/// palette hides unchecked sections; the full-properties window shows all).
+// --- the row / section registry --------------------------------------------
+//
+// Lane B1 (`docs/plans/2026-09-06-effect-lines-parity.md`): the palette used
+// to be a list of SECTIONS with one body each, and the wrench window could
+// only hide a whole section. The unit is now the ROW — one control — so the
+// window can hide and reorder them individually, which is what the owner
+// asked for ("checkbox/eye icon click for each setting ... and you should be
+// able to reorder them too").
+//
+// A section that has NOT been split yet keeps working: `rows` empty means
+// "the section body IS my single row", with the section id as the row id.
+// That is how frames/balloons, tone, select, gradient and rulers still draw
+// while lane B2 converts them.
+
+/// The "always applies" predicate. Rust has no struct field defaults, so the
+/// const constructors below fill this in for rows and sections with no sub
+/// tool condition.
+fn always(_: &App) -> bool {
+    true
+}
+
+/// The body of a split section, which has none of its own. Unreachable in
+/// practice — `row_list` only falls back to `body` when `rows` is empty.
+fn nothing(_: &mut egui::Ui, _: &mut App) {}
+
+/// The Figure tool's BRUSH half only applies while the armed sub tool INKS.
+/// With an effect-line preset armed (Stream line, Saturated line, either
+/// flash) the generator never touches the brush, so Brush and Dynamics sat in
+/// the palette taking space and doing nothing.
+fn figure_inks(app: &App) -> bool {
+    !app.figure_mode.generates()
+}
+
+/// One control of the Tool Property palette: the unit the settings window's
+/// eye toggles and the up/down arrows move around.
+#[derive(Clone, Copy)]
+pub(crate) struct Row {
+    /// Stable id, `<section id>.<name>`. SHIPPED API — it is what ui.txt's
+    /// `prop_hidden=` and `prop_order=` lines carry, so renaming one silently
+    /// un-hides a row the artist hid.
+    pub id: &'static str,
+    pub label: &'static str,
+    pub body: fn(&mut egui::Ui, &mut App),
+    /// False = the row means nothing for the armed sub tool: the palette
+    /// skips it, the settings window greys it and says why.
+    pub applies: fn(&App) -> bool,
+}
+
+const fn row(id: &'static str, label: &'static str, body: fn(&mut egui::Ui, &mut App)) -> Row {
+    Row {
+        id,
+        label,
+        body,
+        applies: always,
+    }
+}
+
+/// One named group of rows in the Tool Property palette.
+#[derive(Clone, Copy)]
 pub(crate) struct Section {
     pub id: &'static str,
     pub title: &'static str,
-    pub body: fn(&mut egui::Ui, &mut App),
+    /// The converted sections list their rows here. EMPTY = not split yet,
+    /// and the section draws as ONE row (id = section id, label = title).
+    pub rows: &'static [Row],
+    pub body: Option<fn(&mut egui::Ui, &mut App)>,
+    pub applies: fn(&App) -> bool,
 }
 
-const SEC_WORKSTYLE: Section = Section {
-    id: "text.workstyle",
-    title: "Text style",
-    body: sec_text_workstyle,
-};
-const SEC_FONT: Section = Section {
-    id: "text.font",
-    title: "Font",
-    body: sec_text_font,
-};
-const SEC_DIR: Section = Section {
-    id: "text.dir",
-    title: "Direction",
-    body: sec_text_dir,
-};
-const SEC_STYLE: Section = Section {
-    id: "text.style",
-    title: "Style",
-    body: sec_text_style,
-};
-const SEC_RUBY: Section = Section {
-    id: "text.ruby",
-    title: "Furigana",
-    body: sec_text_ruby,
-};
-const SEC_ALIGN: Section = Section {
-    id: "text.align",
-    title: "Align",
-    body: sec_text_align,
-};
-const SEC_SPACING: Section = Section {
-    id: "text.spacing",
-    title: "Spacing",
-    body: sec_text_spacing,
-};
-const SEC_EDGE: Section = Section {
-    id: "text.edge",
-    title: "Edge",
-    body: sec_text_edge,
-};
-const SEC_TEXT_GUIDE: Section = Section {
-    id: "text.guide",
-    title: "Guide",
-    body: sec_text_guide,
-};
-/// Row 55 (CSP 液化): the seven modes, strength and radius. Descriptions
+impl Section {
+    /// The rows this section draws — the whole-section fallback included, so
+    /// callers never have to care whether a section has been split.
+    pub(crate) fn row_list(&self) -> Vec<Row> {
+        if self.rows.is_empty() {
+            vec![Row {
+                id: self.id,
+                label: self.title,
+                body: self.body.unwrap_or(nothing),
+                applies: self.applies,
+            }]
+        } else {
+            self.rows.to_vec()
+        }
+    }
+}
+
+/// An unsplit section: its body is its single row.
+const fn sec(id: &'static str, title: &'static str, body: fn(&mut egui::Ui, &mut App)) -> Section {
+    Section {
+        id,
+        title,
+        rows: &[],
+        body: Some(body),
+        applies: always,
+    }
+}
+
+/// An unsplit section that only applies to some sub tools.
+const fn sec_when(
+    id: &'static str,
+    title: &'static str,
+    body: fn(&mut egui::Ui, &mut App),
+    applies: fn(&App) -> bool,
+) -> Section {
+    Section {
+        id,
+        title,
+        rows: &[],
+        body: Some(body),
+        applies,
+    }
+}
+
+/// A section that has been split into rows.
+const fn sec_rows(id: &'static str, title: &'static str, rows: &'static [Row]) -> Section {
+    Section {
+        id,
+        title,
+        rows,
+        body: None,
+        applies: always,
+    }
+}
+
+// --- the text panel, converted (B1.4) --------------------------------------
+
+const ROWS_FONT: &[Row] = &[
+    row("text.font.font", "Font", row_text_font),
+    row("text.font.size", "Size", row_text_size),
+];
+const ROWS_DIR: &[Row] = &[
+    row(
+        "text.dir.vertical",
+        "Vertical / horizontal",
+        row_text_vertical,
+    ),
+    row("text.dir.auto_tcy", "Auto tate-chu-yoko", row_text_auto_tcy),
+];
+const ROWS_ALIGN: &[Row] = &[
+    row("text.align.rows", "Rows", row_text_align_rows),
+    row("text.align.in_frame", "In frame", row_text_in_frame),
+];
+const ROWS_SPACING: &[Row] = &[
+    row(
+        "text.spacing.line_mode",
+        "Line spacing mode",
+        row_text_line_mode,
+    ),
+    row("text.spacing.line", "Line spacing", row_text_line),
+    row("text.spacing.letter", "Char space", row_text_letter),
+];
+const ROWS_STYLE: &[Row] = &[
+    row(
+        "text.style.marks",
+        "Bold / italic / underline",
+        row_text_marks,
+    ),
+    row("text.style.color", "Text colour", row_text_color),
+];
+const ROWS_RUBY: &[Row] = &[
+    row("text.ruby.reading", "Reading", row_ruby_reading),
+    row("text.ruby.size", "Reading size", row_ruby_size),
+    row("text.ruby.gap", "Reading gap", row_ruby_gap),
+    row("text.ruby.adjust", "Reading adjust", row_ruby_adjust),
+    row("text.ruby.along", "Reading along", row_ruby_along),
+];
+
+const SEC_WORKSTYLE: Section = sec("text.workstyle", "Text style", sec_text_workstyle);
+const SEC_FONT: Section = sec_rows("text.font", "Font", ROWS_FONT);
+const SEC_DIR: Section = sec_rows("text.dir", "Direction", ROWS_DIR);
+const SEC_ALIGN: Section = sec_rows("text.align", "Align", ROWS_ALIGN);
+const SEC_SPACING: Section = sec_rows("text.spacing", "Spacing", ROWS_SPACING);
+const SEC_STYLE: Section = sec_rows("text.style", "Style", ROWS_STYLE);
+const SEC_EDGE: Section = sec("text.edge", "Edge", sec_text_edge);
+const SEC_RUBY: Section = sec_rows("text.ruby", "Furigana", ROWS_RUBY);
+const SEC_TEXT_GUIDE: Section = sec("text.guide", "Guide", sec_text_guide);
+
+/// The text panel's DEFAULT order (B1.4, Fable's ruling from the owner's
+/// example): Direction sits directly above Align, so the vertical/horizontal
+/// switch and Left/Center/Right are neighbours. Style and Furigana, which
+/// used to be wedged between them, moved below Spacing.
+const TEXT_SECTIONS: &[Section] = &[
+    SEC_WORKSTYLE,
+    SEC_FONT,
+    SEC_DIR,
+    SEC_ALIGN,
+    SEC_SPACING,
+    SEC_STYLE,
+    SEC_EDGE,
+    SEC_RUBY,
+    SEC_TEXT_GUIDE,
+];
+
+/// Every section this build has SPLIT into rows — the migration table for
+/// `prop_hidden`, which used to hold section ids. An unsplit section is
+/// absent on purpose: its id already IS its row id, so there is nothing to
+/// migrate and removing it would un-hide it.
+const SPLIT_SECTIONS: &[Section] = &[
+    SEC_FONT,
+    SEC_DIR,
+    SEC_ALIGN,
+    SEC_SPACING,
+    SEC_STYLE,
+    SEC_RUBY,
+];
+
+/// A `prop_hidden=` line written before lane B1 named SECTIONS. Expand each
+/// such id into the row ids that section now has, so "I hid Furigana" still
+/// means Furigana is hidden after the update rather than silently coming
+/// back. Unsplit ids are left exactly as written.
+pub(crate) fn migrate_hidden(hidden: &mut std::collections::BTreeSet<String>) {
+    for s in SPLIT_SECTIONS {
+        if hidden.remove(s.id) {
+            for r in s.rows {
+                hidden.insert(r.id.to_owned());
+            }
+        }
+    }
+}
+
+/// Decode ui.txt's `prop_hidden=` (comma-joined ids), migration included.
+pub(crate) fn hidden_from_line(line: &str) -> std::collections::BTreeSet<String> {
+    let mut set: std::collections::BTreeSet<String> = line
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect();
+    migrate_hidden(&mut set);
+    set
+}
+
+/// Decode ui.txt's `prop_order=` (one JSON object, context id → id list).
+/// A line this build cannot read costs the ORDER and nothing else: every
+/// panel then draws in its default order, which is recoverable, where a
+/// half-parsed list is not.
+pub(crate) fn order_from_json(line: &str) -> std::collections::BTreeMap<String, Vec<String>> {
+    serde_json::from_str(line.trim()).unwrap_or_default()
+}
+
+/// The `prop_order=` line for the save side. An empty map writes an EMPTY
+/// line rather than `{}`, so a user who never reordered anything does not
+/// dirty ui.txt on every start.
+pub(crate) fn order_to_json(map: &std::collections::BTreeMap<String, Vec<String>>) -> String {
+    if map.is_empty() {
+        String::new()
+    } else {
+        serde_json::to_string(map).unwrap_or_default()
+    }
+}
+
+// --- order + visibility ----------------------------------------------------
+
+/// The key `prop_order` is stored under: the tool, or — under the Operation
+/// tool, whose palette swaps for the selected object — which KIND of object
+/// is selected. Reordering the text rows while a text box is selected must
+/// not reorder the balloon rows.
+pub(crate) fn prop_context(app: &App) -> String {
+    if app.tool == Tool::Object {
+        return if app.object_mode == crate::cmd::ObjectMode::PickLayer {
+            "obj.picklayer"
+        } else if app.text_sel.is_some() {
+            "obj.text"
+        } else if app.balloon_sel.is_some() {
+            "obj.balloon"
+        } else if app
+            .gen_sel
+            .is_some_and(|li| app.doc.layers.get(li).is_some_and(|l| l.genlines.is_some()))
+        {
+            "obj.gen"
+        } else if app.object_sel.is_some() {
+            "obj.frame"
+        } else {
+            "obj"
+        }
+        .to_owned();
+    }
+    format!("{:?}", app.tool)
+}
+
+/// Where `id` sits in a stored order — `usize::MAX` for one that is not in
+/// it, which a STABLE sort then leaves in default order at the end. That is
+/// both halves of the rule at once: an id the artist never moved appends in
+/// default order, and an id in the list that no longer exists is ignored
+/// because nothing asks for it.
+fn order_key(order: &[String], id: &str) -> usize {
+    order.iter().position(|s| s == id).unwrap_or(usize::MAX)
+}
+
+/// The sections of the current context in the artist's stored order.
+pub(crate) fn ordered_sections(app: &App) -> Vec<Section> {
+    let mut v = prop_sections(app);
+    if let Some(order) = app.prop_order.get(&prop_context(app)) {
+        v.sort_by_key(|s| order_key(order, s.id));
+    }
+    v
+}
+
+/// One section's rows in the artist's stored order.
+pub(crate) fn ordered_rows(app: &App, s: &Section) -> Vec<Row> {
+    let mut v = s.row_list();
+    if let Some(order) = app.prop_order.get(&prop_context(app)) {
+        v.sort_by_key(|r| order_key(order, r.id));
+    }
+    v
+}
+
+/// What the compact palette draws: sections in the artist's order, each with
+/// its rows in theirs, minus the rows an eye toggle hid and the rows that
+/// mean nothing for the armed sub tool. A section left with no rows is
+/// dropped entirely — a lone caption over nothing is what "hide it" was for.
+///
+/// ONE definition, called by `tool_property_body` and by the tests, so a
+/// test can never pass against a palette that does something else.
+pub(crate) fn palette_rows(app: &App) -> Vec<(Section, Vec<Row>)> {
+    let mut out = Vec::new();
+    for s in ordered_sections(app) {
+        if !(s.applies)(app) {
+            continue;
+        }
+        let rows: Vec<Row> = ordered_rows(app, &s)
+            .into_iter()
+            .filter(|r| (r.applies)(app) && !app.prop_hidden.contains(r.id))
+            .collect();
+        if !rows.is_empty() {
+            out.push((s, rows));
+        }
+    }
+    out
+}
+
+/// `palette_rows` flattened to the id sequence — the seam the order and
+/// visibility tests drive without building a frame.
+#[cfg(test)]
+pub(crate) fn palette_row_ids(app: &App) -> Vec<&'static str> {
+    palette_rows(app)
+        .into_iter()
+        .flat_map(|(_, rows)| rows.into_iter().map(|r| r.id))
+        .collect()
+}
+
+/// The whole context flattened — sections in order, each followed by its own
+/// rows in order. This is what `prop_order` stores: sorting by position in
+/// ONE flat list gives the right answer for both groups, because a section's
+/// rows always sit between it and the next section.
+pub(crate) fn flat_order(app: &App) -> Vec<String> {
+    let mut out = Vec::new();
+    for s in ordered_sections(app) {
+        out.push(s.id.to_owned());
+        if !s.rows.is_empty() {
+            out.extend(ordered_rows(app, &s).iter().map(|r| r.id.to_owned()));
+        }
+    }
+    out
+}
+
+/// Move one section (or one row inside its section) up or down by one, and
+/// write the whole context's order down. `is_section` matters because an
+/// unsplit section's id is ALSO its row id.
+pub(crate) fn move_entry(app: &mut App, id: &str, is_section: bool, up: bool) {
+    let ctx = prop_context(app);
+    // The group this id belongs to, as ids, in current effective order.
+    let group: Vec<String> = if is_section {
+        ordered_sections(app)
+            .iter()
+            .map(|s| s.id.to_owned())
+            .collect()
+    } else {
+        let Some(s) = ordered_sections(app)
+            .into_iter()
+            .find(|s| s.row_list().iter().any(|r| r.id == id))
+        else {
+            return;
+        };
+        ordered_rows(app, &s)
+            .iter()
+            .map(|r| r.id.to_owned())
+            .collect()
+    };
+    let Some(pos) = group.iter().position(|s| s == id) else {
+        return;
+    };
+    let other = if up {
+        if pos == 0 {
+            return;
+        }
+        pos - 1
+    } else {
+        if pos + 1 >= group.len() {
+            return;
+        }
+        pos + 1
+    };
+    let mut flat = flat_order(app);
+    let (Some(a), Some(b)) = (
+        flat.iter().position(|s| *s == group[pos]),
+        flat.iter().position(|s| *s == group[other]),
+    ) else {
+        return;
+    };
+    flat.swap(a, b);
+    app.prop_order.insert(ctx, flat);
+}
+
+/// Row 55 (CSP liquify): the seven modes, strength and radius. Descriptions
 /// carry the Alt-invert and hold-accumulate rules — the two things a
 /// CSP user expects and a new user would never find.
 fn sec_liquify(ui: &mut egui::Ui, app: &mut App) {
@@ -407,26 +757,16 @@ fn sec_liquify(ui: &mut egui::Ui, app: &mut App) {
     });
 }
 
-const SEC_OBJ_GUIDE: Section = Section {
-    id: "obj.guide",
-    title: "Guide",
-    body: sec_obj_guide,
-};
+const SEC_OBJ_GUIDE: Section = sec("obj.guide", "Guide", sec_obj_guide);
 
-/// Every section of the CURRENT context, in palette order. The Operation
-/// tool swaps its whole list for the selected object's editors — Tool
-/// Property edits the item (owner's fix 7).
+/// Every section of the CURRENT context, in DEFAULT order (the stored order
+/// is applied by `ordered_sections`). The Operation tool swaps its whole
+/// list for the selected object's editors — Tool Property edits the item
+/// (owner's fix 7).
 pub(super) fn prop_sections(app: &App) -> Vec<Section> {
     let mut v = prop_sections_for_tool(app);
     if matches!(app.doc.active_layer().kind, mn_core::LayerKind::Fill(_)) {
-        v.insert(
-            0,
-            Section {
-                id: "live.fill",
-                title: "Live layer",
-                body: sec_live_fill,
-            },
-        );
+        v.insert(0, sec("live.fill", "Live layer", sec_live_fill));
     }
     v
 }
@@ -437,40 +777,14 @@ fn prop_sections_for_tool(app: &App) -> Vec<Section> {
             // S-001: the layer pick is its own sub tool, and nothing else
             // in the Operation tool applies while it is the active one.
             if app.object_mode == crate::cmd::ObjectMode::PickLayer {
-                vec![Section {
-                    id: "obj.picklayer",
-                    title: "Select layer",
-                    body: sec_pick_layer,
-                }]
+                vec![sec("obj.picklayer", "Select layer", sec_pick_layer)]
             } else if app.text_sel.is_some() {
-                vec![
-                    SEC_WORKSTYLE,
-                    SEC_FONT,
-                    SEC_DIR,
-                    SEC_STYLE,
-                    SEC_RUBY,
-                    SEC_ALIGN,
-                    SEC_SPACING,
-                    SEC_EDGE,
-                    SEC_TEXT_GUIDE,
-                ]
+                TEXT_SECTIONS.to_vec()
             } else if app.balloon_sel.is_some() {
                 vec![
-                    Section {
-                        id: "obj.balloon",
-                        title: "Balloon",
-                        body: sec_obj_balloon,
-                    },
-                    Section {
-                        id: "obj.balloon.ink",
-                        title: "Colour",
-                        body: sec_obj_ink,
-                    },
-                    Section {
-                        id: "obj.balloon.tail",
-                        title: "Tail",
-                        body: sec_obj_tail,
-                    },
+                    sec("obj.balloon", "Balloon", sec_obj_balloon),
+                    sec("obj.balloon.ink", "Colour", sec_obj_ink),
+                    sec("obj.balloon.tail", "Tail", sec_obj_tail),
                     SEC_OBJ_GUIDE,
                 ]
             } else if app
@@ -483,207 +797,72 @@ fn prop_sections_for_tool(app: &App) -> Vec<Section> {
                 // placed effect-line set could only be re-tuned by deleting
                 // it and dragging a new one.
                 vec![
-                    Section {
-                        id: "obj.gen",
-                        title: "Effect lines",
-                        body: sec_obj_genlines,
-                    },
-                    Section {
-                        id: "obj.gen.density",
-                        title: "Density",
-                        body: sec_obj_genlines_density,
-                    },
+                    sec("obj.gen", "Effect lines", sec_obj_genlines),
+                    sec("obj.gen.density", "Density", sec_obj_genlines_density),
                     SEC_OBJ_GUIDE,
                 ]
             } else if app.object_sel.is_some() {
                 vec![
-                    Section {
-                        id: "obj.frame",
-                        title: "Frame border",
-                        body: sec_obj_frame,
-                    },
+                    sec("obj.frame", "Frame border", sec_obj_frame),
                     SEC_OBJ_GUIDE,
                 ]
             } else {
                 vec![SEC_OBJ_GUIDE]
             }
         }
-        Tool::Text => vec![
-            SEC_WORKSTYLE,
-            SEC_FONT,
-            SEC_DIR,
-            SEC_STYLE,
-            SEC_RUBY,
-            SEC_ALIGN,
-            SEC_SPACING,
-            SEC_EDGE,
-            SEC_TEXT_GUIDE,
-        ],
+        Tool::Text => TEXT_SECTIONS.to_vec(),
         Tool::Balloon => vec![
-            Section {
-                id: "balloon.line",
-                title: "Balloon line",
-                body: sec_balloon_line,
-            },
-            Section {
-                id: "balloon.ink",
-                title: "Colour",
-                body: sec_balloon_ink,
-            },
-            Section {
-                id: "balloon.tail",
-                title: "Tail",
-                body: sec_balloon_tail,
-            },
-            Section {
-                id: "balloon.guide",
-                title: "Guide",
-                body: sec_balloon_guide,
-            },
+            sec("balloon.line", "Balloon line", sec_balloon_line),
+            sec("balloon.ink", "Colour", sec_balloon_ink),
+            sec("balloon.tail", "Tail", sec_balloon_tail),
+            sec("balloon.guide", "Guide", sec_balloon_guide),
         ],
         Tool::Frame => vec![
-            Section {
-                id: "frame.tool",
-                title: "Frame",
-                body: sec_frame_tool,
-            },
-            Section {
-                id: "frame.guide",
-                title: "Guide",
-                body: sec_frame_guide,
-            },
+            sec("frame.tool", "Frame", sec_frame_tool),
+            sec("frame.guide", "Guide", sec_frame_guide),
         ],
         Tool::Fill => vec![
-            Section {
-                id: "fill.opts",
-                title: "Fill",
-                body: sec_fill,
-            },
-            Section {
-                id: "fill.guide",
-                title: "Guide",
-                body: sec_wand_guide,
-            },
+            sec("fill.opts", "Fill", sec_fill),
+            sec("fill.guide", "Guide", sec_wand_guide),
         ],
         Tool::Tone => vec![
-            Section {
-                id: "tone.screen",
-                title: "Tone",
-                body: sec_tone,
-            },
-            Section {
-                id: "tone.region",
-                title: "Area detection",
-                body: sec_tone_region,
-            },
-            Section {
-                id: "tone.guide",
-                title: "Guide",
-                body: sec_tone_guide,
-            },
+            sec("tone.screen", "Tone", sec_tone),
+            sec("tone.region", "Area detection", sec_tone_region),
+            sec("tone.guide", "Guide", sec_tone_guide),
         ],
         Tool::Wand => vec![
-            Section {
-                id: "wand.opts",
-                title: "Auto select",
-                body: sec_wand,
-            },
-            Section {
-                id: "wand.guide",
-                title: "Guide",
-                body: sec_wand_guide,
-            },
+            sec("wand.opts", "Auto select", sec_wand),
+            sec("wand.guide", "Guide", sec_wand_guide),
         ],
-        Tool::Select => vec![Section {
-            id: "select.opts",
-            title: "Selection",
-            body: sec_select,
-        }],
-        Tool::Eyedrop => vec![Section {
-            id: "eyedrop.guide",
-            title: "Guide",
-            body: sec_eyedrop,
-        }],
-        Tool::Liquify => vec![Section {
-            id: "liquify.opts",
-            title: "Liquify",
-            body: sec_liquify,
-        }],
-        Tool::Pan => vec![Section {
-            id: "pan.guide",
-            title: "Guide",
-            body: sec_pan,
-        }],
+        Tool::Select => vec![sec("select.opts", "Selection", sec_select)],
+        Tool::Eyedrop => vec![sec("eyedrop.guide", "Guide", sec_eyedrop)],
+        Tool::Liquify => vec![sec("liquify.opts", "Liquify", sec_liquify)],
+        Tool::Pan => vec![sec("pan.guide", "Guide", sec_pan)],
         Tool::Ruler => vec![
-            Section {
-                id: "ruler.tool",
-                title: "Create ruler",
-                body: sec_ruler_tool,
-            },
-            Section {
-                id: "ruler.snap",
-                title: "Snapping",
-                body: sec_ruler_snap,
-            },
-            Section {
-                id: "ruler.guide",
-                title: "Guide",
-                body: sec_ruler_guide,
-            },
+            sec("ruler.tool", "Create ruler", sec_ruler_tool),
+            sec("ruler.snap", "Snapping", sec_ruler_snap),
+            sec("ruler.guide", "Guide", sec_ruler_guide),
         ],
         Tool::Figure => vec![
-            Section {
-                id: "figure.brush",
-                title: "Brush",
-                body: brush_sliders,
-            },
-            Section {
-                id: "figure.dynamics",
-                title: "Dynamics",
-                body: dynamics_editor,
-            },
-            Section {
-                id: "figure.opts",
-                title: "Figure",
-                body: sec_figure,
-            },
+            // Only while the armed sub tool INKS: an effect-line preset
+            // generates its own layer and never touches the brush, so these
+            // two used to sit here doing nothing (B1.1).
+            sec_when("figure.brush", "Brush", brush_sliders, figure_inks),
+            sec_when("figure.dynamics", "Dynamics", dynamics_editor, figure_inks),
+            sec("figure.opts", "Figure", sec_figure),
             // The eight wobbles, split off the Figure section in the parity
             // round: nineteen numbers in one column is a wall nobody reads,
             // and "what is a line?" and "how much does the hand vary?" are
             // two different questions. Right after Figure, because it is the
             // second half of the same answer.
-            Section {
-                id: "figure.wobble",
-                title: "Wobble",
-                body: sec_figure_wobble,
-            },
-            Section {
-                id: "figure.guide",
-                title: "Guide",
-                body: sec_figure_guide,
-            },
+            sec("figure.wobble", "Wobble", sec_figure_wobble),
+            sec("figure.guide", "Guide", sec_figure_guide),
         ],
         Tool::Gradient => vec![
-            Section {
-                id: "grad.info",
-                title: "Gradient",
-                body: sec_gradient_info,
-            },
-            Section {
-                id: "grad.opts",
-                title: "Ramp",
-                body: sec_gradient_opts,
-            },
-            Section {
-                id: "grad.set",
-                title: "Gradient set",
-                body: sec_gradient_set,
-            },
-            Section {
-                id: "grad.guide",
-                title: "Guide",
-                body: sec_gradient_guide,
-            },
+            sec("grad.info", "Gradient", sec_gradient_info),
+            sec("grad.opts", "Ramp", sec_gradient_opts),
+            sec("grad.set", "Gradient set", sec_gradient_set),
+            sec("grad.guide", "Guide", sec_gradient_guide),
         ],
         _ => Vec::new(),
     }

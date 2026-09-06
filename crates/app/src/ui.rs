@@ -36,7 +36,7 @@ mod prefs_dialog;
 /// The Shortcuts tab of the Preferences window — a friendly editor over
 /// keys.json (the file stays the truth). Pub(crate) for the `App` field.
 pub(crate) mod shortcut_tab;
-mod property;
+pub(crate) mod property;
 mod reader;
 mod subtool;
 mod tools;
