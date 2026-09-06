@@ -446,3 +446,188 @@ Warnings: **0**. 33 tests before, 36 now (`outer_ends_are_needles_not_caps`, `bu
   wearing a geometry costume: a 1 px white gap between two hard-edged blacks can only be a dashed
   line until `segment` writes coverage instead of a hit test.
 - `genlines.rs` is ~3 030 lines. Still Fable's call.
+
+---
+
+## Round 3 (builder) — stratified accents, drips back on the frame, the last stub
+
+Critic verdict was FAIL with **7 of 10 non-parked presets PASSING**. The three failures —
+`stream-line`, `sparse-stream`, `drip-lines` — all failed the same axis (weight mix) for the
+same cause, plus four smaller items. Measured before and after with a throwaway probe example
+(rendered the same panels the harness does, then: vertical/horizontal ink-run widths bucketed
+by half, ink per sixth, runs touching the frame row, runs per mm, and round-2's erode-and-march
+cap count). The probe is deleted. Only `genlines.rs` and `genlines/presets.rs` changed — the
+harness needed nothing this round.
+
+One new spec field, `LineOpts::start_back` (px, `#[serde(default)]` at the container). Nothing
+re-pinned.
+
+### 1. The accent roll is STRATIFIED, not a coin
+
+`Mix::accent` rolled an independent `rand() < accent_frac` per line. That has the right
+EXPECTED fraction and the wrong distribution at the counts a panel actually holds: `stream-line`
+puts ~7 accents on a page, and seven coin flips landing in one half is ordinary luck. It did —
+thickest stroke 7 px in the top half against 26 px in the bottom.
+
+Now a deficit accumulator, walked in run order (which is normal-offset order in both renderers,
+i.e. straight across the panel): `acc += accent_frac · 3u²` with `u = rand()`, fire and
+`acc −= 1` when it reaches 1. Same one `rand()` per line, same second `rand()` only on a hit, so
+the sequence positions are where they were; `accent_frac` 0 still draws nothing and the legacy
+path is untouched. The no-adjacent refusal from round 2 is unchanged, and the deficit stays owed
+when it refuses, so the fraction is not lost.
+
+> **Deviation from the brief, stated.** The brief specified `acc += accent_frac · (0.5 + rand())`.
+> That was built first and it is a COMB: four increments of a tight jitter concentrate, so
+> `dark-burst` printed one heavy wedge every fourth ray and `stream-line` printed eight evenly
+> ruled rails — one failure traded for another, and ref-08 does the opposite (two or three
+> heavies almost touching, then a dozen hairlines). `3u²` has the same mean 1 and a long tail:
+> a big step fires and leaves the remainder standing, which fires again two lines later and
+> gives the cluster, while a run of small steps gives the hole. What it still cannot do is spend
+> half a panel without firing, which is the defect this round exists to fix.
+
+**Thickest stroke per HALF** (top/bottom for the horizontal sets, left/right for the drips),
+perpendicular ink runs, px at 600 dpi. Target: the thinner half at least 40 % of the other.
+
+| preset | before | after |
+|---|---|---|
+| stream-line | 7 / 26 — **28 %** | 19 / 28 — **68 %** |
+| sparse-stream | 5 / 22 — **23 %** | 27 / 19 — **70 %** |
+| drip-lines (L/R) | 24 / 10 — **42 %** | 19 / 18 — **95 %** |
+
+New test `accents_spread_across_the_panel`: a 64-run stream set at `accent_frac` 0.15 (the
+shipped `stream-line` numbers), vertical ink runs down mid-panel, bucketed into four quarters of
+the normal extent — every quarter must hold at least one stroke over twice the nib, and the
+fattest quarter no more than 3 × the thinnest. It BITES: with the coin restored under the same
+seed it fails with `max 4, min 1, [1, 2, 4, 3]`.
+
+### 2. The drips hang from the frame again
+
+Three separate causes, all fixed:
+
+- **`jit_start` pushed the start the wrong way.** `start_mode` 1 added `rand · jit_start · len`
+  ALONG the direction, so a run began up to 7 mm INSIDE the panel with its own base cap showing.
+  It is subtracted now: the wobble is spent outside the frame, so it varies the far ends — the
+  thing you can see — and the starts all read as one straight cut.
+- **`start_back`**, a new `LineOpts` field in px (drips: 3 mm at the page dpi). `place` pushes the
+  reference line back along the drag by it and adds it to the reach, so even a zero-wobble run
+  begins outside the frame and the border clips it. It is a field rather than a constant because
+  `place` has no dpi and every preset number in that file is a millimetre.
+- **`entry` was already 0** on drips — checked, not changed. The upward point the critic saw was
+  the base half-disc cap of a run floating below the frame line.
+
+| drip measurement | before | after | target |
+|---|---|---|---|
+| runs touching row 0 | 1 of 40 — **0.03** | 81 of 84 — **0.96** | at least 0.90 |
+| lines per mm | **0.40** | **0.84** | at least 0.70 (ref-09 ≈ 0.9) |
+| ink, bottom-right sixth | **1.1 %** | **3.3 %** | at least 3 % |
+| ink, whole panel | 3.8 % | **8.0 %** | ref-09 24 % |
+
+Density: gap 0.7 → **0.35 mm** (mean pitch ~2.4 → ~1.2 mm once the bundle wobble is priced in).
+`accent_frac` 0.28 → **0.20** and `accent_mul` 8 → **5** to go with the doubled count — an 8×
+accent on a 0.16 mm nib is 1.3 mm and would swallow the three lanes either side at the new gap.
+The bottom-right also needed `jit_len` 0.8 → 0.6, `len_skew` 0.3 → 0.4 and, the biggest single
+lever, **`taper` 0.9 → 0.7**: a drip that arrives at the bottom of the frame carrying a tenth of
+its own weight is why the bottom half measured a quarter of the top half's ink. Item 4 is what
+made that affordable — the tip is a point now regardless of the taper.
+
+### 3. Perspective-stream's vanishing-side corner
+
+Raising `len_skew`/`jit_len` alone (0.5/0.6 → 0.7/0.45) moved it from 49 % to 53 % of the mean
+and could not do better, because the constraint is not length. Every run in a converged fan
+passes through the vanishing point, so the panel corner on the FAR side of the fan lies on the
+line of exactly ONE run — the one based at that corner — and the walk's normal extent stops
+there. It is round 2's along-extent bug on the other axis: an extent solved in a basis the runs
+never take.
+
+The walk now pads the normal extent by a quarter either side when `converge` is set, giving the
+fan bases just outside the canvas that sweep into those corners. Guarded on the convergence, so
+every other shipped preset is untouched; runs that miss the canvas cost one clipped bbox test.
+
+| perspective-stream | before | after |
+|---|---|---|
+| bottom-right sixth vs panel mean | 4.9 % / 9.9 % — **49 %** | 8.8 % / 11.1 % — **80 %** (target 60 %) |
+| strokes per 25.4 mm, mid-panel | 21 | **21** — the pad fills corners, not the middle |
+
+### 4. The last rounded stub — the cause, not the instance
+
+The critic's stub at `dark-burst-crop` (182,149) is full-panel (1645, 675), and the probe found
+it there. It is not that ray: `taper` 0.9 leaves `(1 − 0.9)^needle` = **0.158 of the NIB** standing
+at the tip, and that is a fraction of the nib rather than a fixed width. On a hairline it is half
+a pixel and the half-pixel floor in `segment` already reads it as a needle; on a 30 px accent it
+is a rounded 5 px stub. Every heavy tapered stroke that dies inside the frame had one — the
+critic saw one because it takes an accent AND an inner end inside the panel AND no neighbour to
+hide it.
+
+`width_at` now runs the residue linearly to zero over the last tenth of the length (guarded on
+`taper > 0`, so the pinned constant-width path is untouched). It costs ~0.8 % of the ink and is
+invisible on a hairline. It is also what let the drips drop to `taper` 0.7 in item 2.
+
+**Round caps across the sheet** (round 2's probe: erode to strokes at least 6 px wide, take each
+blob's outermost point along its own axis, march outward in the full ink — a needle keeps inking,
+a cap reaches only its own radius; the march now allows ±2 px perpendicular, because a 1 px white
+sliver between two near-merged rails is not a stroke end and marching down it read as five):
+
+| preset | round 2's code | round 3 |
+|---|---|---|
+| dark-burst | 17 (incl. the critic's (1645, 675)) | **0** |
+| drip-lines | 5 (all at y = 20…112 — the floating starts) | **0** |
+| dense-stream / sparse-stream | 1 / 1 | **0 / 0** |
+| the other six non-parked | 0 | **0** |
+| **non-parked total** | **24** | **0** |
+
+`sea-urchin-flash` 3 and `solid-flash` 62 are unchanged and out of scope: their teeth are cut
+sectors, not tapered segments, and both kinds are parked.
+
+New test `heavy_tapered_ends_run_out_to_a_point`: the arithmetic (`width_at(1.0, 0.9, 0, 0.8)`
+is 0 and `width_at(0.8, …)` is still exactly the old shape) plus a 48 px ray whose inner end must
+measure 2 px half-height or less and still 6 px or more a fifth of the way in. It BITES: with the
+run-out disabled it fails with `the tip is a point (0.15848935)`, and the sheet-wide probe goes
+back to 13 caps in `dark-burst` and 1 in `drip-lines`.
+
+### 5. The two taste calls
+
+- **Stream fan `jit_angle` 1.0 → 2.0°** (±1° per run) on `stream`, inherited by `sparse-stream`.
+  `dense-stream` is pinned at 1.0 with a comment: at its 0.6 mm gap a ±1° lean drifts 3.5 mm over
+  a panel-crossing run — six lanes — and the block would cross itself into a mesh. That row's
+  hand shows in the bundling.
+- **dark-burst ink left alone.** 26.3 % → 24.9 % across the six windows, still inside the
+  22–30 % band the critic passed. Nothing was aimed at it; the drift is the exit run-out plus the
+  new accent spacing.
+
+### 6. Gates
+
+    cargo test -p mn-core genlines
+    test result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 803 filtered out; finished in 78.71s
+
+    cargo check --workspace --all-targets
+        Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 23s
+
+Warnings: **0**. 36 tests before, 38 now (`accents_spread_across_the_panel`,
+`heavy_tapered_ends_run_out_to_a_point`). `legacy_renders_are_bit_stable` and
+`pre_flash_specs_load_with_the_old_meaning` pass UNCHANGED — no fingerprint re-pinned.
+`cargo run -p mn-core --example effect_lines_sheet` re-run; `target/effect-lines/` is fresh.
+
+### Eyeball check (Read tool, honest one-liners)
+
+- `stream-line.png` — seven rails now run top to bottom instead of piling in the lower half, two
+  of them nearly touching near the top and then a wide hole, and at 2° the block is visibly drawn
+  rather than ruled; the hairline field between the rails is still the most uniform thing here.
+- `sparse-stream.png` — one heavy spindle at the top, one at the bottom, mediums through the
+  middle: both halves carry weight for the first time, and every rail swells and thins the way a
+  G-pen stroke does.
+- `drip-lines.png` — every line is cut hard by the top frame, twice as many of them, and the bold
+  verticals sit left, middle and right; the curtain still empties out toward the bottom faster
+  than ref-09's does.
+- `dark-burst-crop.png` — heavies come in clusters of two and three with runs of hairlines
+  between them, and not one wedge ends in a blob any more: every stroke that dies mid-field comes
+  to a point. The white sliver between two merged wedges still dashes, which is the accepted
+  artefact.
+
+### Not done, out of scope (stated)
+
+- The two flash kinds (parked) and anti-aliasing. The 65 cap detections that remain are all in
+  those two rows.
+- **A behaviour change to name:** a layer saved with `start_mode` 1 AND `jit_start` > 0 now draws
+  its runs starting BEFORE the reference line instead of after it. That is the fix, and only the
+  drips preset ships that combination.
+- `genlines.rs` is ~3 230 lines. Still Fable's call.

@@ -153,6 +153,19 @@ impl Mix {
     /// `accent_frac` 0 no random number is drawn, so the sequence is the
     /// one every saved file was rendered with.
     ///
+    /// STRATIFIED, not a coin. `acc` is a deficit accumulator walked in
+    /// run order — which is normal-offset order in both renderers, i.e.
+    /// straight across the panel — and it fires when the accumulated
+    /// share reaches a whole line. An independent coin per run has the
+    /// right EXPECTED fraction and the wrong distribution at the counts
+    /// a panel actually holds: `stream-line` puts ~7 accents on a page,
+    /// and seven coin flips land in one half often enough that they did
+    /// — thickest stroke 7 px in the top half against 26 px in the
+    /// bottom (gauntlet critic, round 3). The accumulator spends the
+    /// same fraction with the same one `rand()` per line, but the gap
+    /// between accents is `1/accent_frac` lines give or take a third,
+    /// never a run of thirty with none.
+    ///
     /// `prev` carries "the line before this one was an accent", and a
     /// second accent immediately after one is REFUSED. Two neighbours in
     /// a bundle are a gap apart — 1° on `dark-burst`, which at the crop
@@ -160,17 +173,32 @@ impl Mix {
     /// wide, so two adjacent heavies MERGE into one slab and the white
     /// sliver left between them breaks into dashes (gauntlet critic,
     /// round 2: "reads as a print fault", `dark-burst-crop` y≈225). The
-    /// refusal is on the DRAW, not the roll: the `rand` for the roll
-    /// still happens every line, so the position of every other random
-    /// number is where it was.
-    fn accent(&self, hw: f32, seed: &mut u64, prev: &mut bool) -> f32 {
+    /// refusal is on the DRAW, not the accumulation: the deficit stays
+    /// owed and the next line takes it, so the fraction is not lost.
+    fn accent(&self, hw: f32, seed: &mut u64, prev: &mut bool, acc: &mut f32) -> f32 {
         if self.accent_frac <= 0.0 {
             *prev = false;
             return hw;
         }
-        let take = rand(seed) < self.accent_frac && !*prev;
+        // `3u²` has mean 1, so the expected fraction is exactly
+        // `accent_frac` — but it is a LUMPY 1. A bare `+= frac` puts the
+        // accents on an exact comb, and so does any tight jitter round
+        // it: `0.5 + rand` was tried and its four-term sum concentrates,
+        // which printed `dark-burst` as one heavy wedge every fourth ray
+        // and `stream-line` as eight evenly ruled rails. ref-08 does the
+        // opposite — two or three heavies almost touching, then a dozen
+        // hairlines. The squared draw is mostly small with a long tail,
+        // so a big step fires and leaves the remainder standing, which
+        // fires again two lines later (the no-adjacent rule spaces the
+        // pair) and gives the CLUSTER, while a run of small steps gives
+        // the hole. What it still cannot do is spend a whole half-panel
+        // without firing, which is the round-3 defect.
+        let u = rand(seed);
+        *acc += self.accent_frac * 3.0 * u * u;
+        let take = *acc >= 1.0 && !*prev;
         *prev = take;
         if take {
+            *acc -= 1.0;
             // The SPREAD, not the ceiling — see `accent_mul`. Both rand
             // calls are inside the guard, so the accent-free sequence is
             // untouched.
@@ -259,8 +287,10 @@ pub struct SpeedLinesParams {
     /// panel's top edge at different lengths, which a scatter cannot do
     /// (it puts half of them in mid-air).
     pub start_mode: u8,
-    /// 0..1 — `start_mode` 1 only: how far along the direction a run may
-    /// start off that line, as a fraction of its own length.
+    /// 0..1 — `start_mode` 1 only: how far BEFORE that line a run may
+    /// start, as a fraction of its own length. Backward, so the wobble
+    /// is spent off the panel and shows up as ragged far ends rather
+    /// than as a row of floating starts — see the call site.
     pub jit_start: f32,
     /// Where the reference line sits (`start_mode` 1 only). `None` = the
     /// canvas origin's projection, i.e. the line through (0, 0).
@@ -439,6 +469,26 @@ fn width_at(t: f32, taper: f32, entry: f32, needle: f32) -> f32 {
     let mut w = (1.0 - taper * t).max(0.0);
     if needle > 0.0 {
         w = w.powf(needle);
+    }
+    // 抜き: run the residue out to a point. A `taper` under 1 leaves
+    // `(1 − taper)^needle` of the NIB standing at the tip — 0.16 of it
+    // at the shipped 0.9/0.8 — and that is a fraction of the nib, not a
+    // fixed width: on a hairline it is half a pixel and the floor in
+    // `segment` already reads it as a needle, but on a 30 px accent it
+    // is a rounded 5 px stub. That is the one round cap left on the
+    // sheet after round 2 (critic, round 3: `dark-burst-crop` (182,149),
+    // half-width 4 px), and it is a property of every heavy tapered
+    // stroke, not of that ray.
+    //
+    // The last tenth of the length runs the residue linearly to zero, so
+    // the exit is a point at EVERY weight. It costs ~0.8 % of the ink
+    // (half of a tenth of the tail's already-thin width) and it is
+    // invisible on a hairline, where the half-pixel floor holds the line
+    // to the tip either way. Guarded on `taper` > 0: a constant-width
+    // stroke has no exit to run out, and that is the pinned legacy path.
+    const EXIT: f32 = 0.1;
+    if taper > 0.0 && t > 1.0 - EXIT {
+        w *= (1.0 - t) / EXIT;
     }
     // 入り: a fast-in ramp from a point, so the base end is a needle too
     // and the stroke reads as the spindle ref-07's streaks are. 0.7 is
@@ -710,7 +760,7 @@ pub fn render_focus(p: &FocusLinesParams, size: (u32, u32)) -> HashMap<TileIdx, 
     } else {
         p.length_jitter
     };
-    let mut prev_accent = false;
+    let (mut prev_accent, mut accent_acc) = (false, 0.0f32);
     for i in 0..n {
         let base = match &bases {
             Some(v) => v[i as usize],
@@ -730,7 +780,9 @@ pub fn render_focus(p: &FocusLinesParams, size: (u32, u32)) -> HashMap<TileIdx, 
         }
         let r2 = p.r_out - p.mix.skew(rand(&mut seed)) * out_jit * span * 0.5;
         let w = p.width * (1.0 - rand(&mut seed) * p.width_jitter);
-        let hw = p.mix.accent((w * 0.5).max(0.5), &mut seed, &mut prev_accent);
+        let hw = p
+            .mix
+            .accent((w * 0.5).max(0.5), &mut seed, &mut prev_accent, &mut accent_acc);
         let (s, c) = ang.sin_cos();
         // OUTER first: segment() tapers toward `b`, and a focus ray thins
         // toward the convergence (the inner end). With taper 0 the order
@@ -788,9 +840,30 @@ pub fn render_speed(p: &SpeedLinesParams, size: (u32, u32)) -> HashMap<TileIdx, 
     // draw sequence has to be untouched when the new knobs are absent.
     let mut offsets: Vec<f32> = Vec::new();
     if p.gap_px > 0.0 {
+        // A CONVERGED run does not travel along the shared direction, so
+        // the canvas's extent along the shared NORMAL under-covers it.
+        // Every run in a fan passes through the vanishing point, so the
+        // panel corner on the FAR side of the fan lies on the line of
+        // exactly one run — the one based at that corner — and the walk
+        // stops there. That corner measured 4.9 % ink against a 9.9 %
+        // panel mean, the emptiest patch on the whole sheet (gauntlet
+        // critic, rounds 2 and 3). It is the same mistake round 2 found
+        // in the along-extent fit, on the other axis: an extent solved in
+        // a basis the run never takes.
+        //
+        // A quarter of the extent either side gives the fan bases just
+        // outside the canvas that sweep INTO those corners, which is what
+        // a converging streak block does on paper. The runs that miss the
+        // canvas cost one clipped bbox test each. Parallel sets — every
+        // shipped preset but `perspective-stream` — are untouched.
+        let pad = if p.converge.is_some() {
+            (hi - lo) * 0.25
+        } else {
+            0.0
+        };
         offsets = walk_offsets(
-            lo,
-            hi,
+            lo - pad,
+            hi + pad,
             p.gap_px.max(0.25),
             p.group,
             p.group_gap,
@@ -804,7 +877,7 @@ pub fn render_speed(p: &SpeedLinesParams, size: (u32, u32)) -> HashMap<TileIdx, 
         offsets.len() as u32
     };
     let prof = p.mix.profile(p.taper);
-    let mut prev_accent = false;
+    let (mut prev_accent, mut accent_acc) = (false, 0.0f32);
     // The extent along ANY direction, not just the shared one — see the
     // per-run fit below. Corners are the only points that can bound it.
     let extent_along = |d: [f32; 2]| {
@@ -863,12 +936,21 @@ pub fn render_speed(p: &SpeedLinesParams, size: (u32, u32)) -> HashMap<TileIdx, 
             // line through `anchor` perpendicular to the direction, so
             // the block has one straight edge and ragged tails (ref-09).
             let base_at = p.anchor.map_or(0.0, |a| a[0] * dir[0] + a[1] * dir[1]);
+            // BACKWARD, never forward. A start pushed PAST the reference
+            // line leaves the run hanging in mid-air a millimetre or two
+            // inside the panel with its own base cap showing, which is
+            // what the drips regressed to: 3 of ~40 reached row 0 and the
+            // rest floated with a fine point aimed at the frame (critic,
+            // round 3). ref-09 cuts every line hard ON the frame line.
+            // Subtracted, the wobble is spent OUTSIDE the panel, so it
+            // varies the far ends — the thing you can see — and the
+            // starts all read as one straight cut.
             let off = if p.jit_start > 0.0 {
                 rand(&mut seed) * p.jit_start.clamp(0.0, 1.0) * len
             } else {
                 0.0
             };
-            base_at + off
+            base_at - off
         } else if p.gap_px > 0.0 {
             // FIT the run inside the canvas's along-extent instead of
             // scattering it over `w.max(h) + len`.
@@ -930,7 +1012,9 @@ pub fn render_speed(p: &SpeedLinesParams, size: (u32, u32)) -> HashMap<TileIdx, 
         if p.jit_width > 0.0 {
             hw *= 1.0 - rand(&mut seed) * p.jit_width.clamp(0.0, 0.9);
         }
-        let hw = p.mix.accent(hw.max(0.5), &mut seed, &mut prev_accent);
+        let hw = p
+            .mix
+            .accent(hw.max(0.5), &mut seed, &mut prev_accent, &mut accent_acc);
         segment(&mut map, base, tip, hw, prof, size);
     }
     let (wi, hi_) = (size.0 as i32, size.1 as i32);
@@ -2152,6 +2236,62 @@ mod tests {
         );
     }
 
+    /// A HEAVY tapered stroke has to end in a point too. `taper` 0.9
+    /// leaves `(1 − 0.9)^needle` of the nib standing at the tip: on a
+    /// hairline that is under half a pixel and the floor in `segment`
+    /// reads it as a needle, but on a 24 px accent it is a rounded 4 px
+    /// stub — the one round cap left on the sheet after round 2
+    /// (`dark-burst-crop` (182,149)). The residue runs out over the last
+    /// tenth of the length, at every weight.
+    #[test]
+    fn heavy_tapered_ends_run_out_to_a_point() {
+        // The arithmetic, first: the tip is zero and the body is not
+        // touched. 0.158 is what the tip used to be.
+        assert!(
+            width_at(1.0, 0.9, 0.0, 0.8) == 0.0,
+            "the tip is a point ({})",
+            width_at(1.0, 0.9, 0.0, 0.8)
+        );
+        let body = width_at(0.8, 0.9, 0.0, 0.8);
+        assert!(
+            (body - (1.0f32 - 0.9 * 0.8).powf(0.8)).abs() < 1e-6,
+            "and everything before the last tenth is the shape it was ({body})"
+        );
+
+        // …and on the page. One 48 px ray, inner end at x = 600, drawn
+        // from an outer end off the right of the canvas.
+        let p = FocusLinesParams {
+            center: [300.0, 512.0],
+            r_in: 300.0,
+            r_out: 900.0,
+            count: 1,
+            width: 48.0,
+            taper: 0.9,
+            mix: Mix {
+                needle: 0.8,
+                ..Mix::default()
+            },
+            seed: 5,
+            ..Default::default()
+        };
+        let m = render_focus(&p, (1024, 1024));
+        let hh = |x: i32| {
+            (0..200)
+                .take_while(|d| ink_at(&m, x, 512 + d) || ink_at(&m, x, 512 - d))
+                .count()
+        };
+        assert!(
+            hh(604) <= 2,
+            "the inner end needles ({} px half-height)",
+            hh(604)
+        );
+        assert!(
+            hh(700) >= 6,
+            "…and it is still a real stroke a fifth in ({} px)",
+            hh(700)
+        );
+    }
+
     /// `group_jit` has to make bundles of DIFFERENT sizes, in both walks.
     /// Bundles of exactly two at a near-constant pitch is a picket fence,
     /// and the critic could read the period off the page (round 2).
@@ -2216,14 +2356,72 @@ mod tests {
         };
         let mut seed = 12_345u64 | 1;
         let (mut prev, mut last, mut n) = (false, false, 0);
+        let mut acc = 0.0f32;
         for _ in 0..500 {
-            let is = mix.accent(2.0, &mut seed, &mut prev) > 2.0;
+            let is = mix.accent(2.0, &mut seed, &mut prev, &mut acc) > 2.0;
             assert!(!(is && last), "two neighbours both drew as accents");
             n += is as u32;
             last = is;
         }
-        // A 0.9 roll refused after every hit still lands on about half.
+        // A 0.9 share refused after every hit still lands on about half.
         assert!(n > 150, "…but accents still happen ({n} of 500)");
+    }
+
+    /// The rails have to be spread ACROSS the panel, not merely present.
+    /// An independent coin per run has the right expected fraction and
+    /// the wrong distribution at the counts a panel holds: `stream-line`
+    /// carries ~7 accents, and seven coin flips landing in one half is
+    /// ordinary luck — the critic measured the thickest stroke at 7 px in
+    /// the top half against 26 px in the bottom (round 3), which reads as
+    /// two thirds of the paper at one weight. The stratified accumulator
+    /// in [`Mix::accent`] spends the same fraction evenly.
+    #[test]
+    fn accents_spread_across_the_panel() {
+        // A stream set at panel scale: 64 runs across the normal extent,
+        // 15 % of them accents — the shipped `stream-line` numbers.
+        let p = SpeedLinesParams {
+            angle_deg: 0.0,
+            len_min: 900.0,
+            len_max: 900.0,
+            width: 4.0,
+            gap_px: 16.0,
+            mix: Mix {
+                accent_frac: 0.15,
+                accent_mul: 8.0,
+                ..Mix::default()
+            },
+            seed: 21,
+            ..Default::default()
+        };
+        let m = render_speed(&p, (1024, 1024));
+        // Vertical ink runs down the middle of the block: at 0° every run
+        // is horizontal, so a run's height IS its width. Only an accent
+        // clears twice the 4 px nib.
+        let mut per_quarter = [0usize; 4];
+        let mut y = 0;
+        while y < 1024 {
+            if ink_at(&m, 512, y) {
+                let s = y;
+                while y < 1024 && ink_at(&m, 512, y) {
+                    y += 1;
+                }
+                if y - s >= 8 {
+                    per_quarter[((s + y) / 2 / 256).min(3) as usize] += 1;
+                }
+            } else {
+                y += 1;
+            }
+        }
+        let lo = *per_quarter.iter().min().unwrap();
+        let hi = *per_quarter.iter().max().unwrap();
+        assert!(
+            lo >= 1,
+            "every quarter of the panel carries a rail, got {per_quarter:?}"
+        );
+        assert!(
+            hi <= lo * 3,
+            "and no quarter hoards them (max {hi}, min {lo}, {per_quarter:?})"
+        );
     }
 
     /// The mean inner end of a 集中線, ray by ray: how far in the ink

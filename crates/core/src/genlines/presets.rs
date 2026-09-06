@@ -126,6 +126,14 @@ pub struct LineOpts {
     pub start_mode: u8,
     /// Stream, `start_mode` 1: start wobble as a fraction of the length.
     pub jit_start: f32,
+    /// Stream, `start_mode` 1: push the reference line this many canvas
+    /// px BACK along the drag, so the runs begin outside the panel and
+    /// the frame cuts them. ref-09's drips are all cut hard by the top
+    /// border; a run that begins exactly on the line still shows its own
+    /// base cap, and a run that begins a hair inside shows a floating
+    /// end (critic, round 3). 0 = start on the line, the pre-round-3
+    /// placement.
+    pub start_back: f32,
     /// Stream: 0 = parallel runs. >0 = aim every run at a point this
     /// many drag-lengths beyond the drag's end, along the drag — the
     /// perspective streaks of ref-07's and ref-08's second panels, where
@@ -187,9 +195,12 @@ impl LineOpts {
             entry: 0.35,
             needle: 0.9,
             len_skew: 0.4,
-            // One degree of hand. Dead-parallel is measurable and it is
-            // the thing that reads as ruled (critic, round 2).
-            jit_angle: 1.0,
+            // TWO degrees of hand (round 3). One measured as 0.9° of
+            // spread across a 25 mm crop, which the critic could see was
+            // deliberate but read as "a call, not a fault"; 2° is the
+            // number they named for "unmistakably hand-ruled". The
+            // per-run wobble is ±jit_angle/2, so this is ±1°.
+            jit_angle: 2.0,
             ..Self::from_mm(dpi, 0.20, 1.0)
         }
     }
@@ -204,6 +215,11 @@ impl LineOpts {
             jit_len: 0.4,
             entry: 0.3,
             accent_frac: 0.12,
+            // NOT the parent's 2°. At a 0.6 mm gap a ±1° lean drifts
+            // 3.5 mm over a panel-crossing run — six lanes — so the
+            // block would cross itself into a mesh. This row is the
+            // tight one; its hand shows in the bundling, not the lean.
+            jit_angle: 1.0,
             ..Self::stream(dpi)
         }
         .with_mm(dpi, 0.17, 0.6)
@@ -253,8 +269,14 @@ impl LineOpts {
         Self {
             entry: 0.3,
             accent_frac: 0.15,
-            jit_len: 0.6,
-            len_skew: 0.5,
+            // Round 3: the vanishing-side quarter was the emptiest patch
+            // on the whole sheet (4.9 % ink against a 9.9 % panel mean —
+            // it passed with no margin at all). Converged runs all point
+            // AT that corner, so the only thing that fills it is runs
+            // long enough to arrive: 0.45/0.7 instead of 0.6/0.5 puts the
+            // mean length at ~0.85 of the panel fit instead of ~0.7.
+            jit_len: 0.45,
+            len_skew: 0.7,
             converge_far: 2.5,
             // No hand wobble on this one: the convergence already fans
             // every run by its own amount, and a second wobble on top of
@@ -283,12 +305,18 @@ impl LineOpts {
             jit_width: 0.3,
             // ref-09 has several clearly bolder verticals among the
             // hairlines; round 1 shipped zero, and the critic scored the
-            // weight mix 2/5 for it. Same arithmetic as `sparse_stream`,
-            // and the highest fraction in the set: ~43 runs on a panel,
-            // half the accent spread lands mild against a 0.16 mm nib,
-            // and 0.15 measured as TWO visible rails. 0.28 measures as
-            // eight, spread three/two/three across the panel.
-            accent_frac: 0.28,
+            // weight mix 2/5 for it. A fraction has to be read against
+            // the count it applies to, and the count DOUBLED this round
+            // (see the gap below), so 0.28 came back to 0.20 for the
+            // same ~17 rails on a much denser curtain.
+            accent_frac: 0.20,
+            // …and 5×, not the stream family's 8×. At a 0.35 mm gap an
+            // 8× accent on a 0.16 mm nib is 1.3 mm wide and swallows the
+            // three lanes either side of it; 5× is 0.8 mm, which is what
+            // ref-09's bold verticals measure.
+            accent_mul: 5.0,
+            // No 入り on a drip: the whole point is that the frame cuts
+            // it, and a ramp at the base is a point aimed at the border.
             entry: 0.0,
             needle: 1.0,
             // Half a degree — a drip is closer to ruled than a streak is,
@@ -296,18 +324,38 @@ impl LineOpts {
             jit_angle: 0.5,
             // Depths from a stub to the full panel: `place` gives an
             // anchored run the distance from the reference line to the
-            // far edge, so `jit_len` 0.8 spans 1/5 of it to all of it and
-            // the long bias keeps most of them deep.
-            jit_len: 0.8,
-            len_skew: 0.3,
+            // far edge, so `jit_len` 0.6 spans 2/5 of it to all of it
+            // and the long bias keeps most of them deep. Round 3 pulled
+            // it in from 0.8/0.3: the bottom-right sixth measured 1.1 %
+            // ink against a 3.8 % panel mean — the emptiest corner on the
+            // sheet — and short drips are why.
+            jit_len: 0.6,
+            len_skew: 0.4,
+            // A SHALLOWER taper than the family's 0.9, and the exit
+            // run-out in `width_at` is what pays for it. A drip's whole
+            // job is to reach the bottom of the frame, and at 0.9 it
+            // arrives carrying a tenth of its own weight — the bottom
+            // half of the panel measured a quarter of the top half's ink.
+            // 0.7 keeps the line readable the whole way down, and the tip
+            // is still a point, because the point no longer depends on
+            // the taper reaching 1.
+            taper: 0.7,
             start_mode: 1,
             jit_start: 0.1,
+            // 3 mm of overshoot. The runs begin outside the frame and
+            // the border cuts them, which is the one thing you see
+            // instantly next to ref-09: theirs hang from the frame line,
+            // ours hung from nothing (critic, round 3 — 3 of ~40 drips
+            // reached row 0). Backward `jit_start` alone would put most
+            // starts off the panel; the overshoot covers the rest.
+            start_back: 3.0 / 25.4 * dpi as f32,
             ..Self::stream(dpi)
         }
-        // 0.7 mm inside a pair, 4.2 mm between pairs — same mean pitch as
-        // the old even 2.5 mm comb, but the pairs nearly touch and the
-        // holes are wide, which is what ref-09 actually looks like.
-        .with_mm(dpi, 0.16, 0.7)
+        // 0.35 mm inside a bundle, ~2.1 mm between bundles — a mean pitch
+        // of ~1.2 mm, so ~0.8 lines per mm. Round 3 halved it: ref-09
+        // runs at ~0.9 lines per mm and 24 % ink, ours at 0.40 and 3.8 %,
+        // and "sparse" does not mean you can count them.
+        .with_mm(dpi, 0.16, 0.35)
     }
 
     /// 集中線: a 2.2° gap, 0.35 mm rays needling to the convergence, a
@@ -485,9 +533,12 @@ impl LineOpts {
             // the diagonal instead, `jit_len` had to eat 45 % before a run
             // even stopped inside the panel, so the depths bunched and
             // the bottom quarter stayed blank (critic, round 1).
+            // …and the runs start `start_back` px BEFORE that line, so
+            // the reach has to cover the overshoot too or the deepest
+            // drip stops `start_back` short of the far edge.
             let reach = if self.start_mode == 1 && len > 1e-3 {
                 let d = [(b[0] - a[0]) / len, (b[1] - a[1]) / len];
-                let base = a[0] * d[0] + a[1] * d[1];
+                let base = a[0] * d[0] + a[1] * d[1] - self.start_back.max(0.0);
                 [
                     [bounds[0], bounds[1]],
                     [bounds[2], bounds[1]],
@@ -570,9 +621,20 @@ impl LineOpts {
             // drag's START (that is the gesture: you draw the edge the
             // drips fall from). Everything else anchors at the midpoint,
             // where the reference line has always been.
+            // …pushed `start_back` px back along the drag, so the runs
+            // begin off the panel and the border clips them (see the
+            // field).
             anchor: (!radial).then(|| {
                 if self.start_mode == 1 {
-                    a
+                    let back = self.start_back.max(0.0);
+                    if back > 0.0 && len > 1e-3 {
+                        [
+                            a[0] - (b[0] - a[0]) / len * back,
+                            a[1] - (b[1] - a[1]) / len * back,
+                        ]
+                    } else {
+                        a
+                    }
                 } else {
                     [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5]
                 }
