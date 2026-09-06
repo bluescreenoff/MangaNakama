@@ -208,9 +208,25 @@ sliding past) and Drip lines (short verticals hanging off the edge you
 drag). <i>Saturated line</i> holds Saturated line, Dense saturated
 line, Dark burst, Sea urchin flash and Solid flash. Picking a row
 loads its whole set of knobs; tweak any of them and no row is lit any
-more, the same way a modified brush preset behaves. <span class="why">
-Making your own rows — right-click ▸ duplicate, rename, save current
-settings — is the next piece of work and is not in yet.</span></div>
+more, the same way a modified brush preset behaves.</div>
+<div class="quirk"><b>Make your own rows.</b> Right-click any effect-line
+row for the same organise menu the brushes have. <b>Duplicate</b> puts a
+copy in a <i>Mine</i> group at the end of that row's group — retune it in
+Tool Property, right-click it again and <b>Rename</b> it (type in the box,
+<kbd>Enter</kbd> applies, <kbd>Esc</kbd> drops it). Once a row is lit, two
+more items appear: <b>Save current settings as sub tool</b> makes a new
+Mine row out of the knobs exactly as you have them tuned right now, and
+<b>Update from current</b> writes them into the Mine row you right-clicked.
+<b>Delete</b> removes a Mine row. Your rows are saved with the rest of the
+interface and are there at the next start. <span class="why">The shipped
+rows can be duplicated but not renamed or deleted — they come back with
+the next version anyway, so a rename would not stick. Deleting a Mine row
+does not change the settings you are drawing with: it removes the way back
+to those numbers, not the numbers. And a row of yours remembers the
+resolution of the page you saved it on, so on a page at a different dpi it
+restates its widths and gaps for that page — a 0.2 mm line stays 0.2 mm,
+the same way a shipped row does. Angles, bundle sizes and every wobble are
+already resolution-free and are left alone.</span></div>
 
 <h3>What each knob does</h3>
 <p>All of these sit in Tool Property while a line sub tool is armed,

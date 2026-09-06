@@ -485,50 +485,61 @@ fn mode_sub_tools(ui: &mut egui::Ui, app: &mut App) {
             // wrote a count and a width could not express the gap, the
             // bundling, the accents or the split wobbles, and a half-written
             // preset is exactly how the sets drifted apart.
+            //
+            // Lane A3 adds the artist's OWN rows under a "Mine" caption at
+            // the end of each group — the brush list's shape, and the same
+            // right-click menu on every row of both kinds.
             let dpi = app.tone_dpi();
-            let mut group_drawn: Option<&str> = None;
-            for p in crate::cmd::builtin_presets() {
+            // The two groups are walked EXPLICITLY rather than letting the
+            // caption change as the kinds go by (which is what A2 did): the
+            // Mine rows have to land at the end of their own group, and
+            // "have I passed the last builtin of this group yet" is not a
+            // question a single pass over one list can answer.
+            for stream_group in [true, false] {
                 // Two captions, not four: the flashes ride in the 集中線
                 // group because they are the same centre-out gesture on the
                 // same knobs, only the rays are filled teeth.
-                let caption = if p.kind == crate::cmd::LineKind::Stream {
-                    group::STREAM_LINE
-                } else {
-                    group::SATURATED_LINE
-                };
-                if group_drawn != Some(caption) {
-                    group_caption(ui, caption);
-                    group_drawn = Some(caption);
-                }
-                let mode = FigureMode::of_line_kind(p.kind);
-                let opts = (p.opts)(dpi);
-                let radial = p.kind.radial();
-                // A tweaked set highlights NO row, like a modified brush
-                // preset — the knobs stay editable in Tool Property.
-                let held = if radial {
-                    app.figure_focus
-                } else {
-                    app.figure_stream
-                };
-                let on = app.figure_mode == mode && held.same_as(&opts);
-                let icon = match p.kind {
-                    crate::cmd::LineKind::Stream => Icon::StreamLines,
-                    crate::cmd::LineKind::Focus => Icon::FocusLines,
-                    _ => Icon::UrchinFlash,
-                };
-                if mode_row(ui, on, icon, p.name)
-                    .on_hover_text(match p.kind {
-                        crate::cmd::LineKind::Stream => {
-                            "drag along the motion — a fresh speed-line layer each drag"
-                        }
-                        crate::cmd::LineKind::Focus => {
-                            "drag from the convergence point outward — a fresh focus-line layer each drag"
-                        }
-                        _ => "drag from the flash's centre outward — a fresh flash layer each drag",
-                    })
-                    .clicked()
+                group_caption(
+                    ui,
+                    if stream_group {
+                        group::STREAM_LINE
+                    } else {
+                        group::SATURATED_LINE
+                    },
+                );
+                for p in crate::cmd::builtin_presets()
+                    .iter()
+                    .filter(|p| (p.kind == crate::cmd::LineKind::Stream) == stream_group)
                 {
-                    crate::cmd::arm_line_preset(app, p.kind, opts);
+                    line_preset_row(ui, app, p.name, p.kind, (p.opts)(dpi), false);
+                }
+                // The artist's own rows of this group. Cloned out of `app`
+                // first: the row draw takes `&mut App` (arming writes the
+                // held knobs, the rename box writes the edit buffer), and a
+                // borrow of the list would outlive the frame it survives.
+                //
+                // `repriced(dpi)` and not `u.opts`: a Mine row stores canvas
+                // PIXELS plus the dpi it was priced at, so on another page
+                // its width and gap are restated the way the shipped rows
+                // above restate theirs. Doing it HERE, once, is what makes
+                // every downstream step agree — the row arms with these
+                // numbers, the highlight compares against these numbers, and
+                // a Duplicate of it stores these numbers under the open
+                // page's dpi.
+                let mine: Vec<(String, crate::cmd::LineKind, crate::cmd::FigureLineOpts)> = app
+                    .figure_presets
+                    .iter()
+                    .filter(|u| (u.kind == crate::cmd::LineKind::Stream) == stream_group)
+                    .map(|u| (u.name.clone(), u.kind, u.repriced(dpi)))
+                    .collect();
+                if !mine.is_empty() {
+                    // A literal, like the brush list's own "Mine" group —
+                    // the `crate::subtools::group` constants exist so a
+                    // SHORTCUT can name a tab, and this caption is not a tab.
+                    group_caption(ui, "Mine");
+                    for (name, kind, opts) in mine {
+                        line_preset_row(ui, app, &name, kind, opts, true);
+                    }
                 }
             }
         }
@@ -653,6 +664,167 @@ fn mode_sub_tools(ui: &mut egui::Ui, app: &mut App) {
             unreachable!("brush list handles these")
         }
     }
+}
+
+/// One effect-line sub tool row — shipped or the artist's own. They draw
+/// and behave identically on purpose: a row you made is a sub tool, not a
+/// bookmark, so it arms through the same `arm_line_preset`, highlights
+/// through the same `same_as`, and carries the same right-click menu.
+///
+/// `opts` is the row's OWN knobs (a builtin's priced at the page's dpi, a
+/// Mine row's as saved). `mine` unlocks the three verbs that only make
+/// sense on a row the artist owns: Rename, Update from current, Delete.
+fn line_preset_row(
+    ui: &mut egui::Ui,
+    app: &mut App,
+    name: &str,
+    kind: crate::cmd::LineKind,
+    opts: crate::cmd::FigureLineOpts,
+    mine: bool,
+) {
+    let mode = crate::cmd::FigureMode::of_line_kind(kind);
+    // A tweaked set highlights NO row, like a modified brush preset — the
+    // knobs stay editable in Tool Property.
+    let armed = app.figure_mode == mode && crate::cmd::held_line_opts(app, kind).same_as(&opts);
+    let icon = match kind {
+        crate::cmd::LineKind::Stream => Icon::StreamLines,
+        crate::cmd::LineKind::Focus => Icon::FocusLines,
+        _ => Icon::UrchinFlash,
+    };
+    let resp = mode_row(ui, armed, icon, name).on_hover_text(match kind {
+        crate::cmd::LineKind::Stream => {
+            "drag along the motion — a fresh speed-line layer each drag"
+        }
+        crate::cmd::LineKind::Focus => {
+            "drag from the convergence point outward — a fresh focus-line layer each drag"
+        }
+        _ => "drag from the flash's centre outward — a fresh flash layer each drag",
+    });
+    if resp.clicked() {
+        crate::cmd::arm_line_preset(app, kind, opts);
+    }
+    line_preset_menu(&resp, app, name, kind, opts, mine, armed);
+}
+
+/// The organise menu for effect-line sub tools — the owner's ask, 2026-09-06:
+/// "i should be able to make a new subtool from default that does this by
+/// varying settings ... from right click duplicate subtool and rename".
+///
+/// Deliberately `organise_menu`'s shape (the brush one, just above): inline
+/// rename box first, Enter or the button applies, Esc drops it; then the
+/// verbs. Two things differ, both because a line preset is DATA in ui.txt
+/// rather than a file on disk:
+/// - every row has a menu, builtin included, because "Duplicate a shipped
+///   row and retune it" is the whole gesture the owner asked for. A builtin
+///   cannot be renamed or deleted (it comes back with the next build), so
+///   those two verbs are hidden rather than shown and refused.
+/// - "Update from current" has no brush equivalent: brushes re-save to a new
+///   file, a line preset overwrites its own numbers in place.
+fn line_preset_menu(
+    resp: &egui::Response,
+    app: &mut App,
+    name: &str,
+    kind: crate::cmd::LineKind,
+    opts: crate::cmd::FigureLineOpts,
+    mine: bool,
+    armed: bool,
+) {
+    resp.context_menu(|ui| {
+        ui.set_min_width(210.0);
+        if mine {
+            // Seed (or re-seed) from the row's own name, so the box can
+            // never carry one sub tool's half-typed name onto the next.
+            let buf = app
+                .figure_preset_rename
+                .get_or_insert_with(|| (name.to_owned(), name.to_owned()));
+            if buf.0 != name {
+                *buf = (name.to_owned(), name.to_owned());
+            }
+            let edit = ui.add(
+                egui::TextEdit::singleline(&mut buf.1)
+                    .hint_text("sub tool name")
+                    .desired_width(200.0),
+            );
+            let entered = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if entered || ui.button("Rename").clicked() {
+                let to = std::mem::take(&mut buf.1);
+                app.figure_preset_rename = None;
+                app.push_cmd(AppCmd::FigurePresetRename {
+                    from: name.to_owned(),
+                    to,
+                });
+                ui.close();
+                return;
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                app.figure_preset_rename = None;
+                ui.close();
+                return;
+            }
+            ui.separator();
+        }
+        // Only on the ARMED row: "current settings" means the knobs Tool
+        // Property is editing, and those belong to whichever row is lit.
+        if armed
+            && ui
+                .button("Save current settings as sub tool")
+                .on_hover_text(
+                    "the lines as TUNED right now — gap, bundling, accents, the wobbles — \
+                     become a new sub tool in Mine",
+                )
+                .clicked()
+        {
+            let opts = crate::cmd::held_line_opts(app, kind);
+            app.push_cmd(AppCmd::FigurePresetAdd {
+                name: format!("{name} tuned"),
+                kind,
+                opts,
+            });
+            ui.close();
+        }
+        if mine
+            && armed
+            && ui
+                .button("Update from current")
+                .on_hover_text("overwrite this sub tool's numbers with the ones in hand")
+                .clicked()
+        {
+            let opts = crate::cmd::held_line_opts(app, kind);
+            app.push_cmd(AppCmd::FigurePresetUpdate {
+                name: name.to_owned(),
+                opts,
+            });
+            ui.close();
+        }
+        if ui
+            .button("Duplicate")
+            .on_hover_text("a copy in Mine to retune — the original stays as it is")
+            .clicked()
+        {
+            // A builtin's copy says so in its name; a copy of one of your
+            // own numbers itself, because its base name is already taken
+            // (`unique_preset_name` does both from one rule).
+            app.push_cmd(AppCmd::FigurePresetAdd {
+                name: if mine {
+                    name.to_owned()
+                } else {
+                    format!("{name} copy")
+                },
+                kind,
+                opts,
+            });
+            ui.close();
+        }
+        if mine
+            && ui
+                .button("Delete")
+                .on_hover_text("removes the row — the settings in hand are untouched")
+                .clicked()
+        {
+            app.push_cmd(AppCmd::FigurePresetDelete(name.to_owned()));
+            ui.close();
+        }
+    });
 }
 
 /// The preset list, grouped CSP-style with a real stroke preview per row:

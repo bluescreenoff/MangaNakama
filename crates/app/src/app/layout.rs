@@ -172,6 +172,12 @@ pub struct UiLayout {
     /// the starter set; `[]` is a user who deleted every gradient and is
     /// entitled to keep it empty.
     pub gradients: String,
+    /// Lane A3 (`2026-09-06-effect-lines-parity`): the artist's OWN
+    /// effect-line sub tools — `Vec<crate::cmd::UserLinePreset>` as one JSON
+    /// line. Empty = nobody has made one, which is also what a junk line
+    /// degrades to: the shipped rows are all still there, so an unreadable
+    /// list costs the copies and nothing else.
+    pub figure_presets: String,
     /// Per-sub-tool brush SIZES: preset key → dab diameter in canvas px, one
     /// JSON object on one line (`App::preset_key` makes the key — the preset's
     /// path relative to the brushes root, so a moved or re-installed copy
@@ -239,6 +245,7 @@ impl Default for UiLayout {
             grid_div: GRID_DIV,
             test_stroke_hidden: false,
             gradients: String::new(),
+            figure_presets: String::new(),
             sub_tool_size_px: BTreeMap::new(),
             hidden_rows: BTreeMap::new(),
             sub_tool_last: BTreeMap::new(),
@@ -463,6 +470,15 @@ impl UiLayout {
         }
     }
 
+    /// Lane A3: the artist's own effect-line sub tools, as
+    /// `crate::cmd::user_presets_to_json`.
+    pub fn note_figure_presets(&mut self, json: &str) {
+        if self.figure_presets != json {
+            self.figure_presets = json.to_owned();
+            self.dirty = true;
+        }
+    }
+
     /// Remember one sub tool's brush size, or forget it. `Some(px)` is a size
     /// the user moved off the preset's own; `None` means "back to the preset"
     /// and DELETES the entry — writing the default down would freeze it, and
@@ -520,7 +536,8 @@ sub_tool_last={}
 references={}
 grid={}
 grid_mm={}
-grid_div={}\n",
+grid_div={}
+figure_presets={}\n",
             self.left_w,
             self.right_w,
             self.left_collapsed as u8,
@@ -563,6 +580,10 @@ grid_div={}\n",
             self.grid_on as u8,
             self.grid_mm,
             self.grid_div,
+            // `replace('\n', "")` like `gradients`: one key is one line, and
+            // a stray newline inside a value would turn the rest of the list
+            // into unknown keys that are silently dropped on the next load.
+            self.figure_presets.replace('\n', ""),
         )
     }
 
@@ -668,6 +689,12 @@ grid_div={}\n",
             }
             // `G-011`: the gradient set, one JSON line.
             "gradients" if !line.contains('\n') => self.gradients = v.to_owned(),
+            // Lane A3: the artist's own effect-line sub tools, one JSON
+            // line. Kept as WRITTEN and decoded where it is used
+            // (`crate::cmd::user_presets_from_json`), which is where the
+            // "junk ⇒ empty list" rule lives — this module knows nothing
+            // about `LineOpts` and should not start now.
+            "figure_presets" if !line.contains('\n') => self.figure_presets = v.to_owned(),
             // Per-sub-tool sizes, JSON map preset key → canvas px. Entries
             // outside the Size control's own range (and NaN) are dropped
             // here rather than clamped: a number this build cannot mean is a

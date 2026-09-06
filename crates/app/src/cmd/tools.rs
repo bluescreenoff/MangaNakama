@@ -396,6 +396,220 @@ pub fn arm_line_preset(app: &mut App, kind: LineKind, opts: FigureLineOpts) {
     };
 }
 
+/// The knobs a line sub tool row would ARM, as they stand right now — the
+/// holder that generator reads. The mirror of [`arm_line_preset`]'s write,
+/// and what "Save current settings as sub tool" / "Update from current"
+/// capture.
+pub fn held_line_opts(app: &App, kind: LineKind) -> FigureLineOpts {
+    if kind.radial() {
+        app.figure_focus
+    } else {
+        app.figure_stream
+    }
+}
+
+/// One of the artist's OWN effect-line sub tools (plan
+/// `2026-09-06-effect-lines-parity`, lane A3), saved in `ui.txt` as JSON.
+///
+/// A [`LinePreset`](mn_core::genlines::LinePreset) is a shipped row: a
+/// `&'static str` and a `fn(dpi) -> LineOpts`, because a millimetre cannot
+/// become pixels until a page says what a millimetre is. A user row is the
+/// other shape — it is BORN from a page whose dpi is known (the row it was
+/// duplicated from, or the knobs as tuned on the open document), so it
+/// stores the priced values — plus the `dpi` it was priced AT, which is
+/// what lets [`UserLinePreset::repriced`] put the recipe back together.
+///
+/// Recording the dpi is the whole reason a Mine row behaves like a shipped
+/// one across pages. Without it, a 0.2 mm width saved on a 600 dpi B4 is
+/// the number 4.7, and opening a 300 dpi draft draws it 4.7 px wide — twice
+/// the millimetres the artist chose, beside a `Stream line` row that
+/// correctly halved itself. With it, the ratio `page / stored` restates the
+/// three pixel fields and the row means the same thing on any page.
+#[derive(Clone, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
+pub struct UserLinePreset {
+    pub name: String,
+    pub kind: LineKind,
+    pub opts: FigureLineOpts,
+    /// The page dpi `opts` was priced at. `#[serde(default)]` to 600 — the
+    /// manga standard and `tone_dpi`'s own fallback — so the handful of
+    /// rows written before this field existed load as what they almost
+    /// certainly are, rather than dropping the whole line.
+    #[serde(default = "default_preset_dpi")]
+    pub dpi: u32,
+}
+
+/// See [`UserLinePreset::dpi`]. A fn because `serde(default = …)` needs one.
+fn default_preset_dpi() -> u32 {
+    600
+}
+
+impl UserLinePreset {
+    /// This row's knobs restated for a page at `page_dpi`.
+    ///
+    /// EXACTLY three fields are canvas pixels — `width`, `gap_px` and
+    /// `start_back` (read their docs in `crates/core/src/genlines/presets.rs`;
+    /// `place` treats nothing else as px). Everything else is a degree
+    /// (`gap_deg`, `jit_angle`, `sweep_deg`), a fraction (every `jit_*`,
+    /// `taper`, `entry`, `r_in_frac`, …), a multiple (`group_gap`,
+    /// `accent_mul`, `converge_far`) or a count — all of which mean the
+    /// same thing at any resolution and must NOT be touched. Scaling
+    /// `gap_deg` would rotate the burst; scaling `count` would change how
+    /// many lines there are.
+    ///
+    /// Same dpi (the ordinary case) returns the opts untouched, so the
+    /// float multiply cannot drift a row that never left its page. A 0 on
+    /// either side is a hand-edited or absent number and also passes
+    /// through — a guess is worse than the artist's own value.
+    pub fn repriced(&self, page_dpi: u32) -> FigureLineOpts {
+        if self.dpi == 0 || page_dpi == 0 || self.dpi == page_dpi {
+            return self.opts;
+        }
+        let k = page_dpi as f32 / self.dpi as f32;
+        FigureLineOpts {
+            // `.max(0.5)` mirrors `LineOpts::from_mm`: a sub-half-pixel
+            // line is not a thin line, it is a line that does not draw.
+            width: (self.opts.width * k).max(0.5),
+            gap_px: self.opts.gap_px * k,
+            start_back: self.opts.start_back * k,
+            ..self.opts
+        }
+    }
+}
+
+/// Parse the `figure_presets=` line. TOLERANT by contract: a missing line,
+/// an empty one, junk, or JSON of the wrong shape all give an empty list —
+/// losing the user rows costs the rows, while taking `ui.txt` down with it
+/// would cost every palette width and the window position too.
+pub fn user_presets_from_json(s: &str) -> Vec<UserLinePreset> {
+    if s.trim().is_empty() {
+        return Vec::new();
+    }
+    serde_json::from_str(s.trim()).unwrap_or_default()
+}
+
+/// The save half. Compact (one line, per the `ui.txt` key contract).
+pub fn user_presets_to_json(list: &[UserLinePreset]) -> String {
+    serde_json::to_string(list).unwrap_or_else(|_| "[]".into())
+}
+
+/// A name no other user row is using. `base` free ⇒ `base`; else `base 2`,
+/// `base 3`, …
+///
+/// The two Duplicate spellings in the plan fall straight out of this one
+/// function: a BUILTIN duplicate passes `"<name> copy"` (free, so it stays
+/// that), a MINE duplicate passes the row's own name (taken by definition,
+/// so it becomes `"<name> 2"`). Empty after trimming ⇒ `None`, which every
+/// caller reads as "do nothing" — a blank sub tool cannot be clicked.
+pub fn unique_preset_name(list: &[UserLinePreset], base: &str) -> Option<String> {
+    let base = base.trim();
+    if base.is_empty() {
+        return None;
+    }
+    let taken = |n: &str| list.iter().any(|p| p.name == n);
+    if !taken(base) {
+        return Some(base.to_owned());
+    }
+    // 2.. and not 1..: "Foo 1" is not what a second copy is called.
+    (2..1000)
+        .map(|i| format!("{base} {i}"))
+        .find(|n| !taken(n))
+}
+
+/// Write the list back to the `figure_presets=` line. One call site per
+/// arm, so a new verb cannot forget it and leave a row that vanishes at the
+/// next restart — the classic "it worked until I closed the app" bug.
+fn note_figure_presets(app: &mut App) {
+    let json = user_presets_to_json(&app.figure_presets);
+    app.layout.note_figure_presets(&json);
+}
+
+/// The four `FigurePreset*` arms: plain state edits on `app.figure_presets`,
+/// each noting the layout dirty so `ui.txt` is rewritten.
+///
+/// NOT undo steps — the brush presets they are modelled on are not either.
+/// A sub tool list is furniture, and an undo press in the middle of drawing
+/// should give back the last mark, never the row you renamed ten minutes
+/// ago. This is also why they never touch the document: nothing here can
+/// change a pixel, so `dispatch` hands them over before the history bracket.
+///
+/// Rows are addressed BY NAME rather than by index. Names are unique by
+/// construction (`unique_preset_name`), a command sits in `app.cmds` for a
+/// frame before it runs, and an index would then be aimed at whatever moved
+/// into that slot — the classic delete-the-wrong-row bug.
+pub(super) fn run_figure_preset(app: &mut App, cmd: AppCmd) {
+    match cmd {
+        AppCmd::FigurePresetAdd { name, kind, opts } => {
+            let Some(name) = unique_preset_name(&app.figure_presets, &name) else {
+                return;
+            };
+            // Every `opts` that reaches here is priced for the page that is
+            // open: a builtin row is `(p.opts)(tone_dpi())`, a tuned set is
+            // whatever the knobs hold, and a Mine row hands over its
+            // `repriced` values. So the dpi to stamp is simply the page's.
+            let dpi = app.tone_dpi();
+            app.figure_presets.push(UserLinePreset {
+                name: name.clone(),
+                kind,
+                opts,
+                dpi,
+            });
+            note_figure_presets(app);
+            app.set_status(format!(
+                "saved as \"{name}\" in Mine — the tuned lines are a sub tool of their own now"
+            ));
+        }
+        AppCmd::FigurePresetRename { from, to } => {
+            // An empty rename is IGNORED, not applied: the box is cleared
+            // by the same keystroke that opens it half the time, and a
+            // nameless row is unclickable.
+            let Some(to) = unique_preset_name(&app.figure_presets, &to) else {
+                return;
+            };
+            let Some(row) = app.figure_presets.iter_mut().find(|p| p.name == from) else {
+                return;
+            };
+            row.name = to.clone();
+            note_figure_presets(app);
+            app.set_status(format!("sub tool renamed to \"{to}\""));
+        }
+        AppCmd::FigurePresetUpdate { name, opts } => {
+            let dpi = app.tone_dpi();
+            let Some(row) = app.figure_presets.iter_mut().find(|p| p.name == name) else {
+                return;
+            };
+            // The seed is the reroll counter, not a parameter — same rule
+            // as `arm_line_preset`, and for the same reason: a row that
+            // stored one would place the identical set on every click.
+            row.opts = FigureLineOpts {
+                seed: row.opts.seed,
+                ..opts
+            };
+            // The knobs in hand are priced for the OPEN page, so the row's
+            // stored dpi moves with them. Leaving the old one here is the
+            // quiet version of the bug this field exists to stop: the row
+            // would be re-priced a second time on the very page it was just
+            // updated from.
+            row.dpi = dpi;
+            note_figure_presets(app);
+            app.set_status(format!("\"{name}\" now holds the current settings"));
+        }
+        AppCmd::FigurePresetDelete(name) => {
+            let before = app.figure_presets.len();
+            app.figure_presets.retain(|p| p.name != name);
+            if app.figure_presets.len() == before {
+                return;
+            }
+            // The armed knobs are NOT touched. Deleting a row removes the
+            // way back to those numbers, not the numbers — you may well be
+            // mid-drag with them, and a Figure tool that silently re-armed
+            // itself from some other row would be a lost drawing.
+            note_figure_presets(app);
+            app.set_status(format!("\"{name}\" removed from Mine — there is no undo for this"));
+        }
+        other => unreachable!("not a figure-preset command: {other:?}"),
+    }
+}
+
 /// Gradient-tool colour modes (CSP's three), plus `FI-050`'s freeform.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum GradMode {

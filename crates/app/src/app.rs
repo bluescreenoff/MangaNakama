@@ -1169,6 +1169,17 @@ pub struct App {
     pub figure_stream: crate::cmd::FigureLineOpts,
     /// Figure ▸ Saturated line: same, for the focus-line drags.
     pub figure_focus: crate::cmd::FigureLineOpts,
+    /// Lane A3: the artist's OWN effect-line sub tools, drawn under a "Mine"
+    /// caption in each of the two groups. Unlike the two fields above these
+    /// are NOT session-only — they persist as the `figure_presets=` line of
+    /// ui.txt, because a sub tool you made is furniture and not a knob.
+    pub figure_presets: Vec<crate::cmd::UserLinePreset>,
+    /// The Mine row whose Rename box is open in the Sub Tool list's
+    /// right-click menu, and the name being typed — `(row name, typed)`.
+    /// Re-seeded whenever the menu opens on a different row, the
+    /// `brush_rename_edit` rule: a half-typed name must not land on the next
+    /// sub tool you right-click.
+    pub figure_preset_rename: Option<(String, String)>,
     /// Gradient-tool sub-mode (which two colours the ramp spans).
     pub grad_mode: GradMode,
     /// `G-008`/`G-013`/`G-014`: the interior colour stops the Tool Property
@@ -2013,6 +2024,11 @@ impl App {
             // moment one is picked.
             figure_stream: crate::cmd::FigureLineOpts::stream(600),
             figure_focus: crate::cmd::FigureLineOpts::focus(600),
+            // Lane A3: whatever the last session saved. A missing line, an
+            // empty one and junk all give an empty list — the shipped rows
+            // are unaffected either way.
+            figure_presets: crate::cmd::user_presets_from_json(&layout.figure_presets),
+            figure_preset_rename: None,
             grad_mode: GradMode::FgToBg,
             grad_mid: Default::default(),
             grad_opts: Default::default(),
@@ -5281,6 +5297,12 @@ mod surface_figure_tests;
 /// figure back one point at a time.
 #[cfg(test)]
 mod figure_stage_tests;
+
+/// Lane A3 of the effect-lines parity plan (2026-09-06): the artist's own
+/// effect-line sub tools — Duplicate / Rename / Save current / Update /
+/// Delete, and the `figure_presets=` line that carries them across a restart.
+#[cfg(test)]
+mod figure_presets_tests;
 
 /// Row 156 (`FG-020`–`024`): Smart Shape — the hold that turns a freehand
 /// stroke into the figure it was approximating, the swap that costs one

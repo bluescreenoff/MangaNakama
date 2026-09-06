@@ -612,6 +612,32 @@ pub enum AppCmd {
     /// Remove a preset's .myb. The texture PNG stays (it can be shared) and
     /// there is no undo, which is why the status line names what went.
     DeleteBrush(PathBuf),
+    // --- the artist's own effect-line sub tools (lane A3) -------------------
+    // Four plain state edits on `app.figure_presets`, each rewriting the
+    // `figure_presets=` line of ui.txt. NOT undo steps — see
+    // `tools::run_figure_preset`, which is where all four run.
+    //
+    // `name` is the row's identity, never an index: these sit in `app.cmds`
+    // for a frame before they run, and an index would be aimed at whatever
+    // moved into that slot meanwhile.
+    /// New Mine row. `name` is a WISH — `unique_preset_name` settles the
+    /// collision, so the palette can just ask for "Saturated line copy"
+    /// without knowing what is already there.
+    FigurePresetAdd {
+        name: String,
+        kind: LineKind,
+        opts: FigureLineOpts,
+    },
+    /// Retitle one Mine row. An empty (or all-space) `to` is ignored.
+    FigurePresetRename { from: String, to: String },
+    /// Overwrite one Mine row's knobs with the ones in hand ("Update from
+    /// current"). The row's own reroll seed survives.
+    FigurePresetUpdate {
+        name: String,
+        opts: FigureLineOpts,
+    },
+    /// Remove one Mine row. The ARMED knobs stay exactly as they are.
+    FigurePresetDelete(String),
     /// The brush's dab DIAMETER in canvas px, absolute (`SIZE_PX_MIN`..
     /// `SIZE_PX_MAX`). RENAMED from `SetBrushSize`, which carried a 0.25..4
     /// multiplier — same shape of number, different meaning, so the old name
@@ -1347,6 +1373,23 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
         AppCmd::SetFillParams(..) | AppCmd::SetLayerBlendIf(..) | AppCmd::ParamEditSession(_)
     ) {
         app.param_session = None;
+    }
+    // The artist's own effect-line sub tools (lane A3) get off here, before
+    // the history bracket and before the tail. They are furniture: a name,
+    // a kind and a `LineOpts`, written straight to `app.figure_presets` and
+    // to ui.txt. Nothing they do can touch a layer, a page or a clip, so
+    // there is no undo step to record and no tail work to run — and the one
+    // thing that WOULD be wrong is an undo press giving back a row you
+    // renamed instead of the mark you just drew. The brush presets they are
+    // modelled on are not undo steps either.
+    if matches!(
+        cmd,
+        AppCmd::FigurePresetAdd { .. }
+            | AppCmd::FigurePresetRename { .. }
+            | AppCmd::FigurePresetUpdate { .. }
+            | AppCmd::FigurePresetDelete(_)
+    ) {
+        return tools::run_figure_preset(app, cmd);
     }
     // docs/CLIPPING-SCENARIOS.md 5b: a structure edit that silences or
     // re-attaches someone's clip should SAY so, not just change the
