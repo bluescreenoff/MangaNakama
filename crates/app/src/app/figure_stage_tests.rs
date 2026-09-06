@@ -621,3 +621,165 @@ fn plain_taps_on_empty_canvas_still_place_points() {
         "one polygon, one undo press"
     );
 }
+
+// --- the parity round's wiring (plan 2026-09-06-effect-lines-parity, A2) --
+//
+// The Figure tool's effect-line drags used to build their `GenLinesSpec`
+// from a struct literal right here in the app. A literal cannot tell you
+// about the fields you left out, so every knob lane A1 added to core was
+// silently placed as 0 — the drag looked wired and generated the OLD set.
+// These two pin the replacement: the drag calls the core's own placement,
+// and every shipped preset row arms the generator it names.
+
+/// A Figure drag places EXACTLY what `LineOpts::place` says, for every
+/// shipped preset — same knobs, same drag, same page, same seed.
+///
+/// Comparing whole specs rather than a field or two on purpose: the failure
+/// this guards against is a field that never got copied, and a spot-check
+/// picks the fields you remembered.
+#[test]
+fn figure_drag_places_the_core_spec() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    app.tool = Tool::Figure;
+    // No frame folder on this page, so the drag's bounds are the page.
+    let bounds = [0.0, 0.0, app.doc.size.0 as f32, app.doc.size.1 as f32];
+    let dpi = app.tone_dpi();
+
+    for p in crate::cmd::builtin_presets() {
+        for (a, b) in [
+            ((300.0f32, 200.0f32), (300.0f32, 80.0f32)),
+            ((120.0, 300.0), (420.0, 260.0)),
+        ] {
+            crate::cmd::arm_line_preset(&mut app, p.kind, (p.opts)(dpi));
+            let armed = if p.kind.radial() {
+                app.figure_focus
+            } else {
+                app.figure_stream
+            };
+            app.cmds.clear();
+            app.finish_figure_drag(a, b);
+            let Some(crate::cmd::AppCmd::GenLinesPlace(spec, panel)) = app.cmds.pop_front() else {
+                panic!("{}: the drag pushed a GenLinesPlace", p.name);
+            };
+            assert_eq!(panel, None, "{}: no panel on this page", p.name);
+            assert_eq!(
+                spec,
+                armed.place(p.kind, [a.0, a.1], [b.0, b.1], bounds, armed.seed),
+                "{}: the placed spec is the core's, field for field",
+                p.name
+            );
+            assert_eq!(spec.kind, p.kind.gen_kind(), "{}: the generator", p.name);
+            // FAIL-BEFORE-FIX: the old literal wrote zeros here, so the
+            // shipped presets placed the pre-parity set whatever the row
+            // said. `kind 0` = the two line generators; the flashes carry
+            // their own tooth shape and take none of these.
+            if spec.kind == 0 {
+                assert!(spec.accent_frac > 0.0, "{}: accents reached it", p.name);
+                assert!(spec.needle > 0.0, "{}: the needle reached it", p.name);
+                assert!(spec.len_skew > 0.0, "{}: the long bias did", p.name);
+            }
+            let seed_now = if p.kind.radial() {
+                app.figure_focus.seed
+            } else {
+                app.figure_stream.seed
+            };
+            assert_eq!(
+                seed_now,
+                armed.seed.wrapping_add(1),
+                "{}: the seed bumped so a re-drag rerolls",
+                p.name
+            );
+        }
+    }
+}
+
+/// Every row of `builtin_presets()` — which the palette draws verbatim —
+/// arms the generator it names, writes into the holder that generator reads,
+/// leaves the other holder alone, keeps the reroll seed, and is the ONLY row
+/// that lights up afterwards.
+///
+/// That last one is the real content: the highlight is `same_as`, so two
+/// presets whose numbers happened to collapse together would light two rows
+/// and the owner could not tell which set the next drag would place.
+#[test]
+fn every_builtin_preset_row_arms_its_kind() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (400, 400), 1.0);
+    app.tool = Tool::Figure;
+    let dpi = app.tone_dpi();
+    let presets = crate::cmd::builtin_presets();
+    assert!(presets.len() >= 10, "the shipped rows are all here");
+
+    // The palette draws TWO captions, and it draws them by watching the kind
+    // change as it walks this list — so the list has to be grouped: every
+    // stream row first, then every radial one.
+    let first_radial = presets
+        .iter()
+        .position(|p| p.kind.radial())
+        .expect("a radial row exists");
+    assert!(
+        presets[..first_radial].iter().all(|p| !p.kind.radial())
+            && presets[first_radial..].iter().all(|p| p.kind.radial()),
+        "the two groups are contiguous, so two captions cover the list"
+    );
+
+    for p in presets {
+        let opts = (p.opts)(dpi);
+        let radial = p.kind.radial();
+        let (seed_before, other_before) = if radial {
+            (app.figure_focus.seed, app.figure_stream)
+        } else {
+            (app.figure_stream.seed, app.figure_focus)
+        };
+
+        crate::cmd::arm_line_preset(&mut app, p.kind, opts);
+
+        assert_eq!(
+            app.figure_mode.line_kind(),
+            Some(p.kind),
+            "{}: armed its own generator",
+            p.name
+        );
+        assert!(app.figure_mode.generates(), "{}: and it generates", p.name);
+        assert_eq!(app.figure_mode.radial(), radial, "{}: same gesture", p.name);
+        assert_eq!(
+            app.figure_mode.gen_kind(),
+            p.kind.gen_kind(),
+            "{}: same spec kind",
+            p.name
+        );
+
+        let (held, other) = if radial {
+            (app.figure_focus, app.figure_stream)
+        } else {
+            (app.figure_stream, app.figure_focus)
+        };
+        assert!(held.same_as(&opts), "{}: the row's knobs landed", p.name);
+        assert_eq!(held.seed, seed_before, "{}: the seed survived", p.name);
+        assert_eq!(
+            other, other_before,
+            "{}: the other family's knobs were not touched",
+            p.name
+        );
+
+        let lit: Vec<&str> = presets
+            .iter()
+            .filter(|q| {
+                let h = if q.kind.radial() {
+                    app.figure_focus
+                } else {
+                    app.figure_stream
+                };
+                app.figure_mode == crate::cmd::FigureMode::of_line_kind(q.kind)
+                    && h.same_as(&(q.opts)(dpi))
+            })
+            .map(|q| q.name)
+            .collect();
+        assert_eq!(lit, vec![p.name], "exactly one row highlights");
+    }
+}

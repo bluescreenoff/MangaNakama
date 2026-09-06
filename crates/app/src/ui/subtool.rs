@@ -473,83 +473,62 @@ fn mode_sub_tools(ui: &mut egui::Ui, app: &mut App) {
                     app.smart_shape = None;
                 }
             }
-            // The preset rows carry a WHOLE `FigureLineOpts` now, built in
-            // mm and degrees at the page's dpi (see the constructors): a
-            // row that only wrote count and width could not express the
-            // gap, bundling and split jitters the density round added,
-            // and a half-written preset is how the sets drifted.
+            // The preset rows are `mn_core::genlines::builtin_presets()`,
+            // drawn verbatim and in order (plan `2026-09-06-effect-lines-
+            // parity`, lanes A1/A2). They used to be a hard-coded list here,
+            // which is how the app's rows and the numbers the tuning loop
+            // actually judged could disagree: the PNG harness renders this
+            // same list, so what a critic passed is what a click arms.
+            //
+            // Every row carries a WHOLE `LineOpts`, priced in mm and degrees
+            // at the PAGE's dpi (see the constructors) — a row that only
+            // wrote a count and a width could not express the gap, the
+            // bundling, the accents or the split wobbles, and a half-written
+            // preset is exactly how the sets drifted apart.
             let dpi = app.tone_dpi();
-            use crate::cmd::FigureLineOpts as FLO;
-            group_caption(ui, group::STREAM_LINE);
-            for (label, opts) in [
-                ("Stream line", FLO::stream_dpi(dpi)),
-                ("Dense stream", FLO::dense_stream_dpi(dpi)),
-                ("Sparse stream", FLO::sparse_stream_dpi(dpi)),
-            ] {
-                let on = app.figure_mode == FigureMode::Stream && app.figure_stream.same_as(&opts);
-                if mode_row(ui, on, Icon::StreamLines, label)
-                    .on_hover_text("drag along the motion — a fresh speed-line layer each drag")
-                    .clicked()
-                {
-                    app.figure_mode = FigureMode::Stream;
-                    app.figure_poly = None;
-                    app.figure_stream = FLO {
-                        seed: app.figure_stream.seed,
-                        ..opts
-                    };
+            let mut group_drawn: Option<&str> = None;
+            for p in crate::cmd::builtin_presets() {
+                // Two captions, not four: the flashes ride in the 集中線
+                // group because they are the same centre-out gesture on the
+                // same knobs, only the rays are filled teeth.
+                let caption = if p.kind == crate::cmd::LineKind::Stream {
+                    group::STREAM_LINE
+                } else {
+                    group::SATURATED_LINE
+                };
+                if group_drawn != Some(caption) {
+                    group_caption(ui, caption);
+                    group_drawn = Some(caption);
                 }
-            }
-            group_caption(ui, group::SATURATED_LINE);
-            for (label, opts) in [
-                ("Saturated line", FLO::focus_dpi(dpi)),
-                ("Dense saturated line", FLO::dense_focus_dpi(dpi)),
-                ("Dark burst", FLO::dark_burst_dpi(dpi)),
-            ] {
-                let on = app.figure_mode == FigureMode::Focus && app.figure_focus.same_as(&opts);
-                if mode_row(ui, on, Icon::FocusLines, label)
-                    .on_hover_text(
-                        "drag from the convergence point outward — a fresh focus-line layer each drag",
-                    )
+                let mode = FigureMode::of_line_kind(p.kind);
+                let opts = (p.opts)(dpi);
+                let radial = p.kind.radial();
+                // A tweaked set highlights NO row, like a modified brush
+                // preset — the knobs stay editable in Tool Property.
+                let held = if radial {
+                    app.figure_focus
+                } else {
+                    app.figure_stream
+                };
+                let on = app.figure_mode == mode && held.same_as(&opts);
+                let icon = match p.kind {
+                    crate::cmd::LineKind::Stream => Icon::StreamLines,
+                    crate::cmd::LineKind::Focus => Icon::FocusLines,
+                    _ => Icon::UrchinFlash,
+                };
+                if mode_row(ui, on, icon, p.name)
+                    .on_hover_text(match p.kind {
+                        crate::cmd::LineKind::Stream => {
+                            "drag along the motion — a fresh speed-line layer each drag"
+                        }
+                        crate::cmd::LineKind::Focus => {
+                            "drag from the convergence point outward — a fresh focus-line layer each drag"
+                        }
+                        _ => "drag from the flash's centre outward — a fresh flash layer each drag",
+                    })
                     .clicked()
                 {
-                    app.figure_mode = FigureMode::Focus;
-                    app.figure_poly = None;
-                    app.figure_focus = FLO {
-                        seed: app.figure_focus.seed,
-                        ..opts
-                    };
-                }
-            }
-            // ウニフラッシュ, the pro-page audit's #1 IMPOSSIBLE — same
-            // group because it is the same centre-out gesture on the same
-            // knobs, only the rays are filled spikes. `width` reads as the
-            // spike base width in px here, so the rows carry values that
-            // suit a flash rather than a hairline fan.
-            for (label, mode, opts) in [
-                (
-                    "Sea urchin flash",
-                    FigureMode::Urchin,
-                    FLO::flash_dpi(dpi, 64, 0.85, 0.3),
-                ),
-                (
-                    "Solid flash",
-                    FigureMode::SolidFlash,
-                    FLO::flash_dpi(dpi, 64, 0.95, 0.45),
-                ),
-            ] {
-                let on = app.figure_mode == mode && app.figure_focus.same_as(&opts);
-                if mode_row(ui, on, Icon::UrchinFlash, label)
-                    .on_hover_text(
-                        "drag from the flash's centre outward — a fresh flash layer each drag",
-                    )
-                    .clicked()
-                {
-                    app.figure_mode = mode;
-                    app.figure_poly = None;
-                    app.figure_focus = FLO {
-                        seed: app.figure_focus.seed,
-                        ..opts
-                    };
+                    crate::cmd::arm_line_preset(app, p.kind, opts);
                 }
             }
         }

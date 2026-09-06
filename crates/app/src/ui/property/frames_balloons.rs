@@ -626,7 +626,12 @@ fn gen_bar(
     )
 }
 
-/// Shape: what kind of set it is, how far it reaches, how it tapers.
+/// Shape: what kind of set it is, how far it reaches, how a line is shaped.
+///
+/// Row order mirrors the Figure tool's own panel (`sec_figure`) — Width,
+/// Accents, Taper, Entry, Needle, then the geometry — so tuning a placed set
+/// and arming the next drag are the same motion in the same order. The gap,
+/// the bundling and the wobbles are the Density section below.
 pub(crate) fn sec_obj_genlines(ui: &mut egui::Ui, app: &mut App) {
     let Some((li, mut s)) = gen_draft(app) else {
         return;
@@ -667,6 +672,7 @@ pub(crate) fn sec_obj_genlines(ui: &mut egui::Ui, app: &mut App) {
     });
 
     let px_per_mm = app.mm_to_px(1.0).max(0.001);
+    let radial = s.radial();
     let flash = s.kind == 1 || s.kind == 2;
     let mut w_mm = s.width / px_per_mm;
     let (c, d) = gen_bar(
@@ -684,12 +690,35 @@ pub(crate) fn sec_obj_genlines(ui: &mut egui::Ui, app: &mut App) {
     done |= d;
 
     if !flash {
+        // The weight MIX (parity round): a few heavy strokes among the
+        // hairlines. One weight everywhere is the flat noise field.
+        let (c, d) = gen_bar(ui, "Accents", (0.0, 1.0), 2, "", &mut s.accent_frac);
+        changed |= c;
+        done |= d;
+        if s.accent_frac > 0.0 {
+            // 0 reads as 1 in the renderer, so a set placed before accents
+            // existed must not jump to 10× the moment the bar is touched.
+            let mut mul = s.accent_mul.max(1.0);
+            let (c, d) = gen_bar(ui, "Accent width", (1.0, 10.0), 1, " \u{d7}", &mut mul);
+            if c {
+                s.accent_mul = mul;
+            }
+            changed |= c;
+            done |= d;
+        }
+
         let (c, d) = gen_bar(ui, "Taper", (0.0, 1.0), 2, "", &mut s.taper);
+        changed |= c;
+        done |= d;
+        let (c, d) = gen_bar(ui, "Entry", (0.0, 1.0), 2, "", &mut s.entry);
+        changed |= c;
+        done |= d;
+        let (c, d) = gen_bar(ui, "Needle", (0.0, 3.0), 2, "", &mut s.needle);
         changed |= c;
         done |= d;
     }
 
-    if s.radial() {
+    if radial {
         // The hole, as a fraction of the reach — the same knob the sub
         // tool row arms, so the two mean one thing.
         let mut frac = if s.d > 0.0 { s.c / s.d } else { 0.0 };
@@ -705,8 +734,15 @@ pub(crate) fn sec_obj_genlines(ui: &mut egui::Ui, app: &mut App) {
         }
         changed |= c2;
         done |= d2;
+        if !flash {
+            // 0 = the full circle; anything else is a fan that wide,
+            // centred on the direction the placing drag went.
+            let (c, d) = gen_bar(ui, "Sweep", (0.0, 360.0), 0, "\u{b0}", &mut s.sweep_deg);
+            changed |= c;
+            done |= d;
+        }
     } else {
-        let (c, d) = gen_bar(ui, "Angle", (-180.0, 180.0), 1, "°", &mut s.a);
+        let (c, d) = gen_bar(ui, "Angle", (-180.0, 180.0), 1, "\u{b0}", &mut s.a);
         changed |= c;
         done |= d;
         let (c2, d2) = gen_bar(ui, "Shortest", (8.0, 6000.0), 0, " px", &mut s.b);
@@ -717,6 +753,26 @@ pub(crate) fn sec_obj_genlines(ui: &mut egui::Ui, app: &mut App) {
         done |= d3;
         if s.b > s.c {
             s.b = s.c;
+        }
+        // ref-09's drips: every run begins on ONE line instead of
+        // scattering along the direction.
+        let mut anchored = s.start_mode == 1;
+        if ui
+            .checkbox(&mut anchored, "Start from the line")
+            .on_hover_text(
+                "every run begins on the reference line and hangs off it — drips from a panel's \
+                 top edge, rain, a curtain. Off, they start anywhere along the direction",
+            )
+            .changed()
+        {
+            s.start_mode = u8::from(anchored);
+            changed = true;
+            done = true;
+        }
+        if anchored {
+            let (c, d) = gen_bar(ui, "Start wobble", (0.0, 1.0), 2, "", &mut s.jit_start);
+            changed |= c;
+            done |= d;
         }
         // 流線 with a vanishing point: the subtle fan a perspective panel
         // wants. Off = pure parallel.
@@ -756,15 +812,39 @@ pub(crate) fn sec_obj_genlines(ui: &mut egui::Ui, app: &mut App) {
     gen_commit(app, li, s, changed, done);
 }
 
-/// Density: the gap between lines, the bundling, and the wobble.
+/// Density: the gap between lines, the bundling, and the wobbles.
+///
+/// The bundling is offered for the RADIAL kinds too since the parity round —
+/// the owner's "effect lines doesn't seem to have a grouping setting", which
+/// was true: まとまり only ever existed in the speed walk, so a 集中線 came
+/// out at one even pitch whatever you did to it.
 pub(crate) fn sec_obj_genlines_density(ui: &mut egui::Ui, app: &mut App) {
     let Some((li, mut s)) = gen_draft(app) else {
         return;
     };
     let (mut changed, mut done) = (false, false);
     let px_per_mm = app.mm_to_px(1.0).max(0.001);
+    let radial = s.radial();
+    let flash = s.kind == 1 || s.kind == 2;
 
-    if s.radial() {
+    // A set written before the wobbles split carries ONE `jitter` and three
+    // zeros, and the renderer falls back to it for each of them
+    // (`GenLinesSpec::jit`). STATE that here, on the draft, the moment the
+    // palette draws: otherwise moving the Position bar alone would also move
+    // the length and the width wobble, because those two were reading the
+    // same fallback number Position just overwrote. Writing them changes no
+    // pixel — they are the values the renderer was already using — and it
+    // only reaches the layer if the owner commits some edit anyway.
+    let single = s.jitter;
+    if single > 0.0 {
+        for v in [&mut s.jit_gap, &mut s.jit_len, &mut s.jit_width] {
+            if *v <= 0.0 {
+                *v = single;
+            }
+        }
+    }
+
+    if radial {
         // GAP, not count: a manga tutorial sizes a 集中線 in degrees
         // (≈3° dense, ≈10° sparse) and that number means the same thing
         // whatever the page is. The count is still shown, because every
@@ -787,7 +867,7 @@ pub(crate) fn sec_obj_genlines_density(ui: &mut egui::Ui, app: &mut App) {
             done = true;
         }
         if by_gap {
-            let (c, d) = gen_bar(ui, "Gap", (0.5, 30.0), 2, "°", &mut s.gap_deg);
+            let (c, d) = gen_bar(ui, "Gap", (0.5, 30.0), 2, "\u{b0}", &mut s.gap_deg);
             changed |= c;
             done |= d;
             ui.weak(format!("{} lines", s.ray_count()));
@@ -822,23 +902,6 @@ pub(crate) fn sec_obj_genlines_density(ui: &mut egui::Ui, app: &mut App) {
             }
             changed |= c;
             done |= d;
-
-            // まとまり — bundles with a hole between them. CSP's own
-            // biggest quality lever for a speed block.
-            let mut n = s.group as f32;
-            let (c, d) = gen_bar(ui, "Bundle", (0.0, 16.0), 0, "", &mut n);
-            if c {
-                s.group = n.round() as u32;
-            }
-            changed |= c;
-            done |= d;
-            if s.group > 1 {
-                let (c, d) = gen_bar(ui, "Bundle gap", (1.0, 8.0), 1, " ×", &mut s.group_gap);
-                changed |= c;
-                done |= d;
-            } else {
-                ui.weak("0 or 1 = one even block, no bundles");
-            }
         } else {
             let mut n = s.count as f32;
             let (c, d) = gen_bar(ui, "Lines", (1.0, 512.0), 0, "", &mut n);
@@ -850,24 +913,77 @@ pub(crate) fn sec_obj_genlines_density(ui: &mut egui::Ui, app: &mut App) {
         }
     }
 
-    // The three wobbles. 0 means "use the single old Jitter", so the row
-    // shows that value rather than pretending the set has none.
-    let single = s.jitter;
-    for (label, v, hint) in [
-        ("Position", &mut s.jit_gap, "how far each line strays"),
-        ("Length", &mut s.jit_len, "how much the lengths vary"),
-        ("Width", &mut s.jit_width, "how much the weights vary"),
-    ] {
-        let mut shown = if *v > 0.0 { *v } else { single };
-        let resp = ValueBar::new(label, 0.0, 1.0)
-            .decimals(2)
-            .show(ui, &mut shown);
-        if resp.changed() {
-            *v = shown;
-            changed = true;
+    // まとまり — bundles with a hole between them. Only where a gap
+    // exists (a hole is a multiple OF a gap), and never on a flash: its
+    // teeth are counted and spread over the whole circle by construction.
+    let gapped = !flash && if radial { s.gap_deg > 0.0 } else { s.gap_px > 0.0 };
+    if gapped {
+        let mut n = s.group as f32;
+        let (c, d) = gen_bar(ui, "Bundle", (0.0, 16.0), 0, "", &mut n);
+        if c {
+            s.group = n.round() as u32;
         }
+        changed |= c;
+        done |= d;
+        if s.group > 1 {
+            let (c, d) = gen_bar(ui, "Bundle gap", (1.0, 8.0), 1, " \u{d7}", &mut s.group_gap);
+            changed |= c;
+            done |= d;
+            let (c, d) = gen_bar(ui, "Bundle variety", (0.0, 1.0), 2, "", &mut s.group_jit);
+            changed |= c;
+            done |= d;
+        } else {
+            ui.weak("0 or 1 = one even block, no bundles");
+        }
+    }
+
+    // The wobbles, in the Figure panel's order.
+    let mut rows: Vec<(&str, &mut f32, &str)> = vec![
+        (
+            "Position",
+            &mut s.jit_gap,
+            "how far each line strays from the even spacing",
+        ),
+        ("Length", &mut s.jit_len, "how much the lengths differ"),
+    ];
+    if !flash {
+        rows.push((
+            "Long bias",
+            &mut s.len_skew,
+            "which way the length wobble leans — 1 makes most lines long with a few short ones",
+        ));
+        if radial {
+            rows.push((
+                "Outer length",
+                &mut s.jit_len_out,
+                "the same wobble on the FAR end of a ray — keep it small or the ends stop inside the panel",
+            ));
+        }
+        rows.push((
+            "Width",
+            &mut s.jit_width,
+            "how much the weights differ from line to line",
+        ));
+    }
+    if radial {
+        rows.push((
+            "Core stagger",
+            &mut s.core_jit,
+            "how ragged the edge of the hollow centre is — 0 is a compass circle",
+        ));
+    }
+    for (label, v, hint) in rows {
+        let resp = ValueBar::new(label, 0.0, 1.0).decimals(2).show(ui, v);
+        changed |= resp.changed();
         done |= resp.drag_stopped() || (resp.changed() && !resp.dragged());
         resp.on_hover_text(hint);
+    }
+    // A stream's own hand wobble: degrees off the drag's direction, so it
+    // does not belong in the 0..1 column above.
+    if !radial {
+        let (c, d) = gen_bar(ui, "Angle wobble", (0.0, 5.0), 2, "\u{b0}", &mut s.jit_angle);
+        changed |= c;
+        done |= d;
     }
     gen_commit(app, li, s, changed, done);
 }
@@ -914,12 +1030,70 @@ pub(crate) fn sec_obj_guide(ui: &mut egui::Ui, app: &mut App) {
     ui.weak("Del removes the selected one");
 }
 
+/// One `label  value` row of the effect-line knobs.
+///
+/// A helper rather than a dozen copies of the same four lines: the Figure
+/// panel is a column of near-identical numbers, and the only thing that
+/// makes such a column readable is that EVERY value says what it does on the
+/// page when you hover it. Hand-written rows are rows where that gets left
+/// out.
+fn line_knob(
+    ui: &mut egui::Ui,
+    label: &str,
+    v: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    speed: f64,
+    suffix: &str,
+    hint: &str,
+) {
+    ui.horizontal(|ui| {
+        ui.label(label);
+        ui.add(
+            egui::DragValue::new(v)
+                .range(range)
+                .speed(speed)
+                .suffix(suffix),
+        )
+        .on_hover_text(hint);
+    });
+}
+
+/// How many rays the CURRENT radial knobs would draw — the bundle walk's
+/// own answer, not `360 / gap`.
+///
+/// Once bundling exists the two are different numbers: a bundle of 4 with a
+/// 3x hole spends 7 gaps on 4 rays, so the old hint over-counted by nearly
+/// half and the owner would have sized the burst against a lie. The walk
+/// lives on [`mn_core::genlines::GenLinesSpec`], so ask a throwaway spec
+/// carrying just the fields it reads.
+fn tool_ray_count(o: &crate::cmd::FigureLineOpts) -> u32 {
+    mn_core::genlines::GenLinesSpec {
+        focus: true,
+        count: o.count,
+        gap_deg: o.gap_deg,
+        sweep_deg: o.sweep_deg,
+        group: o.group,
+        group_gap: o.group_gap,
+        group_jit: o.group_jit,
+        seed: o.seed,
+        ..Default::default()
+    }
+    .ray_count()
+}
+
+/// The effect-line knobs for the NEXT drag: SHAPE and density.
+///
+/// The wobbles moved out to [`sec_figure_wobble`] in the parity round —
+/// eleven shape knobs and eight wobbles in one section is a wall of numbers
+/// nobody reads, and they answer two different questions ("what is a line?"
+/// and "how much does the hand vary?"). Ranges mirror the generator
+/// dialog's (its clamp rationale — giant counts/widths were a real UI hang —
+/// applies here too), and every width is stated in MILLIMETRES like the
+/// object panel: a millimetre means the same thing on a 600 dpi B4 and a
+/// 72 dpi draft, and a pixel does not.
 pub(crate) fn sec_figure(ui: &mut egui::Ui, app: &mut App) {
     match app.figure_mode {
         m if m.generates() => {
-            // The effect-line knobs: what the NEXT drag generates with.
-            // Ranges mirror the generator dialog's (its clamp rationale —
-            // giant counts/widths were a real UI hang — applies here too).
             let radial = m.radial();
             let flash = m.gen_kind() != 0;
             let px_per_mm = app.mm_to_px(1.0).max(0.001);
@@ -930,20 +1104,22 @@ pub(crate) fn sec_figure(ui: &mut egui::Ui, app: &mut App) {
             };
             // Density is stated as a GAP where the preset says so — a
             // count field that the generator ignores is worse than no
-            // field, and the gap is the unit a tutorial uses anyway.
-            if !flash && radial && o.gap_deg > 0.0 {
-                ui.horizontal(|ui| {
-                    ui.label("Gap");
-                    ui.add(
-                        egui::DragValue::new(&mut o.gap_deg)
-                            .range(0.5..=30.0)
-                            .speed(0.1)
-                            .suffix("°"),
-                    )
-                    .on_hover_text("degrees between rays — 3° dense, 10° sparse");
-                });
-                ui.weak(format!("{} lines", (360.0 / o.gap_deg).ceil() as u32));
-            } else if !flash && !radial && o.gap_px > 0.0 {
+            // field, and the gap is the unit a tutorial uses anyway. The
+            // flashes COUNT their teeth (their `width` is a spike base and
+            // the renderer clamps neighbours), so they keep the count row.
+            let gapped = !flash && if radial { o.gap_deg > 0.0 } else { o.gap_px > 0.0 };
+            if gapped && radial {
+                line_knob(
+                    ui,
+                    "Gap",
+                    &mut o.gap_deg,
+                    0.5..=30.0,
+                    0.05,
+                    "\u{b0}",
+                    "degrees between neighbouring rays — about 2° for a dense burst, 10° for a sparse one",
+                );
+                ui.weak(format!("{} lines", tool_ray_count(o)));
+            } else if gapped {
                 let mut gap_mm = o.gap_px / px_per_mm;
                 ui.horizontal(|ui| {
                     ui.label("Gap");
@@ -954,95 +1130,222 @@ pub(crate) fn sec_figure(ui: &mut egui::Ui, app: &mut App) {
                                 .speed(0.02)
                                 .suffix(" mm"),
                         )
-                        .on_hover_text("spacing between runs — they walk the block evenly")
+                        .on_hover_text(
+                            "how far apart the runs sit — they walk the block at this pitch \
+                             instead of scattering",
+                        )
                         .changed()
                     {
                         o.gap_px = (gap_mm * px_per_mm).max(0.25);
                     }
                 });
+            } else {
+                ui.horizontal(|ui| {
+                    ui.label(if flash { "Spikes" } else { "Lines" });
+                    ui.add(egui::DragValue::new(&mut o.count).range(1..=512))
+                        .on_hover_text(if flash {
+                            "how many teeth the flash has, all the way round"
+                        } else {
+                            "how many lines in total"
+                        });
+                });
+            }
+
+            // まとまり — bundles with a hole between them, in px for a
+            // stream and in DEGREES for a burst (the owner's missing
+            // grouping setting, 2026-09-06). Only where a gap exists: a
+            // hole is a multiple OF a gap, so there has to be one.
+            if gapped {
                 ui.horizontal(|ui| {
                     ui.label("Bundle");
                     ui.add(egui::DragValue::new(&mut o.group).range(0..=16))
-                        .on_hover_text("まとまり — runs per bundle, with a hole between bundles");
+                        .on_hover_text(
+                            "まとまり — how many lines sit together before a hole. 0 or 1 is one \
+                             even comb, which is the thing that reads as machine-made",
+                        );
                     if o.group > 1 {
                         ui.add(
                             egui::DragValue::new(&mut o.group_gap)
                                 .range(1.0..=8.0)
                                 .speed(0.1)
-                                .suffix(" ×"),
+                                .suffix(" \u{d7}"),
                         )
-                        .on_hover_text("how wide the hole is, in gaps");
+                        .on_hover_text("how wide the hole after a bundle is, counted in gaps");
                     }
                 });
-            } else {
-                ui.horizontal(|ui| {
-                    ui.label(if flash { "Spikes" } else { "Lines" });
-                    ui.add(egui::DragValue::new(&mut o.count).range(1..=512));
-                });
             }
+
+            let mut w_mm = o.width / px_per_mm;
             ui.horizontal(|ui| {
                 ui.label(if flash { "Spike width" } else { "Width" });
-                // A flash's width is the spike BASE, so it needs a range
-                // a line never does; the renderer still caps it at the
-                // gap between neighbours so the teeth cannot merge.
-                ui.add(
-                    egui::DragValue::new(&mut o.width)
-                        .range(if flash { 1.0..=200.0 } else { 0.5..=40.0 })
-                        .speed(0.1),
-                )
-                .on_hover_text(if flash {
-                    "how wide each spike is at the rim, in pixels"
-                } else {
-                    "line thickness in pixels"
-                });
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut w_mm)
+                            // A flash's width is the spike BASE, so it
+                            // needs a range a hairline never does.
+                            .range(0.02..=if flash { 4.0 } else { 1.5 })
+                            .speed(0.01)
+                            .suffix(" mm"),
+                    )
+                    .on_hover_text(if flash {
+                        "how wide each spike is where it meets the rim"
+                    } else {
+                        "how thick a line is at its heaviest point"
+                    })
+                    .changed()
+                {
+                    o.width = (w_mm * px_per_mm).max(0.5);
+                }
             });
-            // Stream tails and Focus rays both taper (a printed 集中線
-            // needles at the convergence); the flash kinds' teeth carry
-            // their own shape and get no knob.
+
             if !flash {
+                // The weight MIX — the single biggest thing between a
+                // generated set and a printed one. A hand puts a few heavy
+                // strokes among the hairlines; one weight everywhere is
+                // the flat noise field the pro-page audit flagged.
                 ui.horizontal(|ui| {
-                    ui.label("Taper");
+                    ui.label("Accents");
                     ui.add(
-                        egui::DragValue::new(&mut o.taper)
+                        egui::DragValue::new(&mut o.accent_frac)
                             .range(0.0..=1.0)
                             .speed(0.01),
                     )
-                    .on_hover_text(if radial {
-                        "how far each ray thins toward the convergence — 0 flat, 1 a needle point"
-                    } else {
-                        "how far each line thins toward its tail — 0 is a flat run, 1 a needle point"
-                    });
-                });
-            }
-            // ONE wobble knob, writing all four fields. The presets set
-            // the three split jitters to different values (a printed set
-            // wants a lot of length wobble and little angular wobble),
-            // and a split jitter overrides the single one — so a Jitter
-            // row that wrote only `jitter` would look live and do
-            // nothing. Turning this evens them out, deliberately.
-            ui.horizontal(|ui| {
-                ui.label("Jitter");
-                let mut j = o.jit_gap.max(o.jitter);
-                if ui
-                    .add(egui::DragValue::new(&mut j).range(0.0..=1.0).speed(0.01))
-                    .on_hover_text("angle, width and length wobble — 0 is a drafting tool's fan")
-                    .changed()
-                {
-                    o.jitter = j;
-                    o.jit_gap = j;
-                    o.jit_len = j;
-                    o.jit_width = j;
-                }
-            });
-            if radial {
-                ui.horizontal(|ui| {
-                    ui.label("Hollow centre");
+                    .on_hover_text(
+                        "what share of the lines are drawn heavy — 0.15 is about one in seven",
+                    );
                     ui.add(
-                        egui::DragValue::new(&mut o.r_in_frac)
-                            .range(0.0..=0.95)
-                            .speed(0.01),
+                        egui::DragValue::new(&mut o.accent_mul)
+                            .range(1.0..=10.0)
+                            .speed(0.05)
+                            .suffix(" \u{d7}"),
                     )
-                    .on_hover_text("the empty middle, as a fraction of the dragged radius");
+                    .on_hover_text(
+                        "the HEAVIEST an accent gets, as a multiple of the width. Each accent \
+                         draws its own between 1.5× and this, so the set is a continuum rather \
+                         than two weights",
+                    );
+                });
+                line_knob(
+                    ui,
+                    "Taper",
+                    &mut o.taper,
+                    0.0..=1.0,
+                    0.01,
+                    "",
+                    if radial {
+                        "how far a ray thins toward the convergence — 0 is a flat bar, 1 runs out to nothing"
+                    } else {
+                        "how far a line thins toward its tail — 0 is a flat bar, 1 runs out to nothing"
+                    },
+                );
+                line_knob(
+                    ui,
+                    "Entry",
+                    &mut o.entry,
+                    0.0..=1.0,
+                    0.01,
+                    "",
+                    "入り — how much of the START also ramps up from a point. With Taper that \
+                     makes a spindle (thin, thick, thin); 0 leaves a blunt cap",
+                );
+                line_knob(
+                    ui,
+                    "Needle",
+                    &mut o.needle,
+                    0.0..=3.0,
+                    0.05,
+                    "",
+                    "the SHAPE of the thinning. 1 is a straight wedge; above 1 it thins fast and \
+                     then runs a long needle; below 1 it keeps a belly and ends abruptly",
+                );
+            }
+
+            if radial {
+                line_knob(
+                    ui,
+                    "Hollow centre",
+                    &mut o.r_in_frac,
+                    0.0..=0.95,
+                    0.01,
+                    "",
+                    "the empty middle the art sits in, as a fraction of how far you drag",
+                );
+                if !flash {
+                    line_knob(
+                        ui,
+                        "Sweep",
+                        &mut o.sweep_deg,
+                        0.0..=360.0,
+                        1.0,
+                        "\u{b0}",
+                        "0 = a full circle. Anything else is a FAN that wide, aimed the way you \
+                         drag — what you want when the burst's centre is off the panel",
+                    );
+                }
+            } else {
+                // ref-09's ゴ… drips: every run hangs off ONE line instead
+                // of scattering along the direction. Scattered, half of
+                // them would float in mid-air.
+                ui.horizontal(|ui| {
+                    ui.label("Start");
+                    let mut anchored = o.start_mode == 1;
+                    if ui
+                        .selectable_label(!anchored, "scatter")
+                        .on_hover_text("runs begin anywhere along the drag's direction")
+                        .clicked()
+                    {
+                        anchored = false;
+                    }
+                    if ui
+                        .selectable_label(anchored, "from the line")
+                        .on_hover_text(
+                            "every run begins on the line you drag from and hangs off it — drips \
+                             from a panel's top edge, rain, a curtain",
+                        )
+                        .clicked()
+                    {
+                        anchored = true;
+                    }
+                    o.start_mode = u8::from(anchored);
+                    if anchored {
+                        ui.add(
+                            egui::DragValue::new(&mut o.jit_start)
+                                .range(0.0..=1.0)
+                                .speed(0.01),
+                        )
+                        .on_hover_text(
+                            "how far the starts stagger off that line, as a share of the run's \
+                             own length",
+                        );
+                    }
+                });
+                // 流線 with a vanishing point: the perspective streaks of a
+                // block converging on an impact instead of sliding past it.
+                ui.horizontal(|ui| {
+                    ui.label("Fan toward a point");
+                    let mut fan = o.converge_far > 0.0;
+                    if ui
+                        .checkbox(&mut fan, "")
+                        .on_hover_text(
+                            "aims every run at one point beyond the drag instead of running \
+                             parallel",
+                        )
+                        .changed()
+                    {
+                        o.converge_far = if fan { 2.5 } else { 0.0 };
+                    }
+                    if fan {
+                        ui.add(
+                            egui::DragValue::new(&mut o.converge_far)
+                                .range(0.2..=10.0)
+                                .speed(0.05)
+                                .suffix(" \u{d7}"),
+                        )
+                        .on_hover_text(
+                            "how far past the drag's end that point sits, in drag lengths. \
+                             Small = a hard perspective, large = a gentle fan",
+                        );
+                    }
                 });
             }
             ui.weak("each drag places its own layer — one undo press removes it");
@@ -1060,6 +1363,135 @@ pub(crate) fn sec_figure(ui: &mut egui::Ui, app: &mut App) {
                     );
             }
         }
+    }
+}
+
+/// How much the HAND varies — the eight wobbles, for the next drag.
+///
+/// Its own section since the parity round (plan `2026-09-06-effect-lines-
+/// parity`, lane A2). Before it there was ONE "Jitter" row that wrote all
+/// four wobble fields to the same number, which was worse than nothing: the
+/// shipped presets deliberately set them apart (a printed set wants a lot of
+/// length wobble and almost no angular wobble), so touching that row flattened
+/// the preset the owner had just picked and the panel gave no way back.
+///
+/// The legacy single `jitter` is written from the POSITION wobble. It is not
+/// a knob any more — it is the fallback a file saved before the split reads
+/// (`GenLinesSpec::jit`), and keeping it equal to the position wobble is the
+/// only value that cannot surprise an older build.
+pub(crate) fn sec_figure_wobble(ui: &mut egui::Ui, app: &mut App) {
+    let m = app.figure_mode;
+    if !m.generates() {
+        // B1 will grey this out properly (`Row::applies`); until then say
+        // why it is empty rather than showing a bare caption.
+        ui.weak("only the effect-line sub tools wobble — a drawn figure is ruled");
+        return;
+    }
+    let radial = m.radial();
+    let flash = m.gen_kind() != 0;
+    let o = if radial {
+        &mut app.figure_focus
+    } else {
+        &mut app.figure_stream
+    };
+    let bundled = !flash && o.group > 1 && if radial { o.gap_deg > 0.0 } else { o.gap_px > 0.0 };
+
+    ui.horizontal(|ui| {
+        ui.label("Position");
+        if ui
+            .add(
+                egui::DragValue::new(&mut o.jit_gap)
+                    .range(0.0..=1.0)
+                    .speed(0.01),
+            )
+            .on_hover_text(
+                "how far each line strays from where the even spacing would put it, as a share \
+                 of the gap. 0 is a drafting tool",
+            )
+            .changed()
+        {
+            // The fallback for a build that predates the split wobbles.
+            o.jitter = o.jit_gap;
+        }
+    });
+    line_knob(
+        ui,
+        "Length",
+        &mut o.jit_len,
+        0.0..=1.0,
+        0.01,
+        "",
+        "how much the lengths differ. 0 makes every line reach exactly as far as its neighbour, \
+         which is the clean ring or the wall of equal streaks that gives a set away",
+    );
+    if !flash {
+        line_knob(
+            ui,
+            "Long bias",
+            &mut o.len_skew,
+            0.0..=1.0,
+            0.01,
+            "",
+            "which way the length wobble leans. 0 draws short and long equally often; 1 makes \
+             most lines long with a few short ones, the way a reference page looks",
+        );
+        if radial {
+            line_knob(
+                ui,
+                "Outer length",
+                &mut o.jit_len_out,
+                0.0..=1.0,
+                0.01,
+                "",
+                "the same wobble on the FAR end of a ray. Keep it small — a ray that stops \
+                 inside the panel shows its own blunt end instead of being cut by the border",
+            );
+        }
+        line_knob(
+            ui,
+            "Width",
+            &mut o.jit_width,
+            0.0..=1.0,
+            0.01,
+            "",
+            "how much the weights differ from line to line, on top of the accents",
+        );
+        if !radial {
+            line_knob(
+                ui,
+                "Angle",
+                &mut o.jit_angle,
+                0.0..=5.0,
+                0.05,
+                "\u{b0}",
+                "how far each run leans off the drag's direction. A degree or two reads as \
+                 hand-ruled; 0 is dead parallel and reads as a filter",
+            );
+        }
+    }
+    if radial {
+        line_knob(
+            ui,
+            "Core stagger",
+            &mut o.core_jit,
+            0.0..=1.0,
+            0.01,
+            "",
+            "how ragged the edge of the hollow centre is. 0 puts every inner end on one perfect \
+             circle, which is the compass look",
+        );
+    }
+    if bundled {
+        line_knob(
+            ui,
+            "Bundle variety",
+            &mut o.group_jit,
+            0.0..=1.0,
+            0.01,
+            "",
+            "how much the bundle sizes and the holes between them vary. 0 repeats one unit at \
+             one pitch, and the eye finds the period — a picket fence",
+        );
     }
 }
 

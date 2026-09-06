@@ -10395,12 +10395,23 @@ fn figure_flash_drags_place_urchin_and_solid_layers() {
     );
     assert_eq!(after.count, 40, "and the dialog's own change landed");
 
-    // Stream taper reaches the placed spec. The TOOL default is 0.5 —
+    // Stream taper reaches the placed spec. The TOOL default tapers —
     // printed effect lines needle, and a tool default is free to be right
     // (the spec-side 0-means-legacy rule guards saved layers, not knobs).
     // Turning the knob to 0 still buys the flat legacy look.
+    //
+    // 2026-09-06 (lane A2): the number is the CORE preset's now, not a
+    // second copy in the app — the parity round's tuning loop settled on
+    // 0.9 rather than 1.0 (a full taper drives the ramp to zero and most
+    // of the stroke measures as a hairline). Read it from the preset so
+    // the next tuning round moves one number, not two.
     app.figure_mode = crate::cmd::FigureMode::Stream;
-    assert_eq!(app.figure_stream.taper, 0.5, "the tool default tapers");
+    assert_eq!(
+        app.figure_stream.taper,
+        crate::cmd::FigureLineOpts::stream(600).taper,
+        "the tool default tapers"
+    );
+    assert!(app.figure_stream.taper > 0.0);
     app.figure_stream.taper = 0.0;
     app.finish_figure_drag((100.0, 100.0), (400.0, 100.0));
     drain_cmds(&mut app);

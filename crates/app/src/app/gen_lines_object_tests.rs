@@ -273,3 +273,146 @@ fn apply_to_regenerates_the_selected_run() {
     dispatch(&mut app, AppCmd::GenLinesApplyTo { layer: plain, spec });
     assert_eq!(app.doc.layers[plain].genlines, None);
 }
+
+/// The angular pitch between neighbouring rays, read off a ring of ink —
+/// the same measurement `mn-core`'s `radial_grouping_leaves_angular_holes`
+/// makes, done here on a real placed LAYER instead of a renderer call.
+///
+/// Walk a circle of radius `r` about the centre, note where each run of ink
+/// starts and stops, and return the angle between consecutive run centres.
+/// An unbundled burst gives one number repeated; a bundled one gives tight
+/// gaps in runs of `group` with a big hole after each.
+fn ray_gaps(app: &App, li: usize, c: [f32; 2], r: f32) -> Vec<f32> {
+    const N: usize = 3600;
+    let hit: Vec<bool> = (0..N)
+        .map(|k| {
+            let a = k as f32 * std::f32::consts::TAU / N as f32;
+            let (s, cs) = a.sin_cos();
+            ink_at(app, li, (c[0] + cs * r) as i32, (c[1] + s * r) as i32)
+        })
+        .collect();
+    let mut centres = Vec::new();
+    let mut run: Option<(usize, usize)> = None;
+    for (k, on) in hit.iter().enumerate() {
+        if *on {
+            run = Some(match run {
+                Some((a, _)) => (a, k),
+                None => (k, k),
+            });
+        } else if let Some((a, b)) = run.take() {
+            centres.push((a + b) as f32 * 0.5);
+        }
+    }
+    if let Some((a, b)) = run {
+        centres.push((a + b) as f32 * 0.5);
+    }
+    centres
+        .windows(2)
+        .map(|w| (w[1] - w[0]) * 360.0 / N as f32)
+        .collect()
+}
+
+/// Owner, 2026-09-06: effect lines "doesn't seem to have a grouping
+/// setting". He was right — まとまり only ever existed in the SPEED walk, so
+/// a 集中線 came out at one even pitch whatever the palette did, and the
+/// Tool Property section did not offer the knob at all for a radial set.
+///
+/// This is the Object-tool half of the fix: the Density section's Bundle and
+/// Bundle-gap bars on a SELECTED focus set commit through
+/// `AppCmd::GenLinesApplyTo` (that is all `gen_commit` does), and the layer
+/// re-rasterizes with real angular holes in it.
+#[test]
+fn object_panel_edits_radial_bundle() {
+    let Some(renderer) = headless_renderer() else {
+        return;
+    };
+    let mut app = App::new(renderer, (600, 400), 1.0);
+    let li = place_focus(&mut app, (300.0, 200.0), (300.0, 80.0));
+
+    // A CLEAN set to measure: an even 3° pitch, no wobble of any kind, a
+    // flat 2 px width, and a reach that stays on the page. Every wobble is
+    // switched off on purpose — this test is about the pitch, and a
+    // position wobble of a quarter of the gap would blur the very thing
+    // being counted. (The shipped preset carries all of them; that is what
+    // makes the sets look hand-made, and what makes them unmeasurable.)
+    let placed = app.doc.layers[li].genlines.expect("the drag placed a spec");
+    let even = mn_core::genlines::GenLinesSpec {
+        c: 60.0,
+        d: 300.0,
+        gap_deg: 3.0,
+        width: 2.0,
+        taper: 0.0,
+        entry: 0.0,
+        needle: 0.0,
+        jitter: 0.0,
+        jit_gap: 0.0,
+        jit_len: 0.0,
+        jit_width: 0.0,
+        jit_len_out: 0.0,
+        core_jit: 0.0,
+        len_skew: 0.0,
+        accent_frac: 0.0,
+        group: 0,
+        group_gap: 0.0,
+        group_jit: 0.0,
+        ..placed
+    };
+    dispatch(
+        &mut app,
+        AppCmd::GenLinesApplyTo {
+            layer: li,
+            spec: even,
+        },
+    );
+    let flat = ray_gaps(&app, li, [300.0, 200.0], 150.0);
+    assert!(flat.len() > 30, "enough rays to see a pattern ({flat:?})");
+    let hi = flat.iter().copied().fold(0.0f32, f32::max);
+    let lo = flat.iter().copied().fold(f32::INFINITY, f32::min);
+    assert!(
+        hi - lo < 0.6,
+        "BEFORE: one even pitch, no bundles anywhere ({lo}..{hi})"
+    );
+
+    // Now the two bars the palette gained: Bundle 4, Bundle gap 3×.
+    let bundled = mn_core::genlines::GenLinesSpec {
+        group: 4,
+        group_gap: 3.0,
+        ..even
+    };
+    let steps = app.doc.undo_len();
+    dispatch(
+        &mut app,
+        AppCmd::GenLinesApplyTo {
+            layer: li,
+            spec: bundled,
+        },
+    );
+    assert_eq!(
+        app.doc.layers[li].genlines,
+        Some(bundled),
+        "the layer carries the bundling"
+    );
+    assert_eq!(app.doc.undo_len(), steps + 1, "one undo press, as before");
+
+    let gaps = ray_gaps(&app, li, [300.0, 200.0], 150.0);
+    assert!(gaps.len() > 20, "still a burst ({} rays)", gaps.len() + 1);
+    // 4 rays a 3° apart, then a hole of 3 × 3° = 9°.
+    let tight = gaps.iter().filter(|g| (**g - 3.0).abs() < 0.6).count();
+    let holes = gaps.iter().filter(|g| (**g - 9.0).abs() < 1.0).count();
+    assert!(
+        holes >= 8,
+        "AFTER: the bundles stand apart ({holes} holes in {gaps:?})"
+    );
+    assert!(
+        tight >= holes,
+        "and each bundle is several tight rays ({tight} tight, {holes} holes)"
+    );
+
+    // And it undoes back to the even set, pixels and parameters together.
+    assert!(app.doc.undo(), "the bundling undoes");
+    assert_eq!(app.doc.layers[li].genlines, Some(even));
+    let back = ray_gaps(&app, li, [300.0, 200.0], 150.0);
+    let hi = back.iter().copied().fold(0.0f32, f32::max);
+    let lo = back.iter().copied().fold(f32::INFINITY, f32::min);
+    assert!(hi - lo < 0.6, "the even pitch is back ({lo}..{hi})");
+}

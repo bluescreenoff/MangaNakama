@@ -647,6 +647,16 @@ fn prop_sections_for_tool(app: &App) -> Vec<Section> {
                 title: "Figure",
                 body: sec_figure,
             },
+            // The eight wobbles, split off the Figure section in the parity
+            // round: nineteen numbers in one column is a wall nobody reads,
+            // and "what is a line?" and "how much does the hand vary?" are
+            // two different questions. Right after Figure, because it is the
+            // second half of the same answer.
+            Section {
+                id: "figure.wobble",
+                title: "Wobble",
+                body: sec_figure_wobble,
+            },
             Section {
                 id: "figure.guide",
                 title: "Guide",

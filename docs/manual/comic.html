@@ -197,9 +197,103 @@ the convergence point out to where the rays should reach, a stream-line
 drag runs along the motion (its angle and length come from the drag).
 Every drag makes its OWN layer — one <kbd>Ctrl+Z</kbd> removes it, and
 the layer is a normal generator afterwards: Object-tool handles and
-Layer ▸ Edit effect lines both adjust it. Count, width, jitter and the
-hollow centre live in Tool Property and apply to the <em>next</em>
-drag.</div>
+Layer ▸ Edit effect lines both adjust it. The knobs live in Tool
+Property (<b>Figure</b> and <b>Wobble</b>) and apply to the
+<em>next</em> drag; with a placed set selected under the Object tool
+the same knobs edit <em>that</em> set instead.</div>
+<div class="quirk"><b>Ten sub tool rows, in two groups.</b>
+<i>Stream line</i> holds Stream line, Dense stream, Sparse stream,
+Perspective stream (the runs fan into an impact point instead of
+sliding past) and Drip lines (short verticals hanging off the edge you
+drag). <i>Saturated line</i> holds Saturated line, Dense saturated
+line, Dark burst, Sea urchin flash and Solid flash. Picking a row
+loads its whole set of knobs; tweak any of them and no row is lit any
+more, the same way a modified brush preset behaves. <span class="why">
+Making your own rows — right-click ▸ duplicate, rename, save current
+settings — is the next piece of work and is not in yet.</span></div>
+
+<h3>What each knob does</h3>
+<p>All of these sit in Tool Property while a line sub tool is armed,
+and on the selected set under the Object tool. Widths and gaps are in
+<b>millimetres</b>, not pixels: a millimetre is the same size on a
+600 dpi print page and on a rough draft, and a pixel is not.</p>
+
+<p><b>Figure</b> — what a line <em>is</em>.</p>
+<table>
+<tr><th>Knob</th><th>What it does on the page</th></tr>
+<tr><td>Gap</td><td>How far apart neighbouring lines sit: degrees for a
+burst (about 2° packed, 10° airy), millimetres for a stream. On the
+flashes this row says <b>Spikes</b> instead and counts the teeth.</td></tr>
+<tr><td>Bundle</td><td>How many lines sit together before a hole — the
+Japanese term is まとまり. The second number is how wide that hole is,
+counted in gaps, so 3× means a hole three gaps across. 0 or 1 means one
+even comb, and an even comb is the single thing that most makes a set
+look machine-made. This is the setting that was missing on bursts.</td></tr>
+<tr><td>Width</td><td>How thick a line is at its heaviest point.</td></tr>
+<tr><td>Accents</td><td>The first number is what share of the lines are
+drawn heavy — 0.15 is about one in seven. The second is the heaviest
+they get, as a multiple of Width; each accent picks its own between
+1.5× and that, so you get a spread of weights rather than two. A
+printed page always has a few fat strokes among the hairlines.</td></tr>
+<tr><td>Taper</td><td>How far a line thins toward its far end. 0 is a
+flat bar the whole way; 1 runs out to nothing.</td></tr>
+<tr><td>Entry</td><td>入り — how much of the <em>start</em> also ramps
+up from a point. Together with Taper that makes a spindle: thin, thick,
+thin. 0 leaves a blunt cap where the stroke begins.</td></tr>
+<tr><td>Needle</td><td>The <em>shape</em> of the thinning. 1 is a
+straight wedge. Above 1 the line thins fast and then runs a long thin
+needle. Below 1 it keeps a belly and ends abruptly.</td></tr>
+<tr><td>Hollow centre</td><td>Bursts only: the empty middle the art sits
+in, as a fraction of how far you drag.</td></tr>
+<tr><td>Sweep</td><td>Bursts only. 0 is a full circle. Anything else is
+a fan that many degrees wide, aimed the way you dragged — what you want
+when the centre of the burst is off the edge of the panel.</td></tr>
+<tr><td>Start</td><td>Streams only. <i>scatter</i> lets runs begin
+anywhere along the direction. <i>from the line</i> makes every run begin
+on the line you dragged from and hang off it — drips down a panel, rain,
+a curtain. The number beside it is how far the starts stagger off that
+line.</td></tr>
+<tr><td>Fan toward a point</td><td>Streams only: aim every run at one
+point beyond the drag instead of running parallel, for a block rushing
+at an impact. The number is how far past the drag's end that point sits,
+counted in drag lengths — small is a hard perspective, large is a gentle
+fan.</td></tr>
+</table>
+
+<p><b>Wobble</b> — how much the hand varies. Every one of these is
+0 to 1 (Angle is in degrees), and 0 everywhere is a drafting tool.</p>
+<table>
+<tr><th>Knob</th><th>What it does on the page</th></tr>
+<tr><td>Position</td><td>How far each line strays from where the even
+spacing would put it, as a share of the gap.</td></tr>
+<tr><td>Length</td><td>How much the lengths differ. 0 makes every line
+reach exactly as far as its neighbour — the clean ring, or the wall of
+equal streaks, that gives a generated set away.</td></tr>
+<tr><td>Long bias</td><td>Which way the length wobble leans. 0 draws
+short and long equally often; 1 makes most lines long with a few short
+ones, which is how a reference page looks.</td></tr>
+<tr><td>Outer length</td><td>Bursts only: the same wobble on the
+<em>far</em> end of a ray. Keep it small. A ray that stops inside the
+panel shows its own blunt end instead of being cut off by the
+border.</td></tr>
+<tr><td>Width</td><td>How much the weights differ from line to line, on
+top of the accents.</td></tr>
+<tr><td>Angle</td><td>Streams only: how far each run leans off the
+drag's direction. A degree or two reads as hand-ruled; 0 is dead
+parallel and reads as a filter.</td></tr>
+<tr><td>Core stagger</td><td>Bursts only: how ragged the edge of the
+hollow centre is. 0 puts every inner end on one perfect circle, which
+is the compass look.</td></tr>
+<tr><td>Bundle variety</td><td>How much the bundle sizes and the holes
+between them vary. 0 repeats one unit at one pitch and the eye finds
+the period — a picket fence.</td></tr>
+</table>
+<div class="quirk"><b>The flashes only show the knobs they use.</b> Sea
+urchin and Solid flash draw filled teeth that carry their own shape, so
+Taper, Entry, Needle, Accents, Sweep, Bundle and most of the wobbles
+are not offered on them — you get Spikes, Spike width, Hollow centre,
+the Position and Length wobbles and Core stagger. A row that cannot
+change anything is worse than no row.</div>
 <div class="quirk"><b><kbd>Shift</kbd> means two different things in the
 Direct draw group.</b> On the straight line it snaps the drag to 45°
 steps, the way you rule a horizon. On the rectangle and the ellipse it

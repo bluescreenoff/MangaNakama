@@ -2356,10 +2356,22 @@ impl App {
     /// Figure ▸ Stream/Saturated line release: turn the drag's geometry into
     /// a `GenLinesSpec` and place it as a fresh layer (`GenLinesPlace` —
     /// never the dialog's in-place regen; see the AppCmd doc). The tool
-    /// knobs (count/width/jitter/inner radius) ride on `figure_stream` /
-    /// `figure_focus`; the seed bumps per placement so re-drags reroll.
+    /// knobs ride on `figure_stream` / `figure_focus`; the seed bumps per
+    /// placement so re-drags reroll.
+    ///
+    /// The MATHS is not here any more: `LineOpts::place` in `mn-core` owns
+    /// it (plan `2026-09-06-effect-lines-parity`, lane A1/A2), so the render
+    /// harness, the sub tool rows and this drag cannot drift apart — the
+    /// spec literal that used to sit here silently ignored every knob the
+    /// parity round added, because a struct literal does not tell you about
+    /// the fields you left out. What is left here is what genuinely belongs
+    /// to the app: the too-short-drag guidance, which panel the press landed
+    /// in, and the seed bump.
     fn finish_figure_lines(&mut self, a: (f32, f32), b: (f32, f32)) {
         let radial = self.figure_mode.radial();
+        let Some(kind) = self.figure_mode.line_kind() else {
+            return;
+        };
         let len = (b.0 - a.0).hypot(b.1 - a.1);
         if len < 8.0 {
             self.set_status(if radial {
@@ -2370,7 +2382,7 @@ impl App {
             return;
         }
         // The flashes share Saturated line's knobs — same centre-out
-        // gesture, same four values (see FigureLineOpts).
+        // gesture, same values (see FigureLineOpts).
         let opts = if radial {
             let o = self.figure_focus;
             self.figure_focus.seed = o.seed.wrapping_add(1);
@@ -2383,95 +2395,16 @@ impl App {
         // CSP default lengths (owner, 2026-08-24): the lines CROSS the
         // panel — from the ring past the border, protrusions hidden by
         // the frame folder's coverage. The gesture keeps centre, hole
-        // and angle; the drag distance no longer caps the length.
+        // and angle; the drag distance does not cap the length. `place`
+        // is where that rule lives; the panel it applies to is here,
+        // because only the app knows which panel the press was in.
         let panel = panel_at(&self.doc, [a.0, a.1]);
         let bounds = panel.map_or(
             [0.0, 0.0, self.doc.size.0 as f32, self.doc.size.1 as f32],
             |(_, b)| b,
         );
-        let (pa, pb, pc, pd) = if radial {
-            // Centre from the press, hole from the drag (the fraction
-            // knob); the reach runs to the panel's/page's farthest
-            // corner plus a border-crossing margin, never shorter than
-            // the drag.
-            let far = [
-                [bounds[0], bounds[1]],
-                [bounds[2], bounds[1]],
-                [bounds[0], bounds[3]],
-                [bounds[2], bounds[3]],
-            ]
-            .iter()
-            .map(|c| (c[0] - a.0).hypot(c[1] - a.1))
-            .fold(0.0f32, f32::max);
-            let r_out = (far + (far * 0.05).max(32.0)).max(len);
-            (a.0, a.1, len * opts.r_in_frac.clamp(0.0, 0.95), r_out)
-        } else {
-            // Angle from the drag direction; the runs cross the whole
-            // panel edge to edge (the AABB diagonal outruns any crossing
-            // at any angle), protruding past both sides until the panel
-            // clips them.
-            let angle = (b.1 - a.1).atan2(b.0 - a.0).to_degrees();
-            let cross = ((bounds[2] - bounds[0]).hypot(bounds[3] - bounds[1]) * 1.05).max(len);
-            (angle, cross, cross, 0.0)
-        };
-        let kind = self.figure_mode.gen_kind();
         self.push_cmd(AppCmd::GenLinesPlace(
-            mn_core::genlines::GenLinesSpec {
-                // Kinds 1/2 keep focus = true: the Object tool's driver
-                // handles and their clamps key on it (GenLinesSpec's doc).
-                focus: radial,
-                kind,
-                a: pa,
-                b: pb,
-                c: pc,
-                d: pd,
-                count: opts.count,
-                width: opts.width,
-                jitter: opts.jitter,
-                // Focus rays taper toward the convergence like Stream tails
-                // (the renderer swaps endpoints for that); the flash kinds'
-                // teeth carry their own shape and ignore it.
-                taper: match self.figure_mode {
-                    FigureMode::Focus | FigureMode::Stream => opts.taper,
-                    _ => 0.0,
-                },
-                // Density: the radial kinds are gap-driven in DEGREES, the
-                // stream in px — a flash counts its teeth and takes neither
-                // (its `width` is a spike base, and gapping it would fight
-                // the renderer's own neighbour clamp).
-                gap_deg: if radial && kind == 0 {
-                    opts.gap_deg
-                } else {
-                    0.0
-                },
-                gap_px: if radial { 0.0 } else { opts.gap_px },
-                group: if radial { 0 } else { opts.group },
-                group_gap: if radial { 0.0 } else { opts.group_gap },
-                jit_gap: opts.jit_gap,
-                jit_len: opts.jit_len,
-                jit_width: opts.jit_width,
-                // WHERE THE DRIVER HANDLES GO. Screen-side only — no
-                // renderer reads either — but without them a burst placed
-                // near the right edge put its radius handles off the page and
-                // a stream's reference line sat at the canvas centre instead
-                // of on the run you just drew: nothing to aim at, which is
-                // half of "I cannot re-select them" (owner, 2026-08-23).
-                hand_deg: if radial {
-                    (b.1 - a.1).atan2(b.0 - a.0).to_degrees()
-                } else {
-                    0.0
-                },
-                anchor: (!radial).then_some([(a.0 + b.0) * 0.5, (a.1 + b.1) * 0.5]),
-                converge: None,
-                color: [0, 0, 0],
-                seed: opts.seed,
-                // The parity round's knobs (accents, entry, needle,
-                // len_skew, sweep, anchored starts) at their 0 = today's
-                // set exactly. Lane A2 deletes this whole body for
-                // `opts.place(kind, a, b, bounds, seed)`, which is what
-                // actually writes them.
-                ..Default::default()
-            },
+            opts.place(kind, [a.0, a.1], [b.0, b.1], bounds, opts.seed),
             panel.map(|(i, _)| i),
         ));
     }

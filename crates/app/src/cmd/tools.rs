@@ -170,6 +170,35 @@ impl FigureMode {
             FigureMode::Focus | FigureMode::Urchin | FigureMode::SolidFlash
         )
     }
+
+    /// The core generator this sub tool arms, or `None` for the seven
+    /// Direct-draw modes that ink with the brush instead.
+    ///
+    /// Two enums for one idea, deliberately: [`LineKind`] is what a preset
+    /// row and [`FigureLineOpts::place`] speak, and it has exactly four
+    /// members. `FigureMode` is the whole Figure PALETTE, most of which is
+    /// not an effect line at all — folding the two would put `Polygon` in a
+    /// signature that cannot place one.
+    pub fn line_kind(self) -> Option<LineKind> {
+        Some(match self {
+            FigureMode::Stream => LineKind::Stream,
+            FigureMode::Focus => LineKind::Focus,
+            FigureMode::Urchin => LineKind::Urchin,
+            FigureMode::SolidFlash => LineKind::Solid,
+            _ => return None,
+        })
+    }
+
+    /// The palette row for one core [`LineKind`] — the inverse of
+    /// [`FigureMode::line_kind`], so a preset list can arm a mode.
+    pub fn of_line_kind(kind: LineKind) -> Self {
+        match kind {
+            LineKind::Stream => FigureMode::Stream,
+            LineKind::Focus => FigureMode::Focus,
+            LineKind::Urchin => FigureMode::Urchin,
+            LineKind::Solid => FigureMode::SolidFlash,
+        }
+    }
 }
 
 impl FigureMode {
@@ -321,174 +350,50 @@ impl FigureStage2 {
 }
 
 /// Tool-side parameters for Figure ▸ Stream/Saturated line — what the NEXT
-/// drag generates with (the drag itself supplies the geometry: center and
-/// radius, or angle and length). One struct serves both modes; Stream
-/// ignores `jitter`/`r_in_frac` (the speed renderer has no use for either)
-/// and the radial modes ignore `taper`. `seed` bumps after every placement
-/// so consecutive drags differ without losing determinism.
+/// drag generates with. THE STRUCT LIVES IN CORE now
+/// ([`mn_core::genlines::LineOpts`], plan `2026-09-06-effect-lines-parity`
+/// lane A1): the render harness has to draw the shipped presets without an
+/// app, and the tuning loop that produced them edits numbers in ONE file
+/// rather than chasing them through the UI layer. The app copy — and its
+/// seven `*_dpi` constructors — are gone; the presets are
+/// [`mn_core::genlines::builtin_presets`] and the drag→spec maths is
+/// [`mn_core::genlines::LineOpts::place`].
+///
+/// The alias stays because `crate::cmd::FigureLineOpts` is the name every
+/// call site in the app already uses, and because the app's mental model of
+/// it is unchanged: one struct serves every generator mode, a mode ignores
+/// the fields it has no use for, and `seed` bumps after every placement so
+/// consecutive drags differ without losing determinism.
 ///
 /// The flash modes share `figure_focus` with Saturated line: they are the
-/// same centre-out gesture with the same four knobs, and every sub tool
-/// row writes its own preset values on the way in.
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub struct FigureLineOpts {
-    pub count: u32,
-    pub width: f32,
-    pub jitter: f32,
-    /// Focus/flash only: the empty middle, as a fraction of the radius.
-    pub r_in_frac: f32,
-    /// Stream only: [`mn_core::genlines::SpeedLinesParams::taper`]. 0 is
-    /// the pre-2026-08-22 look and stays the default — an existing drag
-    /// must not change shape because the knob appeared.
-    pub taper: f32,
-    /// Radial: the angular gap in degrees ([`mn_core::genlines::
-    /// GenLinesSpec::gap_deg`]). >0 drives `count`.
-    pub gap_deg: f32,
-    /// Stream: the spacing between runs in canvas px, and the bundling
-    /// around it (see the same-named `GenLinesSpec` fields).
-    pub gap_px: f32,
-    pub group: u32,
-    pub group_gap: f32,
-    pub jit_gap: f32,
-    pub jit_len: f32,
-    pub jit_width: f32,
-    pub seed: u64,
-}
+/// same centre-out gesture with the same knobs, and every sub tool row
+/// writes its own preset values on the way in.
+pub use mn_core::genlines::{LineKind, LineOpts as FigureLineOpts, builtin_presets};
 
-impl FigureLineOpts {
-    /// The sub tool presets, in the units a manga tutorial states them in
-    /// — an ANGULAR gap for 集中線 (CSP's own rule of thumb: ≈3° for a
-    /// dense burst, ≈10° for a sparse one) and MILLIMETRES for a 流線
-    /// spacing and every line width. Both are the units that mean the
-    /// same thing on a 600 dpi B4 and a 72 dpi draft; a count and a pixel
-    /// width are not, which is half of why the generated sets have never
-    /// looked like the reference pages.
-    ///
-    /// `dpi` is the caller's `tone_dpi()` — the page's, or the manga
-    /// standard 600 for a pixel canvas (at 96 a 0.2 mm line rounds to
-    /// under one pixel and the whole set turns to hairline noise).
-    fn from_mm(dpi: u32, width_mm: f32, gap_mm: f32) -> Self {
-        let px = |mm: f32| mm / 25.4 * dpi as f32;
-        Self {
-            count: 60,
-            width: px(width_mm).max(0.5),
-            jitter: 0.0,
-            r_in_frac: 0.0,
-            taper: 0.5,
-            gap_deg: 0.0,
-            gap_px: px(gap_mm),
-            group: 0,
-            group_gap: 0.0,
-            jit_gap: 0.0,
-            jit_len: 0.0,
-            jit_width: 0.0,
-            seed: 1,
-        }
-    }
-
-    // Default tapers are NOT 0: a flat-width effect line is the "flat
-    // noise field" the pro-page audit flagged — printed 流線/集中線 thin
-    // to needles. Tool defaults are free to be right (nothing saved
-    // regenerates through them; the 0-means-legacy rule guards SPECS).
-    pub fn stream_default() -> Self {
-        Self::stream_dpi(600)
-    }
-    pub fn focus_default() -> Self {
-        Self::focus_dpi(600)
-    }
-
-    /// 流線, the everyday one: 1 mm between runs, 0.20 mm wide, in
-    /// bundles of 4 with a two-and-a-half-gap hole between bundles
-    /// (まとまり — the single biggest quality lever a generated speed
-    /// block has, and the thing the uniform scatter could not express).
-    pub fn stream_dpi(dpi: u32) -> Self {
-        Self {
-            group: 4,
-            group_gap: 2.5,
-            jit_gap: 0.25,
-            jit_len: 0.3,
-            jit_width: 0.25,
-            ..Self::from_mm(dpi, 0.20, 1.0)
-        }
-    }
-
-    /// A tighter 流線 block: 0.6 mm gap, 0.15 mm lines, bundles of 6.
-    pub fn dense_stream_dpi(dpi: u32) -> Self {
-        Self {
-            group: 6,
-            group_gap: 2.0,
-            jit_gap: 0.25,
-            jit_len: 0.3,
-            jit_width: 0.25,
-            ..Self::from_mm(dpi, 0.15, 0.6)
-        }
-    }
-
-    /// A sparse 流線 block — the same rule read the other way: gaps you
-    /// can see between the runs, so no bundling on top of them.
-    pub fn sparse_stream_dpi(dpi: u32) -> Self {
-        Self {
-            jit_gap: 0.3,
-            jit_len: 0.35,
-            jit_width: 0.25,
-            ..Self::from_mm(dpi, 0.30, 2.5)
-        }
-    }
-
-    /// 集中線: a 3.5° gap, 0.35 mm rays needling to the convergence, and
-    /// a 40 % hole for the art.
-    pub fn focus_dpi(dpi: u32) -> Self {
-        Self {
-            gap_deg: 3.5,
-            gap_px: 0.0,
-            taper: 0.6,
-            r_in_frac: 0.40,
-            jitter: 0.25,
-            jit_gap: 0.25,
-            jit_len: 0.25,
-            jit_width: 0.3,
-            ..Self::from_mm(dpi, 0.35, 0.0)
-        }
-    }
-
-    /// The dense end of the 3°/10° rule: a 2° gap on 0.25 mm rays.
-    pub fn dense_focus_dpi(dpi: u32) -> Self {
-        Self {
-            gap_deg: 2.0,
-            ..Self::focus_dpi(dpi)
-        }
-    }
-
-    /// A black burst: rays at a 1.2° gap, twice the weight, small hole.
-    pub fn dark_burst_dpi(dpi: u32) -> Self {
-        Self {
-            gap_deg: 1.2,
-            r_in_frac: 0.22,
-            jitter: 0.5,
-            width: (0.7 / 25.4 * dpi as f32).max(0.5),
-            ..Self::focus_dpi(dpi)
-        }
-    }
-
-    /// The two flash kinds ride `figure_focus` (same gesture, same
-    /// knobs), but their `width` is a spike BASE in px and their teeth
-    /// are counted, not gapped — so they keep the count-driven preset.
-    pub fn flash_dpi(dpi: u32, count: u32, width_mm: f32, r_in_frac: f32) -> Self {
-        Self {
-            count,
-            gap_deg: 0.0,
-            jitter: 0.25,
-            r_in_frac,
-            taper: 0.0,
-            ..Self::from_mm(dpi, width_mm, 0.0)
-        }
-    }
-
-    /// Do two presets describe the same set? The seed rerolls on every
-    /// placement, so it can never take part in "is this row armed".
-    pub fn same_as(&self, other: &Self) -> bool {
-        Self { seed: 0, ..*self } == Self { seed: 0, ..*other }
-    }
+/// Arm one effect-line sub tool row: point the Figure tool at its generator
+/// and load the row's knobs.
+///
+/// A named fn rather than five lines inside the palette's click closure,
+/// because two of those five are easy to get wrong and impossible to test
+/// where they were. The SEED must survive the pick — it is the reroll
+/// counter, not a parameter, and resetting it would make two clicks on one
+/// row place the identical set twice. And the three radial kinds (集中線 and
+/// both flashes) share ONE holder with each other while the stream keeps its
+/// own, so "which field does this row write?" is a question about the KIND,
+/// not about the row.
+pub fn arm_line_preset(app: &mut App, kind: LineKind, opts: FigureLineOpts) {
+    app.figure_mode = FigureMode::of_line_kind(kind);
+    // A half-placed polygon belongs to the sub tool you just left.
+    app.figure_poly = None;
+    let held = if kind.radial() {
+        &mut app.figure_focus
+    } else {
+        &mut app.figure_stream
+    };
+    *held = FigureLineOpts {
+        seed: held.seed,
+        ..opts
+    };
 }
 
 /// Gradient-tool colour modes (CSP's three), plus `FI-050`'s freeform.

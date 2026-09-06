@@ -2007,8 +2007,12 @@ impl App {
             figure_stage2: None,
             figure_adjust_angle: false,
             smart_shape: None,
-            figure_stream: crate::cmd::FigureLineOpts::stream_default(),
-            figure_focus: crate::cmd::FigureLineOpts::focus_default(),
+            // The core presets at the manga standard 600 dpi (`tone_dpi`'s
+            // fallback): an App is built before any page setup is read, and
+            // a sub tool row re-prices its knobs at the page's own dpi the
+            // moment one is picked.
+            figure_stream: crate::cmd::FigureLineOpts::stream(600),
+            figure_focus: crate::cmd::FigureLineOpts::focus(600),
             grad_mode: GradMode::FgToBg,
             grad_mid: Default::default(),
             grad_opts: Default::default(),
