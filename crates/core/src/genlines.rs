@@ -510,7 +510,30 @@ struct Tooth {
     /// rectangles, blunt on both ends". A real nib enters and exits;
     /// 0.10 is a short entry, so the stroke still reads 太い at the base
     /// the way ref-23 labels it, but it arrives there from a point.
+    ///
+    /// Since Builder C it is stated PER TOOTH, not once for the set: the
+    /// preset's fraction with a floor of [`ENTRY_NIB`] half-widths, so a
+    /// fat accent on a short stroke still gets a ramp long enough to read
+    /// as a point. See `render_urchin`.
     entry: f32,
+    /// A ベタフラ's CUT only: how wide the cut becomes BELOW its fat end,
+    /// in px. 0 (every other row, and every saved flash) = it stops at
+    /// the fat end, which is the straight cut the whole module drew
+    /// before.
+    ///
+    /// Why a cut has to keep going below its own base: the black between
+    /// two cuts is the mark, and where the cuts stop the black abruptly
+    /// widens to the full pitch and ends in a flat. That flat is critic
+    /// 2's "blunt spike ends at the core" and the staircase along the
+    /// core edge, and Builder B's answer to it — named in that report and
+    /// left undone — is this: let each cut run on past the boundary,
+    /// FLARING, so it merges with its neighbours and the black between
+    /// them tapers to a real point and disappears into the white core.
+    ///
+    /// It only ever removes black inside the core's own boundary, which
+    /// the solid scan skips anyway; what it changes is the last few
+    /// pixels above it.
+    flare_hw: f32,
 }
 
 impl Tooth {
@@ -535,8 +558,19 @@ impl Tooth {
         } else {
             (self.r_base, self.r_apex)
         };
-        if along < lo || along > hi {
+        if along > hi {
             return false;
+        }
+        if along < lo {
+            // 入り below the base — the flare (see `flare_hw`). Off by
+            // default, and `along < 0` is the far side of the centre.
+            if self.flare_hw <= self.hw || along < 0.0 {
+                return false;
+            }
+            let gain = self.flare_hw - self.hw;
+            let x = ((lo - along) / (FLARE_SLOPE * gain).max(1.0)).min(1.0);
+            let perp = -dx * self.s + dy * self.c;
+            return perp.abs() <= self.hw + gain * x;
         }
         let span = hi - lo;
         if span <= f32::EPSILON {
@@ -1217,7 +1251,18 @@ pub fn render_speed(p: &SpeedLinesParams, size: (u32, u32)) -> HashMap<TileIdx, 
 /// which is what lets the solid scan bound its search by MEASUREMENT
 /// instead of by the ±1 sector the bundle walk would have broken.
 fn tooth_reach(t: &Tooth) -> f32 {
-    (t.hw / t.r_base.max(1.0)).clamp(0.0, 1.0).asin()
+    // A flared cut is at its widest a flare below its own base, so that
+    // is the radius the angle has to be taken at. Without a flare this is
+    // the arithmetic it always was, float for float.
+    let (w, r) = if t.flare_hw > t.hw {
+        (
+            t.flare_hw,
+            (t.r_base - FLARE_SLOPE * (t.flare_hw - t.hw)).max(1.0),
+        )
+    } else {
+        (t.hw, t.r_base.max(1.0))
+    };
+    (w / r).clamp(0.0, 1.0).asin()
 }
 
 /// The most teeth any arc `reach` wide can hold, given their sorted
@@ -1316,15 +1361,59 @@ fn core_lut(teeth: &[Tooth], angs: &[f32], win: usize) -> Vec<f32> {
 /// peak, not a clump: at 0.03 the pack still reads as a single spike.
 const SLIVER_JIT: f32 = 0.03;
 
-/// The same for the FAT end, which is four times looser.
+/// The hole, in three parts — all of them measured against `core_jit`,
+/// so that knob still says how ragged the hole is, and NONE of them ever
+/// pushes a stroke OUTWARD past the hole curve.
 ///
-/// The peak is the thing a bundle shares (ref-23's zigzag); the starts
-/// are the thing it frays. ref-17: the fat stroke-starts "stack against
-/// [the hole] with visible gaps and overlaps, giving a fuzzy band roughly
-/// 4–6 stroke-widths thick rather than a clean boundary". With both ends
-/// locked to 3 % every pack's base was one straight cut at one radius,
-/// which is what critic 1 saw as blunt rectangles in open white.
-const SLIVER_IN: f32 = 0.12;
+/// That last word is the whole of critic 2's fix 1. Builder B's hole was
+/// a lobe plus a per-bundle draw that ran BOTH ways, so a pack could
+/// start a couple of millimetres outside its neighbours with clean white
+/// all round its inner end — a leaf floating in the annulus, which is
+/// ref-15's plain-flash signature and a rubric ban. ref-17 and ref-18 are
+/// unambiguous: every stroke starts ON the hole edge and only ever runs
+/// outward.
+///
+/// So the hole is now ONE smooth curve — `r_in · (1 + core_jit ·
+/// HOLE_LOBE · lobe(θ))`, continuous in θ, so neighbouring bundles sit on
+/// nearly the same radius — and both jitters bite INWARD from it: a small
+/// per-bundle one and a bigger per-stroke one. Ink therefore begins at or
+/// inside the curve at every angle, the ring cannot break, and the
+/// raggedness that is left is at STROKE scale (critic 2: ours was "at
+/// bundle scale … both measure 20 %; only one looks inked").
+const HOLE_LOBE: f32 = 0.75;
+/// …the per-BUNDLE pull-in, inward only.
+const HOLE_BUMP: f32 = 0.18;
+/// …and the per-STROKE one, which is the serration a reader sees.
+const HOLE_CHEW: f32 = 0.24;
+
+/// The nib's 入り floor: an entry ramp is never shorter than this many of
+/// the stroke's own half-widths, whatever fraction of the LENGTH that
+/// works out as.
+///
+/// [`Tooth::entry`] is a fraction of the length, and Builder B left the
+/// consequence written down: at half the burst size the ramp is half as
+/// long in pixels, so `sea-urchin-flash-tight` reported 9 blunt ends
+/// where the shipped row reports 0. A ramp reads as a point when it is
+/// long against the WIDTH it ramps from — that is a property of the nib,
+/// not of the burst — so the floor is stated there.
+const ENTRY_NIB: f32 = 7.0;
+/// …and it never eats more than this much of the stroke, or a fat accent
+/// on a short stroke turns into ref-15's double-tapered spindle.
+const ENTRY_MAX: f32 = 0.45;
+
+/// How steeply a ベタフラ's cut flares below its own fat end: the depth
+/// it takes to reach [`Tooth::flare_hw`], as a multiple of the width it
+/// has to gain. 1.2 makes the black valley between two bundles close at
+/// roughly a 70° point — pointed enough to read as a spike's end, steep
+/// enough that the last sub-pixel stretch of black is under a pixel of
+/// radius and cannot print as a row of dots.
+const FLARE_SLOPE: f32 = 0.7;
+
+/// The narrowest black a ベタフラ may leave between two neighbouring
+/// cuts, in px. A pixel and a bit: under one pixel a hard-edged raster
+/// prints a thread as a dashed line, which is dirt on the page and
+/// `frags` on the table.
+const BLACK_MIN: f32 = 2.4;
 
 /// How much shorter a bundle's OUTERMOST sliver is than its middle one,
 /// as a fraction of the ring's span.
@@ -1430,6 +1519,11 @@ pub fn render_urchin(p: &UrchinParams, size: (u32, u32)) -> HashMap<TileIdx, Arc
     } else {
         1.0
     };
+    // How wide a ベタフラ's cut gets below its base, in PITCHES. The
+    // widest black a flare has to close is a whole between-bundle valley
+    // — `group_gap` pitches — so half of that, plus a little, is what
+    // makes every black spike end in a point instead of a flat.
+    let flare_pitch = 0.60 * p.group_gap.max(1.0) * (1.0 + p.group_jit.clamp(0.0, 1.0));
     let aj = p.angle_jitter.clamp(0.0, 0.5);
     let lj = p.length_jitter.clamp(0.0, 1.0);
     // Which end the length jitter moves — see `UrchinParams::jit_len_out`.
@@ -1496,19 +1590,29 @@ pub fn render_urchin(p: &UrchinParams, size: (u32, u32)) -> HashMap<TileIdx, Arc
             let out_reach = if p.jit_len_out > 0.0 { 0.85 } else { 0.5 };
             b_base = r_out - p.mix.skew(rand(&mut seed)) * out_jit * span * out_reach;
             b_apex = r_in;
-            if in_jit > 0.0 {
-                b_apex += p.mix.skew(rand(&mut seed)) * in_jit * span * 0.5;
+            // The draw happens either way so the `rand()` sequence does
+            // not depend on the walk; only the LEGACY path spends it on
+            // pushing the apex outward, because on a walked flash the
+            // hole is a curve and nothing may start outside it (see
+            // `HOLE_LOBE`).
+            let push_in = if in_jit > 0.0 {
+                p.mix.skew(rand(&mut seed)) * in_jit * span * 0.5
+            } else {
+                0.0
+            };
+            if bases.is_none() {
+                b_apex += push_in;
             }
             if p.core_jit > 0.0 {
-                // A WALKED flash chews its hole in LOBES and does it
-                // SYMMETRICALLY: `r_in` stays the mean hole radius, so
-                // the ring's span still means the stroke length (see
-                // `lobe`). Every saved flash is unwalked and keeps the
-                // one-sided pull-in, off the same single `rand()`.
+                // A WALKED flash's hole is ONE smooth lobed curve, and
+                // this bundle sits on it and is only ever pulled INSIDE
+                // it (see `HOLE_LOBE`/`HOLE_BUMP`). Every saved flash is
+                // unwalked and keeps the one-sided pull-in from `r_in`,
+                // off the same single `rand()`.
                 let u = rand(&mut seed);
                 let cj = p.core_jit.clamp(0.0, 1.0);
                 if bases.is_some() {
-                    b_apex += r_in * cj * (0.65 * lobe(ang, ph) + 0.35 * (2.0 * u - 1.0));
+                    b_apex = r_in * (1.0 + cj * HOLE_LOBE * lobe(ang, ph)) - r_in * cj * HOLE_BUMP * u;
                 } else {
                     b_apex -= r_in * cj * u;
                 }
@@ -1529,7 +1633,13 @@ pub fn render_urchin(p: &UrchinParams, size: (u32, u32)) -> HashMap<TileIdx, Arc
                 // Guarded on the walk, so an unbundled flash draws no
                 // extra number.
                 r_base -= rand(&mut seed) * SLIVER_JIT * span;
-                r_apex += (rand(&mut seed) - 0.5) * SLIVER_IN * span;
+            }
+            // …and its own bite out of the hole, INWARD ONLY, which is
+            // the serration ref-12's 20 % is made of (see `HOLE_CHEW`).
+            // The old draw here was ± half the bite, and the half that
+            // pushed a stroke outward is what floated the leaves.
+            if p.core_jit > 0.0 {
+                r_apex -= r_in * p.core_jit.clamp(0.0, 1.0) * HOLE_CHEW * rand(&mut seed);
             }
         }
         let r_apex = r_apex.max(0.0).min(r_out - 1.0);
@@ -1546,6 +1656,20 @@ pub fn render_urchin(p: &UrchinParams, size: (u32, u32)) -> HashMap<TileIdx, Arc
         } else {
             (r_apex, r_base)
         };
+        // The 入り, per tooth: the preset's fraction, floored at
+        // `ENTRY_NIB` half-widths of THIS tooth so a fat accent on a
+        // short stroke still arrives from a point, capped at `ENTRY_MAX`
+        // so the floor can never turn a stroke into a spindle. 0 stays 0
+        // — every saved flash draws the straight cut it always drew.
+        let len_i = (r_base - r_apex).abs().max(1.0);
+        let entry_i = if p.mix.entry > 0.0 {
+            p.mix
+                .entry
+                .max(ENTRY_NIB * hw_i / len_i)
+                .min(ENTRY_MAX)
+        } else {
+            0.0
+        };
         teeth.push(Tooth {
             ang: ang.rem_euclid(std::f32::consts::TAU),
             c,
@@ -1554,7 +1678,15 @@ pub fn render_urchin(p: &UrchinParams, size: (u32, u32)) -> HashMap<TileIdx, Arc
             r_base,
             hw: hw_i,
             needle: nib,
-            entry: p.mix.entry,
+            entry: entry_i,
+            // A ベタフラ's cut runs on below its base, flaring to half the
+            // bundle's own pitch so it merges with its neighbours and the
+            // black between them ends in a point (see `Tooth::flare_hw`).
+            flare_hw: if p.solid && p.width_frac > 0.0 {
+                (step * r_wide * flare_pitch).max(hw_i)
+            } else {
+                0.0
+            },
         });
     }
 
@@ -1567,15 +1699,93 @@ pub fn render_urchin(p: &UrchinParams, size: (u32, u32)) -> HashMap<TileIdx, Arc
         // walk and a wider-than-pitch cut break — a black tooth
         // straddling a white gap.
         teeth.sort_by(|a, b| a.ang.total_cmp(&b.ang));
+        // THE BLACK GETS A FLOOR TOO. `Tooth::hit` floors the CUT at half
+        // a pixel so a white sliver never prints as a dotted line; the
+        // black between two cuts had no such floor, and once the count
+        // goes up it is the thing that runs out of room first. Measured:
+        // at 520 teeth the nominal thread is 2.5 px, but the angle wobble
+        // and a 1.9× accent between them take pairs under a pixel, and a
+        // 1-bit raster prints those as a dashed line — 52 specks, every
+        // one of them a long dash rather than a spike tip (dumped and
+        // read, not guessed).
+        //
+        // So each cut is capped at half its own tightest neighbour gap,
+        // less `BLACK_MIN`. Both members of a pair take the same cap, so
+        // their two half-widths can never sum past the gap, and the black
+        // between any two cuts survives at a printable width. The pitch
+        // is smallest at the hole, which is where this is measured.
+        if p.width_frac > 0.0 && teeth.len() > 2 {
+            let n = teeth.len();
+            // Each tooth's tightest ANGULAR gap to a neighbour. Everything
+            // below is that angle turned into arc length at some radius.
+            let ang_gap: Vec<f32> = (0..n)
+                .map(|i| {
+                    let nx = (teeth[(i + 1) % n].ang - teeth[i].ang)
+                        .rem_euclid(std::f32::consts::TAU);
+                    let pv = (teeth[i].ang - teeth[(i + n - 1) % n].ang)
+                        .rem_euclid(std::f32::consts::TAU);
+                    nx.min(pv).max(1e-6)
+                })
+                .collect();
+            // The arc one cut, one black thread and half of each
+            // neighbour needs: two half-pixel cuts (the raster floor in
+            // `Tooth::hit`) plus a printable thread.
+            let need = 1.0 + BLACK_MIN;
+            for i in 0..n {
+                // A HOLE CANNOT BE CHEWED DEEPER THAN THE PITCH THERE CAN
+                // CARRY. `core_jit`'s lobe takes a base down to two
+                // thirds of `r_in` and the per-stroke chew takes it lower
+                // still, and at that radius the same angle is two thirds
+                // of the arc — so the black thread beside it goes under a
+                // pixel and prints as a dashed line. (Dumped and read:
+                // every speck on this row was a dash on the core
+                // boundary in a deep lobe, never a spike tip.) Pulling
+                // the base back out to where there IS room says the same
+                // thing as "the lobe stops where the raster stops", and
+                // the core's boundary follows the bases, so the picture
+                // stays consistent with itself.
+                let r_min = need / ang_gap[i];
+                let (lo, hi) = (teeth[i].r_inner(), teeth[i].r_apex.max(teeth[i].r_base));
+                if lo < r_min && hi > r_min + 1.0 {
+                    if teeth[i].r_apex <= teeth[i].r_base {
+                        teeth[i].r_apex = r_min;
+                    } else {
+                        teeth[i].r_base = r_min;
+                    }
+                }
+            }
+            // …and then the cut itself is capped at half its own tightest
+            // gap, less the thread. Both members of a pair take the same
+            // cap off the same gap, so their half-widths can never sum
+            // past it.
+            let arc = |i: usize, j: usize| {
+                (teeth[j].ang - teeth[i].ang).rem_euclid(std::f32::consts::TAU)
+                    * teeth[i].r_inner().min(teeth[j].r_inner()).max(1.0)
+            };
+            let caps: Vec<f32> = (0..n)
+                .map(|i| {
+                    let d = arc(i, (i + 1) % n).min(arc((i + n - 1) % n, i));
+                    ((d - BLACK_MIN) * 0.5).max(0.5)
+                })
+                .collect();
+            for (t, c) in teeth.iter_mut().zip(caps) {
+                t.hw = t.hw.min(c);
+            }
+        }
         let angs: Vec<f32> = teeth.iter().map(|t| t.ang).collect();
         let reach = teeth.iter().map(tooth_reach).fold(0.0, f32::max);
         let win = candidate_window(&angs, reach);
-        // Three quarters of a pitch of min-filter — the arc a base cut
-        // spans, which is what has to be pushed past (see `core_lut`).
+        // No min-filter once the cuts FLARE (see `Tooth::flare_hw`): the
+        // filter existed to push the boundary past the pinch above a
+        // cut's base, and a flaring cut has already eaten the black
+        // there, so the sharp interpolation is back and with it the
+        // sliver starts that used to sit blunt out in the black. Without
+        // a flare it is still three quarters of a pitch — the arc a base
+        // cut spans (see `core_lut`).
         let inner = core_lut(
             &teeth,
             &angs,
-            (0.75 * step / std::f32::consts::TAU * CORE_LUT as f32).ceil() as usize,
+            (4.0 * step / std::f32::consts::TAU * CORE_LUT as f32).ceil() as usize,
         );
         // A swept flash inks only its own arc: a burst aimed from outside
         // the panel would otherwise black the whole page on the way past,
@@ -1599,8 +1809,38 @@ pub fn render_urchin(p: &UrchinParams, size: (u32, u32)) -> HashMap<TileIdx, Arc
         let x1 = (c[0] + field_r + 1.0).min(size.0 as f32);
         let y0 = (c[1] - field_r - 1.0).max(0.0);
         let y1 = (c[1] + field_r + 1.0).min(size.1 as f32);
+        // ONE FIELD, LITERALLY. A ベタフラ's black is a single mass with a
+        // burst punched through it (REFS target 5, ref-20/21), and the
+        // only way a hard-edged raster can end a black wedge in a point
+        // is to print its last sub-pixel stretch as a dot or two. Both
+        // Builder B (355 of them) and this round (down to 12 by geometry
+        // alone: a flare that closes steeply, a boundary pushed two
+        // pitches clear, a floor on the black thread) fought that with
+        // shape, and shape can only trade it against the core's own
+        // raggedness — measured, `core_jit` 0.42 → 0.20 halves the specks
+        // and takes white σ from 18.8 % to 14.5 %, which is the wrong
+        // trade.
+        //
+        // So the rule is stated instead of approximated: on a flash whose
+        // black is a FIELD, keep only the black connected to it. Seeded
+        // from past `r_out`, where there are no teeth and the field is
+        // solid by construction. Gated on `field`, so a saved flash — no
+        // field, black that stops with the teeth — is untouched.
+        let despeckle = p.field > 1.0 && p.width_frac > 0.0;
+        let (rw, rh) = (
+            (x1.ceil() - x0.floor()) as usize + 2,
+            (y1.ceil() - y0.floor()) as usize + 2,
+        );
+        let (ox, oy) = (x0.floor() as i32, y0.floor() as i32);
+        let mut hit_map = if despeckle {
+            vec![false; rw * rh]
+        } else {
+            Vec::new()
+        };
+        let mut seeds: Vec<u32> = Vec::new();
         if x0 < x1 && y0 < y1 {
             let ro2 = field_r * field_r;
+            let solid_r2 = (r_out + 1.0) * (r_out + 1.0);
             let ni = teeth.len() as isize;
             let wi = win as isize;
             for y in y0.floor() as i32..=y1.ceil() as i32 {
@@ -1628,8 +1868,46 @@ pub fn render_urchin(p: &UrchinParams, size: (u32, u32)) -> HashMap<TileIdx, Arc
                     let idx = angs.partition_point(|v| *v < a) as isize;
                     let cut = (-wi..=wi)
                         .any(|o| teeth[(idx + o).rem_euclid(ni) as usize].hit(dx, dy));
-                    if !cut {
+                    if cut {
+                        continue;
+                    }
+                    if !despeckle {
                         put(&mut map, x, y);
+                        continue;
+                    }
+                    let k = (y - oy) as usize * rw + (x - ox) as usize;
+                    hit_map[k] = true;
+                    if r2 > solid_r2 {
+                        seeds.push(k as u32);
+                    }
+                }
+            }
+            if despeckle {
+                // Flood the field, then ink only what it reached.
+                let mut keep = vec![false; rw * rh];
+                let mut stack = seeds;
+                for s in &stack {
+                    keep[*s as usize] = true;
+                }
+                while let Some(k) = stack.pop() {
+                    let (kx, ky) = ((k as usize) % rw, (k as usize) / rw);
+                    for dy in -1i32..=1 {
+                        for dx in -1i32..=1 {
+                            let (nx, ny) = (kx as i32 + dx, ky as i32 + dy);
+                            if nx < 0 || ny < 0 || nx >= rw as i32 || ny >= rh as i32 {
+                                continue;
+                            }
+                            let j = ny as usize * rw + nx as usize;
+                            if hit_map[j] && !keep[j] {
+                                keep[j] = true;
+                                stack.push(j as u32);
+                            }
+                        }
+                    }
+                }
+                for (k, on) in keep.iter().enumerate() {
+                    if *on {
+                        put(&mut map, ox + (k % rw) as i32, oy + (k / rw) as i32);
                     }
                 }
             }

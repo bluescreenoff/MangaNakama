@@ -872,20 +872,38 @@ pub fn builtin_presets() -> &'static [LinePreset] {
             // At 0.55 the black thread between two slivers is as wide as
             // the sliver, which is ref-22's own measurement.
             opts: |dpi| LineOpts {
-                jit_len_out: 0.85,
+                // The length SPREAD, and it is what makes the fringe read
+                // as a BAND rather than as rain. At 0.85 (times the
+                // renderer's own 0.85 outer reach) a sliver could lose
+                // 72 % of the span, so at any given radius most of them
+                // had already stopped and the survivors read as isolated
+                // hairlines with 3–8 mm of black between them — critic
+                // 2's "rain / speed lines", worst on the off-corner row.
+                // At 0.55 they die together, between about 1.35× and
+                // 1.65× the core radius, which is ref-21's band.
+                jit_len_out: 0.72,
                 field: 4.0,
                 // The cut keeps its belly and whips out at the end, same
                 // as the urchin.s tooth. A straight wedge is a hair for
                 // most of its length, and a hair is where the black
                 // between two of them pinches under a pixel and dots.
                 needle: 0.6,
-                reach_frac: 1.70,
-                // Packs of 4–6 with a 3.5-pitch valley: ref-22's own
+                // 1.42 against a 0.85 hole = slivers that stop at about
+                // 1.67× the core radius. It was 1.70 (2.0×), and ref-20
+                // /21 both leave a solid black margin all round with the
+                // spike band only about a quarter of the total radius —
+                // critic 2: "the slivers run most of the way to the
+                // frame, so the silhouette reads as a cracked window
+                // rather than a burst".
+                reach_frac: 1.58,
+                // Packs of 4–6 with a 2.8-pitch valley: ref-22's own
                 // count ("each spike resolves into a stack of 4–10
                 // parallel white slivers … the gap between bundles is
-                // 4–8 sliver widths").
+                // 4–8 sliver widths"). The valley came down from 3.5
+                // because it is the widest black a reader sees inside the
+                // band, and critic 2 wants none over ~1.5 mm.
                 group: 6,
-                group_gap: 3.5,
+                group_gap: 2.8,
                 group_jit: 0.55,
                 // A LOT less accent spread than the urchin's, and a
                 // tighter angle wobble. A cut that is several pitches
@@ -901,11 +919,23 @@ pub fn builtin_presets() -> &'static [LinePreset] {
                 // the urchin. REFS target 4 wants the longest white spike
                 // at 1.5–2.0× the MEDIAN white radius, and a long bias
                 // pulls the median up to meet the longest.
-                len_skew: 0.15,
+                len_skew: 0.05,
                 // The core is a letterable middle, so its edge wobbles
                 // but does not lobe as deep as a ウニフラ's chewed hole.
                 core_jit: 0.42,
-                ..LineOpts::flash(dpi, 380, 0.34, 0.85)
+                // 520 teeth over the circle, not 380 — after the walk's
+                // holes that is ~400 white slivers, where 380 gave ~270
+                // and only about half of those were still alive at the
+                // middle of the band. ref-21 measures 354 tips and REFS
+                // asks for 150–350; critic 2 counted ours at ~135 and
+                // called the fringe "cracks in glass" rather than a
+                // dandelion. `width_frac` goes UP as the pitch comes
+                // down, because it is stated against the pitch: 0.40 of
+                // a 4.3 px pitch at the hole is a 1.7 px sliver with a
+                // 2.6 px black thread beside it, which is ref-22's
+                // "spacing between neighbouring slivers inside a bundle
+                // is roughly equal to one sliver width".
+                ..LineOpts::flash(dpi, 460, 0.40, 0.85)
             },
         },
     ]
@@ -1218,23 +1248,38 @@ mod tests {
                 .unwrap_or_else(|| panic!("no preset called {name}"))
         };
 
-        for (name, drag, long) in [
-            ("Sea urchin flash", 0.22f32, false),
-            ("Solid flash", 0.176, true),
+        // The third row is the HARNESS's tight burst, not a shipped
+        // preset — the same ウニフラ at half the drag and half the count.
+        // It is pinned here because it is the panel that broke: critic 2
+        // failed it on `caps 9`, and the cause was that `Mix::entry` is a
+        // fraction of the stroke LENGTH, so the nib's 入り halved with the
+        // burst while the nib itself did not. A target measured only on
+        // the shipped drag cannot see that class of bug at all.
+        for (name, from, drag, long, count, seed) in [
+            ("Sea urchin flash", "Sea urchin flash", 0.22f32, false, 0u32, 1_056u64),
+            ("Solid flash", "Solid flash", 0.176, true, 0, 1_063),
+            (
+                "Sea urchin flash - tight",
+                "Sea urchin flash",
+                0.11,
+                false,
+                254,
+                2_004,
+            ),
         ] {
-            let p = row(name);
+            let p = row(from);
             let c = if long {
                 [w * 0.50, h * 0.48]
             } else {
                 [w * 0.55, h * 0.45]
             };
-            let spec = (p.opts)(dpi).place(
-                p.kind,
-                c,
-                [c[0] + w * drag, c[1]],
-                bounds,
-                if long { 1_063 } else { 1_056 },
-            );
+            let opts = (p.opts)(dpi);
+            let opts = if count > 0 {
+                LineOpts { count, ..opts }
+            } else {
+                opts
+            };
+            let spec = opts.place(p.kind, c, [c[0] + w * drag, c[1]], bounds, seed);
             let m = super::super::metrics::measure(&spec, size, dpi);
             let ratio = m.w_p95 / m.w_p50.max(1e-6);
             let hole_rel = m.hole_rel().unwrap_or(0.0);
@@ -1283,11 +1328,16 @@ mod tests {
             //    with a flat end instead of a point. Ten ends out of
             //    ~500 is the trade, and it is the honest one for a
             //    pipeline with no anti-aliasing anywhere in it.
-            let cap_budget = if p.kind == LineKind::Urchin { 0 } else { 12 };
-            assert!(
-                m.caps <= cap_budget,
-                "{name}: {} ends stop dead instead of running out to a point \
-                 (budget {cap_budget})",
+            //    Builder C: the budget is ZERO on both rows. The trade
+            //    above is gone — a ベタフラ's cut now runs on BELOW its
+            //    own base, flaring into its neighbours, so the black
+            //    between two of them closes to a point on its own and the
+            //    boundary no longer has to be parked under it (see
+            //    `Tooth::flare_hw`). Both solid rows measured 5 caps
+            //    before that and 0 after.
+            assert_eq!(
+                m.caps, 0,
+                "{name}: {} ends stop dead instead of running out to a point",
                 m.caps
             );
 
@@ -1361,6 +1411,24 @@ mod tests {
                     (1.4..=2.1).contains(&hi),
                     "{name}: the longest white spike is {hi:.2}× the median, \
                      wanted 1.5–2.0 (above that they all run off the frame)"
+                );
+                // 5. DENSITY (Builder C, critic 2's fix 2). ref-21
+                //    measures 354 white tips on a comparable shape and
+                //    REFS asks for 150–350; critic 2 counted ours at
+                //    ~135 and said the fringe "reads as cracks in glass
+                //    rather than a dandelion". The cut is the honest
+                //    place to count: 35 strokes per 25 mm of it, against
+                //    24.5 before. The BAND is what it is really pinning —
+                //    a count alone can be spent on slivers that have all
+                //    stopped by the time the cut crosses them, which is
+                //    exactly what the off-corner row used to do.
+                assert!(
+                    (40.0..=70.0).contains(&m.per_25mm),
+                    "{name}: {:.1} white slivers per 25 mm of the cut, \
+                     wanted 40–70 (was 24.5 and read as cracked glass; \
+                     above 70 the black thread between two of them goes \
+                     under a pixel)",
+                    m.per_25mm
                 );
             }
         }

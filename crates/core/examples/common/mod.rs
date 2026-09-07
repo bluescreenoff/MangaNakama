@@ -183,13 +183,13 @@ pub fn panels() -> Vec<(String, GenLinesSpec)> {
             // point of separating them (ref-19: a flash off the edge
             // whose black "fused with the panel's own fill" at the far
             // side while its spikes show as wedges near the burst).
-            reach_frac: 1.9,
+            reach_frac: 1.58,
             // …and the count scales with it. A flash states its pitch as a
             // count over the WHOLE circle, so a burst twice the radius
             // drawn at the shipped count has half the slivers per
             // millimetre — which is how critic 1 got "giant
             // multi-millimetre white bands running frame to frame".
-            count: 840,
+            count: 1120,
             ..(solid.opts)(DPI)
         }
         .place(
