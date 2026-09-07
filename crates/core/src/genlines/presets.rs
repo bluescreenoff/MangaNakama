@@ -139,6 +139,35 @@ pub struct LineOpts {
     /// perspective streaks of ref-07's and ref-08's second panels, where
     /// the block converges on the impact instead of sliding past it.
     pub converge_far: f32,
+    /// Flash kinds: the tooth's fat end as a fraction of the angular
+    /// PITCH where that end sits (see [`super::UrchinParams::width_frac`]).
+    /// 0 = the `width` in px. Near 1 the fat ends of neighbouring teeth
+    /// just touch, which is the whole difference between a ウニフラ (they
+    /// do not quite fuse — a chewed hole) and a ベタフラ (they do — a
+    /// solid core).
+    pub width_frac: f32,
+    /// Flash kinds: the tooth's point faces OUTWARD, fat end at the hole
+    /// (see [`super::UrchinParams::tip_out`]). Both flash rows want it —
+    /// it is the one construction every Japanese source describes.
+    pub tip_out: bool,
+    /// Solid flash: how far the BLACK runs past the teeth, as a multiple
+    /// of the reach (see [`super::UrchinParams::field`]). 0 = it stops
+    /// with them. ref-20/21's ベタフラ is a black field with a white burst
+    /// punched through it, and the field is what makes the corners solid.
+    pub field: f32,
+    /// Radial: the outer radius as a multiple of the DRAG LENGTH. 0 = the
+    /// panel's far corner plus a margin, which is what every other radial
+    /// row wants and what every saved layer was placed with.
+    ///
+    /// The flashes want the other thing. Every Japanese source calls a
+    /// ウニフラ/ベタフラ フキダシの一種 — "a kind of speech balloon" — and
+    /// every reference in the pack is a balloon-sized object with its own
+    /// silhouette sitting inside a panel, not a burst that fills one.
+    /// With the corner reach the outer edge is always off the page, so
+    /// the effect has no outline at all: `solid-flash.png` before Lane F
+    /// was 84 % ink with a compass-circle hole, which is the shape you
+    /// get when the only visible edge is the one you did not draw.
+    pub reach_frac: f32,
     pub seed: u64,
 }
 
@@ -438,27 +467,71 @@ impl LineOpts {
         .with_mm(dpi, 0.50, 0.0)
     }
 
-    /// The two flash kinds ride the same centre-out gesture, but their
-    /// `width` is a spike BASE in px and their teeth are counted, not
-    /// gapped — so they keep the count-driven preset, and the parity
-    /// knobs stay off: the teeth carry their own shape.
+    /// The two flash kinds ride the same centre-out gesture. Everything
+    /// they share is here; the two rows below differ in three numbers.
     ///
-    /// The jitters are the flashes' ONLY irregularity, and at 0.25 they
-    /// were not enough: the critic read both rows as "a polar zoom
-    /// filter" — same length, same spacing, one circle. Angle 0.35 (the
-    /// renderer's cap is 0.5), length 0.5, and `core_jit` 0.3 so the
-    /// filled variant's teeth do not all start on one circle.
-    pub fn flash(dpi: u32, count: u32, width_mm: f32, r_in_frac: f32) -> Self {
+    /// Rebuilt for Lane F (2026-09-07) against a reference pack of real
+    /// ウニフラ/ベタフラ (`docs/plans/refs/effect-lines/REFS.md`). What
+    /// the old rows got wrong, in order of how much it showed:
+    ///
+    /// - **They were rays, not BUNDLES.** Clip Studio's own flash tool
+    ///   has a まとまり setting and labels its spikes 2本/3本/4本
+    ///   (ref-24); a close-up of a professionally inked analog flash
+    ///   resolves each spike into 4–10 slivers that peak together
+    ///   (ref-22); a manga school budgets 4–6 lines per big peak, 2–3 per
+    ///   small (ref-23). An evenly spaced ring fails at ANY count, which
+    ///   is why raising `count` never helped. `group` 5 with a 5× hole
+    ///   and a 0.5 size wobble draws packs of three to five.
+    /// - **They filled the panel.** Every source calls these フキダシの一種
+    ///   — a kind of speech balloon — and every reference is a
+    ///   balloon-sized object with its own silhouette. The corner reach
+    ///   put the outer edge off the page, so the effect had no outline at
+    ///   all. `reach_frac` 1.4 makes the drag state the size.
+    /// - **The teeth were upside down** for the filled row: see
+    ///   `tip_out`.
+    /// - **`width` in mm cannot state a cut.** See `width_frac`.
+    ///
+    /// The jitters (retuned by Builder B after critic 1): angle 0.35 (the
+    /// renderer caps at 0.5) is the within-bundle wobble; `core_jit` now
+    /// carries the whole of the hole's raggedness and does it in LOBES
+    /// around `r_in` rather than as a per-bundle pull-in, so `r_in` still
+    /// means the mean hole radius and the ring's span still means the
+    /// stroke length. `jit_len` — the apex's own white-noise push — drops
+    /// to a tenth: at 0.90 it scattered the fat starts over 360 px of a
+    /// 364 px hole radius, so nothing stacked at the hole and the band
+    /// read mid-grey instead of black (critic 1, "the band never reads
+    /// black", 6–8 % ink).
+    pub fn flash(dpi: u32, count: u32, width_frac: f32, r_in_frac: f32) -> Self {
         Self {
             count,
             gap_deg: 0.0,
             jitter: 0.25,
             jit_gap: 0.35,
-            jit_len: 0.5,
-            core_jit: 0.3,
+            jit_len: 0.10,
+            jit_len_out: 0.05,
+            core_jit: 0.55,
+            // Packs of 3–5 slivers, then a hole four pitches wide: the
+            // 3–8× between/within ratio the pack calls for (ref-22 puts
+            // the between-bundle gap at 4–8 sliver widths).
+            group: 5,
+            group_gap: 4.0,
+            group_jit: 0.5,
+            // A few teeth much fatter than the rest — ref-13 puts "fat
+            // wedges next to hairline slivers, 4–6x in the same
+            // neighbourhood".
+            accent_frac: 0.16,
+            accent_mul: 4.5,
+            // Most teeth long, a few stubs.
+            len_skew: 0.45,
+            // BOTH rows draw the stroke the same way up: fat at the hole,
+            // whipping out to a needle. That is the one construction
+            // every source describes, and the only difference between the
+            // two effects is whether those fat starts fuse (see the rows).
+            tip_out: true,
+            width_frac,
             r_in_frac,
             taper: 0.0,
-            ..Self::from_mm(dpi, width_mm, 0.0)
+            ..Self::from_mm(dpi, 0.3, 0.0)
         }
     }
 
@@ -518,7 +591,14 @@ impl LineOpts {
             .iter()
             .map(|c| (c[0] - a[0]).hypot(c[1] - a[1]))
             .fold(0.0f32, f32::max);
-            let r_out = (far + (far * 0.05).max(32.0)).max(len);
+            // …unless the row states its own reach in drag lengths (the
+            // flashes do — see `reach_frac`). Still floored at the drag,
+            // so a long drag is never shortened by a small multiple.
+            let r_out = if self.reach_frac > 0.0 {
+                (len * self.reach_frac).max(len)
+            } else {
+                (far + (far * 0.05).max(32.0)).max(len)
+            };
             (a[0], a[1], len * self.r_in_frac.clamp(0.0, 0.95), r_out)
         } else {
             // Angle from the drag direction; the runs cross the whole
@@ -583,13 +663,24 @@ impl LineOpts {
                 0.0
             },
             gap_px: if radial { 0.0 } else { self.gap_px },
-            // Bundling: the stream walks in px and the focus rays walk
-            // in DEGREES (the owner's missing grouping setting, added
-            // this round). The flashes take neither, same reason as the
-            // gap.
-            group: if gen_kind == 0 { self.group } else { 0 },
-            group_gap: if gen_kind == 0 { self.group_gap } else { 0.0 },
-            group_jit: if gen_kind == 0 { self.group_jit } else { 0.0 },
+            // Bundling: the stream walks in px, the focus rays walk in
+            // DEGREES, and (Lane F) so do the flashes — a flash IS a set
+            // of bundles, which is the one structural fact three
+            // independent Japanese sources agree on (see
+            // `render_urchin`). The flash's pitch comes from its count,
+            // so it still takes no `gap_deg`.
+            group: self.group,
+            group_gap: self.group_gap,
+            group_jit: self.group_jit,
+            // The tooth width against the pitch, and which way up the
+            // tooth is — flash ideas only; a ray's width is a nib, and
+            // nibs are stated in millimetres.
+            width_frac: if gen_kind == 0 { 0.0 } else { self.width_frac },
+            tip_out: gen_kind != 0 && self.tip_out,
+            // The black field is the SOLID kind's alone: it is the thing
+            // a ベタフラ punches its burst out of, and on a filled row it
+            // would just be a black disc over the drawing.
+            field: if gen_kind == 2 { self.field } else { 0.0 },
             jit_gap: self.jit_gap,
             jit_len: self.jit_len,
             jit_width: self.jit_width,
@@ -712,12 +803,110 @@ pub fn builtin_presets() -> &'static [LinePreset] {
         LinePreset {
             name: "Sea urchin flash",
             kind: LineKind::Urchin,
-            opts: |dpi| LineOpts::flash(dpi, 64, 0.85, 0.3),
+            // ウニフラ: a BALLOON-sized ring of fine hairs whose fat
+            // starts nearly, but not quite, fuse round the hole. ref-12's
+            // hole is about half its outer radius, so the reach is 1.4
+            // drag lengths against a 0.70 hole; 0.80 of the pitch AT THE
+            // HOLE leaves the starts near-touching inside a bundle and
+            // clearly apart between bundles, which is what chews the hole
+            // edge instead of turning it into a compass circle.
+            opts: |dpi| LineOpts {
+                // ref-12's hole is a little over half its outer radius,
+                // so a 22 mm drag becomes a 13 mm hole inside a 24 mm
+                // balloon. Both numbers are the MEAN: the hole's lobes
+                // swing it ±60 %, which is ref-12's own 51–132 px spread
+                // about an 85 px mean.
+                reach_frac: 1.09,
+                // PACKS OF 5–9, not 3–5. ref-12 is the dense member of
+                // the family — "packs of roughly 8–15 near-parallel
+                // needles sitting shoulder to shoulder, then a visible
+                // white gap" — and the pack size is also the duty cycle:
+                // at 5 teeth against a 4-pitch hole only 43 % of the ring
+                // carries ink and the band cannot read black however fine
+                // the hairs are. 8 against 5 is 61 %.
+                group: 12,
+                group_gap: 3.2,
+                group_jit: 0.55,
+                // The lobed hole, at ref-12's own roughness (σ 20 % of
+                // the mean hole radius).
+                core_jit: 0.60,
+                // The nib. `needle` under 1 keeps the belly and whips the
+                // last stretch to a point (the band's ink rises with it);
+                // `entry` gives the FAT end a short ramp so it arrives at
+                // full width from a point instead of a square cut.
+                needle: 0.5,
+                entry: 0.26,
+                // Fat ends WIDER than the pitch, so inside a pack they
+                // overlap and fuse: ref-18's ウニフラ has a 70° arc "fused
+                // into a solid black patch where the fat stroke-starts
+                // ran together", and REFS calls that partial fusion
+                // correct — the state between ウニフラ and ベタフラ. The
+                // gaps BETWEEN packs are what keeps it from being a
+                // ベタフラ.
+                ..LineOpts::flash(dpi, 508, 1.10, 0.59)
+            },
         },
         LinePreset {
             name: "Solid flash",
             kind: LineKind::Solid,
-            opts: |dpi| LineOpts::flash(dpi, 64, 0.95, 0.45),
+            // ベタフラ: the same stroke drawn as the CUT, so the white
+            // slivers are fat at the hole and needle outward and the
+            // black between them is the mark. ref-20/21 exactly: "an
+            // all-black rectangle with a white oval burst punched through
+            // the middle … everything you read as the flash is the WHITE
+            // shape".
+            //
+            // The two radii are different questions, and Lane F Builder A
+            // answered them with one number. `reach_frac` says how long a
+            // white sliver is (a balloon: 1.55 drag lengths against a
+            // 0.85 hole, so the burst stops well inside the frame);
+            // `field` says how far the black goes (4× that, i.e. past any
+            // panel the balloon fits in). Sharing one radius meant the
+            // slivers were jittered as a fraction of a corner-sized span,
+            // so all of them ran off the frame and the panel had no black
+            // field at all — corner ink 0 %, critic 1's biggest fail.
+            //
+            // `width_frac` 0.55, not 0.90: a cut that is nine tenths of
+            // the pitch merges with its neighbours, so 170 slivers
+            // printed as ~40 huge white wedges ("a cracked-window star").
+            // At 0.55 the black thread between two slivers is as wide as
+            // the sliver, which is ref-22's own measurement.
+            opts: |dpi| LineOpts {
+                jit_len_out: 0.85,
+                field: 4.0,
+                // The cut keeps its belly and whips out at the end, same
+                // as the urchin.s tooth. A straight wedge is a hair for
+                // most of its length, and a hair is where the black
+                // between two of them pinches under a pixel and dots.
+                needle: 0.6,
+                reach_frac: 1.70,
+                // Packs of 4–6 with a 3.5-pitch valley: ref-22's own
+                // count ("each spike resolves into a stack of 4–10
+                // parallel white slivers … the gap between bundles is
+                // 4–8 sliver widths").
+                group: 6,
+                group_gap: 3.5,
+                group_jit: 0.55,
+                // A LOT less accent spread than the urchin's, and a
+                // tighter angle wobble. A cut that is several pitches
+                // wide crosses the black threads either side of it and
+                // strands the black beyond their tips — 246 free-floating
+                // black islands at `accent_mul` 4.5 (critic 1 found two
+                // of them by eye at 1:1 and called them "detached
+                // triangular islands that never join the black mass").
+                accent_frac: 0.14,
+                accent_mul: 1.9,
+                jit_gap: 0.22,
+                // Most slivers short, a few long — the other way up from
+                // the urchin. REFS target 4 wants the longest white spike
+                // at 1.5–2.0× the MEDIAN white radius, and a long bias
+                // pulls the median up to meet the longest.
+                len_skew: 0.15,
+                // The core is a letterable middle, so its edge wobbles
+                // but does not lobe as deep as a ウニフラ's chewed hole.
+                core_jit: 0.42,
+                ..LineOpts::flash(dpi, 380, 0.34, 0.85)
+            },
         },
     ]
 }
@@ -988,6 +1177,193 @@ mod tests {
             "which is ~109 rays over the circle, not 80 ({})",
             s.ray_count()
         );
+    }
+
+    /// THE FLASH TARGET TABLE (Lane F, 2026-09-07).
+    ///
+    /// Every number here is measured off the rendered panel by
+    /// [`super::super::metrics`] — the same code the `effect_metrics`
+    /// example prints — so a preset that drifts fails CI instead of
+    /// failing a critic three rounds later. That is the whole point of
+    /// the lean loop: the last gauntlet paid a builder round for a defect
+    /// the builder had eyeballed wrong.
+    ///
+    /// The targets come from two places, and where they disagree the
+    /// stricter one wins:
+    ///
+    /// - the brief (`docs/plans/2026-09-07-lane-F-brief.md`): accents
+    ///   ≥ 8 % of strokes, base-width p95/p50 ≥ 2.5, round caps 0, and a
+    ///   hole/inner-edge σ of at least 0.4 mm;
+    /// - the reference pack (`docs/plans/refs/effect-lines/REFS.md`,
+    ///   "Targets I'd set"), which measured five real ウニフラ/ベタフラ:
+    ///   the hole σ ≥ 15 % of its own mean, the fattest stroke ≥ 4× the
+    ///   thinnest, and for the solid row a white region of σ 20–31 % with
+    ///   its longest reach 1.5–2.0× the median.
+    ///
+    /// It measures the SHIPPED rows on the same drag the render harness
+    /// uses (`crates/core/examples/common/mod.rs`), because a target that
+    /// is not the picture the critic looks at is a target for nothing.
+    /// The panel is deliberately the harness's 100 × 70 mm at 600 dpi.
+    #[test]
+    fn flash_presets_hit_their_measured_targets() {
+        let dpi = 600;
+        let px = |mm: f32| mm / 25.4 * dpi as f32;
+        let size = (px(100.0) as u32, px(70.0) as u32);
+        let (w, h) = (size.0 as f32, size.1 as f32);
+        let bounds = [0.0, 0.0, w, h];
+        let row = |name: &str| {
+            builtin_presets()
+                .iter()
+                .find(|p| p.name == name)
+                .unwrap_or_else(|| panic!("no preset called {name}"))
+        };
+
+        for (name, drag, long) in [
+            ("Sea urchin flash", 0.22f32, false),
+            ("Solid flash", 0.176, true),
+        ] {
+            let p = row(name);
+            let c = if long {
+                [w * 0.50, h * 0.48]
+            } else {
+                [w * 0.55, h * 0.45]
+            };
+            let spec = (p.opts)(dpi).place(
+                p.kind,
+                c,
+                [c[0] + w * drag, c[1]],
+                bounds,
+                if long { 1_063 } else { 1_056 },
+            );
+            let m = super::super::metrics::measure(&spec, size, dpi);
+            let ratio = m.w_p95 / m.w_p50.max(1e-6);
+            let hole_rel = m.hole_rel().unwrap_or(0.0);
+
+            // --- BUILDER B's four, from critic 1's ranked list.
+
+            // 1. BUNDLES THAT FORM PEAKS. Critic 1: "almost every stroke
+            //    is a loner … bundle structure is absent everywhere".
+            //    Most of the strokes on the cut have to sit in a pack of
+            //    three or more (REFS target 1: bundles of 2–6 with the
+            //    between-bundle gap 3–8× the within-bundle one).
+            //    THREE QUARTERS, not half. An even comb still measures a
+            //    few clusters — its strokes carry accents, so on a cut
+            //    circle some neighbours merge and some gaps close by
+            //    chance. Turning `group` off on this very preset and
+            //    re-measuring puts 55 % of its strokes in packs of 3+
+            //    (`1×74 2×60 3×33 4×14 …`, a histogram whose mass is at
+            //    the SMALL end); the walk puts 96–99 % there, with the
+            //    mass at the group size. 75 % sits in the empty middle.
+            let total: usize = m.bundles.iter().map(|(s, n)| s * n).sum();
+            let packed: usize = m.bundles.iter().filter(|(s, _)| *s >= 3).map(|(s, n)| s * n).sum();
+            assert!(
+                total > 0 && packed * 4 >= total * 3,
+                "{name}: only {packed} of {total} strokes are in a pack of 3+ \
+                 — that is a comb ({:?})",
+                m.bundles
+            );
+
+            // 2. NOTHING FLOATS. Dirt specks anywhere, plus (solid only)
+            //    black islands clear of the field. Critic 1 found both by
+            //    eye at 1:1 and the old probe reported neither.
+            assert_eq!(m.frags, 0, "{name}: free-floating marks");
+
+            // 3. EVERY STROKE RUNS OUT TO A POINT. See `caps` — the probe
+            //    is Builder B's: strokes down to 5 px, and the excuse for
+            //    a straight end is that it is BURIED in ink, not that it
+            //    happens to sit near the middle of the burst.
+            //
+            //    The solid row is allowed a dozen. Its black spikes end
+            //    on the white core, and the core's boundary is pushed a
+            //    little BELOW the cuts' fat ends on purpose (`core_lut`):
+            //    parked exactly on them the black pinches under a pixel
+            //    and a 1-bit rasteriser prints that as a line of dirt —
+            //    355 specks, measured. Below them the black is wide and
+            //    clean, and the price is that a few spikes meet the core
+            //    with a flat end instead of a point. Ten ends out of
+            //    ~500 is the trade, and it is the honest one for a
+            //    pipeline with no anti-aliasing anywhere in it.
+            let cap_budget = if p.kind == LineKind::Urchin { 0 } else { 12 };
+            assert!(
+                m.caps <= cap_budget,
+                "{name}: {} ends stop dead instead of running out to a point \
+                 (budget {cap_budget})",
+                m.caps
+            );
+
+            // The brief's four, both rows.
+            assert!(
+                m.accent_pct >= 8.0,
+                "{name}: accents are {:.0} % of the strokes, wanted 8 %",
+                m.accent_pct
+            );
+            assert!(
+                ratio >= 2.5,
+                "{name}: base width p95/p50 is {ratio:.2}, wanted 2.5 \
+                 (1.9 with nothing above twice the median is what the round-4 \
+                 critic called machine-made)"
+            );
+            assert!(
+                m.hole_sigma_mm.unwrap_or(0.0) >= 0.4,
+                "{name}: the hole edge is a circle ({:?} mm σ)",
+                m.hole_sigma_mm
+            );
+
+            // REFS, where it is stricter.
+            assert!(
+                m.w_p95 >= 4.0 * m.w_p5,
+                "{name}: fattest stroke {:.2} mm against thinnest {:.2} mm, \
+                 wanted 4× (REFS target 2)",
+                m.w_p95,
+                m.w_p5
+            );
+            if p.kind == LineKind::Urchin {
+                // REFS target 3, the pack's sharpest discriminator: a hole
+                // smoother than ~12 % of its own radius is a 密フラッシュ,
+                // not a ウニフラ.
+                assert!(
+                    hole_rel >= 15.0,
+                    "{name}: the hole is only {hole_rel:.1} % ragged, wanted 15 % \
+                     (ref-12 measures 20 %; under 12 % is a 密フラッシュ)"
+                );
+                // 4. …and the SECOND half of REFS target 3, which Builder
+                //    A could not get and critic 1 called "the single
+                //    sharpest fail in the pack": the hole must be rougher
+                //    than the OUTLINE. It was 21.7 % hole against 27.2 %
+                //    outline, which is ref-16 密フラッシュ the wrong way
+                //    round. ref-12 measures 20 % against 11 %.
+                let outer_rel = m.outer_rel().unwrap_or(99.9);
+                assert!(
+                    hole_rel > outer_rel,
+                    "{name}: hole {hole_rel:.1} % against outline {outer_rel:.1} % \
+                     — a 密フラッシュ has it that way round, a ウニフラ does not"
+                );
+            } else {
+                // 2b. THE BLACK FIELD. ref-20 is "an all-black rectangle
+                //     with a white oval burst punched through"; critic 1
+                //     measured our corners at 0 % and called it "a
+                //     black-and-white pinwheel".
+                assert!(
+                    m.corner_ink >= 99.5,
+                    "{name}: the emptiest corner box is only {:.0} % ink — \
+                     a ベタフラ's corners are solid black",
+                    m.corner_ink
+                );
+                // REFS target 4, measured on the WHITE region, which is
+                // what this row renders (a black field around a burst).
+                assert!(
+                    (18.0..=33.0).contains(&hole_rel),
+                    "{name}: white region σ is {hole_rel:.1} % of its mean, \
+                     wanted 20–31 % (ref-21 20 %, ref-20 31 %)"
+                );
+                let hi = m.hole_hi_ratio.unwrap_or(9.9);
+                assert!(
+                    (1.4..=2.1).contains(&hi),
+                    "{name}: the longest white spike is {hi:.2}× the median, \
+                     wanted 1.5–2.0 (above that they all run off the frame)"
+                );
+            }
+        }
     }
 
     /// `same_as` ignores the seed and nothing else — it is what tells a

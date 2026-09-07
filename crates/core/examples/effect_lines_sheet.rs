@@ -3,17 +3,22 @@
 //! `2026-09-06-effect-lines-parity`, A1.6).
 //!
 //! `cargo run -p mn-core --example effect_lines_sheet [-- <out-dir>]`
-//! Default out-dir is `target/effect-lines/`. Writes, per preset:
+//! Default out-dir is `target/effect-lines/`. The panel list itself lives
+//! in `examples/common/mod.rs`, shared with `effect_metrics` so the table
+//! and the pictures can never describe different sets. Writes, per panel:
 //!
-//! - `<preset>.png` — the whole 100 × 70 mm panel at 600 dpi, box-
+//! - `<panel>.png` — the whole 100 × 70 mm panel at 600 dpi, box-
 //!   downscaled ×3 so a screen shows the block the way a printed page
 //!   shows it (a 1:1 view of a 2362 px panel is a microscope, and every
 //!   generated set looks fine under a microscope).
-//! - `<preset>-crop.png` — a 600 × 600 px patch at 1:1. This is where
+//! - `<panel>-crop.png` — a 600 × 600 px patch at 1:1. This is where
 //!   the round caps, blunt ends and missing needles live; the downscale
 //!   hides all three.
 //!
-//! plus `sheet.png`, every panel in a grid with its name burnt in.
+//! plus `sheet.png`, every panel in a grid with its name burnt in, and
+//! `README.txt` — which file is 1:1 and which is shrunk, in writing,
+//! because a critic that has to guess spends a third of its round on it
+//! (lean-loop plan, "what was bloat last time").
 //!
 //! Deliberately an example rather than a `#[test]`, following
 //! `gen_materials`: it WRITES files, which a test must never do. It
@@ -22,27 +27,22 @@
 //! Nothing here opens a window and nothing here is committed: the PNGs
 //! are build output.
 
+mod common;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use image::{GrayImage, Luma};
-use mn_core::genlines::{GenLinesSpec, LineKind, LineOpts, builtin_presets};
+use mn_core::genlines::GenLinesSpec;
 use mn_core::tile::{TILE_SIZE, Tile, TileIdx};
 
-/// The print resolution the presets are authored at (they are stated in
-/// millimetres, so a dpi is what turns them into lines).
-const DPI: u32 = 600;
-/// The panel: 100 × 70 mm, a wide-ish middle-of-the-page frame.
-const PANEL_MM: (f32, f32) = (100.0, 70.0);
+use common::{DPI, PANEL_MM, panel_size, panels, slug};
+
 /// How far the panel is shrunk for the overview PNG.
 const SHRINK: u32 = 3;
 /// The 1:1 patch side.
 const CROP: u32 = 600;
-
-fn mm(v: f32) -> f32 {
-    v / 25.4 * DPI as f32
-}
 
 fn main() {
     let out = match std::env::args().nth(1) {
@@ -51,133 +51,83 @@ fn main() {
     };
     std::fs::create_dir_all(&out).expect("create the out dir");
 
-    let size = (mm(PANEL_MM.0) as u32, mm(PANEL_MM.1) as u32);
-    let (w, h) = (size.0 as f32, size.1 as f32);
-    let bounds = [0.0, 0.0, w, h];
-    let at = |fx: f32, fy: f32| [w * fx, h * fy];
-
-    let mut panels: Vec<(String, GrayImage)> = Vec::new();
-
-    for (i, p) in builtin_presets().iter().enumerate() {
-        let opts = (p.opts)(DPI);
-        // A fixed drag per kind, so every row is judged on the same
-        // gesture and two runs of this example are the same PNGs.
-        let (a, b) = if p.name == "Drip lines" {
-            // The drips hang off the panel's top EDGE — y = 0, not 2 %
-            // down: in ref-09 every line touches the frame, and starting
-            // the drag inside the panel left a white strip along the top
-            // that read as "the set floats" (critic, round 1).
-            (at(0.50, 0.0), at(0.50, 0.40))
-        } else if p.kind.radial() {
-            let c = at(0.55, 0.45);
-            (c, [c[0] + w * 0.22, c[1]])
-        } else {
-            (at(0.15, 0.55), at(0.85, 0.45))
-        };
-        let spec = opts.place(p.kind, a, b, bounds, 1_000 + i as u64 * 7);
-        write_panel(&out, p.name, &spec, size, &mut panels);
+    // Tuning one preset should not cost a whole sheet: `MN_PANELS` is a
+    // substring of the slug, and a filtered run leaves `sheet.png` and
+    // `README.txt` alone rather than writing a partial one.
+    let only = std::env::var("MN_PANELS").unwrap_or_default();
+    let size = panel_size();
+    let mut sheet_panels: Vec<(String, GrayImage)> = Vec::new();
+    for (name, spec) in panels() {
+        if !only.is_empty() && !slug(&name).contains(&only) {
+            continue;
+        }
+        write_panel(&out, &name, &spec, size, &mut sheet_panels);
+    }
+    if !only.is_empty() {
+        println!("[lines] {} filtered panels -> {}", sheet_panels.len(), out.display());
+        return;
     }
 
-    // The two off-panel centres, both on the Saturated line preset —
-    // ref-11's left panel (a fan rising from below the frame) and
-    // ref-10's right (a burst from beyond the top-right corner). A
-    // centre outside the panel is the case a full circle plus clipping
-    // gets wrong, so it gets its own picture.
-    //
-    // These are their OWN looks, not `saturated-line` re-aimed. A centre
-    // inside the panel spends its rays over the full circle and the panel
-    // sees all of them; a centre outside spends them over a 360° circle
-    // of which the panel sees a narrow arc, so the same 2.2° gap printed
-    // 32 rays for a whole page — "a ruled vector starburst, not 集中線"
-    // (gauntlet critic, round 2, worst score in the sheet). The fix is
-    // arithmetic, not taste: sweep only the arc the panel occupies, and
-    // buy the pitch back out of the rays the sweep saved.
-    //
-    // The width also comes DOWN. Both variants have to fit ~40 strokes
-    // into 25 mm at the panel's middle; at the shipped 0.35 mm that is
-    // more than half the paper inked before a single accent, so the
-    // hairlines the critic asked for (its crop had none, p5 = 4 px) can
-    // only exist at a finer nib.
-    let sat = LineOpts::focus(DPI);
-    let curtain = |sweep: f32, gap: f32, width_mm: f32| LineOpts {
-        sweep_deg: sweep,
-        gap_deg: gap,
-        // A 50 % width wobble against a 0.16 mm nib is the hairline end
-        // of the continuum; the accents are the other end.
-        jit_width: 0.5,
-        accent_frac: 0.15,
-        // 6× a 0.16 mm nib is ~1 mm: against a 0.07 mm hairline that is
-        // the continuum. The in-panel preset's 4× would top out at 8 px
-        // once the taper has had its share, which reads as one weight.
-        accent_mul: 6.0,
-        // …and the LENGTH rhythm. `focus`'s 0.6 long-bias puts almost
-        // every inner end on the hole radius, which for an off-panel
-        // centre is off the panel too — so every ray ran frame to frame
-        // and the critic scored length variation 3/5 with "nearly every
-        // line runs frame to frame". 0.25 spreads the inner ends across
-        // the panel instead, which is where ref-11's right panel gets its
-        // white core from: strokes that stop, not a mask.
-        len_skew: 0.25,
-        width: width_mm / 25.4 * DPI as f32,
-        ..sat
-    };
-    let below = at(0.50, 1.20);
-    write_panel(
-        &out,
-        "Saturated line - centre below",
-        // 170° of arc, aimed straight up into the panel (ref-11's left
-        // panel: a fan rising from below the frame).
-        // The drag is LONGER than the in-panel presets' — the hole is a
-        // fraction of it, and an off-panel centre needs a hole big enough
-        // to reach the near frame edge or the rays converge to a black
-        // knot just outside it (ref-11's left panel keeps a white core
-        // sitting on the bottom edge).
-        &curtain(170.0, 0.42, 0.16).place(
-            LineKind::Focus,
-            below,
-            [below[0], below[1] - w * 0.45],
-            bounds,
-            2_001,
-        ),
-        size,
-        &mut panels,
-    );
-    let corner = at(1.10, -0.10);
-    write_panel(
-        &out,
-        "Saturated line - centre off corner",
-        // The panel subtends ~79° from this centre; 110° covers it with
-        // margin for the angle jitter and nothing to spare.
-        &curtain(110.0, 0.28, 0.16).place(
-            LineKind::Focus,
-            corner,
-            [corner[0] - w * 0.352, corner[1] + h * 0.352],
-            bounds,
-            2_002,
-        ),
-        size,
-        &mut panels,
-    );
-
-    write_sheet(&out.join("sheet.png"), &panels);
+    write_sheet(&out.join("sheet.png"), &sheet_panels);
+    write_readme(&out.join("README.txt"), size, &sheet_panels);
     println!(
-        "[lines] {} panels + {} crops + sheet.png -> {}",
-        panels.len(),
-        panels.len(),
+        "[lines] {} panels + {} crops + sheet.png + README.txt -> {}",
+        sheet_panels.len(),
+        sheet_panels.len(),
         out.display()
     );
 }
 
-/// `Stream line` -> `stream-line`. The critic reads file names.
-fn slug(name: &str) -> String {
-    name.to_ascii_lowercase()
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect::<String>()
-        .split('-')
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("-")
+/// What the critic reads first: which PNG is at print scale and which is
+/// not. Round 1 of the last gauntlet spent a third of its list working
+/// this out from the pixels, and got it wrong.
+fn write_readme(path: &Path, size: (u32, u32), panels: &[(String, GrayImage)]) {
+    let (sw, sh) = panels.first().map(|(_, i)| i.dimensions()).unwrap_or((0, 0));
+    let mut s = String::new();
+    s.push_str("MangaNakama - effect-line render sheet\n");
+    s.push_str("=====================================\n\n");
+    s.push_str(&format!(
+        "Panel      : {} x {} mm at {DPI} dpi = {} x {} px.\n",
+        PANEL_MM.0, PANEL_MM.1, size.0, size.1
+    ));
+    s.push_str(&format!(
+        "             1 mm = {:.1} px, 1 px = {:.4} mm.\n\n",
+        DPI as f32 / 25.4,
+        25.4 / DPI as f32
+    ));
+    s.push_str(&format!(
+        "<name>.png       SHRUNK x{SHRINK} (box filter, so a grey pixel IS the ink\n\
+         \x20                fraction of its {SHRINK}x{SHRINK} block). {sw} x {sh} px.\n\
+         \x20                This is roughly how the panel reads on a printed page.\n\n"
+    ));
+    s.push_str(&format!(
+        "<name>-crop.png  1:1, NO resampling. A {CROP} x {CROP} px patch =\n\
+         \x20                {:.1} x {:.1} mm of paper, vertically centred. Judge\n\
+         \x20                tips, caps and stroke weights here; the shrunk PNG\n\
+         \x20                hides all three.\n\
+         \x20                Taken at x = 62 % of the panel width, EXCEPT for a\n\
+         \x20                radial set that ends inside the frame (both flashes,\n\
+         \x20                which are balloon-sized): there it straddles the band,\n\
+         \x20                at the burst centre plus 0.6 of its reach. So on a\n\
+         \x20                flash crop, LEFT is toward the hole and RIGHT is\n\
+         \x20                outward, and no panel frame is in shot - an end that\n\
+         \x20                stops dead in a crop is a real blunt end.\n\n",
+        CROP as f32 * 25.4 / DPI as f32,
+        CROP as f32 * 25.4 / DPI as f32
+    ));
+    s.push_str(
+        "sheet.png        every shrunk panel in a 3-wide grid with its name burnt in.\n\n",
+    );
+    s.push_str("Ink is 1-bit black on white. There is no anti-aliasing anywhere in\n");
+    s.push_str("this pipeline - the generators write full coverage or nothing - so a\n");
+    s.push_str("grey pixel in a shrunk PNG is the box filter, never the renderer.\n\n");
+    s.push_str("Panels, in sheet order:\n");
+    for (name, _) in panels {
+        s.push_str(&format!("  {:<36} {}.png\n", name, slug(name)));
+    }
+    s.push_str("\nNumbers for every panel: run\n");
+    s.push_str("  cargo run --release -p mn-core --example effect_metrics\n");
+    std::fs::write(path, s).expect("write README.txt");
 }
 
 /// Render one spec and write its overview PNG and its 1:1 crop.
@@ -199,7 +149,24 @@ fn write_panel(
     // The 1:1 patch, right of centre — where a radial set's rays have
     // spread far enough to read one at a time and a stream block is
     // still full of ends.
-    let cx = ((size.0 as f32 * 0.62) as u32).min(size.0.saturating_sub(CROP));
+    //
+    // …unless the effect is a BALLOON that ends inside the panel, which
+    // since Lane F both flashes are. 62 % of the panel width is a fixed
+    // spot, and `sea-urchin-flash-tight` is 24 mm across — the crop
+    // landed almost entirely on blank paper. For a radial set whose own
+    // outer radius stops short of the frame, take the patch across its
+    // band instead: the burst's centre plus 0.6 of its reach, which puts
+    // the hole edge, the band and the outer fringe all in one 25 mm
+    // square.
+    let cx = {
+        let by_frac = (size.0 as f32 * 0.62) as u32;
+        let x = if spec.radial() && spec.a + spec.d < size.0 as f32 {
+            (spec.a + spec.d * 0.6 - CROP as f32 * 0.5).max(0.0) as u32
+        } else {
+            by_frac
+        };
+        x.min(size.0.saturating_sub(CROP))
+    };
     let cy = (size.1.saturating_sub(CROP)) / 2;
     let crop = image::imageops::crop_imm(&full, cx, cy, CROP, CROP).to_image();
     save(&crop, &dir.join(format!("{stem}-crop.png")));
@@ -231,29 +198,6 @@ fn box_shrink(src: &GrayImage, n: u32) -> GrayImage {
         }
     }
     out
-}
-
-/// Spec -> paper-white / ink-black greyscale, the way the Materials
-/// thumbnails do it: the generators write COVERAGE in alpha, the colour
-/// channels are the layer's business.
-fn raster(spec: &GenLinesSpec, size: (u32, u32)) -> GrayImage {
-    let tiles: HashMap<TileIdx, Arc<Tile>> = spec.render(size);
-    let mut img = GrayImage::from_pixel(size.0, size.1, Luma([255]));
-    for (idx, t) in &tiles {
-        let (ox, oy) = idx.origin();
-        for y in 0..TILE_SIZE {
-            for x in 0..TILE_SIZE {
-                let (gx, gy) = (ox + x as i32, oy + y as i32);
-                if gx < 0 || gy < 0 || gx >= size.0 as i32 || gy >= size.1 as i32 {
-                    continue;
-                }
-                if t.pixel(x, y)[3] > 0 {
-                    img.put_pixel(gx as u32, gy as u32, Luma([0]));
-                }
-            }
-        }
-    }
-    img
 }
 
 /// All the panels in one grid, three across, each with its name burnt
@@ -366,4 +310,26 @@ fn save(img: &GrayImage, path: &Path) {
         ExtendedColorType::L8,
     )
     .expect("encode the PNG");
+}
+/// Spec -> paper-white / ink-black greyscale, the way the Materials
+/// thumbnails do it: the generators write COVERAGE in alpha, the colour
+/// channels are the layer's business.
+fn raster(spec: &GenLinesSpec, size: (u32, u32)) -> GrayImage {
+    let tiles: HashMap<TileIdx, Arc<Tile>> = spec.render(size);
+    let mut img = GrayImage::from_pixel(size.0, size.1, Luma([255]));
+    for (idx, t) in &tiles {
+        let (ox, oy) = idx.origin();
+        for y in 0..TILE_SIZE {
+            for x in 0..TILE_SIZE {
+                let (gx, gy) = (ox + x as i32, oy + y as i32);
+                if gx < 0 || gy < 0 || gx >= size.0 as i32 || gy >= size.1 as i32 {
+                    continue;
+                }
+                if t.pixel(x, y)[3] > 0 {
+                    img.put_pixel(gx as u32, gy as u32, Luma([0]));
+                }
+            }
+        }
+    }
+    img
 }
