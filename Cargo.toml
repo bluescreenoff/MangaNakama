@@ -45,6 +45,14 @@ image = { version = "0.25", default-features = false, features = [
 ] }
 windows-sys = "0.61"
 
+[profile.release]
+# Thin LTO: cross-crate inlining for the dab/composite hot paths (the CPU
+# blend fns live in mn-core, the loops in mn-brush/mn-app) at a modest link
+# cost. Not fat LTO / codegen-units=1: they roughly double the owner's local
+# release build on a 16 GB laptop for a few percent more. No target-cpu: the
+# exe ships to strangers' machines.
+lto = "thin"
+
 [profile.dev]
 # Debug builds are used for iteration, but dab compositing is hot enough that
 # fully-unoptimised deps make the pen feel wrong. Optimise deps only.
