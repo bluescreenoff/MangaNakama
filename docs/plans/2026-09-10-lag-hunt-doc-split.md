@@ -180,6 +180,27 @@ Lane B first (mechanical, one crate), then Lane A (touches app + gpu + genlines;
 sites reference `Document::regen_genlines`, whose path does not change). The two lanes' files are
 disjoint, so both may run at once; cargo's target lock serializes their builds.
 
+## Outcome (2026-09-10, both lanes landed) and what is still open
+- Lane B: pure move, committed 0d69c92. Lane A: effect lines were O(length²) (axis-aligned box per
+  stroke); chunked scan along the stroke axis. Perspective stream >9 min → 8.9 s, Stream line 20 s →
+  5.1 s, urchin 0.83 → 0.25 s. Pixel-set identical (`legacy_renders_are_bit_stable`).
+- **OPEN, next perf round (in priority order):**
+  1. Effect lines still 3-9 s per regen at B4 600 dpi: `put` does a HashMap lookup per inked pixel and
+     the map holds tiles by value. Fix shape: rasterize into a flat page-sized bitmap (or per-tile
+     scanline spans), then tile once. Target under 300 ms.
+  2. Solid flash (ベタフラ) 15.5 s: page-sized filled disc with an `atan2` + tooth test per pixel.
+     Fix shape: per-scanline angular spans. Ask the owner whether he uses it first.
+  3. Pen readback stall: A3's async plan is UNSAFE as written (`mask_stroke_to_selection` /
+     `mask_op_to_alpha` / undo-op close read the pixels right after `finish_gpu_dab_stroke`; a deferred
+     write turns the selection clamp into a no-op and ink escapes the selection, no undo). The 220 ms of
+     a 306 ms readback is `poll(wait)` behind the previous composite. Fix shape: move the readback
+     to the top of the NEXT `App::render` before that frame's composite is submitted, still synchronous,
+     with the three post-stroke consumers moved with it; or throttle the compositor while a stroke is
+     live. Needs a plan of its own; the new `(submit, wait, copy)` split in the log gives the numbers.
+  4. Composite full rebuild 4.0 s at B4 600 dpi; `divide_frame_folder` 273 ms.
+- Owner eye test owed: drag a speed-lines / perspective-stream handle on a big page (should be a few
+  seconds, not a freeze); the log now has `[frame] slow:` attribution lines to send back.
+
 ## Already done by Fable in this round
 - `[profile.release] lto = "thin"` in the workspace `Cargo.toml` (HPC step 1, the safe half; no
   `codegen-units = 1` because it roughly doubles the owner's local release build time, no

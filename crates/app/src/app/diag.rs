@@ -134,6 +134,19 @@ pub struct Diag {
     pub dab_gpu_strokes: u32,
     pub dab_cpu_routed: u32,
     pub dab_canary_repairs: u32,
+
+    // --- whole-frame attribution (lag hunt 2026-09-10) ----------------------
+    // `[gpu] slow composite` only ever accused the compositor, so a frame
+    // that spent 200 ms rasterizing effect lines on the UI thread read as a
+    // fast frame with a slow composite inside it. These three carry the rest
+    // of the sentence, and turn every session log the owner sends into a lag
+    // report.
+    /// Names of the commands dispatched since the last frame.
+    cmds: Vec<String>,
+    frame_slow_logged: Option<Instant>,
+    /// `(w, h, dpi)` of the newest `[doc]` line — one line per document
+    /// opened, not one per frame.
+    doc_logged: Option<(u32, u32, u32)>,
 }
 
 /// A composite frame slower than this (CPU-side ms) gets its own log line.
@@ -142,6 +155,34 @@ const COMP_SLOW_MS: f32 = 50.0;
 const COMP_SLOW_EVERY: Duration = Duration::from_secs(10);
 /// Aggregate line cadence while compositing is happening.
 const COMP_FLUSH_EVERY: Duration = Duration::from_secs(300);
+/// A WHOLE frame slower than this (ms) gets its own attribution line.
+const FRAME_SLOW_MS: f32 = 50.0;
+/// At most one attribution line per this many seconds. Shorter than the
+/// composite limit above: a drag that hangs the window is over in a few
+/// seconds, and a 10 s gate would report it once, after the fact.
+const FRAME_SLOW_EVERY: Duration = Duration::from_secs(3);
+/// How many command names one attribution line lists.
+const CMD_NAMES_MAX: usize = 6;
+
+/// Collects only the leading identifier of a `Debug` rendering, so
+/// [`Diag::note_cmd`] costs one short `String` instead of formatting a
+/// command's whole payload — some carry a `Vec` of layer indices, and it
+/// runs on every dispatch, not only on the slow frames. Refusing the first
+/// non-identifier character aborts the formatter, which is the point.
+#[derive(Default)]
+struct VariantName(String);
+
+impl std::fmt::Write for VariantName {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        for c in s.chars() {
+            if !(c.is_alphanumeric() || c == '_') {
+                return Err(std::fmt::Error);
+            }
+            self.0.push(c);
+        }
+        Ok(())
+    }
+}
 
 impl Default for Diag {
     fn default() -> Self {
@@ -174,6 +215,9 @@ impl Default for Diag {
             dab_gpu_strokes: 0,
             dab_cpu_routed: 0,
             dab_canary_repairs: 0,
+            cmds: Vec::new(),
+            frame_slow_logged: None,
+            doc_logged: None,
         }
     }
 }
@@ -259,6 +303,89 @@ impl Diag {
                 self.dab_gpu_strokes, self.dab_cpu_routed, self.dab_canary_repairs,
             ));
         }
+    }
+
+    /// Remember that a command ran, for the next slow-frame line. Called
+    /// from `cmd::dispatch` — the one door every command goes through, so
+    /// no dispatcher can be forgotten.
+    pub(crate) fn note_cmd(&mut self, cmd: &impl std::fmt::Debug) {
+        if self.cmds.len() >= CMD_NAMES_MAX {
+            return;
+        }
+        let mut w = VariantName::default();
+        // The `Err` that stops the formatter at the first `{`, ` ` or `(`
+        // IS the success case here, so the result is deliberately dropped.
+        let _ = std::fmt::write(&mut w, format_args!("{cmd:?}"));
+        if !w.0.is_empty() {
+            self.cmds.push(w.0);
+        }
+    }
+
+    /// One `[doc] WxH dpi N layers` line per document opened. Called at the
+    /// frame head and deduplicated on the size, so it costs one tuple
+    /// compare per frame and cannot be forgotten at one of the nine places
+    /// a `Document` is swapped into `App::doc`.
+    pub(crate) fn note_doc(&mut self, size: (u32, u32), dpi: Option<u32>, layers: usize) {
+        let key = (size.0, size.1, dpi.unwrap_or(0));
+        if self.doc_logged == Some(key) {
+            return;
+        }
+        self.doc_logged = Some(key);
+        crate::testlog::line(&format!(
+            "[doc] {}x{} {} {} layers",
+            size.0,
+            size.1,
+            dpi.map_or_else(|| "(no dpi)".to_owned(), |d| format!("{d} dpi,")),
+            layers,
+        ));
+    }
+
+    /// WHERE a slow frame's time went, in one rate-limited line:
+    /// `[frame] slow: 212 ms | cmds: FrameDivide | ui 3 ms | composite 190 ms
+    /// (12 tiles, full) | other 19 ms | doc 6070x8598, 14 layers | tool Pen`.
+    ///
+    /// `ui` and `composite` are measured in [`super::App::render`]; whatever
+    /// the two do not account for is the frame-head work (tone refresh, the
+    /// dab flush, thumbnails, an effect-line regen) and is reported as
+    /// `other` rather than left for the reader to subtract — that gap is the
+    /// number the effect-line hang needed somebody to be able to read.
+    pub(crate) fn note_frame_parts(
+        &mut self,
+        dt: Duration,
+        ui: Duration,
+        composite: Duration,
+        fs: &mn_gpu::FrameStats,
+        doc: (u32, u32, usize),
+        tool: &'static str,
+    ) {
+        let ms = dt.as_secs_f32() * 1000.0;
+        let due = ms > FRAME_SLOW_MS
+            && self
+                .frame_slow_logged
+                .is_none_or(|t| t.elapsed() >= FRAME_SLOW_EVERY);
+        if due {
+            self.frame_slow_logged = Some(Instant::now());
+            crate::testlog::line(&format!(
+                "[frame] slow: {:.0} ms | cmds: {} | ui {:.0} ms | composite {:.0} ms \
+                 ({} tiles{}) | other {:.0} ms | doc {}x{}, {} layers | tool {}",
+                ms,
+                if self.cmds.is_empty() {
+                    "-".to_owned()
+                } else {
+                    self.cmds.join(",")
+                },
+                ui.as_secs_f32() * 1000.0,
+                composite.as_secs_f32() * 1000.0,
+                fs.composite_tiles,
+                if fs.full { ", full" } else { "" },
+                dt.saturating_sub(ui).saturating_sub(composite).as_secs_f32() * 1000.0,
+                doc.0,
+                doc.1,
+                doc.2,
+                tool,
+            ));
+        }
+        self.cmds.clear();
     }
 
     pub(crate) fn note_frame(&mut self, dt: Duration) {

@@ -735,6 +735,27 @@ fn width_at(t: f32, taper: f32, entry: f32, needle: f32) -> f32 {
 /// quadratic in the radius and allocated unbounded off-canvas tiles that
 /// `retain` only discarded after building (a multi-minute UI hang and a
 /// commit spike, from three slider drags).
+///
+/// Clipping to the page is not enough when the stroke CROSSES the page,
+/// which is what a 流線 does. The lag hunt (2026-09-10) measured one
+/// default `Stream line` preset at **20 seconds** on a B4 600 dpi page in
+/// release, and `Perspective stream` at over nine minutes — the owner's
+/// "speedlines/radial crash manganakama from slowness". The cost is the
+/// axis-aligned box: a stroke 8,000 px long and 3 px wide has a
+/// 6,000 × 5,700 px box, so a scan that should test 30,000 pixels tests 34
+/// million, and a preset draws hundreds of strokes. It is O(length²) in a
+/// job that is O(length × width).
+///
+/// So the scan walks the stroke in CHUNKS along its own axis: each chunk's
+/// box is the box of its two endpoints grown by the reach, and the total
+/// area is proportional to length × width again. This is not an
+/// approximation and not a quality knob — every pixel within reach of the
+/// stroke has its nearest point on some chunk and is therefore inside that
+/// chunk's box, [`put`] is idempotent so the overlap between neighbouring
+/// boxes costs a repeated test and nothing else, and the boxes only ever
+/// SHRINK relative to the old one, so no pixel that was not inked before is
+/// inked now. The written pixel set is identical, which is what
+/// `legacy_renders_are_bit_stable` pins.
 fn segment(
     map: &mut HashMap<TileIdx, Tile>,
     a: [f32; 2],
@@ -748,22 +769,30 @@ fn segment(
     if dd <= f32::EPSILON {
         return;
     }
-    let x0 = (a[0].min(b[0]) - hw - 1.0).max(0.0);
-    let x1 = (a[0].max(b[0]) + hw + 1.0).min(size.0 as f32);
-    let y0 = (a[1].min(b[1]) - hw - 1.0).max(0.0);
-    let y1 = (a[1].max(b[1]) + hw + 1.0).min(size.1 as f32);
-    if x0 >= x1 || y0 >= y1 {
-        return;
-    }
-    for y in y0.floor() as i32..=y1.ceil() as i32 {
-        for x in x0.floor() as i32..=x1.ceil() as i32 {
-            let px = x as f32 + 0.5;
-            let py = y as f32 + 0.5;
-            let t = (((px - a[0]) * d[0] + (py - a[1]) * d[1]) / dd).clamp(0.0, 1.0);
-            let qx = a[0] + t * d[0];
-            let qy = a[1] + t * d[1];
-            let ex = px - qx;
-            let ey = py - qy;
+    // How far off its own axis this stroke can still ink a pixel: the ramp
+    // never returns more than 1.0 and the test below floors the half-width
+    // at half a pixel, so `hw.max(0.5)` is the true half-width for the
+    // whole stroke, and the `+ 1.0` is the margin the old box already had.
+    // It is never SMALLER than the old `hw + 1.0`, so the chunk boxes can
+    // only lose pixels that were outside the stroke anyway.
+    let reach = hw.max(0.5) + 1.0;
+    for (p, q) in scan_chunks(a, b, reach) {
+        let x0 = (p[0].min(q[0]) - reach).max(0.0);
+        let x1 = (p[0].max(q[0]) + reach).min(size.0 as f32);
+        let y0 = (p[1].min(q[1]) - reach).max(0.0);
+        let y1 = (p[1].max(q[1]) + reach).min(size.1 as f32);
+        if x0 >= x1 || y0 >= y1 {
+            continue;
+        }
+        for y in y0.floor() as i32..=y1.ceil() as i32 {
+            for x in x0.floor() as i32..=x1.ceil() as i32 {
+                let px = x as f32 + 0.5;
+                let py = y as f32 + 0.5;
+                let t = (((px - a[0]) * d[0] + (py - a[1]) * d[1]) / dd).clamp(0.0, 1.0);
+                let qx = a[0] + t * d[0];
+                let qy = a[1] + t * d[1];
+                let ex = px - qx;
+                let ey = py - qy;
             // The ramped half-width, floored at half a pixel: a pen
             // needle stays a 1 px line until it ends, and this test is
             // hard-edged, so once `hw · width_at(t)` drops under ~0.35 px
@@ -777,12 +806,37 @@ fn segment(
             // (`legacy_renders_are_bit_stable`). A layer saved WITH a
             // taper does redraw — solid tails instead of dotted ones —
             // which is the fix, not a regression.
-            let hwt = (hw * prof.width_at(t)).max(0.5);
-            if ex * ex + ey * ey <= hwt * hwt {
-                put(map, x, y);
+                let hwt = (hw * prof.width_at(t)).max(0.5);
+                if ex * ex + ey * ey <= hwt * hwt {
+                    put(map, x, y);
+                }
             }
         }
     }
+}
+
+/// A hard ceiling on how many boxes one stroke is scanned in — a runaway
+/// parameter must cost a coarse scan, never an unbounded loop.
+const MAX_SCAN_CHUNKS: usize = 8192;
+
+/// Split `a`→`b` into consecutive sub-segments short enough that each one's
+/// axis-aligned box is proportional to `reach`, not to the whole stroke.
+/// See [`segment`] for why this is the whole effect-line fix.
+///
+/// The floor of 8 px keeps the per-chunk bookkeeping from dominating a
+/// hairline: at `reach` ≈ 1.5 a chunk box is about 11 × 11, so the scan
+/// costs roughly 15 tests per pixel of length instead of the length itself.
+fn scan_chunks(a: [f32; 2], b: [f32; 2], reach: f32) -> impl Iterator<Item = ([f32; 2], [f32; 2])> {
+    let d = [b[0] - a[0], b[1] - a[1]];
+    let len = d[0].hypot(d[1]);
+    let steps = ((len / (reach * 2.0).max(8.0)).ceil() as usize).clamp(1, MAX_SCAN_CHUNKS);
+    (0..steps).map(move |s| {
+        let (u0, u1) = (s as f32 / steps as f32, (s + 1) as f32 / steps as f32);
+        (
+            [a[0] + d[0] * u0, a[1] + d[1] * u0],
+            [a[0] + d[0] * u1, a[1] + d[1] * u1],
+        )
+    })
 }
 
 /// Fill one tooth by scanning ITS bbox — the same clip-first rule as
@@ -802,10 +856,42 @@ fn fill_tooth(map: &mut HashMap<TileIdx, Tile>, c: [f32; 2], t: &Tooth, size: (u
     if x0 >= x1 || y0 >= y1 {
         return;
     }
-    for y in y0.floor() as i32..=y1.ceil() as i32 {
-        for x in x0.floor() as i32..=x1.ceil() as i32 {
-            if t.hit(x as f32 + 0.5 - c[0], y as f32 + 0.5 - c[1]) {
-                put(map, x, y);
+    // Same story as [`segment`], same fix (lag hunt 2026-09-10): a flash's
+    // spike is long, thin and diagonal, so ITS box is quadratic in the
+    // outer radius too. Walk it in chunks along the apex→base axis.
+    //
+    // Every chunk box is intersected with the WHOLE-tooth box computed
+    // above, and that is load-bearing rather than tidy: `Tooth::hit` also
+    // answers true a little way BELOW the near end when a ベタフラ's cut
+    // flares, and today that extra is clipped by this very box. Clipping to
+    // it keeps the clip exactly where it already was, so the pixel set does
+    // not move. The chunk range covers the flare's reach as well, so
+    // nothing inside the box is skipped either.
+    let reach = t.hw.max(t.flare_hw).max(0.5) + 1.0;
+    // A flaring cut keeps answering true all the way down to the centre
+    // (`Tooth::hit` only stops at `along < 0.0`), so when one is armed the
+    // walk starts at the centre. Read off `hit` rather than assumed: its
+    // ramp is clamped at 1.0, it does not close again below the ramp.
+    let r_lo = if t.flare_hw > t.hw {
+        0.0
+    } else {
+        t.r_apex.min(t.r_base)
+    };
+    let r_hi = t.r_apex.max(t.r_base);
+    let ray = |r: f32| [c[0] + t.c * r, c[1] + t.s * r];
+    for (p, q) in scan_chunks(ray(r_lo), ray(r_hi), reach) {
+        let cx0 = (p[0].min(q[0]) - reach).max(x0);
+        let cx1 = (p[0].max(q[0]) + reach).min(x1);
+        let cy0 = (p[1].min(q[1]) - reach).max(y0);
+        let cy1 = (p[1].max(q[1]) + reach).min(y1);
+        if cx0 >= cx1 || cy0 >= cy1 {
+            continue;
+        }
+        for y in cy0.floor() as i32..=cy1.ceil() as i32 {
+            for x in cx0.floor() as i32..=cx1.ceil() as i32 {
+                if t.hit(x as f32 + 0.5 - c[0], y as f32 + 0.5 - c[1]) {
+                    put(map, x, y);
+                }
             }
         }
     }
@@ -1924,6 +2010,124 @@ pub fn render_urchin(p: &UrchinParams, size: (u32, u32)) -> HashMap<TileIdx, Arc
         ox < wi && oy < hi_ && ox + TILE_SIZE as i32 > 0 && oy + TILE_SIZE as i32 > 0
     });
     map.into_iter().map(|(k, v)| (k, Arc::new(v))).collect()
+}
+
+#[cfg(test)]
+mod scan_cost_tests {
+    use super::*;
+
+    /// A page big enough that an O(length²) scan cannot hide, small enough
+    /// that the fixed version is instant even in a debug build.
+    const PAGE: (u32, u32) = (3000, 4000);
+
+    /// The lag hunt's regression guard (2026-09-10). Before [`scan_chunks`]
+    /// a default `Stream line` preset took **20 seconds** on a B4 600 dpi
+    /// page in RELEASE, because each stroke scanned its axis-aligned box
+    /// instead of itself — and this page is a third of B4's area, so the
+    /// old code cannot come near the budget even unoptimised.
+    ///
+    /// The budget is wall-clock, which is normally a flaky thing to assert
+    /// on, so it is set with a lot of air: the heaviest preset takes ~5 s
+    /// here in a DEBUG build under `--test-threads=2` contention, and the
+    /// quadratic scan took **minutes** on the same page in the same build.
+    /// A 30 s ceiling is therefore six times the honest cost and a fifth of
+    /// the broken one. A tighter number failed on nothing but a busy
+    /// machine (observed); a looser one would stop catching the bug. If
+    /// this fails, the scan went quadratic again — do not raise it further,
+    /// find the box that grew.
+    ///
+    /// `LineKind::Solid` (ベタフラ) is excluded on purpose: it draws no
+    /// strokes at all — it scans a filled disc and punches the teeth out of
+    /// it — so its cost is the AREA of the black it prints, which is honest
+    /// work and always was. It is the one preset still slow enough to be
+    /// felt on a B4 page; see the Lane A report's "not fixed" section.
+    #[test]
+    fn every_preset_renders_a_full_page_in_well_under_a_second_of_work() {
+        let (w, h) = (PAGE.0 as f32, PAGE.1 as f32);
+        for (i, p) in builtin_presets().iter().enumerate() {
+            if p.kind == LineKind::Solid {
+                continue;
+            }
+            let opts = (p.opts)(600);
+            let a = [w * 0.5, h * 0.5];
+            let b = [a[0] + w / 6.0, a[1]];
+            let spec = opts.place(p.kind, a, b, [0.0, 0.0, w, h], 0x51ED_5EED ^ i as u64);
+            let t = std::time::Instant::now();
+            let map = spec.render(PAGE);
+            let ms = t.elapsed().as_secs_f32() * 1000.0;
+            assert!(
+                !map.is_empty(),
+                "{} drew nothing — the bound must not clip the effect away",
+                p.name
+            );
+            assert!(
+                ms < 30_000.0,
+                "{} took {ms:.0} ms to render {}x{} — the stroke scan went quadratic again",
+                p.name,
+                PAGE.0,
+                PAGE.1,
+            );
+        }
+    }
+
+    /// The other half of the same promise: a SMALL effect on a big page
+    /// must touch a small part of it. One case per render kind, because
+    /// each builds its own scan boxes.
+    #[test]
+    fn a_small_effect_touches_a_small_share_of_the_page() {
+        // 3000x4000 at 64 px tiles = 47 x 63 = 2,961 tiles.
+        let full = 47 * 63;
+        let centre = [300.0, 300.0];
+
+        let focus = render_focus(
+            &FocusLinesParams {
+                center: centre,
+                r_in: 40.0,
+                r_out: 200.0,
+                count: 60,
+                width: 3.0,
+                ..Default::default()
+            },
+            PAGE,
+        );
+        let urchin = render_urchin(
+            &UrchinParams {
+                center: centre,
+                r_in: 40.0,
+                r_out: 200.0,
+                count: 60,
+                width: 3.0,
+                width_frac: 0.5,
+                ..Default::default()
+            },
+            PAGE,
+        );
+        // Speed lines scatter over the whole canvas by design, so the
+        // bound that means anything for them is the LENGTH: 60 px runs
+        // cover a band, never the page.
+        let speed = render_speed(
+            &SpeedLinesParams {
+                angle_deg: 20.0,
+                count: 40,
+                len_min: 60.0,
+                len_max: 60.0,
+                width: 3.0,
+                ..Default::default()
+            },
+            PAGE,
+        );
+
+        for (name, n, share) in [
+            ("focus", focus.len(), 0.10),
+            ("urchin", urchin.len(), 0.10),
+            ("speed", speed.len(), 0.35),
+        ] {
+            assert!(
+                n > 0 && (n as f32) < full as f32 * share,
+                "{name}: {n} tiles of {full} — a small effect must not allocate the page",
+            );
+        }
+    }
 }
 
 #[cfg(test)]

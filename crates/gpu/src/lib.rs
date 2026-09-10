@@ -43,7 +43,7 @@ use std::collections::HashMap;
 use mn_core::{Document, Paper, TILE_SIZE, TileIdx};
 
 mod dabs;
-pub use dabs::{WASH_LAYER_KEY, dab_tiles};
+pub use dabs::{ReadbackTiming, WASH_LAYER_KEY, dab_tiles};
 
 mod kernel;
 pub use kernel::{FREEFORM_SEGS_MAX, KERNEL_FLOOR_PX, Kernel, TileJob};
@@ -881,6 +881,9 @@ pub struct Renderer {
     /// objects avoids the free→realloc alias entirely — every upload is a
     /// full-tile `write_texture`, so contents never leak between uses.
     tile_pool: Vec<CachedTile>,
+    /// How the newest stroke-end dab readback spent its time (lag hunt
+    /// 2026-09-10). Diagnostics only — nothing branches on it.
+    readback_timing: ReadbackTiming,
     /// Next canvas pass must clear + redraw everything.
     canvas_dirty_all: bool,
     /// Layer presentation state as of the last composite.
@@ -1727,6 +1730,7 @@ impl Renderer {
             blend2_blit_bgl,
             snap: None,
             tile_pool: Vec::new(),
+            readback_timing: ReadbackTiming::default(),
             canvas_dirty_all: true,
             layer_sig: Vec::new(),
             mono_preview: false,

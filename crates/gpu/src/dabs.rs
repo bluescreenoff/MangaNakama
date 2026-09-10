@@ -19,6 +19,22 @@
 use mn_core::TileIdx;
 use std::collections::BTreeSet;
 
+/// Where a stroke-end dab readback's milliseconds went.
+///
+/// `submit_ms` = encode + `queue.submit` + `map_async`; `wait_ms` = the
+/// `device.poll(wait)` that blocks until EVERY previously submitted command
+/// buffer is done, the last composite of a big page included; `copy_ms` =
+/// reading the mapped bytes out into `Vec<u16>`. The owner's log shows the
+/// same tile count costing 4 ms or 60 ms, and only one of these three can
+/// explain that.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ReadbackTiming {
+    pub tiles: u32,
+    pub submit_ms: f32,
+    pub wait_ms: f32,
+    pub copy_ms: f32,
+}
+
 /// One dab as `dab.wgsl` sees it: the C dispatch math (per-mode opacities,
 /// fix15 colour) precomputed on the CPU so the shader stays dumb integer
 /// math.
@@ -864,8 +880,10 @@ impl crate::Renderer {
         tiles: &[TileIdx],
     ) -> (Vec<(TileIdx, Vec<u16>)>, bool) {
         if tiles.is_empty() {
+            self.readback_timing = ReadbackTiming::default();
             return (Vec::new(), true);
         }
+        let t_submit = std::time::Instant::now();
         let n = tiles.len();
         let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("mn.dab.read"),
@@ -915,7 +933,9 @@ impl crate::Renderer {
         slice.map_async(wgpu::MapMode::Read, |_| {});
         let cslice = canary_read.slice(..);
         cslice.map_async(wgpu::MapMode::Read, |_| {});
+        let t_wait = std::time::Instant::now();
         let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        let t_copy = std::time::Instant::now();
         let canary = {
             let bytes = cslice.get_mapped_range().expect("map canary");
             u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
@@ -932,7 +952,24 @@ impl crate::Renderer {
                 .collect();
             out.push((idx, px));
         }
+        self.readback_timing = ReadbackTiming {
+            tiles: n as u32,
+            submit_ms: (t_wait - t_submit).as_secs_f32() * 1000.0,
+            wait_ms: (t_copy - t_wait).as_secs_f32() * 1000.0,
+            copy_ms: t_copy.elapsed().as_secs_f32() * 1000.0,
+        };
         (out, canary == expected)
+    }
+
+    /// How the newest [`Renderer::readback_dab_tiles`] spent its time.
+    ///
+    /// The lag hunt's whole question about the pen (2026-09-10): the
+    /// owner's log shows the stroke-end readback taking 4 ms or 60 ms for
+    /// the same tile count, which can only mean the cost is the WAIT on a
+    /// busy queue, not the copy. Nothing branches on this — it exists so
+    /// the claim is measured rather than argued.
+    pub fn readback_timing(&self) -> ReadbackTiming {
+        self.readback_timing
     }
 
     /// After the CPU tile is authoritative again (readback write or CPU

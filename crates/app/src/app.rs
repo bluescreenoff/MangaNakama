@@ -3155,6 +3155,13 @@ impl App {
             self.doc.set_undo_limit(self.prefs.undo_depth);
         }
 
+        // One `[doc] WxH dpi N layers` line per document opened (lag hunt
+        // 2026-09-10): every slow-frame report below is unreadable without
+        // the page size, and a B4 600 dpi page is 40× the pixels of the
+        // 72 dpi draft most bug reports are made on.
+        self.diag
+            .note_doc(self.doc.size, self.doc.dpi, self.doc.layers.len());
+
         // Panel reading order, same frame-head reasoning as the line above:
         // the cache holds raw layer indices, and a dozen commands that are
         // not "frame commands" shift them (see `ensure_frame_order`).
@@ -3203,11 +3210,14 @@ impl App {
         // The context is an Arc handle, so cloning it frees `self` to be
         // borrowed mutably by the UI closure.
         let ctx = self.shell.ctx.clone();
+        let t_ui = Instant::now();
         let raw = self.shell.begin(size);
         let mut out = ctx.run_ui(raw, |ui| crate::ui::build(ui, self));
         let repaint_after = self.shell.end(&out);
         let jobs = ctx.tessellate(std::mem::take(&mut out.shapes), out.pixels_per_point);
+        let ui_took = t_ui.elapsed();
 
+        let t_comp = Instant::now();
         {
             let Self {
                 renderer,
@@ -3224,10 +3234,20 @@ impl App {
         }
         // Only legal after the frame has been submitted.
         self.shell.free(&mut out.textures_delta);
+        let comp_took = t_comp.elapsed();
 
         let fs = self.renderer.frame_stats();
         self.diag.note_composite(&fs);
-        self.diag.note_frame(t0.elapsed());
+        let dt = t0.elapsed();
+        self.diag.note_frame_parts(
+            dt,
+            ui_took,
+            comp_took,
+            &fs,
+            (self.doc.size.0, self.doc.size.1, self.doc.layers.len()),
+            self.tool.label(),
+        );
+        self.diag.note_frame(dt);
         FrameOutput { repaint_after }
     }
 
@@ -4240,10 +4260,21 @@ impl App {
             self.dab_path_last = "gpu → cpu repair!".into();
         }
         if canary_ok {
+            // The split (lag hunt 2026-09-10): the owner's log showed the
+            // same tile count costing 4 ms or 60 ms, which the total alone
+            // could never explain. `wait` is `poll(wait_indefinitely)`,
+            // which returns only once EVERY previously submitted command
+            // buffer is done — the last composite of a big page included —
+            // so a big `wait` beside a small `copy` says the pen is queued
+            // behind the compositor, not that the copy is slow.
+            let rt = self.renderer.readback_timing();
             self.dab_path_last = format!(
-                "gpu | {} tiles, readback {:.1} ms",
+                "gpu | {} tiles, readback {:.1} ms (submit {:.1}, wait {:.1}, copy {:.1})",
                 tiles.len(),
-                t0.elapsed().as_secs_f32() * 1000.0
+                t0.elapsed().as_secs_f32() * 1000.0,
+                rt.submit_ms,
+                rt.wait_ms,
+                rt.copy_ms,
             );
             crate::testlog::line(&self.dab_path_last);
         }
@@ -5053,6 +5084,10 @@ mod tests;
 
 #[cfg(test)]
 mod grid_engine_tests;
+
+/// Lag hunt 2026-09-10: `#[ignore]`d measurements at B4 600 dpi.
+#[cfg(test)]
+mod lag_hunt_tests;
 
 /// Documents, tabs, and what "new" means.
 ///

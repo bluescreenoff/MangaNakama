@@ -1334,6 +1334,11 @@ pub const SIZE_PX_MAX: f32 = 5000.0;
 pub const DEFAULT_SIZE_PX: f32 = 10.0;
 
 pub fn dispatch(app: &mut App, cmd: AppCmd) {
+    // Lag hunt 2026-09-10: name the command for the next slow-frame line.
+    // Here rather than in `main::pump_commands` because the automation
+    // socket and the keymap dispatch through this door too, and a lag
+    // report that omits the command that caused the lag is worth nothing.
+    app.diag.note_cmd(&cmd);
     // `IO-060`: a work resample in flight owns the whole page set. Its
     // phase 1 has the open page stashed and a pending list keyed by page
     // INDEX, so a page turn, an undo or a save arriving between two pages
