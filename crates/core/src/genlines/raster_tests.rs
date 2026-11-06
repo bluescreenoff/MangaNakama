@@ -153,3 +153,105 @@ fn row_scan_matches_the_chunk_scan() {
     }
     assert!(checked > 200, "most strokes must reach the page ({checked})");
 }
+
+/// The solid kind's own corners, which the one shipped preset does not
+/// reach: no field (so no despeckle), a swept arc, a centre near a page
+/// corner (the flood box clipped by the page), the legacy width path, an
+/// inverted tooth, bundles with a ragged core. Pinned at fingerprints taken
+/// from the per-pixel scan (commit 5893c17) before the row scan existed.
+fn solid_variants() -> Vec<(&'static str, super::UrchinParams)> {
+    use super::{Mix, UrchinParams};
+    let base = UrchinParams {
+        center: [430.0, 610.0],
+        r_in: 90.0,
+        r_out: 260.0,
+        count: 140,
+        width: 6.0,
+        width_frac: 0.55,
+        angle_jitter: 0.4,
+        length_jitter: 0.5,
+        solid: true,
+        seed: 11,
+        ..Default::default()
+    };
+    vec![
+        ("no field", base.clone()),
+        ("field 4", UrchinParams { field: 4.0, ..base.clone() }),
+        (
+            "swept, field 3",
+            UrchinParams {
+                field: 3.0,
+                sweep_deg: 140.0,
+                sweep_center_deg: 30.0,
+                ..base.clone()
+            },
+        ),
+        (
+            "corner, bundles, ragged core",
+            UrchinParams {
+                center: [60.0, 1350.0],
+                field: 1.5,
+                group: 5,
+                group_gap: 2.8,
+                group_jit: 0.6,
+                core_jit: 0.4,
+                jit_len_out: 0.7,
+                mix: Mix {
+                    needle: 0.6,
+                    entry: 0.1,
+                    ..Default::default()
+                },
+                ..base.clone()
+            },
+        ),
+        (
+            "legacy width",
+            UrchinParams {
+                width_frac: 0.0,
+                width: 9.0,
+                ..base.clone()
+            },
+        ),
+        (
+            "tip out, field 2",
+            UrchinParams {
+                tip_out: true,
+                field: 2.0,
+                ..base.clone()
+            },
+        ),
+        (
+            "off page",
+            UrchinParams {
+                center: [-150.0, 500.0],
+                field: 4.0,
+                ..base
+            },
+        ),
+    ]
+}
+
+const GOLDEN_SOLID: &[(&str, (usize, u64, u64))] = &[
+    ("no field", (67, 163202, 15314340380099935216)),
+    ("field 4", (350, 1356230, 9624883242645359390)),
+    ("swept, field 3", (170, 573202, 10374741291137620039)),
+    ("corner, bundles, ragged core", (46, 143016, 7603092316824107955)),
+    ("legacy width", (67, 93648, 13160660166343323177)),
+    ("tip out, field 2", (223, 765616, 16885660788358395811)),
+    ("off page", (282, 1088038, 9395007924750315913)),
+];
+
+#[test]
+fn solid_flash_corners_are_pixel_identical_to_the_pixel_scan() {
+    let mut got = Vec::new();
+    for (name, p) in solid_variants() {
+        got.push((name, fingerprint(&super::render_urchin(&p, PAGE))));
+    }
+    for g in &got {
+        println!("    (\"{}\", {:?}),", g.0, g.1);
+    }
+    assert_eq!(got.len(), GOLDEN_SOLID.len(), "one golden row per variant");
+    for (g, want) in got.iter().zip(GOLDEN_SOLID) {
+        assert_eq!(g, want, "{} moved", g.0);
+    }
+}

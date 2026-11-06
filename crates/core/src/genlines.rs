@@ -720,6 +720,32 @@ impl InkMask {
     }
 }
 
+impl InkMask {
+    /// Ink `x0..=x1` on row `y`: the same pixels, and the same clip, as
+    /// [`InkSink::put`] on each of them, a mask word at a time.
+    fn put_run(&mut self, y: i32, x0: i32, x1: i32) {
+        if y < 0 || x1 < 0 || x1 < x0 || self.tw == 0 {
+            return;
+        }
+        let (y, x0) = (y as usize, x0.max(0) as usize);
+        let x1 = (x1 as usize).min(self.tw * TILE_SIZE - 1);
+        let ty = y / TILE_SIZE;
+        if ty >= self.th || x0 > x1 {
+            return;
+        }
+        let mut x = x0;
+        while x <= x1 {
+            let tx = x / TILE_SIZE;
+            let lo = x % TILE_SIZE;
+            let hi = (x1 - tx * TILE_SIZE).min(TILE_SIZE - 1);
+            let bits = (u64::MAX >> (TILE_SIZE - 1 - hi)) & (u64::MAX << lo);
+            let m = self.masks[ty * self.tw + tx].get_or_insert_with(|| Box::new([0; TILE_SIZE]));
+            m[y % TILE_SIZE] |= bits;
+            x = (tx + 1) * TILE_SIZE;
+        }
+    }
+}
+
 impl InkSink for InkMask {
     #[inline]
     fn put(&mut self, x: i32, y: i32) {
@@ -1623,6 +1649,33 @@ fn tooth_reach(t: &Tooth) -> f32 {
     (w / r).clamp(0.0, 1.0).asin()
 }
 
+/// How far [`tooth_quad`] grows a tooth's box, in px, along and across its
+/// axis. The box only has to CONTAIN every pixel centre [`Tooth::hit`] can
+/// accept; the float error in `hit` on a B4 page is a thousandth of a
+/// pixel, so two pixels is a wide margin, and a bigger box only costs a
+/// few more exact tests.
+const QUAD_PAD: f32 = 2.0;
+
+/// A box, relative to the flash centre, holding everything [`Tooth::hit`]
+/// can answer true for — so the solid scan can ask a ROW which teeth might
+/// cover it instead of asking every pixel.
+///
+/// `hit` is only true where `along` is in `[lo, hi]` (or, for a flaring
+/// cut, anywhere in `[0, lo)` too) and `|perp|` is at most the half-width
+/// at that radius, which never exceeds the tooth's `hw`, its half-pixel
+/// floor or its flare, whichever is widest. That is a rectangle on the
+/// tooth's own axis; this is it, grown by [`QUAD_PAD`].
+fn tooth_quad(t: &Tooth) -> Quad {
+    let (lo, hi) = (t.r_apex.min(t.r_base), t.r_apex.max(t.r_base));
+    let a0 = if t.flare_hw > t.hw { lo.min(0.0) } else { lo } - QUAD_PAD;
+    let a1 = hi + QUAD_PAD;
+    let w = t.hw.max(t.flare_hw).max(0.5) + QUAD_PAD;
+    // (along, perp) → (dx, dy): along · (c, s) + perp · (−s, c), the
+    // inverse of the projection `hit` makes.
+    let at = |a: f32, p: f32| [a * t.c - p * t.s, a * t.s + p * t.c];
+    Quad::new([at(a0, -w), at(a1, -w), at(a1, w), at(a0, w)])
+}
+
 /// The most teeth any arc `reach` wide can hold, given their sorted
 /// angles — so testing `idx ± win` either side of a query's insertion
 /// point provably covers every tooth within `reach` of it, wrap included.
@@ -2185,77 +2238,186 @@ pub fn render_urchin(p: &UrchinParams, size: (u32, u32)) -> HashMap<TileIdx, Arc
         // solid by construction. Gated on `field`, so a saved flash — no
         // field, black that stops with the teeth — is untouched.
         let despeckle = p.field > 1.0 && p.width_frac > 0.0;
-        let (rw, rh) = (
-            (x1.ceil() - x0.floor()) as usize + 2,
-            (y1.ceil() - y0.floor()) as usize + 2,
-        );
-        let (ox, oy) = (x0.floor() as i32, y0.floor() as i32);
-        let mut hit_map = if despeckle {
-            vec![false; rw * rh]
-        } else {
-            Vec::new()
-        };
-        let mut seeds: Vec<u32> = Vec::new();
+        // THE SCAN BY ROWS (perf lane 2, 2026-11-06). This scan used to
+        // take an `atan2`, a binary search and up to `2 · win + 1` tooth
+        // tests on EVERY pixel of the field, and its despeckle flooded a
+        // page-sized map seeded from every black pixel past the rim: a B4
+        // 600 dpi `Solid flash` measured 15.5 s (lag hunt, 2026-09-10).
+        // Almost all of that page is plain black no tooth reaches.
+        //
+        // So each tooth gets a box holding everything `Tooth::hit` can say
+        // yes to (`tooth_quad`), each row asks which boxes it crosses, and a
+        // pixel no box covers cannot be cut by any tooth: for it the cut
+        // test is `false` without being run, and when its radius is past
+        // every bin of the core table (or inside every bin) the table test
+        // is decided without the `atan2` too. Everything else runs the
+        // original test unchanged, with the candidate window narrowed to
+        // the teeth whose boxes cover the pixel — a tooth that does not
+        // cover it cannot hit it, so the `any` comes out the same.
+        //
+        // The despeckle keeps its rule (ink the black connected to a seed,
+        // a seed being black past `r_out + 1`) but floods only a box round
+        // the rim. Every seed is kept by definition, so a seed is inked on
+        // the spot; a pixel that is NOT a seed lies inside the rim, so it
+        // and its whole chain back to its first seed lie in the rim's box,
+        // and flooding that box from the seeds inside it reaches exactly
+        // the pixels the page-sized flood did. `raster_tests` pins it.
         if x0 < x1 && y0 < y1 {
             let ro2 = field_r * field_r;
             let solid_r2 = (r_out + 1.0) * (r_out + 1.0);
             let ni = teeth.len() as isize;
             let wi = win as isize;
-            for y in y0.floor() as i32..=y1.ceil() as i32 {
-                for x in x0.floor() as i32..=x1.ceil() as i32 {
-                    let dx = x as f32 + 0.5 - c[0];
-                    let dy = y as f32 + 0.5 - c[1];
-                    let r2 = dx * dx + dy * dy;
-                    if r2 > ro2 {
-                        continue;
-                    }
-                    let a = dy.atan2(dx).rem_euclid(std::f32::consts::TAU);
-                    if let Some((mid, half)) = arc {
-                        let d = (a - mid + std::f32::consts::PI)
-                            .rem_euclid(std::f32::consts::TAU)
-                            - std::f32::consts::PI;
-                        if d.abs() > half {
-                            continue;
+            // Is tooth `j` among the old scan's candidates, `idx − win ..=
+            // idx + win` wrapped round the circle?
+            let in_window = |j: usize, idx: isize| {
+                2 * wi + 1 >= ni || {
+                    let d = (j as isize - idx).rem_euclid(ni);
+                    d <= wi || d >= ni - wi
+                }
+            };
+            // The core table's extremes, compared the way the pixel test
+            // compares (`r2 < ri * ri`). A NaN bin turns both shortcuts off.
+            let (core_lo2, core_hi2) = if inner.iter().any(|r| r.is_nan()) {
+                (f32::NEG_INFINITY, f32::INFINITY)
+            } else {
+                inner
+                    .iter()
+                    .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), r| {
+                        (lo.min(r * r), hi.max(r * r))
+                    })
+            };
+            let quads: Vec<Quad> = teeth.iter().map(tooth_quad).collect();
+            let (sx0, sx1) = (x0.floor() as i32, x1.ceil() as i32);
+            let (sy0, sy1) = (y0.floor() as i32, y1.ceil() as i32);
+            // The flood box: every non-seed pixel (`r ≤ r_out + 1`) with a
+            // margin, so each of its neighbours is inside it as well.
+            let fr = r_out + 5.0;
+            let fx0 = sx0.max((c[0] - fr).floor() as i32);
+            let fx1 = sx1.min((c[0] + fr).ceil() as i32);
+            let fy0 = sy0.max((c[1] - fr).floor() as i32);
+            let fy1 = sy1.min((c[1] + fr).ceil() as i32);
+            let fw = (fx1 - fx0 + 1).max(0) as usize;
+            let fh = (fy1 - fy0 + 1).max(0) as usize;
+            let flood = despeckle && fw > 0 && fh > 0;
+            let mut hit_map = if flood {
+                vec![false; fw * fh]
+            } else {
+                Vec::new()
+            };
+            let mut seeds: Vec<u32> = Vec::new();
+            // This row's tooth boxes as `(first col, last col, tooth)`, and
+            // the ones covering the current column as `(last col, tooth)`.
+            let mut row: Vec<(i32, i32, usize)> = Vec::new();
+            let mut active: Vec<(i32, usize)> = Vec::new();
+            for y in sy0..=sy1 {
+                let dy = y as f32 + 0.5 - c[1];
+                row.clear();
+                for (j, q) in quads.iter().enumerate() {
+                    if let Some((lo, hi)) = q.x_range(dy) {
+                        // Pixel centre `x + 0.5 − cx` in `[lo, hi]`, plus a
+                        // column of slack.
+                        let xa = ((c[0] + lo - 0.5).floor() as i32 - 1).max(sx0);
+                        let xb = ((c[0] + hi - 0.5).ceil() as i32 + 1).min(sx1);
+                        if xa <= xb {
+                            row.push((xa, xb, j));
                         }
                     }
-                    let bin = (a / std::f32::consts::TAU * CORE_LUT as f32) as usize % CORE_LUT;
-                    let ri = inner[bin];
-                    if r2 < ri * ri {
-                        continue;
+                }
+                row.sort_unstable_by_key(|e| e.0);
+                active.clear();
+                let mut next = 0;
+                let mut run: Option<i32> = None;
+                for x in sx0..=sx1 {
+                    while next < row.len() && row[next].0 <= x {
+                        active.push((row[next].1, row[next].2));
+                        next += 1;
                     }
-                    let idx = angs.partition_point(|v| *v < a) as isize;
-                    let cut = (-wi..=wi)
-                        .any(|o| teeth[(idx + o).rem_euclid(ni) as usize].hit(dx, dy));
-                    if cut {
-                        continue;
+                    if !active.is_empty() {
+                        active.retain(|e| e.0 >= x);
                     }
-                    if !despeckle {
-                        map.put(x, y);
-                        continue;
+                    let dx = x as f32 + 0.5 - c[0];
+                    let r2 = dx * dx + dy * dy;
+                    let angle = || dy.atan2(dx).rem_euclid(std::f32::consts::TAU);
+                    let ink = 'px: {
+                        if r2 > ro2 {
+                            break 'px false;
+                        }
+                        let mut a = None;
+                        if let Some((mid, half)) = arc {
+                            let av = angle();
+                            let d = (av - mid + std::f32::consts::PI)
+                                .rem_euclid(std::f32::consts::TAU)
+                                - std::f32::consts::PI;
+                            if d.abs() > half {
+                                break 'px false;
+                            }
+                            a = Some(av);
+                        }
+                        // Inside every bin of the core table: white, cut or
+                        // not. Asked first, because a flaring cut's box runs
+                        // to the centre and in here they all overlap.
+                        if r2 < core_lo2 {
+                            break 'px false;
+                        }
+                        // Does any tooth cut this pixel at all?
+                        let near = active.iter().any(|e| teeth[e.1].hit(dx, dy));
+                        if !near && r2 >= core_hi2 {
+                            break 'px true;
+                        }
+                        let a = a.unwrap_or_else(angle);
+                        let bin = (a / std::f32::consts::TAU * CORE_LUT as f32) as usize % CORE_LUT;
+                        let ri = inner[bin];
+                        if r2 < ri * ri {
+                            break 'px false;
+                        }
+                        if !near {
+                            break 'px true;
+                        }
+                        let idx = angs.partition_point(|v| *v < a) as isize;
+                        !active
+                            .iter()
+                            .any(|e| in_window(e.1, idx) && teeth[e.1].hit(dx, dy))
+                    };
+                    let seed = r2 > solid_r2;
+                    // Inked now: a hit on a flash without a field, or a seed.
+                    if ink && (!despeckle || seed) {
+                        run.get_or_insert(x);
+                    } else if let Some(s) = run.take() {
+                        map.put_run(y, s, x - 1);
                     }
-                    let k = (y - oy) as usize * rw + (x - ox) as usize;
-                    hit_map[k] = true;
-                    if r2 > solid_r2 {
-                        seeds.push(k as u32);
+                    if ink && despeckle {
+                        let inside = flood && x >= fx0 && x <= fx1 && y >= fy0 && y <= fy1;
+                        debug_assert!(inside || seed, "a non-seed pixel outside the flood box");
+                        if inside {
+                            let k = (y - fy0) as usize * fw + (x - fx0) as usize;
+                            hit_map[k] = true;
+                            if seed {
+                                seeds.push(k as u32);
+                            }
+                        }
                     }
                 }
+                if let Some(s) = run.take() {
+                    map.put_run(y, s, sx1);
+                }
             }
-            if despeckle {
-                // Flood the field, then ink only what it reached.
-                let mut keep = vec![false; rw * rh];
+            if flood {
+                // Flood the rim's box from its seeds, then ink what it
+                // reached (the seeds themselves are inked already).
+                let mut keep = vec![false; fw * fh];
                 let mut stack = seeds;
                 for s in &stack {
                     keep[*s as usize] = true;
                 }
                 while let Some(k) = stack.pop() {
-                    let (kx, ky) = ((k as usize) % rw, (k as usize) / rw);
+                    let (kx, ky) = ((k as usize) % fw, (k as usize) / fw);
                     for dy in -1i32..=1 {
                         for dx in -1i32..=1 {
                             let (nx, ny) = (kx as i32 + dx, ky as i32 + dy);
-                            if nx < 0 || ny < 0 || nx >= rw as i32 || ny >= rh as i32 {
+                            if nx < 0 || ny < 0 || nx >= fw as i32 || ny >= fh as i32 {
                                 continue;
                             }
-                            let j = ny as usize * rw + nx as usize;
+                            let j = ny as usize * fw + nx as usize;
                             if hit_map[j] && !keep[j] {
                                 keep[j] = true;
                                 stack.push(j as u32);
@@ -2265,7 +2427,7 @@ pub fn render_urchin(p: &UrchinParams, size: (u32, u32)) -> HashMap<TileIdx, Arc
                 }
                 for (k, on) in keep.iter().enumerate() {
                     if *on {
-                        map.put(ox + (k % rw) as i32, oy + (k / rw) as i32);
+                        map.put(fx0 + (k % fw) as i32, fy0 + (k / fw) as i32);
                     }
                 }
             }
