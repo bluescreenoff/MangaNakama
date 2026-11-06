@@ -617,36 +617,125 @@ fn rand(seed: &mut u64) -> f32 {
     (z >> 40) as f32 / (1u64 << 24) as f32
 }
 
-/// Ink one pixel opaque BLACK, premultiplied fix15 — `[0, 0, 0, ONE]`.
+/// Where a rasterizer in this module writes. Every generator here inks
+/// full-alpha BLACK and nothing else, so a pixel is one bit — inked or not
+/// — and `put` is idempotent.
 ///
-/// This wrote `[ONE; 4]` from the first commit, which is opaque WHITE (the
-/// same four words `Layer::fill_white` writes), so every generator in this
-/// module drew white-on-white: a layer in the palette and nothing on the
-/// page. It survived because every test here reads channel 3 only —
-/// coverage — and the fingerprint pin counts inked PIXELS, not their
-/// colour, so the whole suite agreed with a bug it never looked at. Owner
-/// repro 2026-08-22, Figure ▸ Saturated line. Black is the documented
-/// contract of this module (three doc comments say so) and the print
-/// reality of 集中線/流線; the geometry is untouched, so the bit-stability
-/// pin still matches.
-fn put(map: &mut HashMap<TileIdx, Tile>, x: i32, y: i32) {
-    if x < 0 || y < 0 {
-        return;
-    }
-    let idx = TileIdx::of_pixel(x, y);
-    let (ox, oy) = idx.origin();
-    let tile = map.entry(idx).or_insert_with(Tile::new_transparent);
-    let lx = (x - ox) as usize;
-    let ly = (y - oy) as usize;
-    if lx < TILE_SIZE && ly < TILE_SIZE {
-        let o = Tile::offset(lx, ly);
-        let d = tile.data_mut();
-        d[o] = 0;
-        d[o + 1] = 0;
-        d[o + 2] = 0;
-        d[o + 3] = FIX15_ONE as u16;
+/// Black is `[0, 0, 0, ONE]` premultiplied fix15. The first commit wrote
+/// `[ONE; 4]`, which is opaque WHITE (the same four words
+/// `Layer::fill_white` writes), so every generator drew white-on-white: a
+/// layer in the palette and nothing on the page. It survived because every
+/// test here reads channel 3 only — coverage — and the fingerprint pin
+/// counts inked PIXELS, not their colour. Owner repro 2026-08-22, Figure ▸
+/// Saturated line. Black is the documented contract of this module and the
+/// print reality of 集中線/流線.
+trait InkSink {
+    fn put(&mut self, x: i32, y: i32);
+}
+
+/// The original sink, kept as the reference the shape tests rasterize
+/// single strokes into: a map looked up on every inked pixel. It is what
+/// [`InkMask`] replaced, and the golden fingerprints in `raster_tests` were
+/// taken from it.
+#[cfg(test)]
+impl InkSink for HashMap<TileIdx, Tile> {
+    fn put(&mut self, x: i32, y: i32) {
+        if x < 0 || y < 0 {
+            return;
+        }
+        let idx = TileIdx::of_pixel(x, y);
+        let (ox, oy) = idx.origin();
+        let tile = self.entry(idx).or_insert_with(Tile::new_transparent);
+        let lx = (x - ox) as usize;
+        let ly = (y - oy) as usize;
+        if lx < TILE_SIZE && ly < TILE_SIZE {
+            let o = Tile::offset(lx, ly);
+            let d = tile.data_mut();
+            d[o] = 0;
+            d[o + 1] = 0;
+            d[o + 2] = 0;
+            d[o + 3] = FIX15_ONE as u16;
+        }
     }
 }
+
+// One mask row is one `u64`, which only holds while a tile is 64 wide.
+const _: () = assert!(TILE_SIZE == 64);
+
+/// The page's ink as one bit per pixel, held per tile, allocated on a
+/// tile's first inked pixel, and turned into real tiles ONCE at the end
+/// ([`InkMask::into_tiles`]).
+///
+/// It replaced a `HashMap<TileIdx, Tile>` that was looked up on EVERY
+/// inked pixel (perf lane 2, 2026-11-06). A B4 600 dpi 流線 inks tens of
+/// millions of pixels, most of them more than once — neighbouring scan
+/// chunks overlap, strokes cross — and a hashed lookup per pixel was most
+/// of the 3-9 s one regen took. Here a pixel costs a bounds check, two
+/// divisions by a power of two and an OR into a 512-byte mask.
+///
+/// The clip is the old one EXACTLY. The map sink dropped negative
+/// coordinates, wrote any pixel of any tile — including the columns of a
+/// partial edge tile that lie past the page edge — and every renderer then
+/// `retain`ed only the tiles whose origin was on the page. A grid of
+/// `ceil(w / 64) × ceil(h / 64)` masks is precisely that set of tiles, so
+/// the pixel set does not move (`legacy_renders_are_bit_stable`, and every
+/// shipped preset in `raster_tests`).
+struct InkMask {
+    tw: usize,
+    th: usize,
+    masks: Vec<Option<Box<[u64; TILE_SIZE]>>>,
+}
+
+impl InkMask {
+    fn new(size: (u32, u32)) -> Self {
+        let tw = (size.0 as usize).div_ceil(TILE_SIZE);
+        let th = (size.1 as usize).div_ceil(TILE_SIZE);
+        Self {
+            tw,
+            th,
+            masks: (0..tw * th).map(|_| None).collect(),
+        }
+    }
+
+    /// Every touched tile, inked opaque black (see [`InkSink`]).
+    fn into_tiles(self) -> HashMap<TileIdx, Arc<Tile>> {
+        let tw = self.tw;
+        let mut out = HashMap::with_capacity(self.masks.iter().filter(|m| m.is_some()).count());
+        for (i, m) in self.masks.into_iter().enumerate() {
+            let Some(m) = m else { continue };
+            let mut tile = Tile::new_transparent();
+            let d = tile.data_mut();
+            for (ly, row) in m.iter().enumerate() {
+                let mut bits = *row;
+                while bits != 0 {
+                    let lx = bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
+                    // The colour channels are already 0: black.
+                    d[Tile::offset(lx, ly) + 3] = FIX15_ONE as u16;
+                }
+            }
+            out.insert(TileIdx::new((i % tw) as i32, (i / tw) as i32), Arc::new(tile));
+        }
+        out
+    }
+}
+
+impl InkSink for InkMask {
+    #[inline]
+    fn put(&mut self, x: i32, y: i32) {
+        if x < 0 || y < 0 {
+            return;
+        }
+        let (x, y) = (x as usize, y as usize);
+        let (tx, ty) = (x / TILE_SIZE, y / TILE_SIZE);
+        if tx >= self.tw || ty >= self.th {
+            return;
+        }
+        let m = self.masks[ty * self.tw + tx].get_or_insert_with(|| Box::new([0; TILE_SIZE]));
+        m[y % TILE_SIZE] |= 1 << (x % TILE_SIZE);
+    }
+}
+
 
 /// The half-width ramp along one stroke, `t` = 0 at the base `a` and 1
 /// at the tip `b`. Carried as a struct rather than three more positional
@@ -673,6 +762,49 @@ impl Profile {
 
     fn width_at(&self, t: f32) -> f32 {
         width_at(t, self.taper, self.entry, self.needle)
+    }
+
+    /// `(lo, hi)` such that the COMPUTED `width_at(t)` lies in `[lo, hi]`
+    /// for every `t` in `[t0, t1]` — what lets [`segment`] skip the ramp
+    /// (two `powf`s) on every pixel that is clearly in or clearly out.
+    /// Only called with `taper ≥ 0`.
+    ///
+    /// Why these are true bounds of the float function, not of the maths:
+    /// `width_at` is a product of a falling part (the taper, its needle
+    /// power, the exit ramp) and a rising part (the entry ramp), all
+    /// non-negative. IEEE rounding is monotone, so every `+ − × ÷` step
+    /// keeps that order exactly, and a product of rounded bounds bounds
+    /// the rounded product when it is formed in the same order. The two
+    /// steps that are NOT guaranteed monotone are `powf` (within an ulp
+    /// or two of the true power, which is) and the exit ramp at its
+    /// branch, where `(1 − t) / 0.1` can come out a few ulps over 1. Each
+    /// of those is widened by `1e-5` relative — over a hundred ulps — so
+    /// the bound holds whatever the libm.
+    fn width_bounds(&self, t0: f32, t1: f32) -> (f32, f32) {
+        const EXIT: f32 = 0.1;
+        const UP: f32 = 1.0 + 1e-5;
+        const DOWN: f32 = 1.0 - 1e-5;
+        // The falling part, through the needle power, at one end.
+        let fall = |t: f32| {
+            let w = (1.0 - self.taper * t).max(0.0);
+            if self.needle > 0.0 { w.powf(self.needle) } else { w }
+        };
+        let (mut lo, mut hi) = (fall(t1) * DOWN, fall(t0) * UP);
+        if self.taper > 0.0 {
+            let exit = |t: f32| (1.0 - t) / EXIT;
+            let e_lo = if t1 > 1.0 - EXIT { exit(t1) * DOWN } else { 1.0 };
+            let e_hi = if t0 > 1.0 - EXIT { exit(t0) * UP } else { UP };
+            lo *= e_lo.min(1.0);
+            hi *= e_hi;
+        }
+        if self.entry > 0.0 {
+            let rise = |t: f32| (t / self.entry).powf(0.7);
+            let i_lo = if t0 < self.entry { rise(t0) * DOWN } else { 1.0 };
+            let i_hi = if t1 < self.entry { rise(t1) * UP } else { UP };
+            lo *= i_lo.min(1.0);
+            hi *= i_hi;
+        }
+        (lo, hi)
     }
 }
 
@@ -751,13 +883,13 @@ fn width_at(t: f32, taper: f32, entry: f32, needle: f32) -> f32 {
 /// area is proportional to length × width again. This is not an
 /// approximation and not a quality knob — every pixel within reach of the
 /// stroke has its nearest point on some chunk and is therefore inside that
-/// chunk's box, [`put`] is idempotent so the overlap between neighbouring
+/// chunk's box, [`InkSink::put`] is idempotent so the overlap between neighbouring
 /// boxes costs a repeated test and nothing else, and the boxes only ever
 /// SHRINK relative to the old one, so no pixel that was not inked before is
 /// inked now. The written pixel set is identical, which is what
 /// `legacy_renders_are_bit_stable` pins.
 fn segment(
-    map: &mut HashMap<TileIdx, Tile>,
+    map: &mut impl InkSink,
     a: [f32; 2],
     b: [f32; 2],
     hw: f32,
@@ -769,6 +901,97 @@ fn segment(
     if dd <= f32::EPSILON {
         return;
     }
+    let inks = |x: i32, y: i32| stroke_hit(a, d, dd, hw, prof, x, y);
+    // THE ROW SCAN (perf lane 2, 2026-11-06). The chunk boxes below made
+    // the work O(length × width) again, but each box is axis-aligned and
+    // at least 8 px long, so a hairline 流線 still tested ~20 pixels per
+    // pixel of length, most of them twice over where neighbouring boxes
+    // overlap: a B4 600 dpi `Stream line` measured 11.6 s with the bit-grid
+    // sink already in. This scans each ROW of the stroke's own rectangle
+    // once instead — its length plus a reach at either end, a reach either
+    // side — so a pixel is tested once, and only if it can be inside.
+    //
+    // It is exact, not close. The chunk boxes test every pixel whose
+    // nearest stroke point is within `reach` of it and that lies in
+    // `[0, w] × [0, h]` (each box is clipped to `size` and floored /
+    // ceiled, so column `w` and row `h` are scanned too, and a chunk is
+    // only skipped when it lies wholly past an edge, where no pixel inside
+    // the clip can be near it). A pixel the test accepts is within `hwt`
+    // of its nearest point, and `hwt ≤ hw.max(0.5) = reach − 1` whenever
+    // `width_at` ≤ 1, which holds for every profile with `taper ≥ 0`: so
+    // both scans accept exactly the accepted pixels inside that clip. The
+    // rectangle below is padded a pixel more than the test can reach, for
+    // float rounding. A negative taper (a widening ramp — no preset has one,
+    // the dialog does not offer one), a negative half-width or a non-finite
+    // input takes the old scan, which is the definition this one is checked
+    // against.
+    let r0 = hw.max(0.5);
+    let finite = a.iter().chain(b.iter()).all(|v| v.is_finite()) && r0.is_finite();
+    if !(prof.taper >= 0.0 && hw >= 0.0 && finite) {
+        segment_chunks(map, a, b, hw, prof, size);
+        return;
+    }
+    let len = dd.sqrt();
+    let u = [d[0] / len, d[1] / len];
+    let (al0, al1, pe) = (-r0 - 1.0, len + r0 + 1.0, r0 + 1.0);
+    let at = |s: f32, p: f32| [a[0] + u[0] * s - u[1] * p, a[1] + u[1] * s + u[0] * p];
+    let quad = Quad::new([at(al0, -pe), at(al1, -pe), at(al1, pe), at(al0, pe)]);
+    let (w, h) = (size.0 as i32, size.1 as i32);
+    let ys = (quad.y_lo.floor() as i32).max(0);
+    let ye = (quad.y_hi.ceil() as i32).min(h);
+    for y in ys..=ye {
+        let Some((lo, hi)) = quad.x_range(y as f32 + 0.5) else {
+            continue;
+        };
+        // Pixel centre `x + 0.5` in `[lo, hi]`, one column of slack.
+        let xs = ((lo - 0.5).floor() as i32 - 1).max(0);
+        let xe = ((hi - 0.5).ceil() as i32 + 1).min(w);
+        // In runs of [`RUN`] pixels. `t` is monotone along a row (every
+        // step computing it is monotone in `x`), so a run's two ends bound
+        // it, and [`Profile::width_bounds`] turns that into a squared
+        // half-width every pixel of the run is surely inside, and one it is
+        // surely outside. The exact ramp — two `powf`s — is only paid on
+        // the band between, which is the stroke's own edge.
+        let mut x = xs;
+        while x <= xe {
+            let xr = (x + RUN - 1).min(xe);
+            let (ta, tb) = (stroke_dist(a, d, dd, x, y).0, stroke_dist(a, d, dd, xr, y).0);
+            let (wl, wh) = prof.width_bounds(ta.min(tb), ta.max(tb));
+            let (hl, hh) = ((hw * wl).max(0.5), (hw * wh).max(0.5));
+            let (in2, out2) = (hl * hl, hh * hh);
+            for xi in x..=xr {
+                let e2 = stroke_dist(a, d, dd, xi, y).1;
+                if e2 <= in2 || (e2 <= out2 && inks(xi, y)) {
+                    map.put(xi, y);
+                }
+            }
+            x = xr + 1;
+        }
+    }
+}
+
+/// Pixels per bounded run in [`segment`]'s row scan: short enough that the
+/// ramp barely moves along one, long enough to pay for its two bounds.
+const RUN: i32 = 32;
+
+/// The stroke scan from before the row scan: chunk boxes along the axis
+/// (see [`segment`]). Kept as the path for a widening profile, and as the
+/// definition `raster_tests::row_scan_matches_the_chunk_scan` holds the
+/// row scan to.
+fn segment_chunks(
+    map: &mut impl InkSink,
+    a: [f32; 2],
+    b: [f32; 2],
+    hw: f32,
+    prof: Profile,
+    size: (u32, u32),
+) {
+    let d = [b[0] - a[0], b[1] - a[1]];
+    let dd = d[0] * d[0] + d[1] * d[1];
+    if dd <= f32::EPSILON {
+        return;
+    }
+    let inks = |x: i32, y: i32| stroke_hit(a, d, dd, hw, prof, x, y);
     // How far off its own axis this stroke can still ink a pixel: the ramp
     // never returns more than 1.0 and the test below floors the half-width
     // at half a pixel, so `hw.max(0.5)` is the true half-width for the
@@ -786,34 +1009,93 @@ fn segment(
         }
         for y in y0.floor() as i32..=y1.ceil() as i32 {
             for x in x0.floor() as i32..=x1.ceil() as i32 {
-                let px = x as f32 + 0.5;
-                let py = y as f32 + 0.5;
-                let t = (((px - a[0]) * d[0] + (py - a[1]) * d[1]) / dd).clamp(0.0, 1.0);
-                let qx = a[0] + t * d[0];
-                let qy = a[1] + t * d[1];
-                let ex = px - qx;
-                let ey = py - qy;
-            // The ramped half-width, floored at half a pixel: a pen
-            // needle stays a 1 px line until it ends, and this test is
-            // hard-edged, so once `hw · width_at(t)` drops under ~0.35 px
-            // it only catches the odd pixel centre and the last third of
-            // every tapered stroke prints DASHED. The floor is where the
-            // ramp stops — one pixel wide, held to the tip.
-            //
-            // The trap: both callers already floor `hw` at 0.5, and a
-            // zero profile returns exactly 1.0, so `hwt == hw` on every
-            // pre-parity layer and the pinned rasters do not move
-            // (`legacy_renders_are_bit_stable`). A layer saved WITH a
-            // taper does redraw — solid tails instead of dotted ones —
-            // which is the fix, not a regression.
-                let hwt = (hw * prof.width_at(t)).max(0.5);
-                if ex * ex + ey * ey <= hwt * hwt {
-                    put(map, x, y);
+                if inks(x, y) {
+                    map.put(x, y);
                 }
             }
         }
     }
 }
+
+/// The one per-pixel stroke test, shared by both scans so they cannot
+/// disagree on a single float: is the centre of pixel `(x, y)` within the
+/// ramped half-width of its nearest point on `a`→`a + d` (`dd` = |d|²)?
+#[inline]
+fn stroke_hit(a: [f32; 2], d: [f32; 2], dd: f32, hw: f32, prof: Profile, x: i32, y: i32) -> bool {
+    let (t, e2) = stroke_dist(a, d, dd, x, y);
+    // The ramped half-width, floored at half a pixel: a pen needle stays a
+    // 1 px line until it ends, and this test is hard-edged, so once
+    // `hw · width_at(t)` drops under ~0.35 px it only catches the odd pixel
+    // centre and the last third of every tapered stroke prints DASHED. The
+    // floor is where the ramp stops — one pixel wide, held to the tip.
+    //
+    // The trap: both callers already floor `hw` at 0.5, and a zero profile
+    // returns exactly 1.0, so `hwt == hw` on every pre-parity layer and the
+    // pinned rasters do not move (`legacy_renders_are_bit_stable`). A layer
+    // saved WITH a taper does redraw — solid tails instead of dotted ones —
+    // which is the fix, not a regression.
+    let hwt = (hw * prof.width_at(t)).max(0.5);
+    e2 <= hwt * hwt
+}
+
+/// Pixel `(x, y)`'s centre against `a`→`a + d`: the clamped position `t`
+/// of its nearest point along the stroke, and its squared distance from
+/// that point. Split out of [`stroke_hit`] so the row scan can decide most
+/// pixels on these two numbers alone, with exactly the floats it uses.
+#[inline]
+fn stroke_dist(a: [f32; 2], d: [f32; 2], dd: f32, x: i32, y: i32) -> (f32, f32) {
+    let px = x as f32 + 0.5;
+    let py = y as f32 + 0.5;
+    let t = (((px - a[0]) * d[0] + (py - a[1]) * d[1]) / dd).clamp(0.0, 1.0);
+    let qx = a[0] + t * d[0];
+    let qy = a[1] + t * d[1];
+    let ex = px - qx;
+    let ey = py - qy;
+    (t, ex * ex + ey * ey)
+}
+
+/// A convex quadrilateral, for scanning by rows: which x a horizontal
+/// line crosses it at. Both row scans in this module use it to bound a
+/// per-pixel test, never to decide one, so it only has to be a SUPERSET —
+/// every caller pads the shape it builds.
+struct Quad {
+    corners: [[f32; 2]; 4],
+    y_lo: f32,
+    y_hi: f32,
+}
+
+impl Quad {
+    /// `corners` in order round the outline (either direction).
+    fn new(corners: [[f32; 2]; 4]) -> Self {
+        let y_lo = corners.iter().map(|q| q[1]).fold(f32::INFINITY, f32::min);
+        let y_hi = corners.iter().map(|q| q[1]).fold(f32::NEG_INFINITY, f32::max);
+        Self { corners, y_lo, y_hi }
+    }
+
+    /// The x range the line at height `y` crosses, or `None` if it misses.
+    fn x_range(&self, y: f32) -> Option<(f32, f32)> {
+        if !(y >= self.y_lo && y <= self.y_hi) {
+            return None;
+        }
+        let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+        for k in 0..4 {
+            let (p, q) = (self.corners[k], self.corners[(k + 1) % 4]);
+            if (p[1] < y && q[1] < y) || (p[1] > y && q[1] > y) {
+                continue;
+            }
+            if p[1] == q[1] {
+                lo = lo.min(p[0].min(q[0]));
+                hi = hi.max(p[0].max(q[0]));
+            } else {
+                let x = p[0] + (y - p[1]) * (q[0] - p[0]) / (q[1] - p[1]);
+                lo = lo.min(x);
+                hi = hi.max(x);
+            }
+        }
+        (lo <= hi).then_some((lo, hi))
+    }
+}
+
 
 /// A hard ceiling on how many boxes one stroke is scanned in — a runaway
 /// parameter must cost a coarse scan, never an unbounded loop.
@@ -843,7 +1125,7 @@ fn scan_chunks(a: [f32; 2], b: [f32; 2], reach: f32) -> impl Iterator<Item = ([f
 /// [`segment`], and for the same reason: an off-canvas flash centre with
 /// a page-sized outer radius is an unbounded scan and an unbounded tile
 /// allocation, not a slow one.
-fn fill_tooth(map: &mut HashMap<TileIdx, Tile>, c: [f32; 2], t: &Tooth, size: (u32, u32)) {
+fn fill_tooth(map: &mut impl InkSink, c: [f32; 2], t: &Tooth, size: (u32, u32)) {
     let apex = [c[0] + t.c * t.r_apex, c[1] + t.s * t.r_apex];
     let base = [c[0] + t.c * t.r_base, c[1] + t.s * t.r_base];
     let off = [-t.s * t.hw, t.c * t.hw];
@@ -890,7 +1172,7 @@ fn fill_tooth(map: &mut HashMap<TileIdx, Tile>, c: [f32; 2], t: &Tooth, size: (u
         for y in cy0.floor() as i32..=cy1.ceil() as i32 {
             for x in cx0.floor() as i32..=cx1.ceil() as i32 {
                 if t.hit(x as f32 + 0.5 - c[0], y as f32 + 0.5 - c[1]) {
-                    put(map, x, y);
+                    map.put(x, y);
                 }
             }
         }
@@ -1035,7 +1317,7 @@ fn radial_angles(
 
 /// Render focus lines into sparse tiles (opaque black premul fix15).
 pub fn render_focus(p: &FocusLinesParams, size: (u32, u32)) -> HashMap<TileIdx, Arc<Tile>> {
-    let mut map: HashMap<TileIdx, Tile> = HashMap::new();
+    let mut map = InkMask::new(size);
     let mut seed = p.seed | 1;
     let span = (p.r_out - p.r_in).max(1.0);
     let bases = radial_angles(
@@ -1102,19 +1384,14 @@ pub fn render_focus(p: &FocusLinesParams, size: (u32, u32)) -> HashMap<TileIdx, 
             size,
         );
     }
-    // Clip: drop fully-off-canvas tiles; per-pixel clipping happened in put.
-    let (w, h) = (size.0 as i32, size.1 as i32);
-    map.retain(|idx, _| {
-        let (ox, oy) = idx.origin();
-        ox < w && oy < h && ox + TILE_SIZE as i32 > 0 && oy + TILE_SIZE as i32 > 0
-    });
-    map.into_iter().map(|(k, v)| (k, Arc::new(v))).collect()
+    // The mask only holds on-page tiles: that IS the old off-canvas clip.
+    map.into_tiles()
 }
 
 /// Render speed lines: parallel runs scattered across the canvas along
 /// `angle_deg`, each starting within the canvas's perpendicular extent.
 pub fn render_speed(p: &SpeedLinesParams, size: (u32, u32)) -> HashMap<TileIdx, Arc<Tile>> {
-    let mut map: HashMap<TileIdx, Tile> = HashMap::new();
+    let mut map = InkMask::new(size);
     let mut seed = p.seed | 1;
     let (w, h) = (size.0 as f32, size.1 as f32);
     let rad = p.angle_deg.to_radians();
@@ -1322,12 +1599,7 @@ pub fn render_speed(p: &SpeedLinesParams, size: (u32, u32)) -> HashMap<TileIdx, 
             .accent(hw.max(0.5), &mut seed, &mut prev_accent, &mut accent_acc);
         segment(&mut map, base, tip, hw, prof, size);
     }
-    let (wi, hi_) = (size.0 as i32, size.1 as i32);
-    map.retain(|idx, _| {
-        let (ox, oy) = idx.origin();
-        ox < wi && oy < hi_ && ox + TILE_SIZE as i32 > 0 && oy + TILE_SIZE as i32 > 0
-    });
-    map.into_iter().map(|(k, v)| (k, Arc::new(v))).collect()
+    map.into_tiles()
 }
 
 /// The angular half-extent of a tooth: its half-width at radius `r` is
@@ -1549,7 +1821,7 @@ fn lobe(ang: f32, ph: [f32; 3]) -> f32 {
 /// ONE peak built of slivers rather than as a ragged clump, and it is the
 /// sawtooth ref-23's author annotates 「このジグザグをつくる」.
 pub fn render_urchin(p: &UrchinParams, size: (u32, u32)) -> HashMap<TileIdx, Arc<Tile>> {
-    let mut map: HashMap<TileIdx, Tile> = HashMap::new();
+    let mut map = InkMask::new(size);
     let mut seed = p.seed | 1;
     let n0 = p.count.max(1);
     let step = std::f32::consts::TAU / n0 as f32;
@@ -1958,7 +2230,7 @@ pub fn render_urchin(p: &UrchinParams, size: (u32, u32)) -> HashMap<TileIdx, Arc
                         continue;
                     }
                     if !despeckle {
-                        put(&mut map, x, y);
+                        map.put(x, y);
                         continue;
                     }
                     let k = (y - oy) as usize * rw + (x - ox) as usize;
@@ -1993,7 +2265,7 @@ pub fn render_urchin(p: &UrchinParams, size: (u32, u32)) -> HashMap<TileIdx, Arc
                 }
                 for (k, on) in keep.iter().enumerate() {
                     if *on {
-                        put(&mut map, ox + (k % rw) as i32, oy + (k / rw) as i32);
+                        map.put(ox + (k % rw) as i32, oy + (k / rw) as i32);
                     }
                 }
             }
@@ -2004,13 +2276,11 @@ pub fn render_urchin(p: &UrchinParams, size: (u32, u32)) -> HashMap<TileIdx, Arc
         }
     }
 
-    let (wi, hi_) = (size.0 as i32, size.1 as i32);
-    map.retain(|idx, _| {
-        let (ox, oy) = idx.origin();
-        ox < wi && oy < hi_ && ox + TILE_SIZE as i32 > 0 && oy + TILE_SIZE as i32 > 0
-    });
-    map.into_iter().map(|(k, v)| (k, Arc::new(v))).collect()
+    map.into_tiles()
 }
+
+#[cfg(test)]
+mod raster_tests;
 
 #[cfg(test)]
 mod scan_cost_tests {
