@@ -200,6 +200,11 @@ whole compositor (layer blending, group flattening, tile upload, display)
 plus brush dab rasterization behind `--gpu-dabs`. Gradients, transforms and
 filters are still CPU; they are the queue.
 
+PSD import and export run on a vendored copy of storytold/photocraft's
+`psd` crate (`vendor/photocraft-psd`). The previous in-house PSD writer is
+still in the code and stays there: `psd_legacy_writer=1` in the preferences
+file switches back to it. No removal is planned.
+
 Inking runs on a libmypaint engine with Krita-inspired modes (hard-stamp
 tips, scatter, wash/flow-vs-opacity, texture tips, symmetry, wrap-around
 tiling, a sketch/hatching engine). Manga structure is CSP-style: panels and
