@@ -1,3 +1,5 @@
+//! LEGACY writer, kept one release behind the `psd_legacy_writer` preference; the live one is `psd/`.
+//!
 //! Layered PSD EXPORT (write-only — the practical studio hand-off the
 //! ROADMAP promises in place of a `.clip` writer that cannot exist).
 //!

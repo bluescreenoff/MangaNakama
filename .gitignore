@@ -20,3 +20,6 @@ swatches.txt
 
 # standalone vendor-test resolution (MN-PATCH #18); the workspace lock is the real one
 vendor/egui_dock/Cargo.lock
+# Local-only PSD test fixtures (third-party / owner-made files, not
+# redistributed — the real-file test skips when the folder is absent).
+crates/core/tests/data/psd/

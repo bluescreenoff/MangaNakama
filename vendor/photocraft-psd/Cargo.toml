@@ -1,0 +1,34 @@
+[package]
+name = "photocraft-psd"
+description = "Faithful, lossless reader and writer for Adobe Photoshop PSD (v1) and PSB (v2) files"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "photocraft_psd"
+path = "src/lib.rs"
+# The crate-level doc example cannot link here: rustdoc does not get the
+# `link-self-contained=yes` rustflag from .cargo/config.toml, so the link
+# dies with `cannot find -lgcc_eh` (docs/ARCHITECTURE.md "Traps"). The same
+# build-and-read-back is covered by tests/it/builder.rs and roundtrip.rs.
+doctest = false
+
+[features]
+default = []
+serde = ["dep:serde"]
+testgen = []
+
+[dependencies]
+thiserror = "2"
+flate2 = "1.1"
+serde = { version = "1", features = ["derive"], optional = true }
+
+[dev-dependencies]
+proptest = "1"
+photocraft-psd = { path = ".", features = ["testgen"] }
+
+[lints.rust]
+unsafe_code = "forbid"

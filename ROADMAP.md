@@ -104,8 +104,9 @@ grayscale or colour, web, and a 提出 proof JPEG — output dpi, colour mode,
 resample kernel and format in one pick, resampled first and thresholded last
 so a 1-bit file really is 1-bit, never upsampled, and with a threshold-aware
 "comic" downscale so hairlines survive a shrink instead of dissolving),
-layered PSD export for the studio hand-off (groups, all 27 blend
-modes, clipping, Japanese layer names), crash recovery and autosave.
+layered PSD export and import for the studio hand-off (groups, all 27 blend
+modes, clipping, layer masks, Japanese layer names; PSB past 30,000 px),
+crash recovery and autosave.
 
 **Infrastructure.** 500+ tests. GPU tests run against the software adapter when
 no hardware one is present, and skip rather than fail when there is no adapter

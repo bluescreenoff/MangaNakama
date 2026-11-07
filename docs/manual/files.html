@@ -12,14 +12,37 @@
 
 <h2>Handing a page to a studio (.psd)</h2>
 <div class="quirk"><b>File ▸ Export layered PSD writes the page as
-Photoshop layers — one way.</b> Folders arrive as groups (pass-through
-folders stay pass-through), all blend modes map, clipping and Japanese
-layer names survive. QUIRKS: layer masks are baked into the pixels
-(what you saw is what they get, but the mask is no longer editable
-there); tone, fill, frame, balloon and text layers export as their
-rendered pixels; vector layers export as ink. This is an EXPORT — the
-app never reads .psd back, and your working file stays
+Photoshop layers.</b> Folders arrive as groups (pass-through folders stay
+pass-through), all blend modes map, clipping, opacity, visibility and
+Japanese layer names survive. Layer masks arrive as Photoshop layer masks
+(still editable there, the off switch included). Lock and transparency
+lock ride as Photoshop's lock flags; the page resolution is written.
+QUIRKS: tone, fill, frame, balloon and text layers export as their
+rendered pixels; vector layers export as ink; a frame folder's border
+arrives as a layer named "<i>folder</i> (border)" at the top of its
+group; Glow Dodge becomes Color Dodge (Photoshop has no Glow Dodge).
+A page over 30,000 px on a side is written as <code>.psb</code> (Large
+Document Format) and the status line says so. Your working file stays
 <code>.ora</code>/<code>.mnc</code>.</div>
+
+<h2>Opening a .psd</h2>
+<div class="quirk"><b>File ▸ Open (and drag and drop) accept
+<code>.psd</code> and <code>.psb</code>.</b> The file opens as a single
+page with no page setup, like a bare <code>.ora</code>. Folders, blend
+modes, opacity, visibility, clipping, layer masks and lock flags come
+across; 16- and 32-bit and CMYK files are reduced to 8-bit RGB.
+QUIRKS: text layers, smart objects, adjustment and fill layers, layer
+effects and vector masks arrive as the pixels the file stores for them
+(an adjustment layer usually stores none), with their names; folder masks
+and Blend If ranges are dropped; Dissolve and unknown modes become Normal.
+The status line counts what did not come across. The page has no file
+name yet: Save asks for one, so the <code>.psd</code> is never
+overwritten.</div>
+
+<div class="quirk"><b>Preferences ▸ Saving ▸ Use the old PSD
+writer.</b> Writes PSDs with the previous exporter (8-bit, no layer masks,
+no PSB). Turn it on only if the new writer gives a file your studio cannot
+open. It is removed in the next release.</div>
 
 <h2>Export finish (print presets)</h2>
 <div class="quirk"><b>Export never upsamples.</b> The Finish picker in
@@ -302,8 +325,8 @@ is too big.</div>
 <div class="quirk"><b>Single images save as .ora; comics are work
 folders</b> (a <code>work.mnc</code> index plus one file per page).
 Work folders autosave in place, page by page — only pages that changed
-are rewritten. Layered PSD is the hand-off format for other apps; CSP
-cannot open .ora.</div>
+are rewritten. Layered PSD is the hand-off format for other apps (and the
+way in from them); CSP cannot open .ora.</div>
 
 <div class="quirk"><b>Saving one page of a comic as .ora keeps its
 resolution but not its page setup.</b> The file records the dpi it was

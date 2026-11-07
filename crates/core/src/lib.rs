@@ -50,6 +50,7 @@ pub mod preflight;
 pub mod profile;
 pub mod project;
 pub mod psd;
+pub mod psd_legacy;
 pub mod ruler;
 pub mod selection;
 pub mod shape_fit;

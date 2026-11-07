@@ -1310,6 +1310,7 @@ fn resolve_dialog(hwnd: HWND, cmd: AppCmd) -> Option<AppCmd> {
         AppCmd::OpenOra => rfd::FileDialog::new()
             .set_title("Open")
             .add_filter("MangaNakama Comic / OpenRaster", &["mnc", "ora"])
+            .add_filter("Photoshop (psd, psb)", &["psd", "psb"])
             .pick_file()
             .map(AppCmd::OpenOraPath),
         AppCmd::SaveOra => match current() {

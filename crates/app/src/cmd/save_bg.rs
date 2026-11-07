@@ -28,10 +28,12 @@ pub(crate) enum Write {
     /// too. Measured, a `Document::clone` costs under a millisecond because
     /// tiles are `Arc`, and the encode it defers costs seconds.
     Ora { path: PathBuf, page: PageEncode },
-    /// A layered `.psd`. Same story as `Ora`.
+    /// A layered `.psd` (or `.psb`). Same story as `Ora`. `legacy` = the
+    /// previous writer (`psd_legacy_writer` preference).
     Psd {
         path: PathBuf,
         doc: Box<mn_core::Document>,
+        legacy: bool,
     },
     /// A single-file `.mnc`. `encodes` are the pages whose bytes are not in
     /// `proj` yet — the live page, and any still-blank template page.
@@ -162,16 +164,22 @@ fn perform(job: Write) -> Result<String, String> {
             write_atomic(&path, &bytes)?;
             Ok(format!("saved {} ({kb} KB)", path.display()))
         }
-        Write::Psd { path, doc } => {
+        Write::Psd { path, doc, legacy } => {
             let mut buf = std::io::Cursor::new(Vec::new());
-            mn_core::psd::save_psd(&doc, &mut buf).map_err(|e| e.to_string())?;
+            if legacy {
+                mn_core::psd_legacy::save_psd(&doc, &mut buf).map_err(|e| e.to_string())?;
+            } else {
+                mn_core::psd::save_psd(&doc, &mut buf).map_err(|e| e.to_string())?;
+            }
             let bytes = buf.into_inner();
             let kb = bytes.len() / 1024;
             write_atomic(&path, &bytes)?;
+            let psb = !legacy && mn_core::psd::needs_psb(doc.size);
             Ok(format!(
-                "exported layered PSD ({} layers, {kb} KB) -> {}",
+                "exported layered PSD ({} layers, {kb} KB) -> {}{}",
                 doc.layers.len(),
-                path.display()
+                path.display(),
+                if psb { "; canvas over 30,000 px: wrote PSB" } else { "" }
             ))
         }
         Write::Project {
