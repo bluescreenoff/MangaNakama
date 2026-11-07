@@ -617,7 +617,7 @@ The recurring failure shapes, in order of how often they have shipped:
 - `psd/` is the live writer and the reader, on the vendored crate
   (`vendor/photocraft-psd/VENDOR.md`: pinned commit, patches, re-pin steps).
   `psd_legacy.rs` is the previous writer, selected by the
-  `psd_legacy_writer` preference in `cmd/save_bg.rs`. It stays (Max,
+  `psd_legacy_writer` preference in `cmd/save_bg.rs`. It stays (owner,
   2026-11-07): no removal planned, no card for it.
 - `psd/blend.rs` is the sixth site to touch when a `Blend` variant is added
   (the "five edit sites" note in `doc/mod.rs`). `blend_to_psd` is an
