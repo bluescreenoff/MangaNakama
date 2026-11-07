@@ -612,6 +612,29 @@ The recurring failure shapes, in order of how often they have shipped:
   broken). There is no modal at load time, by design: the mark IS the
   notification.
 
+## PSD import/export (core `psd/` ⇄ `ora.rs` ⇄ vendored `photocraft-psd` ⇄ app `cmd/file_io.rs`)
+
+- `psd/` is the live writer and the reader, on the vendored crate
+  (`vendor/photocraft-psd/VENDOR.md`: pinned commit, patches, re-pin steps).
+  `psd_legacy.rs` is the previous writer, selected by the
+  `psd_legacy_writer` preference in `cmd/save_bg.rs`, and is removed in the
+  release after the one that ships `psd/`.
+- `psd/blend.rs` is the sixth site to touch when a `Blend` variant is added
+  (the "five edit sites" note in `doc/mod.rs`). `blend_to_psd` is an
+  exhaustive match, so the compiler finds it; the reverse map must be
+  extended by hand, and `blend_map_covers_every_variant_both_ways` checks it.
+- Masks: our rule "absent tile = visible" is PSD's "default colour 255". The
+  exporter writes 255 for absent tiles; the importer turns a default-255 mask
+  into tiles over its rectangle only, padded to whole tiles with 255 (a
+  partial tile reads ZERO = hidden outside what was painted into it), and
+  any other default into full-canvas tiles. Change one side, change both;
+  `roundtrip_doc_is_stable` pins them.
+- The import opens with `doc_path = None` (`install_bare_doc`): Save must ask
+  for a name, never write ORA bytes over a `.psd`.
+- Export writes `display_tiles()`: the caller runs `refresh_tones` /
+  `refresh_derived` first, like every exporter. Frame-folder border ink
+  leaves as a separate top child layer, not as pixels on the group record.
+
 ## Tests and process
 
 - `./build.sh --test`, zero warnings, before every PR. GPU tests run on
