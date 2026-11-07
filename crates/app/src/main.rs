@@ -1206,6 +1206,13 @@ fn pump_commands(hwnd: HWND) {
         // the page set out from under a job whose pending list is keyed by
         // page index. Cancelling is free: phase 1 installs nothing.
         with_app(hwnd, |a| a.resample_work_cancel());
+        // Perf lane 3 door: this flow bypasses `cmd::dispatch`, and
+        // `first_dirty_doc` reads `doc.revision`, which a stroke still
+        // pending since pen-up has not moved — land it so the save prompt
+        // sees it.
+        with_app(hwnd, |a| {
+            a.finish_pending_stroke_end("close");
+        });
         // One pass per dirty document. The loop lives HERE rather than
         // re-arming `close_requested` and waiting for another message: an
         // idle window might not deliver one, and a half-finished close is
@@ -2359,6 +2366,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         // uses, so an alt-tab change and a watched change are
         // indistinguishable downstream.
         m if m == app::file_object_watch::MSG => {
+            // Perf lane 3 door: the refresh replaces tiles; land first.
+            app.finish_pending_stroke_end("file-object");
             app.refresh_file_objects_quiet();
             flush_redraw(hwnd, app);
             0

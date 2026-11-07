@@ -33,6 +33,34 @@ pub struct ReadbackTiming {
     pub submit_ms: f32,
     pub wait_ms: f32,
     pub copy_ms: f32,
+    /// Perf lane 3: submit return → poll start. ~0 for the synchronous
+    /// wrapper; about one frame for a pen-up readback landed at the frame
+    /// tail.
+    pub deferred_ms: f32,
+    /// Which door landed it: `"pen-up"` for [`Renderer::readback_dab_tiles`],
+    /// otherwise the app's door name (`"frame-end"`, `"dispatch"`, …).
+    pub landed: &'static str,
+}
+
+/// A stroke-end readback that has been SUBMITTED but not yet waited for
+/// (perf lane 3, "pen-up submits, frame-end lands"). The copy sits on the
+/// queue right behind the frame that was presenting at pen-up; by the time
+/// the next frame has acquired and presented, it is done, so
+/// [`Renderer::finish_readback`] waits on its OWN submission only and finds
+/// it (almost always) finished.
+pub struct PendingReadback {
+    buf: wgpu::Buffer,
+    /// Allocated per readback (4 bytes): one shared canary read buffer could
+    /// be mapped twice if a second readback were begun before the first
+    /// landed.
+    canary: wgpu::Buffer,
+    /// `dispatched_total` at submit — the next `begin_dab_stroke` zeroes it.
+    expected: u32,
+    submission: wgpu::SubmissionIndex,
+    pub layer: usize,
+    pub tiles: Vec<TileIdx>,
+    submitted_at: std::time::Instant,
+    submit_ms: f32,
 }
 
 /// One dab as `dab.wgsl` sees it: the C dispatch math (per-mode opacities,
@@ -183,10 +211,10 @@ pub struct DabGpu {
     params_cap: usize,
     tile_uni_buf: wgpu::Buffer,
     tile_uni_cap: usize,
-    /// Bumped by every dispatched workgroup (atomicAdd); copied to
-    /// `canary_read` and compared against `dispatched_total` at stroke end.
+    /// Bumped by every dispatched workgroup (atomicAdd); copied to the
+    /// readback's own 4-byte canary buffer (`PendingReadback::canary`) and
+    /// compared against `dispatched_total` at stroke end.
     canary_buf: wgpu::Buffer,
-    canary_read: wgpu::Buffer,
     /// Workgroups dispatched since the stroke began (the canary's expected
     /// value — kept outside `DabStroke` because the stroke is closed before
     /// the readback that checks it).
@@ -349,10 +377,6 @@ impl DabGpu {
                 wgpu::BufferUsages::STORAGE
                     | wgpu::BufferUsages::COPY_DST
                     | wgpu::BufferUsages::COPY_SRC,
-                4,
-            ),
-            canary_read: make_buf(
-                wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
                 4,
             ),
             dispatched_total: 0,
@@ -871,9 +895,22 @@ impl crate::Renderer {
         Some((st.layer, st.wash, st.touched.into_iter().collect()))
     }
 
+    /// The non-consuming twin of [`Self::end_dab_stroke`]: the live stroke's
+    /// (layer, wash, touched tiles) WITHOUT closing it. Perf lane 3: the
+    /// renderer stroke is the eviction guard (`update_canvas` pins its
+    /// touched tiles), so a pen-up whose readback lands a frame later must
+    /// read the set while leaving the guard up.
+    pub fn dab_stroke_info(&self) -> Option<(usize, bool, Vec<TileIdx>)> {
+        let st = self.dabs.as_ref()?.stroke.as_ref()?;
+        Some((st.layer, st.wash, st.touched.iter().copied().collect()))
+    }
+
     /// Read the stroke's tiles back into CPU memory plus the canary — the
     /// design's single map per stroke. `canary_ok == false` ⇒ a dispatch was
     /// dropped (the cursed-driver trap): the caller repairs on CPU.
+    ///
+    /// The synchronous form: [`Self::begin_readback`] then
+    /// [`Self::finish_readback`] at once (`landed = "pen-up"`).
     pub fn readback_dab_tiles(
         &mut self,
         layer: usize,
@@ -883,11 +920,25 @@ impl crate::Renderer {
             self.readback_timing = ReadbackTiming::default();
             return (Vec::new(), true);
         }
+        let p = self.begin_readback(layer, tiles);
+        self.finish_readback(p, "pen-up")
+    }
+
+    /// The SUBMIT half of the readback: buffer, tile copies, canary copy,
+    /// `queue.submit`, both `map_async`s — no poll. Precondition:
+    /// `!tiles.is_empty()` (callers handle the empty set).
+    pub fn begin_readback(&mut self, layer: usize, tiles: &[TileIdx]) -> PendingReadback {
         let t_submit = std::time::Instant::now();
         let n = tiles.len();
         let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("mn.dab.read"),
             size: (n * TILE_BYTES) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let canary = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("mn.dab.canary.read"),
+            size: 4,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
@@ -922,30 +973,60 @@ impl crate::Renderer {
                 },
             );
         }
-        let (canary_buf, canary_read, expected) = {
+        let (canary_buf, expected) = {
             let dg = self.dabs.as_ref().unwrap();
-            (&dg.canary_buf, &dg.canary_read, dg.dispatched_total)
+            (&dg.canary_buf, dg.dispatched_total)
         };
-        enc.copy_buffer_to_buffer(canary_buf, 0, canary_read, 0, 4);
-        self.queue.submit(Some(enc.finish()));
+        enc.copy_buffer_to_buffer(canary_buf, 0, &canary, 0, 4);
+        let submission = self.queue.submit(Some(enc.finish()));
 
-        let slice = buf.slice(..);
-        slice.map_async(wgpu::MapMode::Read, |_| {});
-        let cslice = canary_read.slice(..);
-        cslice.map_async(wgpu::MapMode::Read, |_| {});
+        buf.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        canary.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        let submitted_at = std::time::Instant::now();
+        PendingReadback {
+            buf,
+            canary,
+            expected,
+            submission,
+            layer,
+            tiles: tiles.to_vec(),
+            submitted_at,
+            submit_ms: (submitted_at - t_submit).as_secs_f32() * 1000.0,
+        }
+    }
+
+    /// The LAND half: wait for THIS readback's submission only (never for
+    /// whatever was submitted after it — a later composite included), read
+    /// the canary and the bytes, unmap, convert. `landed` names the door
+    /// for [`Self::readback_timing`].
+    pub fn finish_readback(
+        &mut self,
+        p: PendingReadback,
+        landed: &'static str,
+    ) -> (Vec<(TileIdx, Vec<u16>)>, bool) {
         let t_wait = std::time::Instant::now();
-        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        let deferred_ms = (t_wait - p.submitted_at).as_secs_f32() * 1000.0;
+        let _ = self.device.poll(wgpu::PollType::Wait {
+            submission_index: Some(p.submission),
+            timeout: None,
+        });
         let t_copy = std::time::Instant::now();
         let canary = {
-            let bytes = cslice.get_mapped_range().expect("map canary");
+            let bytes = p.canary.slice(..).get_mapped_range().expect("map canary");
             u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
         };
-        let data = slice.get_mapped_range().expect("map dab readback").to_vec();
-        buf.unmap();
-        canary_read.unmap();
+        let data = p
+            .buf
+            .slice(..)
+            .get_mapped_range()
+            .expect("map dab readback")
+            .to_vec();
+        p.buf.unmap();
+        p.canary.unmap();
 
+        let n = p.tiles.len();
         let mut out = Vec::with_capacity(n);
-        for (i, &idx) in tiles.iter().enumerate() {
+        for (i, &idx) in p.tiles.iter().enumerate() {
             let px: Vec<u16> = data[i * TILE_BYTES..(i + 1) * TILE_BYTES]
                 .chunks_exact(2)
                 .map(|c| u16::from_le_bytes([c[0], c[1]]))
@@ -954,11 +1035,13 @@ impl crate::Renderer {
         }
         self.readback_timing = ReadbackTiming {
             tiles: n as u32,
-            submit_ms: (t_wait - t_submit).as_secs_f32() * 1000.0,
+            submit_ms: p.submit_ms,
             wait_ms: (t_copy - t_wait).as_secs_f32() * 1000.0,
             copy_ms: t_copy.elapsed().as_secs_f32() * 1000.0,
+            deferred_ms,
+            landed,
         };
-        (out, canary == expected)
+        (out, canary == p.expected)
     }
 
     /// How the newest [`Renderer::readback_dab_tiles`] spent its time.

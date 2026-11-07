@@ -174,6 +174,10 @@ impl App {
     /// whole tail as one undo press (real-ink mode: the stroke op and
     /// the refill wrap together).
     pub(crate) fn finish_fill_repair(&mut self, mut repair: FillRepair) {
+        // Perf lane 3 door (beyond the plan's table, 2026-11-07): the refill
+        // reads the closing stroke's PIXELS and wraps its undo step — a GPU
+        // stroke submitted at pen-up must land first.
+        self.finish_pending_stroke_end("fill-repair");
         let f = repair.leak.clone();
         let page_uid = self.pages.get(self.page_index).map(|p| p.uid).unwrap_or(0);
         let Some(li) = self.doc.layer_index_of(f.layer_id) else {

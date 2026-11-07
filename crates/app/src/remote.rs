@@ -231,6 +231,9 @@ fn serve_connection(stream: TcpStream, hwnd: isize) {
 
 /// Serve one parked request. UI thread only.
 pub fn respond(app: &mut App, req: &Request) -> String {
+    // Perf lane 3 door: some requests edit the document directly (not via
+    // `cmd::dispatch`), so a stroke submitted at pen-up lands first.
+    app.finish_pending_stroke_end("remote");
     match handle(app, &req.method, &req.params) {
         Ok(v) => ok_response(&req.id, v),
         Err((code, msg)) => err_response(&req.id, code, &msg),

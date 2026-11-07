@@ -134,6 +134,9 @@ pub struct Diag {
     pub dab_gpu_strokes: u32,
     pub dab_cpu_routed: u32,
     pub dab_canary_repairs: u32,
+    /// Perf lane 3 tripwire: pending stroke ends DROPPED because the
+    /// document changed under them (a missed door). Should stay 0.
+    pub dab_pending_dropped: u32,
 
     // --- whole-frame attribution (lag hunt 2026-09-10) ----------------------
     // `[gpu] slow composite` only ever accused the compositor, so a frame
@@ -215,6 +218,7 @@ impl Default for Diag {
             dab_gpu_strokes: 0,
             dab_cpu_routed: 0,
             dab_canary_repairs: 0,
+            dab_pending_dropped: 0,
             cmds: Vec::new(),
             frame_slow_logged: None,
             doc_logged: None,
@@ -354,6 +358,7 @@ impl Diag {
         dt: Duration,
         ui: Duration,
         composite: Duration,
+        stroke_end: Duration,
         fs: &mn_gpu::FrameStats,
         doc: (u32, u32, usize),
         tool: &'static str,
@@ -365,9 +370,17 @@ impl Diag {
                 .is_none_or(|t| t.elapsed() >= FRAME_SLOW_EVERY);
         if due {
             self.frame_slow_logged = Some(Instant::now());
+            // Perf lane 3: a GPU stroke landing at this frame's tail is its
+            // own field (copy-out + clamp + op close), named only when one
+            // ran, so `other` stays the frame-head work.
+            let land = if stroke_end.is_zero() {
+                String::new()
+            } else {
+                format!(" | stroke-end {:.0} ms", stroke_end.as_secs_f32() * 1000.0)
+            };
             crate::testlog::line(&format!(
                 "[frame] slow: {:.0} ms | cmds: {} | ui {:.0} ms | composite {:.0} ms \
-                 ({} tiles{}) | other {:.0} ms | doc {}x{}, {} layers | tool {}",
+                 ({} tiles{}){} | other {:.0} ms | doc {}x{}, {} layers | tool {}",
                 ms,
                 if self.cmds.is_empty() {
                     "-".to_owned()
@@ -378,7 +391,12 @@ impl Diag {
                 composite.as_secs_f32() * 1000.0,
                 fs.composite_tiles,
                 if fs.full { ", full" } else { "" },
-                dt.saturating_sub(ui).saturating_sub(composite).as_secs_f32() * 1000.0,
+                land,
+                dt.saturating_sub(ui)
+                    .saturating_sub(composite)
+                    .saturating_sub(stroke_end)
+                    .as_secs_f32()
+                    * 1000.0,
                 doc.0,
                 doc.1,
                 doc.2,

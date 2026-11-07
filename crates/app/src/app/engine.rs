@@ -73,6 +73,44 @@ pub struct DabStrokeApp {
     pub smudge: bool,
 }
 
+/// Perf lane 3 ("pen-up submits, frame-end lands"): a GPU stroke whose
+/// readback has been SUBMITTED at pen-up and waits to LAND — normally at the
+/// tail of the next `App::render`, after that frame's acquire has absorbed
+/// the GPU work the old synchronous wait used to pay for; earlier at any
+/// door that needs the document first (`App::finish_pending_stroke_end`).
+/// The undo op and the renderer stroke (the eviction guard) both stay open
+/// until the landing.
+pub struct PendingStrokeEnd {
+    /// The submitted copy; carries the stroke's layer key + tiles.
+    pub readback: mn_gpu::PendingReadback,
+    /// all_dabs (canary repair), hard, flushes, wash, smudge.
+    pub st: DabStrokeApp,
+    pub tail: StrokeTail,
+    /// The stroke's target layer's stable id (`Layer::id`, minted from a
+    /// process-wide counter) at pen-up — the tripwire for a document
+    /// swapped (or the layer removed/reordered) under it. The plan named
+    /// `doc.id()`, which does not exist; `doc/mod.rs:706` is `Layer::id`.
+    pub layer_id: Option<u64>,
+    /// `doc.revision` at pen-up — the tripwire for an edit ordered before it.
+    pub doc_rev: u64,
+    /// `doc.op_layer_index()` at pen-up — the tripwire for an op closed
+    /// under it. Equal to `readback.layer` for a plain stroke; a WASH
+    /// stroke's readback key is the sentinel, so the op layer is kept
+    /// separately (deviation from the plan's check, 2026-11-07).
+    pub op_layer: Option<usize>,
+    pub pen_up_at: Instant,
+    /// Wall time of the pen-up half (`end_stroke_queued`).
+    pub pen_up_ms: f32,
+}
+
+/// Everything the op close needs that the pen-up half already decided.
+pub struct StrokeTail {
+    pub mask_stroke: bool,
+    pub steps_before: Option<usize>,
+    pub vector_capture: Option<Vec<PenSample>>,
+    pub kind: PointerKind,
+}
+
 /// The smudge sampler's GPU tile fetch (#0.1 part 3). The ctx is the
 /// `Box<(*mut Renderer, layer)>` installed at `begin_stroke`; valid for the
 /// stroke's duration (the engine is single-threaded and `&mut self.renderer`

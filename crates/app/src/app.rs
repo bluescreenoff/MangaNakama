@@ -156,7 +156,7 @@ pub struct FrameOutput {
     pub repaint_after: Duration,
 }
 
-pub use engine::{DabStrokeApp, Engine, EngineKind, preset_engine};
+pub use engine::{DabStrokeApp, Engine, EngineKind, PendingStrokeEnd, StrokeTail, preset_engine};
 use engine::{StrokeTwin, TwinAxis, smudge_tile_oracle, symmetric_affines};
 
 /// One armed spring-loaded tool borrow (workflow-audit #6): what the held
@@ -1022,6 +1022,14 @@ pub struct App {
     /// The live GPU dab stroke: the full drained dab list (kept for the
     /// canary-mismatch CPU repair), the tip mode, and HUD counters.
     pub dab_stroke: Option<DabStrokeApp>,
+    /// Perf lane 3: a GPU stroke submitted at pen-up, waiting to land at
+    /// the next frame tail (or the first door that needs the document —
+    /// see [`App::finish_pending_stroke_end`]). `None` for CPU strokes.
+    pub pending_stroke_end: Option<PendingStrokeEnd>,
+    /// `true` = the pen-up defers its landing (default). Env
+    /// `MN_SYNC_STROKE_END=1` = the synchronous pen-up path (rollback
+    /// switch, no rebuild needed).
+    pub defer_stroke_end: bool,
     /// "dab: gpu|cpu" + last readback ms — the F1 HUD line.
     pub dab_path_last: String,
     /// The smudge oracle's ctx allocation (`Box<(*mut Renderer, usize)>`
@@ -1977,6 +1985,8 @@ impl App {
             win_maximized: false,
             gpu_dabs: false,
             dab_stroke: None,
+            pending_stroke_end: None,
+            defer_stroke_end: std::env::var_os("MN_SYNC_STROKE_END").is_none(),
             dab_path_last: "cpu".into(),
             dab_smudge_ctx: None,
             clipboard: None,
@@ -2944,6 +2954,8 @@ impl App {
             // last word on the status line.
             self.set_status(format!("input released — {why}"));
         }
+        // Perf lane 3 door: a stroke submitted at pen-up lands now.
+        self.finish_pending_stroke_end("focus");
         if self.drawing() {
             self.end_stroke();
         }
@@ -3235,6 +3247,14 @@ impl App {
         // Only legal after the frame has been submitted.
         self.shell.free(&mut out.textures_delta);
         let comp_took = t_comp.elapsed();
+        // Perf lane 3, the normal landing: AFTER this frame's acquire and
+        // present. The readback copy sat on the queue right behind the
+        // frame that was presenting at pen-up, and the acquire above
+        // already waited for that frame — so the wait here is ≈0 and only
+        // the copy-out (plus clamp + op close) is paid. A landing asks for
+        // the next frame at once: it shows the clamped, closed state.
+        let landed = self.finish_pending_stroke_end("frame-end");
+        let land_took = landed.unwrap_or_default();
 
         let fs = self.renderer.frame_stats();
         self.diag.note_composite(&fs);
@@ -3243,12 +3263,19 @@ impl App {
             dt,
             ui_took,
             comp_took,
+            land_took,
             &fs,
             (self.doc.size.0, self.doc.size.1, self.doc.layers.len()),
             self.tool.label(),
         );
         self.diag.note_frame(dt);
-        FrameOutput { repaint_after }
+        FrameOutput {
+            repaint_after: if landed.is_some() {
+                Duration::ZERO
+            } else {
+                repaint_after
+            },
+        }
     }
 
     pub fn resize(&mut self, w: u32, h: u32) {
@@ -3381,6 +3408,10 @@ impl App {
         if let Some(s) = &mut self.spring {
             s.pointer_seen = true;
         }
+        // Perf lane 3 door: the previous stroke lands (and closes its own
+        // undo step) before this one opens an op — `begin_op` would
+        // otherwise silently join the two into one step and one clamp.
+        self.finish_pending_stroke_end("begin_stroke");
         if self.stroke.is_some() {
             self.end_stroke();
         }
@@ -3772,10 +3803,35 @@ impl App {
         }
     }
 
+    /// Stroke end, synchronous: everything lands before this returns. Every
+    /// caller except the canvas pen-up uses this (begin_stroke ending a
+    /// live stroke, focus loss, the erase-all replay, synthetic figure
+    /// strokes, page/canvas resizes, text edit, screenshots, bench).
     pub fn end_stroke(&mut self) {
-        if self.stroke.is_none() {
-            return;
-        }
+        self.end_stroke_impl(false);
+    }
+
+    /// Stroke end from the canvas pen-up (`canvas_up` — the ONE caller).
+    /// Perf lane 3 ("pen-up submits, frame-end lands"): a GPU stroke only
+    /// SUBMITS its readback here; the write, the selection clamp, the
+    /// transparent-pixel lock and the undo close land at the tail of the
+    /// next frame (or at the first door that needs the document first —
+    /// [`Self::finish_pending_stroke_end`]). `MN_SYNC_STROKE_END=1` turns
+    /// the deferral off.
+    pub fn end_stroke_queued(&mut self) {
+        self.end_stroke_impl(self.defer_stroke_end);
+    }
+
+    fn end_stroke_impl(&mut self, queued: bool) {
+        // A landing still outstanding goes first (idempotent): the callers
+        // of the synchronous `end_stroke` — pages, text edit, screenshots,
+        // bench, the cancel paths — may arrive with one in flight.
+        self.finish_pending_stroke_end("end_stroke");
+        let kind = match &self.stroke {
+            Some(s) => s.kind,
+            None => return,
+        };
+        let t_pen_up = Instant::now();
         // Row 95: how many undo steps stood before this gesture — used at
         // the bottom to fold the stroke plus every replay into ONE press.
         // Counted, not assumed: a stroke that erased nothing (all paper)
@@ -3829,7 +3885,90 @@ impl App {
                 self.dab_clamp_warned = Some(key);
             }
         }
-        self.finish_gpu_dab_stroke();
+        let tail = StrokeTail {
+            mask_stroke,
+            steps_before,
+            vector_capture: self.vector_capture.take(),
+            kind,
+        };
+        // Row 42: the barrier is stroke-scoped — disarm for whatever the
+        // next stroke is (begin_stroke re-arms from the toggle).
+        self.brush
+            .inner_mut()
+            .inner_mut()
+            .set_anti_overflow_all(None);
+        // Input is done at pen-up whatever the path: `drawing()` goes false
+        // here, and the receipt below is about the INPUT, not the landing.
+        let stroke = self.stroke.take();
+        if let Some(s) = stroke {
+            s.report();
+            if s.samples == 0 {
+                // §4.2/§5.4 — the corpus's signature failure: the app looks
+                // alive and produces nothing. `read_pen_batch` drops every
+                // sample that is not `POINTER_FLAG_INCONTACT`, which is
+                // correct (it removed a blob at every stroke start) and is
+                // also exactly how a driver that signals contact through
+                // pressure alone gets silenced by us. The counters for
+                // saying so already existed; only the sentence was missing.
+                let dropped = self.pen.dropped.saturating_sub(s.dropped_at_start);
+                let msg = if dropped > 0 {
+                    format!(
+                        "stroke drew nothing — 0 in-contact samples at ({}, {}); \
+                         {dropped} pen report(s) dropped as not-in-contact",
+                        s.at.0, s.at.1
+                    )
+                } else {
+                    format!(
+                        "stroke drew nothing — no {} samples arrived at ({}, {})",
+                        s.kind.label(),
+                        s.at.0,
+                        s.at.1
+                    )
+                };
+                crate::testlog::line(&format!("[stroke] {msg}"));
+                self.set_error(msg);
+            }
+        }
+        match self.begin_gpu_stroke_end() {
+            // CPU stroke, or a GPU stroke that touched no tile (its
+            // renderer stroke is already closed): nothing to read back.
+            None => self.finish_stroke_tail(tail),
+            Some((readback, st)) => {
+                self.pending_stroke_end = Some(PendingStrokeEnd {
+                    readback,
+                    st,
+                    tail,
+                    layer_id: self
+                        .doc
+                        .op_layer_index()
+                        .and_then(|li| self.doc.layers.get(li))
+                        .map(|l| l.id()),
+                    doc_rev: self.doc.revision,
+                    op_layer: self.doc.op_layer_index(),
+                    pen_up_at: Instant::now(),
+                    pen_up_ms: t_pen_up.elapsed().as_secs_f32() * 1000.0,
+                });
+                if queued {
+                    self.needs_redraw = true;
+                } else {
+                    self.finish_pending_stroke_end("sync");
+                }
+            }
+        }
+    }
+
+    /// The op close and everything after it — today's stroke-end tail,
+    /// order unchanged: selection clamp → transparent-pixel lock → op close
+    /// → mask bracket → selection-paint commit → erase-all replay. Runs at
+    /// pen-up for CPU strokes and at the landing for GPU strokes (after the
+    /// readback write, inside the still-open op).
+    fn finish_stroke_tail(&mut self, tail: StrokeTail) {
+        let StrokeTail {
+            mask_stroke,
+            steps_before,
+            vector_capture,
+            kind,
+        } = tail;
         self.doc.mask_stroke_to_selection();
         // Transparent-pixel lock clamps ONCE at stroke end (not per batch —
         // the attenuation would compound; see Document::mask_op_to_alpha).
@@ -3842,7 +3981,7 @@ impl App {
         }
         // Vector inking: close the op as ONE pixels-plus-record group when
         // this stroke captured (docs/VECTOR-INKING.md); otherwise stock.
-        match self.vector_capture.take() {
+        match vector_capture {
             // Phase 3: the ERASER on a vector layer EDITS geometry instead
             // of recording an eraser stroke — how much is `vector_eraser_
             // mode` (CSP's three). The live raster erase already happened
@@ -3973,54 +4112,17 @@ impl App {
                 });
             }
         }
-        // Row 42: the barrier is stroke-scoped — disarm for whatever the
-        // next stroke is (begin_stroke re-arms from the toggle).
-        self.brush
-            .inner_mut()
-            .inner_mut()
-            .set_anti_overflow_all(None);
-        let stroke = self.stroke.take();
         // Row 95: the stroke's own layer is done and its undo step is on the
         // stack; now rub the SAME input through the rest of the paintable
-        // stack and fold the lot into one press. After `stroke.take()` on
-        // purpose — the replay calls `begin_stroke`, which would end a
-        // stroke that was still live and re-enter this function.
-        if let (Some(before), Some(samples), Some(s)) =
-            (steps_before, self.erase_all_capture.take(), stroke.as_ref())
-        {
-            self.erase_on_other_layers(&samples, s.kind);
+        // stack and fold the lot into one press. The stroke was taken at
+        // pen-up on purpose — the replay calls `begin_stroke`, which would
+        // end a stroke that was still live and re-enter this function — and
+        // a pending landing was taken before this tail ran (I14).
+        if let (Some(before), Some(samples)) = (steps_before, self.erase_all_capture.take()) {
+            self.erase_on_other_layers(&samples, kind);
             let n = self.doc.undo_len().saturating_sub(before);
             if n > 1 {
                 self.doc.wrap_recent("Erase on every layer", n);
-            }
-        }
-        if let Some(s) = stroke {
-            s.report();
-            if s.samples == 0 {
-                // §4.2/§5.4 — the corpus's signature failure: the app looks
-                // alive and produces nothing. `read_pen_batch` drops every
-                // sample that is not `POINTER_FLAG_INCONTACT`, which is
-                // correct (it removed a blob at every stroke start) and is
-                // also exactly how a driver that signals contact through
-                // pressure alone gets silenced by us. The counters for
-                // saying so already existed; only the sentence was missing.
-                let dropped = self.pen.dropped.saturating_sub(s.dropped_at_start);
-                let msg = if dropped > 0 {
-                    format!(
-                        "stroke drew nothing — 0 in-contact samples at ({}, {}); \
-                         {dropped} pen report(s) dropped as not-in-contact",
-                        s.at.0, s.at.1
-                    )
-                } else {
-                    format!(
-                        "stroke drew nothing — no {} samples arrived at ({}, {})",
-                        s.kind.label(),
-                        s.at.0,
-                        s.at.1
-                    )
-                };
-                crate::testlog::line(&format!("[stroke] {msg}"));
-                self.set_error(msg);
             }
         }
         self.needs_redraw = true;
@@ -4129,13 +4231,14 @@ impl App {
         }
     }
 
-    /// Stroke end for the GPU path: final flush, the single readback, CPU
-    /// tiles authoritative again, cache marked clean — or, when the canary
-    /// disagrees with the dispatched workgroup count (the cursed-driver
-    /// defense), a CPU repair from the full dab list. Runs INSIDE the still-
-    /// open undo op: BYPASS never touched the CPU tiles, so the pre-image
-    /// captured at this write IS the pre-stroke state.
-    fn finish_gpu_dab_stroke(&mut self) {
+    /// Stroke end for the GPU path, pen-up half: final flush, then the
+    /// readback SUBMIT (no wait). Returns the submitted readback plus the
+    /// stroke state, or `None` for a CPU stroke / a GPU stroke that touched
+    /// no tile (whose renderer stroke is closed here). The renderer stroke
+    /// of a pending readback stays OPEN — it is the eviction guard that
+    /// keeps the stroke's tiles (not on the CPU yet) in the cache for the
+    /// frame between pen-up and landing.
+    fn begin_gpu_stroke_end(&mut self) -> Option<(mn_gpu::PendingReadback, DabStrokeApp)> {
         // The None-guard comes FIRST: a CPU stroke with recording armed (the
         // ruler-snap tests, future oracle consumers) owns its records — a
         // drain here would silently discard them. Hit twice (rounds 42 and
@@ -4143,7 +4246,7 @@ impl App {
         // the mode armed is safe: `begin_stroke` resets it and clears the
         // record, so nothing leaks into the next stroke.
         let Some(mut st) = self.dab_stroke.take() else {
-            return;
+            return None;
         };
         // Drain the last dabs FIRST, then disarm — `set_dab_recording`
         // clears the record, so disarming before the drain would wipe
@@ -4172,8 +4275,9 @@ impl App {
                 // `end` left the buffer alive under BYPASS (the GPU owns the
                 // commit). The fallback blank exists only for the impossible
                 // window — and matters because an early return here would
-                // strand the renderer's stroke state: `end_dab_stroke` below
-                // must run on every path.
+                // strand the renderer's stroke state: `end_dab_stroke` must
+                // run on every path (here for an empty stroke, at the
+                // landing otherwise).
                 let blank;
                 let buf = match self.brush.inner().inner().wash_buffer() {
                     Some(b) => b,
@@ -4189,12 +4293,85 @@ impl App {
             st.all_dabs.extend(dabs);
             st.flushes += 1;
         }
-        let Some((layer, wash, tiles)) = self.renderer.end_dab_stroke() else {
-            return;
-        };
-        let t0 = Instant::now();
-        let (px, canary_ok) = self.renderer.readback_dab_tiles(layer, &tiles);
-        if wash {
+        let (layer, wash, tiles) = self.renderer.dab_stroke_info()?;
+        if tiles.is_empty() {
+            // Nothing was written, so nothing to read back (the old empty
+            // readback wrote nothing either): close the renderer stroke now.
+            self.renderer.end_dab_stroke();
+            if wash {
+                self.renderer.drop_wash_tiles();
+                self.brush.inner_mut().inner_mut().take_wash_buffer();
+            }
+            return None;
+        }
+        Some((self.renderer.begin_readback(layer, &tiles), st))
+    }
+
+    /// Land a pending GPU stroke end (perf lane 3): wait for its own
+    /// readback submission, write the tiles inside the still-open op
+    /// (BYPASS never touched the CPU tiles, so the pre-image captured at
+    /// this write IS the pre-stroke state), close the renderer stroke, then
+    /// the ordinary tail — selection clamp, transparent-pixel lock, op
+    /// close, erase-all replay. Idempotent: `None` when nothing is pending.
+    ///
+    /// Called from the frame tail (`"frame-end"`, the normal case) and from
+    /// every door that would touch the document before that: `begin_stroke`,
+    /// `cmd::dispatch`, focus loss, the automation socket, the file-object
+    /// watcher, the work resample, the close flow, the smart-shape swap and
+    /// the fill-repair refill. `landed` names the door in the `[dab]` line.
+    pub(crate) fn finish_pending_stroke_end(&mut self, landed: &'static str) -> Option<Duration> {
+        let p = self.pending_stroke_end.take()?;
+        let t = Instant::now();
+        let since_pen_up_ms = p.pen_up_at.elapsed().as_secs_f32() * 1000.0;
+        let PendingStrokeEnd {
+            readback,
+            st,
+            tail,
+            layer_id,
+            doc_rev,
+            op_layer,
+            pen_up_ms,
+            ..
+        } = p;
+        // Tripwires: every door that can swap the document or close the op
+        // lands first, so none of these should ever fire — each one names
+        // the door that let it through.
+        let layer_now = op_layer
+            .and_then(|li| self.doc.layers.get(li))
+            .map(|l| l.id());
+        if layer_now != layer_id {
+            crate::testlog::line(&format!(
+                "[dab] PENDING STROKE END DROPPED: document changed under it (landed={landed})"
+            ));
+            self.renderer.end_dab_stroke();
+            if st.wash {
+                self.renderer.drop_wash_tiles();
+                self.brush.inner_mut().inner_mut().take_wash_buffer();
+            }
+            self.diag.dab_pending_dropped += 1;
+            debug_assert!(false, "pending stroke end: document changed (landed={landed})");
+            self.needs_redraw = true;
+            return Some(t.elapsed());
+        } else if self.doc.op_layer_index() != op_layer {
+            crate::testlog::line(&format!(
+                "[dab] PENDING STROKE END: op closed under it, reopened (landed={landed})"
+            ));
+            debug_assert!(false, "pending stroke end: op closed (landed={landed})");
+            // The stroke becomes its own undo step; the pre-images are still
+            // the pre-stroke tiles because BYPASS never wrote them.
+            if let Some(li) = op_layer {
+                self.doc.begin_op_on(li);
+                self.doc.set_op_label("Stroke");
+            }
+        } else if self.doc.revision != doc_rev {
+            crate::testlog::line(&format!(
+                "[dab] PENDING STROKE END: doc revision moved under it (landed={landed})"
+            ));
+        }
+        let layer = readback.layer;
+        let n_tiles = readback.tiles.len();
+        let (px, canary_ok) = self.renderer.finish_readback(readback, landed);
+        if st.wash {
             // #0.1 wash commit: the readback IS the buffer content — assemble
             // it into a scratch doc and run the CPU `commit_wash` math
             // unchanged (wet semantics identical by construction; the GPU
@@ -4259,25 +4436,34 @@ impl App {
             mn_brush::rasterize_dabs(&mut self.doc, layer, &st.all_dabs, st.hard, tex);
             self.dab_path_last = "gpu → cpu repair!".into();
         }
+        // The eviction guard comes down only now (I11): until the write
+        // above, the stroke's new tiles existed only in the texture cache.
+        self.renderer.end_dab_stroke();
         if canary_ok {
-            // The split (lag hunt 2026-09-10): the owner's log showed the
-            // same tile count costing 4 ms or 60 ms, which the total alone
-            // could never explain. `wait` is `poll(wait_indefinitely)`,
-            // which returns only once EVERY previously submitted command
-            // buffer is done — the last composite of a big page included —
-            // so a big `wait` beside a small `copy` says the pen is queued
-            // behind the compositor, not that the copy is slow.
+            // The split (lag hunt 2026-09-10, perf lane 3 2026-11-07): the
+            // pen-up half (submit) and the landing (wait + copy-out) are two
+            // moments now. `wait` waits for THIS readback's submission only;
+            // landed at the frame tail it is ≈0 because that frame's acquire
+            // already absorbed the GPU work queued ahead of the copy. A big
+            // `wait` with `landed` ≠ frame-end = a door landed it early.
             let rt = self.renderer.readback_timing();
             self.dab_path_last = format!(
-                "gpu | {} tiles, readback {:.1} ms (submit {:.1}, wait {:.1}, copy {:.1})",
-                tiles.len(),
-                t0.elapsed().as_secs_f32() * 1000.0,
+                "gpu | {} tiles | pen-up {:.1} ms (submit {:.1}) | landed {} +{:.0} ms: \
+                 wait {:.1}, copy {:.1}, total {:.1} ms",
+                n_tiles,
+                pen_up_ms,
                 rt.submit_ms,
+                landed,
+                since_pen_up_ms,
                 rt.wait_ms,
                 rt.copy_ms,
+                t.elapsed().as_secs_f32() * 1000.0,
             );
             crate::testlog::line(&self.dab_path_last);
         }
+        self.finish_stroke_tail(tail);
+        self.needs_redraw = true;
+        Some(t.elapsed())
     }
 
     // --- touch: one finger pans, two fingers pinch-zoom --------------------
@@ -5088,6 +5274,10 @@ mod grid_engine_tests;
 /// Lag hunt 2026-09-10: `#[ignore]`d measurements at B4 600 dpi.
 #[cfg(test)]
 mod lag_hunt_tests;
+
+/// Perf lane 3: the deferred GPU stroke end and every door that lands it.
+#[cfg(test)]
+mod stroke_end_tests;
 
 /// Documents, tabs, and what "new" means.
 ///

@@ -2082,6 +2082,10 @@ impl App {
         let Some(hit) = g.preview() else {
             return; // no hold, or no shape: the stroke stands, always.
         };
+        // Perf lane 3 door (beyond the plan's table, 2026-11-07): the swap
+        // below needs the stroke's op CLOSED — a GPU stroke submitted at
+        // pen-up has not closed it yet, so the interlock would refuse.
+        self.finish_pending_stroke_end("smart-shape");
         // The safety interlock. We are about to press Undo on the user's
         // behalf, so we must be certain the newest history entry is OUR
         // stroke and nothing else. `op_count` is the monotonic tally — NOT
@@ -3963,7 +3967,9 @@ impl App {
                 }
                 self.smart_shape_tick();
             }
-            self.end_stroke();
+            // Perf lane 3: the pen-up only SUBMITS a GPU stroke's readback;
+            // it lands at the next frame tail (or the first door).
+            self.end_stroke_queued();
             self.finish_smart_shape();
             // Leak repair, real-ink mode: the stroke just committed as its
             // own op — re-run the fill now and wrap the pair into one

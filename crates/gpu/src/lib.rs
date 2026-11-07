@@ -43,7 +43,7 @@ use std::collections::HashMap;
 use mn_core::{Document, Paper, TILE_SIZE, TileIdx};
 
 mod dabs;
-pub use dabs::{ReadbackTiming, WASH_LAYER_KEY, dab_tiles};
+pub use dabs::{PendingReadback, ReadbackTiming, WASH_LAYER_KEY, dab_tiles};
 
 mod kernel;
 pub use kernel::{FREEFORM_SEGS_MAX, KERNEL_FLOOR_PX, Kernel, TileJob};

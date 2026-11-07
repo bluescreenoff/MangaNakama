@@ -237,6 +237,71 @@ fn lag_hunt_readback() {
         );
     }
     println!("\n(headless: no swapchain, so no vsync back-pressure — these are the FLOOR.)");
+
+    // Perf lane 3 AFTER: the same strokes through the canvas pen-up's
+    // `end_stroke_queued` (submit only), then ONE offscreen composite
+    // standing in for frame N+1 (its own readback drains the queue the way
+    // the live acquire does), then the frame-tail landing.
+    //
+    // `frame flush ms` is timed apart: headless, no frame runs between the
+    // batch and the pen-up, so the WHOLE stroke's dab dispatch would land
+    // inside the pen-up. Live, `App::render` flushes every frame and the
+    // pen-up only sees the tail dabs. The BEFORE `total` above includes it.
+    let vp = app.viewport;
+    // Warm-up: the first composite of the B4 page uploads every tile; keep
+    // that out of the first row.
+    let _ = app.renderer.render_offscreen_vp(&app.doc, &vp, 1600, 1000);
+    println!(
+        "\n| stroke | tiles | frame flush ms | pen-up ms | submit ms | deferred ms | wait ms | \
+         copy ms | landing ms | landed | pen-up target | wait < 5 ms |"
+    );
+    println!("|---|---|---|---|---|---|---|---|---|---|---|---|");
+    for (label, n, step) in [
+        ("short (2 tiles)", 8u32, 6.0f32),
+        ("medium (10 tiles)", 40, 14.0),
+        ("long (40 tiles)", 160, 22.0),
+    ] {
+        app.begin_stroke(PointerKind::Mouse);
+        let batch: Vec<PenSample> = (0..n)
+            .map(|i| PenSample {
+                x: 400.0 + i as f32 * step,
+                y: 1424.0 + i as f32 * step * 0.35, // +1024 px: same tile alignment
+                pressure: 0.8,
+                tilt_x: 0.0,
+                tilt_y: 0.0,
+                t_ms: i as f64 * 8.0,
+            })
+            .collect();
+        app.push_batch(&batch);
+        let tf = Instant::now();
+        app.flush_gpu_dabs();
+        let flush = ms(tf);
+        let t = Instant::now();
+        app.end_stroke_queued();
+        let pen_up = ms(t);
+        assert!(app.pending_stroke_end.is_some(), "the stroke did not queue");
+        let _ = app.renderer.render_offscreen_vp(&app.doc, &vp, 1600, 1000);
+        let landing = app
+            .finish_pending_stroke_end("test")
+            .map_or(0.0, |d| d.as_secs_f32() * 1000.0);
+        let rt = app.renderer.readback_timing();
+        let target = if rt.tiles > 64 { 15.0 } else { 10.0 };
+        println!(
+            "| {} | {} | {:.1} | {:.1} | {:.2} | {:.2} | {:.2} | {:.2} | {:.1} | {} | {} | {} |",
+            label,
+            rt.tiles,
+            flush,
+            pen_up,
+            rt.submit_ms,
+            rt.deferred_ms,
+            rt.wait_ms,
+            rt.copy_ms,
+            landing,
+            rt.landed,
+            if pen_up < target { "pass" } else { "MISS" },
+            if rt.wait_ms < 5.0 { "pass" } else { "MISS" },
+        );
+    }
 }
 
 // --- the ordinary document actions the owner calls laggy ------------------

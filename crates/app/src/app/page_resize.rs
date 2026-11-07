@@ -337,6 +337,12 @@ impl App {
     /// the app paints between pages, so twenty pages reads as twenty counted
     /// steps instead of one hang. The last call installs.
     pub fn resample_work_step(&mut self) {
+        // Perf lane 3 door, CONDITIONAL: a running job swaps `self.doc`; an
+        // unconditional call here (the frame head) would land every stroke
+        // before its frame's acquire and undo the whole deferral.
+        if self.resample_job.is_some() {
+            self.finish_pending_stroke_end("resample");
+        }
         let Some(j) = self.resample_job.as_ref() else {
             return;
         };

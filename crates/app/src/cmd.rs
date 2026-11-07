@@ -1339,6 +1339,10 @@ pub fn dispatch(app: &mut App, cmd: AppCmd) {
     // socket and the keymap dispatch through this door too, and a lag
     // report that omits the command that caused the lag is worth nothing.
     app.diag.note_cmd(&cmd);
+    // Perf lane 3 door: a GPU stroke submitted at pen-up lands BEFORE any
+    // command runs — Undo would otherwise close its op empty, a layer or
+    // page switch would move the document under it, Save would miss it.
+    app.finish_pending_stroke_end("dispatch");
     // `IO-060`: a work resample in flight owns the whole page set. Its
     // phase 1 has the open page stashed and a pending list keyed by page
     // INDEX, so a page turn, an undo or a save arriving between two pages
