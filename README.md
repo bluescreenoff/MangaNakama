@@ -140,6 +140,36 @@ a day of work.
 Want to take this on? Open an issue first; the measurements and a step
 plan exist and can be shared there.
 
+### A memory budget: "let MangaNakama use X % of RAM"
+
+**The idea.** Photoshop has a setting like *"Let Photoshop use 70 % of
+RAM"*. A program with a budget like that can take memory from Windows once,
+keep it, and hand it out again and again inside the program. Windows only
+zeroes memory the first time it gives it out (see above), so after the
+first use the ~1 s per effect layer would mostly disappear: re-used memory
+is already ours and needs no zeroing.
+
+**Why it does not work today.** Re-using memory only helps if old tiles
+are ever given back. In MangaNakama the undo history keeps every old tile
+in RAM at full size, so memory only grows and nothing is free to re-use.
+
+**What it would take.**
+
+1. A setting (Preferences ▸ Performance): "Use up to N % of RAM", with a
+   sensible default such as 50 %.
+2. A tile pool: freed tiles go back into the pool instead of back to
+   Windows, and new tiles come from the pool first.
+3. Undo history that can shrink: when the budget is reached, the oldest
+   undo steps are compressed (most tiles are mostly empty, so they compress
+   very well) or moved to a file on disk, like Photoshop's "scratch disk".
+   That frees their memory for the pool.
+4. Combined with compact tiles (above), most of the budget would rarely be
+   needed at all.
+
+Steps 2 and 3 touch the undo system and the tile store, so this is a larger
+change than it sounds (several days); it also makes the app far better on
+big multi-page works, not only for effect lines.
+
 ---
 
 <details>
