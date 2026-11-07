@@ -170,6 +170,24 @@ Steps 2 and 3 touch the undo system and the tile store, so this is a larger
 change than it sounds (several days); it also makes the app far better on
 big multi-page works, not only for effect lines.
 
+### Lasso selection: show the line while you draw it
+
+**What you notice.** With the lasso (free-hand) selection tool, nothing is
+drawn while you trace around the area. The outline only appears after you
+let go of the pen or mouse, so you are tracing blind and cannot see whether
+you are following the edge you meant.
+
+**What it should do.** Like Clip Studio and Photoshop: while the pen is
+down, draw the path traced so far as a thin line on the canvas (ideally
+with a faint closing line from the pen back to the start point, so you can
+see the area that would be selected if you let go now). On release, the
+normal selection outline replaces it.
+
+**Where it would go.** The lasso already collects the points while the pen
+moves (it needs them to build the selection on release); this is only a
+matter of drawing those points in the canvas overlay each frame, the same
+way the Figure tool previews a shape while it is being dragged.
+
 ---
 
 <details>
