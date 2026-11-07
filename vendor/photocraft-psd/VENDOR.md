@@ -113,3 +113,27 @@ Read: `builder.rs`, `pixels.rs`, `tree.rs`, `blend.rs`, the mask parts of
   `LimitExceeded` / `OutOfMemory` instead of aborting.
 - The version-info resource (1057) is written by `version_info_resource`
   with writer "Adobe Photoshop" (MangaNakama replaces the writer string).
+
+## Real-file tests (local-only fixtures)
+
+`crates/core/src/psd/tests.rs` `real_files_roundtrip` walks
+`crates/core/tests/data/psd/*.psd|*.psb` (gitignored, never committed) and
+skips when the folder is absent. Photoshop-made files, from the psd-tools
+test corpus (MIT, `psd-tools/psd-tools` `tests/psd_files/` at commit
+`b7d7723790bc63f59f70ab2d7b91d8ee3124758b`), one per kind:
+
+| Kind | File |
+|---|---|
+| groups | `group.psd` |
+| masks | `mask.psd` |
+| clipping | `clipping-mask.psd` |
+| 16-bit | `16bit5x5.psd` |
+| text | `text.psd` |
+| CMYK | `colormodes/4x4_8bit_cmyk.psd` (saved flat as `4x4_8bit_cmyk.psd`) |
+| PSB | `2layers.psb` |
+
+Each has a `<name>.expect.txt` beside it (`layers=`, `folders=`, `names=`
+bottom-first with children before their folder, `notes=`), written from the
+crate's own reading of the file (`print_real_file_expectations`, ignored
+test). The Clip Studio slot (`csp-layered.psd`, `csp-flat.psd`) prints a
+"missing" line until the owner saves those two files.

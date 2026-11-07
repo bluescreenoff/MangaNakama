@@ -515,3 +515,122 @@ fn legacy_and_new_writers_decode_alike() {
     assert_docs_equal_8bit(&old.doc, &new.doc, false);
     assert_docs_equal_8bit(&doc, &new.doc, false);
 }
+
+// ---------------------------------------------------------------- real files
+
+/// Local-only real files (gitignored): Photoshop-made files from the
+/// psd-tools test corpus, and the two Clip Studio files the owner saves.
+fn real_files() -> Option<Vec<std::path::PathBuf>> {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/psd");
+    let mut v: Vec<_> = std::fs::read_dir(&dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("psd") || e.eq_ignore_ascii_case("psb")))
+        .collect();
+    v.sort();
+    for csp in ["csp-layered.psd", "csp-flat.psd"] {
+        if !dir.join(csp).is_file() {
+            println!("[psd] CSP fixture missing (slot skipped): {csp}");
+        }
+    }
+    Some(v)
+}
+
+/// What the crate itself reads from a file, without our importer:
+/// pixel layers, folders, every name bottom-first (children before their
+/// folder, as our list orders them).
+fn crate_view(file: &photocraft_psd::PsdFile) -> (usize, usize, Vec<String>) {
+    fn walk(f: &photocraft_psd::PsdFile, n: &photocraft_psd::LayerNode, out: &mut (usize, usize, Vec<String>)) {
+        for c in n.children() {
+            walk(f, c, out);
+        }
+        if n.is_group() {
+            out.1 += 1;
+        } else {
+            out.0 += 1;
+        }
+        out.2.push(f.layers()[n.index()].name());
+    }
+    let mut out = (0, 0, Vec::new());
+    for n in file.layer_tree() {
+        walk(file, &n, &mut out);
+    }
+    out
+}
+
+/// #15: every real file present (a) re-saves byte for byte through the
+/// crate, (b) imports, exports and imports again to the same page, and
+/// (c) matches its `<name>.expect.txt` when one sits beside it.
+#[test]
+fn real_files_roundtrip() {
+    let Some(files) = real_files() else { return };
+    for path in files {
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        println!("[psd] real file: {name}");
+        let bytes = std::fs::read(&path).unwrap();
+        let file = photocraft_psd::PsdFile::from_bytes(&bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert!(file.to_bytes().unwrap() == bytes, "{name}: the crate does not re-save it byte for byte");
+
+        let d1 = load_from_bytes(&bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let d2 = load_from_bytes(&new_bytes(&d1.doc)).unwrap_or_else(|e| panic!("{name} (re-import): {e}"));
+        assert_docs_equal_8bit(&d1.doc, &d2.doc, true);
+
+        let expect = path.with_extension("expect.txt");
+        if let Ok(text) = std::fs::read_to_string(&expect) {
+            let layers = d1.doc.layers.iter().filter(|l| !l.folder).count();
+            let folders = d1.doc.layers.iter().filter(|l| l.folder).count();
+            let names = d1.doc.layers.iter().map(|l| l.name.as_str()).collect::<Vec<_>>().join("|");
+            for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+                let (k, v) = line.split_once('=').unwrap_or_else(|| panic!("{name}: bad expect line {line:?}"));
+                match k {
+                    "layers" => assert_eq!(layers.to_string(), v, "{name}: layers"),
+                    "folders" => assert_eq!(folders.to_string(), v, "{name}: folders"),
+                    "names" => assert_eq!(names, v, "{name}: names"),
+                    "notes" => assert_eq!(d1.notes.len().to_string(), v, "{name}: notes {:?}", d1.notes),
+                    _ => panic!("{name}: unknown expect key {k:?}"),
+                }
+            }
+        }
+    }
+}
+
+/// Prints, per real file, what the crate reads (for writing `.expect.txt`
+/// files) next to our import's notes. Run by hand:
+/// `cargo test -p mn-core --lib print_real_file_expectations -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn print_real_file_expectations() {
+    let Some(files) = real_files() else { return };
+    for path in files {
+        let bytes = std::fs::read(&path).unwrap();
+        let file = photocraft_psd::PsdFile::from_bytes(&bytes).unwrap();
+        let (layers, folders, names) = crate_view(&file);
+        let imp = load_from_bytes(&bytes).unwrap();
+        println!(
+            "== {}\n{:?} {}-bit\nlayers={layers}\nfolders={folders}\nnames={}\nnotes={}\n{:?}",
+            path.display(),
+            file.header.color_mode,
+            file.header.depth,
+            names.join("|"),
+            imp.notes.len(),
+            imp.notes
+        );
+    }
+}
+
+/// A mask that hides nothing on the canvas (default 255, its rectangle off
+/// the page) imports as no mask: a tile-less mask means the same, and the
+/// exporter writes none for it, so a round trip would otherwise lose it.
+/// Found on a CMYK psd-tools file whose fill layer carries such a mask.
+#[test]
+fn import_mask_hiding_nothing_is_no_mask() {
+    let mut b = PsdBuilder::new(8, 8);
+    let mut l = LayerSpec::new("fill", 0, 0, 1, 1, PixelData::Rgba8(vec![1, 2, 3, 255]));
+    l.mask = Some(MaskSpec { rect: Rect::from_xywh(20, 20, 2, 2), data: vec![0; 4], default_color: 255, disabled: false });
+    b.push_layer(l);
+    let imp = load_from_bytes(&b.to_bytes().unwrap()).unwrap();
+    assert!(imp.doc.layers[0].mask.is_none());
+    let again = load_from_bytes(&new_bytes(&imp.doc)).unwrap();
+    assert_docs_equal_8bit(&imp.doc, &again.doc, true);
+}

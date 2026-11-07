@@ -25,7 +25,7 @@ const KINDS: [(&str, &[&[u8; 4]]); 5] = [
     ("text layer(s) came in as pixels", &[b"TySh"]),
     ("layer(s) with effects: effects dropped", &[b"lfx2", b"lrFX"]),
     (
-        "adjustment or fill layer(s) not applied",
+        "adjustment, fill or shape layer(s): only their stored pixels came in",
         &[
             b"levl", b"brit", b"curv", b"expA", b"hue2", b"selc", b"blnc", b"mixr", b"grdm", b"phfl", b"clrL", b"vibA", b"SoCo",
             b"GdFl", b"PtFl",
@@ -175,7 +175,10 @@ impl Walk<'_> {
         }
         match view.user_mask() {
             None => {}
-            Some(Ok(g)) => l.mask = Some(mask_of(&g, !mask_disabled, self.canvas)),
+            // A mask with no tiles hides nothing on the canvas (default 255,
+            // nothing painted inside the page): the same as no mask, and the
+            // exporter writes none for it, so it is not created.
+            Some(Ok(g)) => l.mask = Some(mask_of(&g, !mask_disabled, self.canvas)).filter(|m| !m.tiles.is_empty()),
             Some(Err(e)) => self.notes.push(format!("{name}: mask not decoded ({e})")),
         }
         // Linked is our default; the PSD link flag is not reliably mapped.
