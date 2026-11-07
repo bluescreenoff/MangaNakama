@@ -170,6 +170,42 @@ Steps 2 and 3 touch the undo system and the tile store, so this is a larger
 change than it sounds (several days); it also makes the app far better on
 big multi-page works, not only for effect lines.
 
+### A faster canvas redraw on big pages
+
+**What you notice.** On a B4 page at 600 dpi (the Japanese submission size,
+about 6,000 × 8,600 pixels) the canvas is slow to catch up with some actions.
+Hiding or showing a layer, changing a layer's opacity or blend mode, or
+opening the page takes 1–4 s before the picture is right. During normal
+drawing, each screen refresh costs about 70 ms of CPU time even when only
+2–3 tiles changed, so the app runs at roughly 14 frames per second instead
+of 60. (Measured in the owner's log on an Intel UHD 620: a 3-tile frame
+99 ms, a full-page rebuild 958 ms to 4.0 s.)
+
+**What this is.** The *compositor* is the part that stacks all layers into
+the one picture you see. It runs on the GPU. The slow part is not the GPU
+work: it is the CPU bookkeeping around it. Every frame, the code walks over
+every tile of every layer to decide what changed, then records one draw
+call per layer per screen region. On a 12,800-tile page that walk and that
+recording are most of the 70 ms, and a full rebuild repeats them for every
+tile. Strokes are unaffected (lanes 2 and 3 in the git history fixed
+effect lines and the pen stall); this is purely redraw cost.
+
+**The plan that exists** (`docs/plans/2026-10-01-perf-lane1-composite.md`):
+
+1. Measure first. Split the frame timer into four buckets (scan, upload,
+   encode, submit) and add a headless benchmark on a B4 page with three
+   layers.
+2. Fix only the biggest bucket: dense per-grid bitmaps instead of hash sets
+   if the scan dominates; fewer, batched draw calls if the encoding
+   dominates. No threading of GPU calls (the UHD 620 DX12 driver drops
+   tiles when wgpu is touched from several threads).
+3. Prove the pixels are identical before and after with the existing CPU
+   compositor as the reference.
+
+Parked because the app already feels fine for inking after the 2026-11
+fixes; the remaining cost is felt on layer-panel actions on very large
+pages. About a day of work plus a day of measuring.
+
 ### Lasso selection: show the line while you draw it
 
 **What you notice.** With the lasso (free-hand) selection tool, nothing is
