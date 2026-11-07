@@ -50,7 +50,7 @@ fn as_project(p: &Path) -> Option<PathBuf> {
         return index.is_file().then_some(index);
     }
     match ext_lower(p).as_deref() {
-        Some("mnc") | Some("ora") => Some(p.to_path_buf()),
+        Some("mnc") | Some("ora") | Some("psd") | Some("psb") => Some(p.to_path_buf()),
         _ => None,
     }
 }
@@ -87,7 +87,7 @@ pub fn plan(paths: &[PathBuf]) -> (Vec<AppCmd>, Option<String>) {
         return (
             Vec::new(),
             Some(format!(
-                "cannot open {what} — drop an image ({}), or a .mnc / .ora project",
+                "cannot open {what} — drop an image ({}), or a .mnc / .ora project, or a .psd",
                 IMAGE_EXTS.join(", ")
             )),
         );
@@ -158,8 +158,22 @@ mod tests {
 
     #[test]
     fn many_unsupported_files_are_counted_not_listed() {
-        let (_, note) = plan(&[p("a.txt"), p("b.psd"), p("c.doc")]);
+        let (_, note) = plan(&[p("a.txt"), p("b.xyz"), p("c.doc")]);
         assert!(note.unwrap().contains("3 files"));
+    }
+
+    /// A Photoshop file opens like a project (imported as a bare page),
+    /// whatever the case of its extension.
+    #[test]
+    fn a_psd_opens_like_a_project() {
+        for name in ["x.psd", "y.PSB"] {
+            let (cmds, note) = plan(&[p(name)]);
+            assert!(note.is_none(), "{name}");
+            assert!(
+                matches!(&cmds[..], [AppCmd::OpenOraPath(q)] if q == &p(name)),
+                "{name}"
+            );
+        }
     }
 
     #[test]

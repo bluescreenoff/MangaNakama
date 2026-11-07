@@ -227,31 +227,43 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                 }
                 mn_core::project::MncKind::Unknown => {
                     app.reset_folder_state();
-                    match mn_core::ora::load(&p) {
-                        Ok(doc) => {
-                            app.prepare_open_target();
-                            app.doc = doc;
-                            app.disarm_mask_edit_if_unmasked();
-                            // A bare ORA is a single page with no page-setup
-                            // metadata, so guides are off rather than wrong.
-                            app.page = None;
-                            app.pages = vec![PageEntry::active()];
-                            app.page_index = 0;
-                            // Every layer index and tile in the cache belongs to
-                            // the old document — exactly what invalidate() is for.
-                            app.renderer.invalidate();
-                            app.layer_thumbs.clear();
-                            app.fit_to_view();
-                            app.set_doc_path(Some(p.clone()));
-                            app.mark_saved();
-                            app.note_recent(&p);
-                            app.set_status(format!(
-                                "opened {} ({} layers)",
-                                p.display(),
-                                app.doc.layers.len()
-                            ));
+                    let ext = p.extension().map(|e| e.to_string_lossy().to_ascii_lowercase());
+                    if matches!(ext.as_deref(), Some("psd" | "psb")) {
+                        match mn_core::psd::load(&p) {
+                            Ok(imp) => {
+                                // No doc path: Save must never write ORA bytes
+                                // over a .psd, so it asks for a name.
+                                install_bare_doc(app, imp.doc, None);
+                                app.note_recent(&p);
+                                let mut status = format!(
+                                    "imported {} ({} layers)",
+                                    p.display(),
+                                    app.doc.layers.len()
+                                );
+                                if !imp.notes.is_empty() {
+                                    status.push_str(&format!(
+                                        "; {} notes: {}",
+                                        imp.notes.len(),
+                                        imp.notes.join("; ")
+                                    ));
+                                }
+                                app.set_status(status);
+                            }
+                            Err(e) => app.set_error(format!("open failed: {e}")),
                         }
-                        Err(e) => app.set_error(format!("open failed: {e}")),
+                    } else {
+                        match mn_core::ora::load(&p) {
+                            Ok(doc) => {
+                                install_bare_doc(app, doc, Some(p.clone()));
+                                app.note_recent(&p);
+                                app.set_status(format!(
+                                    "opened {} ({} layers)",
+                                    p.display(),
+                                    app.doc.layers.len()
+                                ));
+                            }
+                            Err(e) => app.set_error(format!("open failed: {e}")),
+                        }
                     }
                 }
             }
@@ -442,6 +454,14 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
         }
         AppCmd::ExportPsdPath(p) => {
             app.refresh_tones();
+            let legacy = app.prefs.psd_legacy_writer;
+            let mut p = p;
+            // Past 30,000 px per side only PSB can hold the page; the legacy
+            // writer still refuses (its own error says so).
+            let psb = !legacy && mn_core::psd::needs_psb(app.doc.size);
+            if psb {
+                p.set_extension("psb");
+            }
             // Snapshot AFTER the tone refresh, so the PSD carries the derived
             // halftones the screen is showing.
             save_bg::submit(
@@ -450,12 +470,14 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
                 save_bg::Write::Psd {
                     path: p.clone(),
                     doc: Box::new(app.doc.clone()),
+                    legacy,
                 },
             );
             app.set_status(format!(
-                "exporting layered PSD ({} layers) -> {}",
+                "exporting layered PSD ({} layers) -> {}{}",
                 app.doc.layers.len(),
-                p.display()
+                p.display(),
+                if psb { "; canvas over 30,000 px: wrote PSB" } else { "" }
             ));
         }
         AppCmd::ExportPngPath(p) => {
@@ -648,6 +670,27 @@ pub(super) fn run(app: &mut App, cmd: AppCmd, cmd_tail: CmdTail) {
     run_cmd_tail(app, cmd_tail);
 }
 
+/// Install a document that arrived without work metadata (a bare `.ora`, an
+/// imported `.psd`) as a single page. `path` becomes the document path; the
+/// PSD import passes `None` so Save asks for a name.
+fn install_bare_doc(app: &mut App, doc: mn_core::Document, path: Option<std::path::PathBuf>) {
+    app.prepare_open_target();
+    app.doc = doc;
+    app.disarm_mask_edit_if_unmasked();
+    // A bare page has no page-setup metadata, so guides are off rather than
+    // wrong.
+    app.page = None;
+    app.pages = vec![PageEntry::active()];
+    app.page_index = 0;
+    // Every layer index and tile in the cache belongs to the old document —
+    // exactly what invalidate() is for.
+    app.renderer.invalidate();
+    app.layer_thumbs.clear();
+    app.fit_to_view();
+    app.set_doc_path(path);
+    app.mark_saved();
+}
+
 /// The blocking-command timing table (item K's addendum, 2026-09-05). The
 /// owner reported Windows painting "not responding" over the window during
 /// saves, which is what happens when the message pump does not run for ~5 s.
@@ -732,6 +775,7 @@ mod blocking_time_tests {
             ("ExportMncPath", AppCmd::ExportMncPath(dir.join("e.mnc"))),
             ("ExportPngPath", AppCmd::ExportPngPath(dir.join("e.png"))),
             ("ExportPsdPath", AppCmd::ExportPsdPath(dir.join("e.psd"))),
+            ("OpenOraPath (.psd)", AppCmd::OpenOraPath(dir.join("e.psd"))),
             ("SaveDuplicatePath", AppCmd::SaveDuplicatePath(dir.join("dup.mnc"))),
             ("ExportTextPath", AppCmd::ExportTextPath(dir.join("script.txt"))),
             ("Autosave", AppCmd::Autosave),
@@ -743,7 +787,18 @@ mod blocking_time_tests {
         // the message pump would really have paid.
         let _serial = save_bg::test_lock();
         save_bg::pretend_frames_are_running(true);
+        let mut exported_layers = 0;
         for (name, cmd) in cases {
+            if name == "ExportPsdPath" {
+                // A frame folder's border ink leaves as one extra child layer.
+                let borders = app
+                    .doc
+                    .layers
+                    .iter()
+                    .filter(|l| l.folder && l.is_frame() && l.display_tiles().values().any(|t| !t.is_blank()))
+                    .count();
+                exported_layers = app.doc.layers.len() + borders;
+            }
             let t = Instant::now();
             dispatch(&mut app, cmd);
             let blocked = ms(t);
@@ -755,6 +810,11 @@ mod blocking_time_tests {
                 "[time] {name}: BLOCKS THE PUMP {blocked:.0} ms, background {background:.0} ms — {}",
                 app.status
             );
+            if name == "OpenOraPath (.psd)" {
+                // An imported PSD has no document path: Save must ask.
+                assert!(app.doc_path.is_none(), "{}", app.status);
+                assert_eq!(app.doc.layers.len(), exported_layers, "{}", app.status);
+            }
         }
         save_bg::pretend_frames_are_running(false);
 

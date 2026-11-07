@@ -61,6 +61,15 @@ pub(crate) const PREF_INDEX: &[PrefMeta] = &[
                (export reminder, unexported, stale pages, forgot to export)",
     },
     PrefMeta {
+        id: "psd_legacy_writer",
+        tab: "Saving",
+        label: "Use the old PSD writer",
+        desc: "Writes PSDs with the previous exporter: 8-bit, no layer masks, \
+               no PSB. Turn on only if the new writer gives a file your \
+               studio cannot open. Removed next release. (psd, photoshop, \
+               old exporter, legacy writer, studio hand-off)",
+    },
+    PrefMeta {
         id: "mouse_smooth_px",
         tab: "Drawing",
         label: "Mouse smoothing floor",
@@ -535,6 +544,12 @@ fn tab_saving(ui: &mut egui::Ui, app: &mut App, focus: Option<&str>, fx: &mut Fx
             row_label(ui, focus, "export_reminder");
             fx.changed |= ui
                 .add(egui::Checkbox::new(&mut p.export_reminder, ""))
+                .changed();
+            ui.end_row();
+
+            row_label(ui, focus, "psd_legacy_writer");
+            fx.changed |= ui
+                .add(egui::Checkbox::new(&mut p.psd_legacy_writer, ""))
                 .changed();
             ui.end_row();
         });

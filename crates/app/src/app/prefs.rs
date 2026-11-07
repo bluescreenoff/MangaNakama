@@ -122,6 +122,11 @@ pub struct Prefs {
     /// ("I fixed two panels and forgot to re-export"), and it says nothing
     /// at all until a work has been exported once.
     pub export_reminder: bool,
+    /// Export layered PSDs with the previous writer (`mn_core::psd_legacy`:
+    /// 8-bit, no layer masks, no PSB). OFF by default; the escape hatch for a
+    /// studio whose reader rejects the new writer's files. Removed in the
+    /// release after the one that ships the new writer.
+    pub psd_legacy_writer: bool,
     /// The Layers palette's command-icon size, px, 14..=32 (owner
     /// 2026-08-21: "a bit bigger by default, and a setting"). The toggle
     /// strip above the list derives from it at 0.8×.
@@ -194,6 +199,7 @@ impl Default for Prefs {
             text_size_pt: TEXT_SIZE_PT,
             new_preset: String::new(),
             export_reminder: true,
+            psd_legacy_writer: false,
             palette_icon_px: PALETTE_ICON_PX,
             theme: THEME.to_owned(),
             ui_scale: 1.0,
@@ -332,6 +338,10 @@ impl Prefs {
         );
         body.push_str(&format!("automation={}\n", u8::from(self.automation)));
         body.push_str(&format!(
+            "psd_legacy_writer={}\n",
+            u8::from(self.psd_legacy_writer)
+        ));
+        body.push_str(&format!(
             "smart_shape={}\nsmart_hold_ms={}\nsmart_fit_tol={}\n",
             u8::from(self.smart_shape),
             self.smart_hold_ms,
@@ -401,6 +411,13 @@ impl Prefs {
                     "1" | "true" => true,
                     "0" | "false" => false,
                     _ => self.export_reminder,
+                }
+            }
+            "psd_legacy_writer" => {
+                self.psd_legacy_writer = match v {
+                    "1" | "true" => true,
+                    "0" | "false" => false,
+                    _ => self.psd_legacy_writer,
                 }
             }
             "palette_icon_px" => self.palette_icon_px = v.parse().unwrap_or(self.palette_icon_px),
@@ -539,7 +556,24 @@ pub fn path_hint() -> String {
 }
 
 #[cfg(test)]
-mod tests {    /// Row 19: the Through-default preference round-trips and takes a
+mod tests {    /// The old-PSD-writer escape hatch round-trips; off by default.
+    #[test]
+    fn psd_legacy_writer_round_trips() {
+        let mut p = super::Prefs::default();
+        assert!(!p.psd_legacy_writer, "the new PSD writer is the default");
+        p.psd_legacy_writer = true;
+        let body = p.to_body();
+        assert!(body.contains("psd_legacy_writer=1"), "{body}");
+        assert!(from_body(&body).psd_legacy_writer);
+        assert!(!from_body("psd_legacy_writer=0\n").psd_legacy_writer);
+        assert!(from_body("psd_legacy_writer=true\n").psd_legacy_writer);
+        assert!(
+            !from_body("psd_legacy_writer=maybe\n").psd_legacy_writer,
+            "gibberish keeps the default"
+        );
+    }
+
+    /// Row 19: the Through-default preference round-trips and takes a
     /// hand-edited "true" like every bool key.
     #[test]
     fn new_folder_through_round_trips() {
