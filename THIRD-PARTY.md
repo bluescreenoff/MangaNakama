@@ -15,6 +15,7 @@ Nothing listed here imposes copyleft on the project.
 | `vendor/libmypaint` | libmypaint v1.6.1 — the brush engine | **ISC**, © 2008–2011 Martin Renold (`vendor/libmypaint/COPYING`) | The MyPaint *application* is GPLv2+; this *library* is ISC. Our patches are logged in `vendor/PATCHES.md`. |
 | `vendor/libmypaint/fastapprox/` | fast approximate math | Own permissive notice, © Paul Mineiro | Notice kept inside the vendored tree. |
 | `vendor/egui_dock` | egui_dock 0.21 — the docking system | **MIT**, © 2022 Adam Gąsior (`vendor/egui_dock/LICENSE`) | Our patches are marked `MN-PATCH` and logged in `vendor/PATCHES.md`. |
+| `vendor/photocraft-psd` | photocraft `crates/psd` at commit `6326117c` (2026-11-05) — the PSD/PSB reader and writer | **MIT OR Apache-2.0**, © storytold / photocraft contributors (`vendor/photocraft-psd/LICENSE-MIT`, `LICENSE-APACHE`) | Trimmed to the PSD core; patches in `vendor/PATCHES.md`. |
 
 ## Vendored assets
 
@@ -26,7 +27,8 @@ Nothing listed here imposes copyleft on the project.
 
 The direct dependencies — `wgpu`, `egui`, `egui-wgpu`, `image`, `zip`,
 `serde`, `serde_json`, `quick-xml`, `rfd`, `bytemuck`, `pollster`,
-`raw-window-handle`, `windows`, `windows-sys`, `windows-numerics`, `cc` —
+`raw-window-handle`, `windows`, `windows-sys`, `windows-numerics`, `cc`,
+`thiserror`, `flate2`, and `proptest` (dev only, for the vendored PSD crate) —
 are all published under the Rust ecosystem's standard permissive terms
 (**MIT OR Apache-2.0**, or equivalently permissive; `rfd` is MIT). Their
 license texts ship inside each crate as fetched by cargo. None impose

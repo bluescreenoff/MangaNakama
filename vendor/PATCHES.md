@@ -704,3 +704,45 @@ grey mud, spectral on a green),
 `stock_presets_do_not_inherit_libmypaints_spectral_default`; plus
 `a_spectral_brush_never_reaches_the_gpu_dab_path` in
 `crates/gpu/tests/dab_parity.rs`.
+
+## vendor/photocraft-psd (photocraft `crates/psd` at `6326117c`, fetched 2026-11-07)
+
+Provenance, the kept/dropped file list and the re-pin procedure are in
+`vendor/photocraft-psd/VENDOR.md`. `Cargo.toml` is ours (upstream inherits
+everything from its workspace); `tests/it/main.rs` is rewritten to list only
+the kept test modules. Everything else under `src/` is upstream, verbatim,
+except the four patches below.
+
+### 2026-11-07 — patch 1: dropped modules unlisted
+
+**File:** `src/lib.rs`. **What:** the `pub mod` lines of `abr`, `aco`, `act`,
+`ase`, `asl`, `atn`, `csh`, `grd`, `hdr`, `metadata`, `path`, `patterns`,
+`shc`, `slices`, `tiff` and the `mod codepage;` line deleted. **Why:** those
+files are other Adobe formats (brushes, swatches, actions, TIFF) and are not
+vendored. **Upstream-relevant:** no.
+
+### 2026-11-07 — patch 2: alpha-channel names without `encoding_rs`
+
+**File:** `src/file.rs`, `PsdFile::alpha_channel_names`. **What:**
+`crate::codepage::decode(name, encoding_rs::MACINTOSH)` became
+`crate::io::decode_legacy_name(name)` (UTF-8 when valid, else byte-as-char).
+**Why:** it was the only use of `codepage.rs` and `encoding_rs` in the kept
+files; MangaNakama never reads alpha (spare) channel names, and the crate
+would have brought a new licence (BSD-3-Clause data tables) into the lock.
+**Silent-failure note:** a Mac Roman legacy channel name with bytes over 0x7F
+now decodes to the wrong characters. Only `alpha_channel_names` is affected.
+**Upstream-relevant:** no.
+
+### 2026-11-07 — patch 3: `dead_code` allowed
+
+**File:** `src/lib.rs`. **What:** `#![allow(dead_code)]` with a comment.
+**Why:** after patch 1, `io.rs` (`utf16_units`, `Reader::new_little`,
+`append_with`) and `layer.rs` (`LayerInfo::write_unpadded`) are used by no
+kept module; the suite rule is zero warnings. **Upstream-relevant:** no.
+
+### 2026-11-07 — patch 4: Mac Roman test ignored
+
+**File:** `src/file.rs`, test
+`pascal_channel_names_use_mac_roman_and_unicode_takes_precedence`. **What:**
+`#[ignore = "..."]` added; the test body is unchanged. **Why:** it asserts
+the Mac Roman decoding patch 2 removes. **Upstream-relevant:** no.

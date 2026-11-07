@@ -25,3 +25,6 @@ quick-xml = "0.41"
 # would drag OS calls across this crate's platform-free contract for
 # every keypress. Already in the tree transitively (same locked version).
 unicode-segmentation = "1.13"
+# PSD/PSB reader + writer, vendored (vendor/photocraft-psd/VENDOR.md). Pure
+# data: forbid(unsafe_code), only thiserror + flate2.
+photocraft-psd = { path = "../../vendor/photocraft-psd" }
