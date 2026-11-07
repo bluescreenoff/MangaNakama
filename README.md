@@ -86,6 +86,60 @@ Read [`CONTRIBUTING.md`](CONTRIBUTING.md) (TL;DR in its first line) and
 `docs/ARCHITECTURE.md` — especially its **"Traps"** section — before
 changing anything. `ROADMAP.md` ends with a list of good first issues.
 
+## Would be nice to have
+
+### Compact tiles: removing the last second from effect lines
+
+**What you notice.** Placing or editing speed lines, focus lines or a solid
+flash (ベタフラ) on a full B4 page at 600 dpi takes about 0.5–1.5 s (a solid
+flash about 4–5 s). Roughly 1 s of that is not drawing at all: it is the
+cost of getting memory for the new layer.
+
+**Why it happens, step by step.**
+
+1. A page is cut into small squares called *tiles* (64 × 64 pixels). Each
+   pixel in a tile is stored as 4 colour values of 2 bytes each (16-bit
+   RGBA), so one tile is 64 × 64 × 8 bytes = **32 KB**, even if it holds a
+   single black line.
+2. Speed lines cross the whole page, so nearly every tile gets some ink. A
+   B4 page at 600 dpi has about **12,800 tiles**, so one effect layer needs
+   about 12,800 × 32 KB = **420 MB** of new memory.
+3. When a program asks Windows for new memory, Windows first fills it with
+   zeros. It must: the memory may have belonged to another program a moment
+   ago, and that program's data (passwords, documents) must not leak. Every
+   program on every modern OS gets this.
+4. Clearing 420 MB to zero takes Windows about **1 second** on a typical
+   laptop. Measured here: building 12,825 tiles costs 0.9–1.3 s, and almost
+   all of it is the zeroing, not our code.
+
+**What was already tried (and why it does not help).**
+
+- *Asking for zeroed memory the cheap way*: already done (`vec![0; n]` /
+  `alloc_zeroed`). The cost is the zeroing itself, which cannot be skipped.
+- *Not creating tiles that get no ink*: already done. Speed lines simply
+  touch 6,000–12,800 tiles.
+- *Re-using old tiles instead of asking Windows for new ones*: undo keeps
+  the old tiles alive, so there is nothing free to re-use.
+
+**The fix that would work: compact tiles.** Most effect-line tiles contain
+only one colour (black) on transparent. Such a tile could be stored as
+"1 bit per pixel (ink / no ink) + the ink colour": 64 × 64 bits = 512 bytes
+instead of 32 KB, which is 64 times less memory. The full 32 KB version is
+only built at the moment something actually needs the full pixels (for
+example when you paint on that tile with a soft brush).
+
+- Saves the ~1 s on every effect-line regen, and a lot of memory per page.
+- It changes how every tile is stored, so every piece of code that reads
+  tile pixels has to learn the compact form. Estimate: 1–2 days, high risk.
+
+**A smaller version: one-colour tiles.** A tile that is entirely one colour
+(the inside of a solid flash) stores just that colour and no pixels. This
+only helps the solid flash (about 0.9 s of its time), but it is about half
+a day of work.
+
+Want to take this on? Open an issue first; the measurements and a step
+plan exist and can be shared there.
+
 ---
 
 <details>
