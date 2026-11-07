@@ -16,6 +16,7 @@
 //! app's `psd_legacy_writer` preference.
 
 mod blend;
+mod export;
 mod import;
 #[cfg(test)]
 mod tests;
@@ -56,8 +57,9 @@ pub fn needs_psb(size: (u32, u32)) -> bool {
 }
 
 /// Write `doc` as a layered PSD (PSB when [`needs_psb`]).
-pub fn save_psd<W: Write>(doc: &Document, out: W) -> Result<(), PsdError> {
-    crate::psd_legacy::save_psd(doc, out).map_err(|e| PsdError(e.0))
+pub fn save_psd<W: Write>(doc: &Document, mut out: W) -> Result<(), PsdError> {
+    let bytes = export::to_bytes(doc)?;
+    out.write_all(&bytes).map_err(|e| PsdError(e.to_string()))
 }
 
 /// Read a PSD or PSB file.

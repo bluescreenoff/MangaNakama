@@ -14,22 +14,13 @@ use std::sync::Arc;
 
 use photocraft_psd::{BlendMode, GroupSpec, LayerSpec, MaskSpec, PixelData, PsdBuilder, Rect, TaggedBlock};
 
+use super::export::straight8;
 use super::*;
 use crate::blend::straight_u8_to_fix15;
 use crate::doc::{Blend, Layer, LayerMask};
 use crate::tile::{TILE_SIZE, Tile, TileIdx};
 
 // ---------------------------------------------------------------- helpers
-
-/// Fix15 premultiplied -> straight 8-bit, the export formulas (plan §4.3).
-fn straight8(p: [u16; 4]) -> [u8; 4] {
-    let a = p[3] as u32;
-    if a == 0 {
-        return [0, 0, 0, 0];
-    }
-    let un = |c: u16| (((c as u32 * 32768 / a).min(32768) * 255 + 16384) / 32768) as u8;
-    [un(p[0]), un(p[1]), un(p[2]), ((a * 255 + 16384) / 32768) as u8]
-}
 
 /// A layer's displayed pixels as a full-canvas straight RGBA8 buffer.
 fn flat8(size: (u32, u32), l: &Layer) -> Vec<u8> {
@@ -176,7 +167,6 @@ fn synthetic(full: bool) -> Document {
     l.visible = false;
     fill(&mut l, 0, 60, 130, 140, |x, _| [255, 255, (x % 256) as u8, 255]);
     if full {
-        l.lock = true;
         // Hidden left of x = 32 in tile (0,1), half coverage in (1,1),
         // everything else unmasked.
         l.mask = Some(mask_with(&[TileIdx::new(0, 1), TileIdx::new(1, 1)], true, |x, _| if x < 32 { 0 } else { 128 }));
@@ -370,4 +360,158 @@ fn import_depth_cap_errors() {
     let ok = load_from_bytes(&nest(250)).unwrap();
     assert_eq!(ok.doc.layers.len(), 251);
     assert_eq!(ok.doc.layers[0].depth, 250);
+}
+
+// ---------------------------------------------------------------- export
+
+fn new_bytes(doc: &Document) -> Vec<u8> {
+    let mut buf = Vec::new();
+    save_psd(doc, &mut buf).unwrap();
+    buf
+}
+
+/// #2: the legacy mini-reader's page through the new writer, read back by
+/// the crate: tree shape, names, flags, blend keys, and the negative layer
+/// count (merged transparency declared: no CSP stocked-selection ghost).
+#[test]
+fn new_writer_structure_reads_back() {
+    let mut doc = Document::new(200, 120);
+    const W: u16 = crate::FIX15_ONE as u16;
+    doc.begin_op();
+    doc.active_layer_mut().tile_mut(TileIdx::new(0, 0)).set_pixel(5, 6, [W, 0, 0, W]);
+    doc.end_op();
+    doc.layers[0].name = "ベタ".into();
+    doc.layers[0].blend = Blend::Multiply;
+    let f = doc.add_folder_above(0, "Folder");
+    let inner = doc.add_layer_in_folder(f, "inner").unwrap();
+    doc.layers[inner].clip = true;
+
+    let file = photocraft_psd::PsdFile::from_bytes(&new_bytes(&doc)).unwrap();
+    let tree = file.layer_tree();
+    assert_eq!(tree.len(), 2, "bottom layer + the folder");
+    assert!(!tree[0].is_group() && tree[1].is_group());
+    assert_eq!(tree[1].children().len(), 1);
+    let rec = |n: &photocraft_psd::LayerNode| &file.layers()[n.index()];
+    assert_eq!(rec(&tree[0]).name(), "ベタ");
+    assert!(rec(&tree[0]).block(b"luni").is_some(), "unicode name block");
+    assert_eq!(rec(&tree[0]).blend_mode.key(), *b"mul ");
+    assert_eq!(rec(&tree[1]).name(), "Folder");
+    assert_eq!(rec(&tree[1]).section_type(), photocraft_psd::SectionType::OpenFolder);
+    let child = rec(&tree[1].children()[0]);
+    assert_eq!(child.name(), "inner");
+    assert_eq!(child.clipping, 1);
+    assert_eq!(child.blend_mode.key(), *b"norm");
+    assert!(file.layer_info.as_ref().unwrap().merged_alpha, "layer count must declare merged transparency");
+    // The writer string is ours, not upstream's "Adobe Photoshop".
+    let vi = file.resource(photocraft_psd::resources::ids::VERSION_INFO).unwrap();
+    let vi = photocraft_psd::resources::VersionInfo::from_bytes(&vi.data).unwrap();
+    assert_eq!(String::from_utf16_lossy(&vi.writer.0).trim_end_matches('\0'), "MangaNakama");
+}
+
+/// #3: a mask rides as a PSD user mask, disabled flag and all.
+#[test]
+fn mask_rides_as_user_mask() {
+    let mut doc = Document::new(128, 64);
+    fill(&mut doc.layers[0], 0, 0, 128, 64, |_, _| [0, 0, 0, 255]);
+    // The left half (tile 0,0) is masked with a ramp; the right half has no
+    // tile, so it is unmasked.
+    doc.layers[0].mask = Some(mask_with(&[TileIdx::new(0, 0)], false, |x, _| (x * 4) as u8));
+    let file = photocraft_psd::PsdFile::from_bytes(&new_bytes(&doc)).unwrap();
+    let layer = file.layer(0).unwrap();
+    let g = layer.user_mask().unwrap().unwrap();
+    assert_eq!((g.left, g.top, g.width, g.height), (0, 0, 64, 64));
+    assert_eq!(g.default_value, 255);
+    for (i, &v) in g.data.iter().enumerate() {
+        let x = (i % 64) as u32;
+        let want = (((x * 4) * 32768 / 255) * 255 + 16384) / 32768;
+        assert_eq!(u32::from(v), want, "mask sample {i}");
+    }
+    assert!(layer.record.layer_mask().unwrap().disabled());
+}
+
+/// #4: past 30,000 px per side the new writer makes a PSB; the legacy one
+/// still refuses.
+#[test]
+fn psb_when_over_30k() {
+    let doc = Document::new(40_000, 100);
+    assert!(needs_psb(doc.size));
+    assert!(!needs_psb((30_000, 30_000)));
+    let file = photocraft_psd::PsdFile::from_bytes(&new_bytes(&doc)).unwrap();
+    assert_eq!(file.header.version, photocraft_psd::Version::Psb);
+    assert!(crate::psd_legacy::save_psd(&doc, &mut Vec::new()).is_err());
+}
+
+/// #5: the document resolution rides as the resolution resource.
+#[test]
+fn dpi_rides_as_resolution() {
+    let mut doc = Document::new(64, 64);
+    doc.dpi = Some(600);
+    let file = photocraft_psd::PsdFile::from_bytes(&new_bytes(&doc)).unwrap();
+    let r = file.resolution().unwrap();
+    assert_eq!(r.h_res_fixed, 600 << 16);
+    assert_eq!(r.v_res_fixed, 600 << 16);
+    assert_eq!(load_from_bytes(&new_bytes(&doc)).unwrap().doc.dpi, Some(600));
+}
+
+/// #6: lock flags ride as `lspf` plus Photoshop's transparency-protected bit.
+#[test]
+fn lock_flags_ride_lspf() {
+    let mut doc = Document::new(64, 64);
+    doc.layers[0].lock_alpha = true;
+    let b = doc.add_layer("locked");
+    doc.layers[b].lock = true;
+    let file = photocraft_psd::PsdFile::from_bytes(&new_bytes(&doc)).unwrap();
+    let lspf = |i: usize| match file.layers()[i].block(b"lspf").and_then(|b| b.parsed()) {
+        Some(Ok(photocraft_psd::BlockData::Protection(f))) => f,
+        _ => 0,
+    };
+    assert!(file.layers()[0].flags.transparency_protected());
+    assert_eq!(lspf(0) & 1, 1);
+    assert_eq!(lspf(1), 7);
+    assert!(!file.layers()[1].flags.transparency_protected());
+}
+
+/// #7: a frame folder's border ink is a pixel layer, the group's top child.
+#[test]
+fn frame_folder_border_is_a_top_child() {
+    let mut doc = Document::new(200, 120);
+    doc.add_frame_folder("コマ", crate::frame::FrameSet::single_rect([20.0, 20.0, 180.0, 100.0], 4.0));
+    doc.refresh_derived(350);
+    let file = photocraft_psd::PsdFile::from_bytes(&new_bytes(&doc)).unwrap();
+    let tree = file.layer_tree();
+    let group = tree.iter().find(|n| n.is_group()).unwrap();
+    assert_eq!(file.layers()[group.index()].name(), "コマ");
+    let top = group.children().last().unwrap();
+    let rec = &file.layers()[top.index()];
+    assert_eq!(rec.name(), "コマ (border)");
+    assert!(rec.rect.width() > 0 && rec.rect.height() > 0, "border pixels present");
+    assert!(file.layer(top.index()).unwrap().rgba8().unwrap().data.chunks(4).any(|p| p[3] > 0));
+}
+
+/// #13: our page through the new writer and back is the same page, and from
+/// the second generation on the bytes are identical.
+#[test]
+fn roundtrip_doc_is_stable() {
+    let doc = synthetic(true);
+    let gen1 = new_bytes(&doc);
+    let d2 = load_from_bytes(&gen1).unwrap();
+    assert!(d2.notes.is_empty(), "{:?}", d2.notes);
+    assert_docs_equal_8bit(&doc, &d2.doc, true);
+    assert_eq!(d2.doc.dpi, Some(600));
+    let gen2 = new_bytes(&d2.doc);
+    let d3 = load_from_bytes(&gen2).unwrap();
+    assert_docs_equal_8bit(&d2.doc, &d3.doc, true);
+    let gen3 = new_bytes(&d3.doc);
+    assert!(gen2 == gen3, "second and third generation bytes differ");
+}
+
+/// #14: the same page through the legacy and the new writer imports to the
+/// same document — the proof that swapping writers is safe.
+#[test]
+fn legacy_and_new_writers_decode_alike() {
+    let doc = synthetic(false);
+    let old = load_from_bytes(&legacy_bytes(&doc)).unwrap();
+    let new = load_from_bytes(&new_bytes(&doc)).unwrap();
+    assert_docs_equal_8bit(&old.doc, &new.doc, false);
+    assert_docs_equal_8bit(&doc, &new.doc, false);
 }
