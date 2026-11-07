@@ -1123,7 +1123,7 @@ fn mask_image(m: &crate::doc::LayerMask) -> (image::RgbaImage, i32, i32) {
 /// before the audit fixes) every tile in the image extent is inserted —
 /// holes inside the bbox then come back zero-coverage (hidden), which is
 /// the M1 bug; new saves record the set so absent stays absent.
-fn mask_from_image(
+pub(crate) fn mask_from_image(
     img: image::RgbaImage,
     enabled: bool,
     full: bool,
@@ -1200,7 +1200,7 @@ fn read_entry<R: Read + Seek>(zip: &mut zip::ZipArchive<R>, name: &str) -> Optio
 ///
 /// Tiles that come out fully transparent are never allocated — sparse layers are
 /// the point.
-fn paint_into_layer(layer: &mut Layer, img: &image::RgbaImage, x: i32, y: i32) {
+pub(crate) fn paint_into_layer(layer: &mut Layer, img: &image::RgbaImage, x: i32, y: i32) {
     let (w, h) = (img.width() as i32, img.height() as i32);
     if w <= 0 || h <= 0 {
         return;
